@@ -15,7 +15,7 @@ import {
 import { signSsh } from "@thwip/sshsig";
 import type { GitSubject } from "./git.js";
 
-export interface ReceiptInputs {
+export interface ProofInputs {
   subject: GitSubject;
   ownerId: string;
   repositoryId: string;
@@ -32,7 +32,7 @@ export interface ReceiptInputs {
   lease?: string;
 }
 
-export function buildStatement(i: ReceiptInputs): InTotoStatementV1 {
+export function buildStatement(i: ProofInputs): InTotoStatementV1 {
   return {
     _type: STATEMENT_TYPE,
     subject: [{ name: "git-tree", digest: { [i.subject.objectFormat]: i.subject.treeOid } }],
@@ -82,7 +82,7 @@ export async function signStatement(
 export function attachTrailer(message: string, envelope: DsseEnvelope): string {
   const stripped = message
     .split("\n")
-    .filter((l) => !l.startsWith("thwip-Receipt:"))
+    .filter((l) => !l.startsWith("thwip-Proof:"))
     .join("\n")
     .replace(/\n+$/, "");
   return `${stripped}\n\n${encodeCarrier(envelope)}\n`;

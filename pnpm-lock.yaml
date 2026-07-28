@@ -17,6 +17,9 @@ importers:
 
   apps/control-plane:
     dependencies:
+      '@andrewxhill/graphics-press-css':
+        specifier: ^4.7.2
+        version: 4.7.2
       '@better-auth/stripe':
         specifier: ^1.6.25
         version: 1.6.25(@better-auth/core@1.6.25(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.1.21)(@cloudflare/workers-types@4.20260702.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.4)(kysely@0.29.4)(nanostores@1.4.1))(better-auth@1.6.25(@cloudflare/workers-types@4.20260702.1)(@prisma/client@5.22.0)(better-sqlite3@13.0.1)(drizzle-orm@0.41.0(@cloudflare/workers-types@4.20260702.1)(@prisma/client@5.22.0)(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(better-sqlite3@12.11.1)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@3.2.7(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.33.0)))(better-call@1.3.7(zod@4.4.3))(stripe@22.3.2(@types/node@22.20.1))
@@ -130,6 +133,14 @@ importers:
         version: link:../protocol
 
 packages:
+
+  '@andrewxhill/graphics-press-css@4.7.2':
+    resolution: {integrity: sha512-DPLPOTJd4gz39uhuOpwINWQQXXQ29M8Lxvahu5v5z7bHaZzuPwQoFfRqmBev7S2dZxYPavROUgfbIl3ETMb9Ig==}
+    peerDependencies:
+      tailwindcss: '>=3.0.0'
+    peerDependenciesMeta:
+      tailwindcss:
+        optional: true
 
   '@babel/code-frame@7.29.7':
     resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
@@ -2446,6 +2457,8 @@ packages:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
 snapshots:
+
+  '@andrewxhill/graphics-press-css@4.7.2': {}
 
   '@babel/code-frame@7.29.7':
     dependencies:

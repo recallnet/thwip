@@ -10,6 +10,7 @@
     "dev": "wrangler dev --env staging"
   },
   "dependencies": {
+    "@andrewxhill/graphics-press-css": "^4.7.2",
     "@better-auth/stripe": "^1.6.25",
     "better-auth": "^1.6.25",
     "hono": "^4.6.0",

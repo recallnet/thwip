@@ -25,7 +25,7 @@
       "test"
     ]
   },
-  "receiptMaxAgeSeconds": 86400,
+  "proofMaxAgeSeconds": 86400,
   "audit": {
     "basisPoints": 0,
     "mandatoryPaths": []

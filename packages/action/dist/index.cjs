@@ -1013,7 +1013,7 @@ var STATEMENT_TYPE = "https://in-toto.io/Statement/v1";
 var PREDICATE_TYPE = "urn:thwip:attestation:ci-run:v1";
 var DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
 var SSH_SIGN_NAMESPACE = "thwip-ci-dsse-v1";
-var TRAILER_KEY = "thwip-Receipt";
+var TRAILER_KEY = "thwip-Proof";
 var CARRIER_VERSION = "v1";
 var CARRIER_MAX_ENCODED = 32 * 1024;
 var ENVELOPE_MAX_DECODED = 24 * 1024;
@@ -1304,36 +1304,36 @@ function extractCarrier(commitMessage) {
     }
   }
   if (matches.length === 0)
-    return { ok: false, error: { code: "RECEIPT_MISSING" } };
+    return { ok: false, error: { code: "PROOF_MISSING" } };
   if (matches.length > 1)
-    return { ok: false, error: { code: "RECEIPT_DUPLICATE" } };
+    return { ok: false, error: { code: "PROOF_DUPLICATE" } };
   const value = matches[0];
   if (value.length > CARRIER_MAX_ENCODED)
-    return { ok: false, error: { code: "RECEIPT_TOO_LARGE" } };
+    return { ok: false, error: { code: "PROOF_TOO_LARGE" } };
   const dot = value.indexOf(".");
   if (dot < 0)
-    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "missing version separator" } };
+    return { ok: false, error: { code: "PROOF_MALFORMED", detail: "missing version separator" } };
   const version = value.slice(0, dot);
   if (version !== CARRIER_VERSION) {
-    return { ok: false, error: { code: "RECEIPT_SCHEMA_UNSUPPORTED", detail: `carrier version ${version}` } };
+    return { ok: false, error: { code: "PROOF_SCHEMA_UNSUPPORTED", detail: `carrier version ${version}` } };
   }
   let bytes;
   try {
     bytes = b64urlDecode(value.slice(dot + 1));
   } catch {
-    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "invalid base64url" } };
+    return { ok: false, error: { code: "PROOF_MALFORMED", detail: "invalid base64url" } };
   }
   if (bytes.length > ENVELOPE_MAX_DECODED)
-    return { ok: false, error: { code: "RECEIPT_TOO_LARGE" } };
+    return { ok: false, error: { code: "PROOF_TOO_LARGE" } };
   let json;
   try {
     json = JSON.parse(utf8Decode(bytes));
   } catch {
-    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "invalid JSON envelope" } };
+    return { ok: false, error: { code: "PROOF_MALFORMED", detail: "invalid JSON envelope" } };
   }
   const parsed = parseEnvelope(json);
   if (!parsed.ok)
-    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: parsed.detail } };
+    return { ok: false, error: { code: "PROOF_MALFORMED", detail: parsed.detail } };
   return { ok: true, envelope: parsed.value, envelopeRawBytes: bytes };
 }
 
@@ -1352,7 +1352,7 @@ var PERMISSION_RANK = {
 function res(code, detail, extra) {
   return { code, ...detail !== void 0 ? { detail } : {}, ...extra };
 }
-async function verifyReceipt(input, deps) {
+async function verifyProof(input, deps) {
   const { facts, bundle } = input;
   const nowMs = Date.parse(input.now);
   if (Date.parse(bundle.expiresAt) < nowMs)
@@ -1367,7 +1367,7 @@ async function verifyReceipt(input, deps) {
   try {
     payloadBytes = b64stdDecode(envelope.payload);
   } catch {
-    return res("RECEIPT_MALFORMED", "payload not base64");
+    return res("PROOF_MALFORMED", "payload not base64");
   }
   const keyid = envelope.signatures[0].keyid;
   const key = bundle.keys.find((k) => k.keyId === keyid);
@@ -1396,11 +1396,11 @@ async function verifyReceipt(input, deps) {
   try {
     statementJson = JSON.parse(utf8Decode(payloadBytes));
   } catch {
-    return res("RECEIPT_MALFORMED", "payload not JSON");
+    return res("PROOF_MALFORMED", "payload not JSON");
   }
   const parsed = parseStatement(statementJson);
   if (!parsed.ok)
-    return res("RECEIPT_MALFORMED", parsed.detail);
+    return res("PROOF_MALFORMED", parsed.detail);
   const statement = parsed.value;
   const pred = statement.predicate;
   if (pred.repository.ownerId !== facts.ownerId || pred.repository.repositoryId !== facts.repositoryId) {
@@ -1460,9 +1460,9 @@ async function verifyReceipt(input, deps) {
   }
   const finished = Date.parse(pred.run.finishedAt);
   if (!Number.isFinite(finished))
-    return res("RECEIPT_MALFORMED", "finishedAt unparseable", { statement });
-  if (nowMs - finished > bundle.policy.receiptMaxAgeSeconds * 1e3) {
-    return res("RECEIPT_EXPIRED", void 0, { statement });
+    return res("PROOF_MALFORMED", "finishedAt unparseable", { statement });
+  if (nowMs - finished > bundle.policy.proofMaxAgeSeconds * 1e3) {
+    return res("PROOF_EXPIRED", void 0, { statement });
   }
   if (bundle.policy.lease.required && pred.run.lease === void 0) {
     return res("LEASE_REQUIRED", void 0, { statement });
@@ -1582,7 +1582,7 @@ async function main() {
       objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
       ...target.prAuthorId !== void 0 ? { prAuthorGithubUserId: target.prAuthorId } : {}
     };
-    const result = await verifyReceipt(
+    const result = await verifyProof(
       { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
       { verifySshSignature }
     );
