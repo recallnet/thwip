@@ -1,8 +1,13 @@
 name: thwip-automerge
 
 # Automatically add internal-team PRs to the merge queue. The only merge
-# gate is the required thwip receipt check; once it is green the queue
-# merges the PR without further human action.
+# gate is the required thwip receipt check; once it is green this job
+# enqueues the PR and the queue merges it without further human action.
+#
+# GitHub's native auto-merge -> merge-queue handoff proved unreliable
+# (a PR whose checks were already green never self-enqueued), so this
+# job waits for the required check on the exact head commit and calls
+# enqueuePullRequest explicitly.
 
 on:
   pull_request:
@@ -11,6 +16,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  checks: read
 
 jobs:
   enqueue:
@@ -18,22 +24,34 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
-      - name: Enable auto-merge for internal team members
+      - name: Enqueue once the thwip check is green (internal members only)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           role=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission || echo "none")
           echo "author $AUTHOR permission: $role"
-          case "$role" in
-            admin|maintain|write)
-              gh pr merge --auto --squash "$PR_URL"
-              echo "auto-merge (merge queue) enabled for $PR_URL"
-              ;;
-            *)
-              echo "author is not an internal team member; not enqueueing"
-              ;;
+          case "$role" in admin|maintain|write) ;; *)
+            echo "author is not an internal team member; not enqueueing"; exit 0 ;;
           esac
+          # Wait for the required thwip check on the exact head commit.
+          for i in $(seq 1 60); do
+            conclusion=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=thwip" \
+              --jq '[.check_runs[] | select(.name=="thwip")][0].conclusion // "pending"')
+            echo "thwip check: $conclusion"
+            case "$conclusion" in
+              success)
+                gh api graphql -f query="mutation { enqueuePullRequest(input:{pullRequestId:\"$PR_ID\"}) { clientMutationId } }" \
+                  && echo "PR #$PR enqueued" || echo "enqueue failed (may already be queued)"
+                exit 0 ;;
+              failure|cancelled|timed_out|action_required)
+                echo "thwip check did not pass; not enqueueing"; exit 0 ;;
+            esac
+            sleep 10
+          done
+          echo "timed out waiting for thwip check"; exit 0
