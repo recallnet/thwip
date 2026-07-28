@@ -621,6 +621,23 @@ app.post("/admin/sync", async (c) => {
   return c.json({ installations: results });
 });
 
+// Resolve a repository's GitHub numeric ids from its full name. The
+// projection already holds every installed repository, so no GitHub call.
+app.get("/v1/resolve-repo", async (c) => {
+  const identity = await enrollmentIdentity(c);
+  if (!identity) return c.json({ error: "unauthorized" }, 401);
+  const name = c.req.query("name") ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(name)) return c.json({ error: "name must be owner/repo" }, 400);
+  const row = await c.env.DB.prepare(
+    `SELECT p.github_repository_id, o.github_org_id FROM projects p
+     JOIN organizations o ON o.id = p.organization_id WHERE p.github_name = ?`,
+  )
+    .bind(name)
+    .first<{ github_repository_id: string; github_org_id: string }>();
+  if (!row) return c.json({ error: "repository not installed for thwip" }, 404);
+  return c.json({ ownerId: row.github_org_id, repositoryId: row.github_repository_id });
+});
+
 // --- Run leases ------------------------------------------------------------
 
 app.post("/v1/run-leases", async (c) => {
