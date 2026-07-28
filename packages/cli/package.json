@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "thwip": "dist/main.js" },
+  "bin": {
+    "thwip": "dist/main.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": { ".": "./dist/index.js" },
+  "exports": {
+    ".": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -14,7 +18,8 @@
   "dependencies": {
     "@thwip/protocol": "workspace:*",
     "@thwip/sshsig": "workspace:*",
-    "@thwip/verifier": "workspace:*"
+    "@thwip/verifier": "workspace:*",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

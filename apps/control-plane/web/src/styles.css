@@ -1,14 +1,67 @@
-/* thwip-specific extensions on top of Graphics Press CSS. Keep small:
-   the library owns type, color, tables, panels, and layout. */
+/* thwip layout on top of Graphics Press CSS. The library owns type, color,
+   tables, panels, and components; this file owns page structure and the
+   proof-slip figure. All values derive from --gp-* tokens. */
 
+.thwip-shell { max-width: var(--gp-page-width); margin: 0 auto; padding: 0 1.5rem; }
+
+/* ---------- top nav ---------- */
+.thwip-nav {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 0 0.7rem;
+  border-bottom: 0.75px solid var(--gp-rule);
+}
+.thwip-nav .links { display: flex; gap: 1.1rem; align-items: baseline; flex-wrap: wrap; }
+.thwip-brand { font-family: var(--gp-serif); font-style: italic; font-size: 1.3rem; text-decoration: none; color: var(--gp-ink); }
+.thwip-brand small {
+  font-family: var(--gp-sans);
+  font-style: normal;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  color: var(--gp-ghost-ink);
+  margin-left: 0.5rem;
+}
+
+/* ---------- hero: two columns, slip on the right ---------- */
+.thwip-hero {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 3rem;
+  align-items: center;
+  padding: 3.5rem 0 3rem;
+}
+.thwip-hero h1 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.1;
+  margin: 0 0 1rem;
+  max-width: none;
+}
+.thwip-hero .dek { color: var(--gp-margin-ink); font-size: 1.02rem; max-width: 44ch; margin: 0 0 1.4rem; text-indent: 0; }
+.thwip-hero .meta {
+  font-family: var(--gp-sans);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gp-ghost-ink);
+  margin: 0 0 0.6rem;
+}
+.thwip-hero .fine { margin-top: 0.9rem; font-family: var(--gp-mono, monospace); font-size: 0.7rem; color: var(--gp-ghost-ink); }
+.thwip-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+
+/* ---------- the proof slip ---------- */
 .thwip-slip {
   font-family: var(--gp-mono, ui-monospace, monospace);
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   line-height: 1.6;
   border: 0.5px solid var(--gp-light-rule);
-  background: oklch(from var(--gp-paper) calc(l - 0.008) c h);
+  background: oklch(from var(--gp-paper) calc(l - 0.012) c h);
+  box-shadow: 0 10px 26px oklch(from var(--gp-ink) l c h / 0.08);
   padding: 1.1rem 1.2rem 1.5rem;
   position: relative;
+  margin: 0;
   overflow-wrap: anywhere;
 }
 .thwip-slip::after {
@@ -36,39 +89,50 @@
   transform: rotate(5deg);
   border: 1.5px solid var(--gp-green);
   color: var(--gp-green);
-  font-size: 0.64rem;
+  font-family: var(--gp-sans);
+  font-size: 0.62rem;
   letter-spacing: 0.14em;
   padding: 0.15rem 0.5rem;
   opacity: 0.85;
 }
 
-.thwip-nav {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  max-width: var(--gp-page-width);
-  padding: 1rem 0 0.6rem;
-  border-bottom: 0.75px solid var(--gp-rule);
-}
-.thwip-nav .links { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
-.thwip-brand { font-style: italic; font-size: 1.25rem; text-decoration: none; color: var(--gp-ink); }
-.thwip-brand small {
+/* ---------- sections ---------- */
+.thwip-section { padding: 2.6rem 0; border-top: 0.75px solid var(--gp-rule); }
+.thwip-eyebrow {
   font-family: var(--gp-sans);
-  font-style: normal;
-  font-size: 0.62rem;
-  letter-spacing: 0.12em;
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--gp-ochre, #8f701f);
+  margin: 0 0 0.5rem;
+}
+.thwip-section h2 { font-size: 1.55rem; margin: 0 0 0.7rem; max-width: none; }
+.thwip-section .lede { color: var(--gp-margin-ink); max-width: 60ch; margin: 0 0 1.6rem; text-indent: 0; }
+
+.thwip-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.8rem; }
+.thwip-step { border-left: 2px solid var(--gp-green); padding-left: 1rem; }
+.thwip-step .k { font-family: var(--gp-mono, monospace); font-size: 0.72rem; color: var(--gp-green); }
+.thwip-step h3 { font-size: 1rem; margin: 0.35rem 0; font-style: normal; font-family: var(--gp-sans); }
+.thwip-step p { color: var(--gp-margin-ink); font-size: 0.92rem; text-indent: 0; margin: 0; }
+
+.thwip-plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; max-width: 46rem; }
+
+footer.thwip-footer {
+  border-top: 0.75px solid var(--gp-rule);
+  padding: 1.6rem 0 3rem;
   color: var(--gp-ghost-ink);
-  margin-left: 0.5rem;
+  font-size: 0.85rem;
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.8rem;
 }
 
+/* ---------- misc ---------- */
 .ok { color: var(--gp-green); font-family: var(--gp-sans); font-size: 0.82rem; }
 .bad { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.82rem; }
 .thwip-error { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.85rem; }
 
-.thwip-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; max-width: var(--gp-page-width); }
-.thwip-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .thwip-device-card { max-width: 28rem; margin: 4rem auto; }
 .thwip-device-card input {
   font-family: var(--gp-mono, monospace);
@@ -81,4 +145,13 @@
   background: transparent;
   color: var(--gp-ink);
   margin: 0.7rem 0;
+}
+
+.thwip-faq dt { font-family: var(--gp-sans); font-weight: 600; margin-top: 1.1rem; }
+.thwip-faq dd { margin: 0.3rem 0 0; color: var(--gp-margin-ink); max-width: 65ch; }
+
+@media (max-width: 860px) {
+  .thwip-hero { grid-template-columns: 1fr; padding: 2rem 0; }
+  .thwip-steps { grid-template-columns: 1fr; }
+  .thwip-plan-grid { grid-template-columns: 1fr; }
 }

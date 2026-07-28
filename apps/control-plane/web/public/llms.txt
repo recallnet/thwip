@@ -1,0 +1,35 @@
+# thwip
+
+> Commit-carried CI evidence for agent-run pipelines. Run CI on the machine
+> where the code lives, sign a compact proof of the exact Git tree, and let a
+> ruleset-protected GitHub check verify it in seconds. The merge queue merges
+> on that proof; nothing reruns in the cloud.
+
+thwip is a control plane, not a CI compute platform. Evidence is a single git
+trailer (`thwip-Proof: v1.<base64url DSSE envelope>`) over an in-toto
+Statement v1 with predicate `urn:thwip:attestation:ci-run:v1`, signed with a
+dedicated OpenSSH key enrolled to the author's device. Verification derives
+all repository facts from GitHub, fetches one signed fact bundle from the
+control plane, and fails closed with stable reason codes (PASS,
+SUBJECT_TREE_MISMATCH, SIGNER_KEY_REVOKED, ...).
+
+Security profiles per project: fast (signed local proof), fresh (adds a
+short-lived subject-bound lease), audited (adds sampled independent reruns in
+GitHub Actions), remote (GitHub runs every check).
+
+## Pages
+
+- [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit
+  signing, rebases, data handling
+- [Install](https://thwip.recall.net/install.md): a step-by-step agent prompt
+  for installing the CLI, device-flow sign-in, and project setup
+- [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored org
+  management (requires sign-in)
+
+## Facts
+
+- Membership and permissions come from the GitHub organization; there are no
+  invitations. Verification checks current GitHub permission.
+- Project settings live in thwip.yaml committed to the repository.
+- Plans: Free (3 projects, 5 signers), Pro $5/month or $50/year (15 projects,
+  25 signers). Both verify identically.
