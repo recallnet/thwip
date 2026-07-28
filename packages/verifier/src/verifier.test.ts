@@ -10,7 +10,7 @@ import {
   type InTotoStatementV1,
   type VerificationBundleV1,
 } from "@thwip/protocol";
-import { verifyReceipt, type GithubFacts, type VerifyDeps } from "./index.js";
+import { verifyProof, type GithubFacts, type VerifyDeps } from "./index.js";
 
 const TREE = "a".repeat(40);
 const PARENT = "b".repeat(40);
@@ -89,7 +89,7 @@ function makeBundle(overrides?: (b: VerificationBundleV1) => void): Verification
       requireGithubKeyPresence: false,
       lease: { required: false, maxAgeSeconds: 1800 },
       pipeline: { digest: PIPELINE_DIGEST, runner: "command", requiredSuites: ["lint", "typecheck", "test"] },
-      receiptMaxAgeSeconds: 86400,
+      proofMaxAgeSeconds: 86400,
       audit: { basisPoints: 0, mandatoryPaths: [] },
     },
     keys: [
@@ -139,7 +139,7 @@ async function run(args?: {
   const statement = args?.statement ?? makeStatement();
   const envelope = args?.envelope ?? envelopeFor(statement);
   const message = args?.message ?? commitMessageFor(envelope);
-  return verifyReceipt(
+  return verifyProof(
     {
       commitMessage: message,
       facts: args?.facts ?? makeFacts(),
@@ -150,24 +150,24 @@ async function run(args?: {
   );
 }
 
-describe("verifyReceipt decision table", () => {
-  it("passes a valid exact-subject receipt", async () => {
+describe("verifyProof decision table", () => {
+  it("passes a valid exact-subject proof", async () => {
     const r = await run();
     expect(r.code).toBe("PASS");
   });
 
   it("fails with no trailer", async () => {
-    expect((await run({ message: "feat: nothing here\n" })).code).toBe("RECEIPT_MISSING");
+    expect((await run({ message: "feat: nothing here\n" })).code).toBe("PROOF_MISSING");
   });
 
   it("fails with duplicate trailers", async () => {
     const env = envelopeFor(makeStatement());
     const line = encodeCarrier(env);
-    expect((await run({ message: `x\n\n${line}\n${line}\n` })).code).toBe("RECEIPT_DUPLICATE");
+    expect((await run({ message: `x\n\n${line}\n${line}\n` })).code).toBe("PROOF_DUPLICATE");
   });
 
   it("fails on unknown carrier version", async () => {
-    expect((await run({ message: "x\n\nthwip-Receipt: v9.abcd\n" })).code).toBe("RECEIPT_SCHEMA_UNSUPPORTED");
+    expect((await run({ message: "x\n\nthwip-Proof: v9.abcd\n" })).code).toBe("PROOF_SCHEMA_UNSUPPORTED");
   });
 
   it("fails on bad signature", async () => {
@@ -194,7 +194,7 @@ describe("verifyReceipt decision table", () => {
     expect((await run({ bundle })).code).toBe("SIGNER_KEY_ALGORITHM_FORBIDDEN");
   });
 
-  it("fails when receipt is copied to another repository", async () => {
+  it("fails when proof is copied to another repository", async () => {
     const facts = makeFacts({ repositoryId: "999", ownerId: "888" });
     const bundle = makeBundle((b) => {
       b.repositoryId = "999";
@@ -291,12 +291,12 @@ describe("verifyReceipt decision table", () => {
     expect((await run({ envelope: env, message: commitMessageFor(env) })).code).toBe("SUITE_DUPLICATE");
   });
 
-  it("fails when the receipt is older than policy allows", async () => {
+  it("fails when the proof is older than policy allows", async () => {
     expect((await run({ now: "2026-07-30T12:00:01Z" })).code).toBe("BUNDLE_EXPIRED");
     const bundle = makeBundle((b) => {
       b.expiresAt = "2026-07-30T13:00:00Z";
     });
-    expect((await run({ now: "2026-07-30T12:00:01Z", bundle })).code).toBe("RECEIPT_EXPIRED");
+    expect((await run({ now: "2026-07-30T12:00:01Z", bundle })).code).toBe("PROOF_EXPIRED");
   });
 
   it("fails when lease is required but absent", async () => {

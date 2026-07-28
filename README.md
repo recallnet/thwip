@@ -1,11 +1,11 @@
 # thwip
 
-Git-native CI receipts for agent-run pipelines.
+Git-native CI proofs for agent-run pipelines.
 
-Run the approved CI pipeline locally, attach a signed receipt to the
+Run the approved CI pipeline locally, attach a signed proof to the
 commit, and let a ruleset-protected GitHub check verify it in seconds.
 The merge queue on this repository merges any internal PR automatically
-once its exact head commit carries a valid thwip receipt.
+once its exact head commit carries a valid thwip proof.
 
 - Control plane (staging): https://thwip.recall.net
 - Design: `plan.md`

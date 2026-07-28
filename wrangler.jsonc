@@ -3,11 +3,18 @@
   "name": "thwip",
   "main": "apps/control-plane/src/index.ts",
   "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "env": {
     "staging": {
       "name": "thwip-staging",
       "routes": [{ "pattern": "thwip.recall.net", "custom_domain": true }],
+      "assets": {
+        "directory": "apps/control-plane/dist/client",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/api/*", "/v1/*", "/admin/*", "/health"]
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -22,10 +29,16 @@
           { "queue": "thwip-sync-staging", "dead_letter_queue": "thwip-sync-staging-dlq", "max_retries": 5 }
         ]
       },
+      "triggers": { "crons": ["17 3 * * *"] },
       "vars": {
         "THWIP_ENV": "staging",
         "PUBLIC_ORIGIN": "https://thwip.recall.net",
-        "BUILD_SHA": "dev"
+        "BUILD_SHA": "dev",
+        "STRIPE_PRICE_MONTHLY": "price_1TyISWLWdKonGktl1HFOwBIU",
+        "STRIPE_PRICE_ANNUAL": "price_1TyISXLWdKonGktlMUXHk6DB",
+        "GITHUB_APP_ID": "4419870",
+        "GITHUB_APP_SLUG": "thwip-dev",
+        "GITHUB_APP_CLIENT_ID": "Iv23lieihhxZU5ZzGg75"
       }
     }
   }

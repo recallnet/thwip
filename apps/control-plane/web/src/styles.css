@@ -1,0 +1,84 @@
+/* thwip-specific extensions on top of Graphics Press CSS. Keep small:
+   the library owns type, color, tables, panels, and layout. */
+
+.thwip-slip {
+  font-family: var(--gp-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  border: 0.5px solid var(--gp-light-rule);
+  background: oklch(from var(--gp-paper) calc(l - 0.008) c h);
+  padding: 1.1rem 1.2rem 1.5rem;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.thwip-slip::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 11px;
+  background:
+    linear-gradient(-45deg, transparent 66%, var(--gp-paper) 67%),
+    linear-gradient(45deg, transparent 66%, var(--gp-paper) 67%);
+  background-size: 13px 13px;
+  background-repeat: repeat-x;
+}
+.thwip-slip .dim { color: var(--gp-ghost-ink); }
+.thwip-slip .trailer { color: var(--gp-ochre, #8f701f); word-break: break-all; }
+.thwip-slip hr { border: 0; border-top: 1px dashed var(--gp-light-rule); margin: 0.7rem 0; max-width: none; }
+.thwip-slip .pass { color: var(--gp-green); }
+.thwip-slip .fail { color: var(--gp-red); }
+.thwip-stamp {
+  position: absolute;
+  right: 1rem;
+  top: 0.8rem;
+  transform: rotate(5deg);
+  border: 1.5px solid var(--gp-green);
+  color: var(--gp-green);
+  font-size: 0.64rem;
+  letter-spacing: 0.14em;
+  padding: 0.15rem 0.5rem;
+  opacity: 0.85;
+}
+
+.thwip-nav {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  max-width: var(--gp-page-width);
+  padding: 1rem 0 0.6rem;
+  border-bottom: 0.75px solid var(--gp-rule);
+}
+.thwip-nav .links { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+.thwip-brand { font-style: italic; font-size: 1.25rem; text-decoration: none; color: var(--gp-ink); }
+.thwip-brand small {
+  font-family: var(--gp-sans);
+  font-style: normal;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  color: var(--gp-ghost-ink);
+  margin-left: 0.5rem;
+}
+
+.ok { color: var(--gp-green); font-family: var(--gp-sans); font-size: 0.82rem; }
+.bad { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.82rem; }
+.thwip-error { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.85rem; }
+
+.thwip-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; max-width: var(--gp-page-width); }
+.thwip-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+.thwip-device-card { max-width: 28rem; margin: 4rem auto; }
+.thwip-device-card input {
+  font-family: var(--gp-mono, monospace);
+  font-size: 1.2rem;
+  letter-spacing: 0.18em;
+  text-align: center;
+  width: 100%;
+  padding: 0.5rem;
+  border: 0.5px solid var(--gp-light-rule);
+  background: transparent;
+  color: var(--gp-ink);
+  margin: 0.7rem 0;
+}

@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { importJWK, compactVerify, type JWK } from "jose";
 import { verifySshSignature } from "@thwip/sshsig";
-import { verifyReceipt, type GithubFacts } from "@thwip/verifier";
+import { verifyProof, type GithubFacts } from "@thwip/verifier";
 import type { VerificationBundleV1 } from "@thwip/protocol";
 import servicePublicJwk from "../service-public.jwk.json" with { type: "json" };
 
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
       objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
       ...(target.prAuthorId !== undefined ? { prAuthorGithubUserId: target.prAuthorId } : {}),
     };
-    const result = await verifyReceipt(
+    const result = await verifyProof(
       { commitMessage: commit.message, facts, bundle, now: new Date().toISOString() },
       { verifySshSignature },
     );
