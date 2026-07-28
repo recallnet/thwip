@@ -1,23 +1,20 @@
 import { parse as parseYaml } from "yaml";
 import { canonicalDigest, type PolicyBundleV1, type Sha256 } from "@thwip/protocol";
 import type { PipelineDefinition } from "./pipeline.js";
-import { showFileAtHead } from "./git.js";
+import { git, showFileAtHead } from "./git.js";
 
 /**
- * thwip.yaml is the committed source of project configuration. The CLI
- * derives the pipeline definition and the immutable policy bundle from it
- * deterministically, so the digest of a configuration is reproducible from
- * the file alone.
+ * thwip.yaml holds only what thwip is authoritative for: the security
+ * profile, which suites are required, and policy knobs. Repository identity
+ * comes from the git remote; suite commands come from the repository's own
+ * pipeline definition (package.json scripts today, a Dagger module when the
+ * pipeline runner is dagger).
  *
  * version: 3
  * profile: fast | fresh | audited | remote
- * repository:
- *   owner_id: "162603603"
- *   repository_id: "1315419165"
- * suites:
+ * required: [lint, typecheck, test]
+ * suites:            # optional override for repos without package.json
  *   lint: pnpm lint
- *   typecheck: pnpm typecheck
- *   test: pnpm test
  * policy:
  *   minimum_permission: write
  *   allow_author_as_signer: true
@@ -27,14 +24,13 @@ import { showFileAtHead } from "./git.js";
 export interface ThwipYaml {
   version: number;
   profile: "fast" | "fresh" | "audited" | "remote";
-  repository: { owner_id: string; repository_id: string };
-  suites: Record<string, string>;
+  required: string[];
+  suites?: Record<string, string>;
   policy?: {
     minimum_permission?: "triage" | "write" | "maintain" | "admin";
     allow_author_as_signer?: boolean;
     allowed_key_algorithms?: string[];
     proof_max_age_seconds?: number;
-    required?: string[];
   };
 }
 
@@ -45,6 +41,8 @@ export interface ProjectConfig {
   pipelineDigest: Sha256;
 }
 
+const SUITE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
 export function parseThwipYaml(text: string): ThwipYaml {
   const y = parseYaml(text) as ThwipYaml;
   if (typeof y !== "object" || y === null) throw new Error("thwip.yaml is not a mapping");
@@ -52,36 +50,87 @@ export function parseThwipYaml(text: string): ThwipYaml {
   if (!["fast", "fresh", "audited", "remote"].includes(y.profile)) {
     throw new Error("thwip.yaml: profile must be fast | fresh | audited | remote");
   }
-  if (!y.repository?.owner_id || !y.repository?.repository_id) {
-    throw new Error("thwip.yaml: repository.owner_id and repository.repository_id are required");
+  if (!Array.isArray(y.required) || y.required.length === 0) {
+    throw new Error("thwip.yaml: 'required' must list at least one suite id");
   }
-  if (!/^[0-9]+$/.test(y.repository.owner_id) || !/^[0-9]+$/.test(y.repository.repository_id)) {
-    throw new Error("thwip.yaml: repository ids are GitHub's numeric ids, quoted as strings");
+  for (const id of y.required) {
+    if (typeof id !== "string" || !SUITE_ID.test(id)) throw new Error(`thwip.yaml: invalid suite id '${id}'`);
   }
-  const suiteIds = Object.keys(y.suites ?? {});
-  if (suiteIds.length === 0) throw new Error("thwip.yaml: declare at least one suite");
-  for (const id of suiteIds) {
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error(`thwip.yaml: invalid suite id '${id}'`);
-    if (typeof y.suites[id] !== "string" || y.suites[id]!.length === 0) {
-      throw new Error(`thwip.yaml: suite '${id}' must map to a shell command`);
+  if (y.suites) {
+    for (const [id, cmd] of Object.entries(y.suites)) {
+      if (!SUITE_ID.test(id)) throw new Error(`thwip.yaml: invalid suite id '${id}'`);
+      if (typeof cmd !== "string" || cmd.length === 0) {
+        throw new Error(`thwip.yaml: suite '${id}' must map to a shell command`);
+      }
     }
   }
   return y;
 }
 
-export async function deriveConfig(y: ThwipYaml): Promise<ProjectConfig> {
-  const suiteIds = Object.keys(y.suites);
-  const pipeline: PipelineDefinition = {
-    schemaVersion: "1",
-    runner: "command",
-    suites: suiteIds.map((id) => ({ id, command: ["sh", "-c", y.suites[id]!] })),
-  };
+/**
+ * Resolve suite id -> command. Explicit `suites:` wins; otherwise the suite
+ * id names a package.json script and runs through the repository's package
+ * manager (detected from the committed lockfile).
+ */
+async function suiteCommand(cwd: string, y: ThwipYaml, id: string): Promise<string> {
+  if (y.suites?.[id]) return y.suites[id];
+  const runner = await (async () => {
+    const tracked = await git(["ls-files", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"], cwd);
+    if (tracked.includes("pnpm-lock.yaml")) return "pnpm run";
+    if (tracked.includes("yarn.lock")) return "yarn run";
+    return "npm run";
+  })();
+  return `${runner} ${id}`;
+}
+
+/** Resolve the GitHub numeric ids for origin, caching in local git config. */
+export async function resolveRepositoryIds(
+  cwd: string,
+  endpoint: string,
+  authHeader: string | null,
+): Promise<{ ownerId: string; repositoryId: string }> {
+  try {
+    const ownerId = await git(["config", "--get", "thwip.owner-id"], cwd);
+    const repositoryId = await git(["config", "--get", "thwip.repository-id"], cwd);
+    if (ownerId && repositoryId) return { ownerId, repositoryId };
+  } catch {
+    /* not cached yet */
+  }
+  const url = await git(["config", "--get", "remote.origin.url"], cwd);
+  const m = /github\.com[:/]([^/]+\/[^/.]+)/.exec(url);
+  if (!m) throw new Error("origin is not a GitHub remote");
+  const name = m[1]!;
+  // The control plane knows every installed repository's numeric ids.
+  const res = await fetch(`${endpoint}/v1/resolve-repo?name=${encodeURIComponent(name)}`, {
+    headers: authHeader ? { authorization: authHeader } : {},
+  });
+  if (!res.ok) {
+    throw new Error(
+      `cannot resolve numeric ids for ${name} (${res.status}); sign in with 'thwip login' and make sure the thwip GitHub App is installed on the repository`,
+    );
+  }
+  const ids = (await res.json()) as { ownerId: string; repositoryId: string };
+  await git(["config", "thwip.owner-id", ids.ownerId], cwd);
+  await git(["config", "thwip.repository-id", ids.repositoryId], cwd);
+  return ids;
+}
+
+export async function deriveConfig(
+  y: ThwipYaml,
+  cwd: string,
+  ids: { ownerId: string; repositoryId: string },
+): Promise<ProjectConfig> {
+  const suites: Array<{ id: string; command: string[] }> = [];
+  for (const id of y.required) {
+    suites.push({ id, command: ["sh", "-c", await suiteCommand(cwd, y, id)] });
+  }
+  const pipeline: PipelineDefinition = { schemaVersion: "1", runner: "command", suites };
   const pipelineDigest = await canonicalDigest(pipeline);
   const policy: PolicyBundleV1 = {
     schemaVersion: "1",
-    projectId: `gh:${y.repository.repository_id}`,
-    repositoryId: y.repository.repository_id,
-    ownerId: y.repository.owner_id,
+    projectId: `gh:${ids.repositoryId}`,
+    repositoryId: ids.repositoryId,
+    ownerId: ids.ownerId,
     version: y.version,
     securityProfile: y.profile,
     minimumPermission: y.policy?.minimum_permission ?? "write",
@@ -90,11 +139,7 @@ export async function deriveConfig(y: ThwipYaml): Promise<ProjectConfig> {
     allowedKeyAlgorithms: y.policy?.allowed_key_algorithms ?? ["ssh-ed25519"],
     requireGithubKeyPresence: false,
     lease: { required: y.profile !== "fast", maxAgeSeconds: 1800 },
-    pipeline: {
-      digest: pipelineDigest,
-      runner: "command",
-      requiredSuites: y.policy?.required ?? suiteIds,
-    },
+    pipeline: { digest: pipelineDigest, runner: "command", requiredSuites: y.required },
     proofMaxAgeSeconds: y.policy?.proof_max_age_seconds ?? 86400,
     audit: { basisPoints: 0, mandatoryPaths: [] },
   };
@@ -103,23 +148,13 @@ export async function deriveConfig(y: ThwipYaml): Promise<ProjectConfig> {
 }
 
 /** Load configuration from the committed tree (HEAD), never the worktree. */
-export async function loadProjectConfigAtHead(cwd: string): Promise<ProjectConfig> {
-  let text: string | null = null;
-  try {
-    text = await showFileAtHead(cwd, "thwip.yaml");
-  } catch {
-    text = null;
-  }
-  if (text !== null) return deriveConfig(parseThwipYaml(text));
-  // Legacy pair of JSON files.
-  const policyText = await showFileAtHead(cwd, "thwip.policy.json");
-  const pipelineText = await showFileAtHead(cwd, "thwip.pipeline.json");
-  const policy = JSON.parse(policyText) as PolicyBundleV1;
-  const pipeline = JSON.parse(pipelineText) as PipelineDefinition;
-  return {
-    policy,
-    policyDigest: await canonicalDigest(policy),
-    pipeline,
-    pipelineDigest: await canonicalDigest(pipeline),
-  };
+export async function loadProjectConfigAtHead(
+  cwd: string,
+  endpoint: string,
+  authHeader: string | null,
+): Promise<ProjectConfig> {
+  const text = await showFileAtHead(cwd, "thwip.yaml");
+  const y = parseThwipYaml(text);
+  const ids = await resolveRepositoryIds(cwd, endpoint, authHeader);
+  return deriveConfig(y, cwd, ids);
 }
