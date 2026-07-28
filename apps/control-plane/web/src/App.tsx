@@ -312,8 +312,9 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <dt>How does a teammate join?</dt>
           <dd>
             They sign in with GitHub. Membership, roles, and repository permissions come from the GitHub
-            organization, so there are no invitations to manage. Verification always checks current GitHub
-            permission, so removing someone on GitHub removes their standing here too.
+            organization, so there are no invitations to manage. Outside collaborators invited to individual
+            repositories on GitHub count too, with their per-repository permission as their standing. Verification
+            always checks current GitHub permission, so removing someone on GitHub removes their standing here too.
           </dd>
           <dt>Do commits have to be signed?</dt>
           <dd>
@@ -696,7 +697,7 @@ function People() {
                 <td>
                   <code>{m.github_login}</code>
                 </td>
-                <td>{m.github_org_role ?? "member"}</td>
+                <td>{m.github_org_role === "outside" ? <span className="gp-chip">outside collaborator</span> : (m.github_org_role ?? "member")}</td>
                 <td>{m.activated_at ? <span className="gp-chip is-active">active</span> : <span className="gp-chip">shadow</span>}</td>
                 <td>{m.active_keys}</td>
               </tr>
@@ -705,7 +706,8 @@ function People() {
         </table>
         <p className="gp-panel__meta" style={{ marginTop: "0.6rem" }}>
           There are no invitations. A member signs in with GitHub and gets exactly the access their GitHub role and
-          repository permissions already grant.
+          repository permissions already grant. Outside collaborators invited to individual repositories on GitHub
+          appear here too, marked as such, with the same per-repository standing.
         </p>
       </Panel>
       <Panel title="Teams">
