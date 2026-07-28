@@ -1,0 +1,1618 @@
+"use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+
+// ../../node_modules/.pnpm/canonicalize@2.1.0/node_modules/canonicalize/lib/canonicalize.js
+var require_canonicalize = __commonJS({
+  "../../node_modules/.pnpm/canonicalize@2.1.0/node_modules/canonicalize/lib/canonicalize.js"(exports2, module2) {
+    "use strict";
+    module2.exports = function serialize(object) {
+      if (typeof object === "number" && isNaN(object)) {
+        throw new Error("NaN is not allowed");
+      }
+      if (typeof object === "number" && !isFinite(object)) {
+        throw new Error("Infinity is not allowed");
+      }
+      if (object === null || typeof object !== "object") {
+        return JSON.stringify(object);
+      }
+      if (object.toJSON instanceof Function) {
+        return serialize(object.toJSON());
+      }
+      if (Array.isArray(object)) {
+        const values2 = object.reduce((t, cv, ci) => {
+          const comma = ci === 0 ? "" : ",";
+          const value = cv === void 0 || typeof cv === "symbol" ? null : cv;
+          return `${t}${comma}${serialize(value)}`;
+        }, "");
+        return `[${values2}]`;
+      }
+      const values = Object.keys(object).sort().reduce((t, cv) => {
+        if (object[cv] === void 0 || typeof object[cv] === "symbol") {
+          return t;
+        }
+        const comma = t.length === 0 ? "" : ",";
+        return `${t}${comma}${serialize(cv)}:${serialize(object[cv])}`;
+      }, "");
+      return `{${values}}`;
+    };
+  }
+});
+
+// src/main.ts
+var import_node_fs = require("node:fs");
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/buffer_utils.js
+var encoder = new TextEncoder();
+var decoder = new TextDecoder();
+var MAX_INT32 = 2 ** 32;
+function concat(...buffers) {
+  const size = buffers.reduce((acc, { length }) => acc + length, 0);
+  const buf = new Uint8Array(size);
+  let i = 0;
+  for (const buffer of buffers) {
+    buf.set(buffer, i);
+    i += buffer.length;
+  }
+  return buf;
+}
+function encode(string) {
+  const bytes = new Uint8Array(string.length);
+  for (let i = 0; i < string.length; i++) {
+    const code = string.charCodeAt(i);
+    if (code > 127) {
+      throw new TypeError("non-ASCII string encountered in encode()");
+    }
+    bytes[i] = code;
+  }
+  return bytes;
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/base64.js
+function decodeBase64(encoded) {
+  if (Uint8Array.fromBase64) {
+    return Uint8Array.fromBase64(encoded);
+  }
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/util/base64url.js
+function decode(input) {
+  if (Uint8Array.fromBase64) {
+    return Uint8Array.fromBase64(typeof input === "string" ? input : decoder.decode(input), {
+      alphabet: "base64url"
+    });
+  }
+  let encoded = input;
+  if (encoded instanceof Uint8Array) {
+    encoded = decoder.decode(encoded);
+  }
+  encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    return decodeBase64(encoded);
+  } catch {
+    throw new TypeError("The input to be decoded is not correctly encoded.");
+  }
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/crypto_key.js
+var unusable = (name, prop = "algorithm.name") => new TypeError(`CryptoKey does not support this operation, its ${prop} must be ${name}`);
+var isAlgorithm = (algorithm, name) => algorithm.name === name;
+function getHashLength(hash) {
+  return parseInt(hash.name.slice(4), 10);
+}
+function checkHashLength(algorithm, expected) {
+  const actual = getHashLength(algorithm.hash);
+  if (actual !== expected)
+    throw unusable(`SHA-${expected}`, "algorithm.hash");
+}
+function getNamedCurve(alg) {
+  switch (alg) {
+    case "ES256":
+      return "P-256";
+    case "ES384":
+      return "P-384";
+    case "ES512":
+      return "P-521";
+    default:
+      throw new Error("unreachable");
+  }
+}
+function checkUsage(key, usage) {
+  if (usage && !key.usages.includes(usage)) {
+    throw new TypeError(`CryptoKey does not support this operation, its usages must include ${usage}.`);
+  }
+}
+function checkSigCryptoKey(key, alg, usage) {
+  switch (alg) {
+    case "HS256":
+    case "HS384":
+    case "HS512": {
+      if (!isAlgorithm(key.algorithm, "HMAC"))
+        throw unusable("HMAC");
+      checkHashLength(key.algorithm, parseInt(alg.slice(2), 10));
+      break;
+    }
+    case "RS256":
+    case "RS384":
+    case "RS512": {
+      if (!isAlgorithm(key.algorithm, "RSASSA-PKCS1-v1_5"))
+        throw unusable("RSASSA-PKCS1-v1_5");
+      checkHashLength(key.algorithm, parseInt(alg.slice(2), 10));
+      break;
+    }
+    case "PS256":
+    case "PS384":
+    case "PS512": {
+      if (!isAlgorithm(key.algorithm, "RSA-PSS"))
+        throw unusable("RSA-PSS");
+      checkHashLength(key.algorithm, parseInt(alg.slice(2), 10));
+      break;
+    }
+    case "Ed25519":
+    case "EdDSA": {
+      if (!isAlgorithm(key.algorithm, "Ed25519"))
+        throw unusable("Ed25519");
+      break;
+    }
+    case "ML-DSA-44":
+    case "ML-DSA-65":
+    case "ML-DSA-87": {
+      if (!isAlgorithm(key.algorithm, alg))
+        throw unusable(alg);
+      break;
+    }
+    case "ES256":
+    case "ES384":
+    case "ES512": {
+      if (!isAlgorithm(key.algorithm, "ECDSA"))
+        throw unusable("ECDSA");
+      const expected = getNamedCurve(alg);
+      const actual = key.algorithm.namedCurve;
+      if (actual !== expected)
+        throw unusable(expected, "algorithm.namedCurve");
+      break;
+    }
+    default:
+      throw new TypeError("CryptoKey does not support this operation");
+  }
+  checkUsage(key, usage);
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/invalid_key_input.js
+function message(msg, actual, ...types) {
+  types = types.filter(Boolean);
+  if (types.length > 2) {
+    const last = types.pop();
+    msg += `one of type ${types.join(", ")}, or ${last}.`;
+  } else if (types.length === 2) {
+    msg += `one of type ${types[0]} or ${types[1]}.`;
+  } else {
+    msg += `of type ${types[0]}.`;
+  }
+  if (actual == null) {
+    msg += ` Received ${actual}`;
+  } else if (typeof actual === "function" && actual.name) {
+    msg += ` Received function ${actual.name}`;
+  } else if (typeof actual === "object" && actual != null) {
+    if (actual.constructor?.name) {
+      msg += ` Received an instance of ${actual.constructor.name}`;
+    }
+  }
+  return msg;
+}
+var invalidKeyInput = (actual, ...types) => message("Key must be ", actual, ...types);
+var withAlg = (alg, actual, ...types) => message(`Key for the ${alg} algorithm must be `, actual, ...types);
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/util/errors.js
+var JOSEError = class extends Error {
+  static code = "ERR_JOSE_GENERIC";
+  code = "ERR_JOSE_GENERIC";
+  constructor(message2, options) {
+    super(message2, options);
+    this.name = this.constructor.name;
+    Error.captureStackTrace?.(this, this.constructor);
+  }
+};
+var JOSEAlgNotAllowed = class extends JOSEError {
+  static code = "ERR_JOSE_ALG_NOT_ALLOWED";
+  code = "ERR_JOSE_ALG_NOT_ALLOWED";
+};
+var JOSENotSupported = class extends JOSEError {
+  static code = "ERR_JOSE_NOT_SUPPORTED";
+  code = "ERR_JOSE_NOT_SUPPORTED";
+};
+var JWSInvalid = class extends JOSEError {
+  static code = "ERR_JWS_INVALID";
+  code = "ERR_JWS_INVALID";
+};
+var JWSSignatureVerificationFailed = class extends JOSEError {
+  static code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
+  code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
+  constructor(message2 = "signature verification failed", options) {
+    super(message2, options);
+  }
+};
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/is_key_like.js
+var isCryptoKey = (key) => {
+  if (key?.[Symbol.toStringTag] === "CryptoKey")
+    return true;
+  try {
+    return key instanceof CryptoKey;
+  } catch {
+    return false;
+  }
+};
+var isKeyObject = (key) => key?.[Symbol.toStringTag] === "KeyObject";
+var isKeyLike = (key) => isCryptoKey(key) || isKeyObject(key);
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/helpers.js
+var unprotected = Symbol();
+function decodeBase64url(value, label, ErrorClass) {
+  try {
+    return decode(value);
+  } catch {
+    throw new ErrorClass(`Failed to base64url decode the ${label}`);
+  }
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/type_checks.js
+var isObjectLike = (value) => typeof value === "object" && value !== null;
+function isObject(input) {
+  if (!isObjectLike(input) || Object.prototype.toString.call(input) !== "[object Object]") {
+    return false;
+  }
+  if (Object.getPrototypeOf(input) === null) {
+    return true;
+  }
+  let proto = input;
+  while (Object.getPrototypeOf(proto) !== null) {
+    proto = Object.getPrototypeOf(proto);
+  }
+  return Object.getPrototypeOf(input) === proto;
+}
+function isDisjoint(...headers) {
+  const sources = headers.filter(Boolean);
+  if (sources.length === 0 || sources.length === 1) {
+    return true;
+  }
+  let acc;
+  for (const header of sources) {
+    const parameters = Object.keys(header);
+    if (!acc || acc.size === 0) {
+      acc = new Set(parameters);
+      continue;
+    }
+    for (const parameter of parameters) {
+      if (acc.has(parameter)) {
+        return false;
+      }
+      acc.add(parameter);
+    }
+  }
+  return true;
+}
+var isJWK = (key) => isObject(key) && typeof key.kty === "string";
+var isPrivateJWK = (key) => key.kty !== "oct" && (key.kty === "AKP" && typeof key.priv === "string" || typeof key.d === "string");
+var isPublicJWK = (key) => key.kty !== "oct" && key.d === void 0 && key.priv === void 0;
+var isSecretJWK = (key) => key.kty === "oct" && typeof key.k === "string";
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/signing.js
+function checkKeyLength(alg, key) {
+  if (alg.startsWith("RS") || alg.startsWith("PS")) {
+    const { modulusLength } = key.algorithm;
+    if (typeof modulusLength !== "number" || modulusLength < 2048) {
+      throw new TypeError(`${alg} requires key modulusLength to be 2048 bits or larger`);
+    }
+  }
+}
+function subtleAlgorithm(alg, algorithm) {
+  const hash = `SHA-${alg.slice(-3)}`;
+  switch (alg) {
+    case "HS256":
+    case "HS384":
+    case "HS512":
+      return { hash, name: "HMAC" };
+    case "PS256":
+    case "PS384":
+    case "PS512":
+      return { hash, name: "RSA-PSS", saltLength: parseInt(alg.slice(-3), 10) >> 3 };
+    case "RS256":
+    case "RS384":
+    case "RS512":
+      return { hash, name: "RSASSA-PKCS1-v1_5" };
+    case "ES256":
+    case "ES384":
+    case "ES512":
+      return { hash, name: "ECDSA", namedCurve: algorithm.namedCurve };
+    case "Ed25519":
+    case "EdDSA":
+      return { name: "Ed25519" };
+    case "ML-DSA-44":
+    case "ML-DSA-65":
+    case "ML-DSA-87":
+      return { name: alg };
+    default:
+      throw new JOSENotSupported(`alg ${alg} is not supported either by JOSE or your javascript runtime`);
+  }
+}
+async function getSigKey(alg, key, usage) {
+  if (key instanceof Uint8Array) {
+    if (!alg.startsWith("HS")) {
+      throw new TypeError(invalidKeyInput(key, "CryptoKey", "KeyObject", "JSON Web Key"));
+    }
+    return crypto.subtle.importKey("raw", key, { hash: `SHA-${alg.slice(-3)}`, name: "HMAC" }, false, [usage]);
+  }
+  checkSigCryptoKey(key, alg, usage);
+  return key;
+}
+async function verify(alg, key, signature, data) {
+  const cryptoKey = await getSigKey(alg, key, "verify");
+  checkKeyLength(alg, cryptoKey);
+  const algorithm = subtleAlgorithm(alg, cryptoKey.algorithm);
+  try {
+    return await crypto.subtle.verify(algorithm, cryptoKey, signature, data);
+  } catch {
+    return false;
+  }
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/jwk_to_key.js
+var unsupportedAlg = 'Invalid or unsupported JWK "alg" (Algorithm) Parameter value';
+function subtleMapping(jwk) {
+  let algorithm;
+  let keyUsages;
+  switch (jwk.kty) {
+    case "AKP": {
+      switch (jwk.alg) {
+        case "ML-DSA-44":
+        case "ML-DSA-65":
+        case "ML-DSA-87":
+          algorithm = { name: jwk.alg };
+          keyUsages = jwk.priv ? ["sign"] : ["verify"];
+          break;
+        default:
+          throw new JOSENotSupported(unsupportedAlg);
+      }
+      break;
+    }
+    case "RSA": {
+      switch (jwk.alg) {
+        case "PS256":
+        case "PS384":
+        case "PS512":
+          algorithm = { name: "RSA-PSS", hash: `SHA-${jwk.alg.slice(-3)}` };
+          keyUsages = jwk.d ? ["sign"] : ["verify"];
+          break;
+        case "RS256":
+        case "RS384":
+        case "RS512":
+          algorithm = { name: "RSASSA-PKCS1-v1_5", hash: `SHA-${jwk.alg.slice(-3)}` };
+          keyUsages = jwk.d ? ["sign"] : ["verify"];
+          break;
+        case "RSA-OAEP":
+        case "RSA-OAEP-256":
+        case "RSA-OAEP-384":
+        case "RSA-OAEP-512":
+          algorithm = {
+            name: "RSA-OAEP",
+            hash: `SHA-${parseInt(jwk.alg.slice(-3), 10) || 1}`
+          };
+          keyUsages = jwk.d ? ["decrypt", "unwrapKey"] : ["encrypt", "wrapKey"];
+          break;
+        default:
+          throw new JOSENotSupported(unsupportedAlg);
+      }
+      break;
+    }
+    case "EC": {
+      switch (jwk.alg) {
+        case "ES256":
+        case "ES384":
+        case "ES512":
+          algorithm = {
+            name: "ECDSA",
+            namedCurve: { ES256: "P-256", ES384: "P-384", ES512: "P-521" }[jwk.alg]
+          };
+          keyUsages = jwk.d ? ["sign"] : ["verify"];
+          break;
+        case "ECDH-ES":
+        case "ECDH-ES+A128KW":
+        case "ECDH-ES+A192KW":
+        case "ECDH-ES+A256KW":
+          algorithm = { name: "ECDH", namedCurve: jwk.crv };
+          keyUsages = jwk.d ? ["deriveBits"] : [];
+          break;
+        default:
+          throw new JOSENotSupported(unsupportedAlg);
+      }
+      break;
+    }
+    case "OKP": {
+      switch (jwk.alg) {
+        case "Ed25519":
+        case "EdDSA":
+          algorithm = { name: "Ed25519" };
+          keyUsages = jwk.d ? ["sign"] : ["verify"];
+          break;
+        case "ECDH-ES":
+        case "ECDH-ES+A128KW":
+        case "ECDH-ES+A192KW":
+        case "ECDH-ES+A256KW":
+          algorithm = { name: jwk.crv };
+          keyUsages = jwk.d ? ["deriveBits"] : [];
+          break;
+        default:
+          throw new JOSENotSupported(unsupportedAlg);
+      }
+      break;
+    }
+    default:
+      throw new JOSENotSupported('Invalid or unsupported JWK "kty" (Key Type) Parameter value');
+  }
+  return { algorithm, keyUsages };
+}
+async function jwkToKey(jwk) {
+  if (!jwk.alg) {
+    throw new TypeError('"alg" argument is required when "jwk.alg" is not present');
+  }
+  const { algorithm, keyUsages } = subtleMapping(jwk);
+  const keyData = { ...jwk };
+  if (keyData.kty !== "AKP") {
+    delete keyData.alg;
+  }
+  delete keyData.use;
+  return crypto.subtle.importKey("jwk", keyData, algorithm, jwk.ext ?? (jwk.d || jwk.priv ? false : true), jwk.key_ops ?? keyUsages);
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/normalize_key.js
+var unusableForAlg = "given KeyObject instance cannot be used for this algorithm";
+var cache;
+var handleJWK = async (key, jwk, alg, freeze = false) => {
+  cache ||= /* @__PURE__ */ new WeakMap();
+  let cached = cache.get(key);
+  if (cached?.[alg]) {
+    return cached[alg];
+  }
+  const cryptoKey = await jwkToKey({ ...jwk, alg });
+  if (freeze)
+    Object.freeze(key);
+  if (!cached) {
+    cache.set(key, { [alg]: cryptoKey });
+  } else {
+    cached[alg] = cryptoKey;
+  }
+  return cryptoKey;
+};
+var handleKeyObject = (keyObject, alg) => {
+  cache ||= /* @__PURE__ */ new WeakMap();
+  let cached = cache.get(keyObject);
+  if (cached?.[alg]) {
+    return cached[alg];
+  }
+  const isPublic = keyObject.type === "public";
+  const extractable = isPublic ? true : false;
+  let cryptoKey;
+  if (keyObject.asymmetricKeyType === "x25519") {
+    switch (alg) {
+      case "ECDH-ES":
+      case "ECDH-ES+A128KW":
+      case "ECDH-ES+A192KW":
+      case "ECDH-ES+A256KW":
+        break;
+      default:
+        throw new TypeError(unusableForAlg);
+    }
+    cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, isPublic ? [] : ["deriveBits"]);
+  }
+  if (keyObject.asymmetricKeyType === "ed25519") {
+    if (alg !== "EdDSA" && alg !== "Ed25519") {
+      throw new TypeError(unusableForAlg);
+    }
+    cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [
+      isPublic ? "verify" : "sign"
+    ]);
+  }
+  switch (keyObject.asymmetricKeyType) {
+    case "ml-dsa-44":
+    case "ml-dsa-65":
+    case "ml-dsa-87": {
+      if (alg !== keyObject.asymmetricKeyType.toUpperCase()) {
+        throw new TypeError(unusableForAlg);
+      }
+      cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [
+        isPublic ? "verify" : "sign"
+      ]);
+    }
+  }
+  if (keyObject.asymmetricKeyType === "rsa") {
+    let hash;
+    switch (alg) {
+      case "RSA-OAEP":
+        hash = "SHA-1";
+        break;
+      case "RS256":
+      case "PS256":
+      case "RSA-OAEP-256":
+        hash = "SHA-256";
+        break;
+      case "RS384":
+      case "PS384":
+      case "RSA-OAEP-384":
+        hash = "SHA-384";
+        break;
+      case "RS512":
+      case "PS512":
+      case "RSA-OAEP-512":
+        hash = "SHA-512";
+        break;
+      default:
+        throw new TypeError(unusableForAlg);
+    }
+    if (alg.startsWith("RSA-OAEP")) {
+      return keyObject.toCryptoKey({
+        name: "RSA-OAEP",
+        hash
+      }, extractable, isPublic ? ["encrypt"] : ["decrypt"]);
+    }
+    cryptoKey = keyObject.toCryptoKey({
+      name: alg.startsWith("PS") ? "RSA-PSS" : "RSASSA-PKCS1-v1_5",
+      hash
+    }, extractable, [isPublic ? "verify" : "sign"]);
+  }
+  if (keyObject.asymmetricKeyType === "ec") {
+    const nist = /* @__PURE__ */ new Map([
+      ["prime256v1", "P-256"],
+      ["secp384r1", "P-384"],
+      ["secp521r1", "P-521"]
+    ]);
+    const namedCurve = nist.get(keyObject.asymmetricKeyDetails?.namedCurve);
+    if (!namedCurve) {
+      throw new TypeError(unusableForAlg);
+    }
+    const expectedCurve = { ES256: "P-256", ES384: "P-384", ES512: "P-521" };
+    if (expectedCurve[alg] && namedCurve === expectedCurve[alg]) {
+      cryptoKey = keyObject.toCryptoKey({
+        name: "ECDSA",
+        namedCurve
+      }, extractable, [isPublic ? "verify" : "sign"]);
+    }
+    if (alg.startsWith("ECDH-ES")) {
+      cryptoKey = keyObject.toCryptoKey({
+        name: "ECDH",
+        namedCurve
+      }, extractable, isPublic ? [] : ["deriveBits"]);
+    }
+  }
+  if (!cryptoKey) {
+    throw new TypeError(unusableForAlg);
+  }
+  if (!cached) {
+    cache.set(keyObject, { [alg]: cryptoKey });
+  } else {
+    cached[alg] = cryptoKey;
+  }
+  return cryptoKey;
+};
+async function normalizeKey(key, alg) {
+  if (key instanceof Uint8Array) {
+    return key;
+  }
+  if (isCryptoKey(key)) {
+    return key;
+  }
+  if (isKeyObject(key)) {
+    if (key.type === "secret") {
+      return key.export();
+    }
+    if ("toCryptoKey" in key && typeof key.toCryptoKey === "function") {
+      try {
+        return handleKeyObject(key, alg);
+      } catch (err) {
+        if (err instanceof TypeError) {
+          throw err;
+        }
+      }
+    }
+    let jwk = key.export({ format: "jwk" });
+    return handleJWK(key, jwk, alg);
+  }
+  if (isJWK(key)) {
+    if (key.k) {
+      return decode(key.k);
+    }
+    return handleJWK(key, key, alg, true);
+  }
+  throw new Error("unreachable");
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/key/import.js
+async function importJWK(jwk, alg, options) {
+  if (!isObject(jwk)) {
+    throw new TypeError("JWK must be an object");
+  }
+  let ext;
+  alg ??= jwk.alg;
+  ext ??= options?.extractable ?? jwk.ext;
+  switch (jwk.kty) {
+    case "oct":
+      if (typeof jwk.k !== "string" || !jwk.k) {
+        throw new TypeError('missing "k" (Key Value) Parameter value');
+      }
+      return decode(jwk.k);
+    case "RSA":
+      if ("oth" in jwk && jwk.oth !== void 0) {
+        throw new JOSENotSupported('RSA JWK "oth" (Other Primes Info) Parameter value is not supported');
+      }
+      return jwkToKey({ ...jwk, alg, ext });
+    case "AKP": {
+      if (typeof jwk.alg !== "string" || !jwk.alg) {
+        throw new TypeError('missing "alg" (Algorithm) Parameter value');
+      }
+      if (alg !== void 0 && alg !== jwk.alg) {
+        throw new TypeError("JWK alg and alg option value mismatch");
+      }
+      return jwkToKey({ ...jwk, ext });
+    }
+    case "EC":
+    case "OKP":
+      return jwkToKey({ ...jwk, alg, ext });
+    default:
+      throw new JOSENotSupported('Unsupported "kty" (Key Type) Parameter value');
+  }
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/validate_crit.js
+function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader, joseHeader) {
+  if (joseHeader.crit !== void 0 && protectedHeader?.crit === void 0) {
+    throw new Err('"crit" (Critical) Header Parameter MUST be integrity protected');
+  }
+  if (!protectedHeader || protectedHeader.crit === void 0) {
+    return /* @__PURE__ */ new Set();
+  }
+  if (!Array.isArray(protectedHeader.crit) || protectedHeader.crit.length === 0 || protectedHeader.crit.some((input) => typeof input !== "string" || input.length === 0)) {
+    throw new Err('"crit" (Critical) Header Parameter MUST be an array of non-empty strings when present');
+  }
+  let recognized;
+  if (recognizedOption !== void 0) {
+    recognized = new Map([...Object.entries(recognizedOption), ...recognizedDefault.entries()]);
+  } else {
+    recognized = recognizedDefault;
+  }
+  for (const parameter of protectedHeader.crit) {
+    if (!recognized.has(parameter)) {
+      throw new JOSENotSupported(`Extension Header Parameter "${parameter}" is not recognized`);
+    }
+    if (joseHeader[parameter] === void 0) {
+      throw new Err(`Extension Header Parameter "${parameter}" is missing`);
+    }
+    if (recognized.get(parameter) && protectedHeader[parameter] === void 0) {
+      throw new Err(`Extension Header Parameter "${parameter}" MUST be integrity protected`);
+    }
+  }
+  return new Set(protectedHeader.crit);
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/validate_algorithms.js
+function validateAlgorithms(option, algorithms) {
+  if (algorithms !== void 0 && (!Array.isArray(algorithms) || algorithms.some((s) => typeof s !== "string"))) {
+    throw new TypeError(`"${option}" option must be an array of strings`);
+  }
+  if (!algorithms) {
+    return void 0;
+  }
+  return new Set(algorithms);
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/check_key_type.js
+var tag = (key) => key?.[Symbol.toStringTag];
+var jwkMatchesOp = (alg, key, usage) => {
+  if (key.use !== void 0) {
+    let expected;
+    switch (usage) {
+      case "sign":
+      case "verify":
+        expected = "sig";
+        break;
+      case "encrypt":
+      case "decrypt":
+        expected = "enc";
+        break;
+    }
+    if (key.use !== expected) {
+      throw new TypeError(`Invalid key for this operation, its "use" must be "${expected}" when present`);
+    }
+  }
+  if (key.alg !== void 0 && key.alg !== alg) {
+    throw new TypeError(`Invalid key for this operation, its "alg" must be "${alg}" when present`);
+  }
+  if (Array.isArray(key.key_ops)) {
+    let expectedKeyOp;
+    switch (true) {
+      case (usage === "sign" || usage === "verify"):
+      case alg === "dir":
+      case alg.includes("CBC-HS"):
+        expectedKeyOp = usage;
+        break;
+      case alg.startsWith("PBES2"):
+        expectedKeyOp = "deriveBits";
+        break;
+      case /^A\d{3}(?:GCM)?(?:KW)?$/.test(alg):
+        if (!alg.includes("GCM") && alg.endsWith("KW")) {
+          expectedKeyOp = usage === "encrypt" ? "wrapKey" : "unwrapKey";
+        } else {
+          expectedKeyOp = usage;
+        }
+        break;
+      case (usage === "encrypt" && alg.startsWith("RSA")):
+        expectedKeyOp = "wrapKey";
+        break;
+      case usage === "decrypt":
+        expectedKeyOp = alg.startsWith("RSA") ? "unwrapKey" : "deriveBits";
+        break;
+    }
+    if (expectedKeyOp && key.key_ops?.includes?.(expectedKeyOp) === false) {
+      throw new TypeError(`Invalid key for this operation, its "key_ops" must include "${expectedKeyOp}" when present`);
+    }
+  }
+  return true;
+};
+var symmetricTypeCheck = (alg, key, usage) => {
+  if (key instanceof Uint8Array)
+    return;
+  if (isJWK(key)) {
+    if (isSecretJWK(key) && jwkMatchesOp(alg, key, usage))
+      return;
+    throw new TypeError(`JSON Web Key for symmetric algorithms must have JWK "kty" (Key Type) equal to "oct" and the JWK "k" (Key Value) present`);
+  }
+  if (!isKeyLike(key)) {
+    throw new TypeError(withAlg(alg, key, "CryptoKey", "KeyObject", "JSON Web Key", "Uint8Array"));
+  }
+  if (key.type !== "secret") {
+    throw new TypeError(`${tag(key)} instances for symmetric algorithms must be of type "secret"`);
+  }
+};
+var asymmetricTypeCheck = (alg, key, usage) => {
+  if (isJWK(key)) {
+    switch (usage) {
+      case "decrypt":
+      case "sign":
+        if (isPrivateJWK(key) && jwkMatchesOp(alg, key, usage))
+          return;
+        throw new TypeError(`JSON Web Key for this operation must be a private JWK`);
+      case "encrypt":
+      case "verify":
+        if (isPublicJWK(key) && jwkMatchesOp(alg, key, usage))
+          return;
+        throw new TypeError(`JSON Web Key for this operation must be a public JWK`);
+    }
+  }
+  if (!isKeyLike(key)) {
+    throw new TypeError(withAlg(alg, key, "CryptoKey", "KeyObject", "JSON Web Key"));
+  }
+  if (key.type === "secret") {
+    throw new TypeError(`${tag(key)} instances for asymmetric algorithms must not be of type "secret"`);
+  }
+  if (key.type === "public") {
+    switch (usage) {
+      case "sign":
+        throw new TypeError(`${tag(key)} instances for asymmetric algorithm signing must be of type "private"`);
+      case "decrypt":
+        throw new TypeError(`${tag(key)} instances for asymmetric algorithm decryption must be of type "private"`);
+    }
+  }
+  if (key.type === "private") {
+    switch (usage) {
+      case "verify":
+        throw new TypeError(`${tag(key)} instances for asymmetric algorithm verifying must be of type "public"`);
+      case "encrypt":
+        throw new TypeError(`${tag(key)} instances for asymmetric algorithm encryption must be of type "public"`);
+    }
+  }
+};
+function checkKeyType(alg, key, usage) {
+  switch (alg.substring(0, 2)) {
+    case "A1":
+    case "A2":
+    case "di":
+    case "HS":
+    case "PB":
+      symmetricTypeCheck(alg, key, usage);
+      break;
+    default:
+      asymmetricTypeCheck(alg, key, usage);
+  }
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/jws/flattened/verify.js
+async function flattenedVerify(jws, key, options) {
+  if (!isObject(jws)) {
+    throw new JWSInvalid("Flattened JWS must be an object");
+  }
+  if (jws.protected === void 0 && jws.header === void 0) {
+    throw new JWSInvalid('Flattened JWS must have either of the "protected" or "header" members');
+  }
+  if (jws.protected !== void 0 && typeof jws.protected !== "string") {
+    throw new JWSInvalid("JWS Protected Header incorrect type");
+  }
+  if (jws.payload === void 0) {
+    throw new JWSInvalid("JWS Payload missing");
+  }
+  if (typeof jws.signature !== "string") {
+    throw new JWSInvalid("JWS Signature missing or incorrect type");
+  }
+  if (jws.header !== void 0 && !isObject(jws.header)) {
+    throw new JWSInvalid("JWS Unprotected Header incorrect type");
+  }
+  let parsedProt = {};
+  if (jws.protected) {
+    try {
+      const protectedHeader = decode(jws.protected);
+      parsedProt = JSON.parse(decoder.decode(protectedHeader));
+    } catch {
+      throw new JWSInvalid("JWS Protected Header is invalid");
+    }
+  }
+  if (!isDisjoint(parsedProt, jws.header)) {
+    throw new JWSInvalid("JWS Protected and JWS Unprotected Header Parameter names must be disjoint");
+  }
+  const joseHeader = {
+    ...parsedProt,
+    ...jws.header
+  };
+  const extensions = validateCrit(JWSInvalid, /* @__PURE__ */ new Map([["b64", true]]), options?.crit, parsedProt, joseHeader);
+  let b64 = true;
+  if (extensions.has("b64")) {
+    b64 = parsedProt.b64;
+    if (typeof b64 !== "boolean") {
+      throw new JWSInvalid('The "b64" (base64url-encode payload) Header Parameter must be a boolean');
+    }
+  }
+  const { alg } = joseHeader;
+  if (typeof alg !== "string" || !alg) {
+    throw new JWSInvalid('JWS "alg" (Algorithm) Header Parameter missing or invalid');
+  }
+  const algorithms = options && validateAlgorithms("algorithms", options.algorithms);
+  if (algorithms && !algorithms.has(alg)) {
+    throw new JOSEAlgNotAllowed('"alg" (Algorithm) Header Parameter value not allowed');
+  }
+  if (b64) {
+    if (typeof jws.payload !== "string") {
+      throw new JWSInvalid("JWS Payload must be a string");
+    }
+  } else if (typeof jws.payload !== "string" && !(jws.payload instanceof Uint8Array)) {
+    throw new JWSInvalid("JWS Payload must be a string or an Uint8Array instance");
+  }
+  let resolvedKey = false;
+  if (typeof key === "function") {
+    key = await key(parsedProt, jws);
+    resolvedKey = true;
+  }
+  checkKeyType(alg, key, "verify");
+  const data = concat(jws.protected !== void 0 ? encode(jws.protected) : new Uint8Array(), encode("."), typeof jws.payload === "string" ? b64 ? encode(jws.payload) : encoder.encode(jws.payload) : jws.payload);
+  const signature = decodeBase64url(jws.signature, "signature", JWSInvalid);
+  const k = await normalizeKey(key, alg);
+  const verified = await verify(alg, k, signature, data);
+  if (!verified) {
+    throw new JWSSignatureVerificationFailed();
+  }
+  let payload;
+  if (b64) {
+    payload = decodeBase64url(jws.payload, "payload", JWSInvalid);
+  } else if (typeof jws.payload === "string") {
+    payload = encoder.encode(jws.payload);
+  } else {
+    payload = jws.payload;
+  }
+  const result = { payload };
+  if (jws.protected !== void 0) {
+    result.protectedHeader = parsedProt;
+  }
+  if (jws.header !== void 0) {
+    result.unprotectedHeader = jws.header;
+  }
+  if (resolvedKey) {
+    return { ...result, key: k };
+  }
+  return result;
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/jws/compact/verify.js
+async function compactVerify(jws, key, options) {
+  if (jws instanceof Uint8Array) {
+    jws = decoder.decode(jws);
+  }
+  if (typeof jws !== "string") {
+    throw new JWSInvalid("Compact JWS must be a string or Uint8Array");
+  }
+  const { 0: protectedHeader, 1: payload, 2: signature, length } = jws.split(".");
+  if (length !== 3) {
+    throw new JWSInvalid("Invalid Compact JWS");
+  }
+  const verified = await flattenedVerify({ payload, protected: protectedHeader, signature }, key, options);
+  const result = { payload: verified.payload, protectedHeader: verified.protectedHeader };
+  if (typeof key === "function") {
+    return { ...result, key: verified.key };
+  }
+  return result;
+}
+
+// ../sshsig/dist/index.js
+var import_node_child_process = require("node:child_process");
+var import_promises = require("node:fs/promises");
+var import_node_os = require("node:os");
+var import_node_path = require("node:path");
+var import_node_util = require("node:util");
+var execFileP = (0, import_node_util.promisify)(import_node_child_process.execFile);
+var ARMOR_BEGIN = "-----BEGIN SSH SIGNATURE-----";
+var ARMOR_END = "-----END SSH SIGNATURE-----";
+function base64ToArmor(b64) {
+  const lines = b64.match(/.{1,70}/g) ?? [];
+  return `${ARMOR_BEGIN}
+${lines.join("\n")}
+${ARMOR_END}
+`;
+}
+function runWithStdin(cmd, argv, stdin) {
+  return new Promise((resolve, reject) => {
+    const child = (0, import_node_child_process.spawn)(cmd, argv, { stdio: ["pipe", "ignore", "ignore"] });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code: code ?? 1 }));
+    child.stdin.end(Buffer.from(stdin));
+  });
+}
+async function verifySshSignature(args) {
+  const dir = await (0, import_promises.mkdtemp)((0, import_node_path.join)((0, import_node_os.tmpdir)(), "thwip-verify-"));
+  try {
+    const allowedSigners = (0, import_node_path.join)(dir, "allowed_signers");
+    const sigPath = (0, import_node_path.join)(dir, "sig");
+    const [keyType, keyBlob] = args.publicKey.trim().split(/\s+/);
+    if (!keyType || !keyBlob)
+      throw new Error("invalid public key");
+    await (0, import_promises.writeFile)(allowedSigners, `thwip namespaces="${args.namespace}" ${keyType} ${keyBlob}
+`);
+    await (0, import_promises.writeFile)(sigPath, base64ToArmor(args.signatureBase64));
+    const { code } = await runWithStdin("ssh-keygen", ["-Y", "verify", "-f", allowedSigners, "-I", "thwip", "-n", args.namespace, "-s", sigPath], args.message);
+    return code === 0;
+  } finally {
+    await (0, import_promises.rm)(dir, { recursive: true, force: true });
+  }
+}
+
+// ../protocol/dist/types.js
+var STATEMENT_TYPE = "https://in-toto.io/Statement/v1";
+var PREDICATE_TYPE = "urn:thwip:attestation:ci-run:v1";
+var DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
+var SSH_SIGN_NAMESPACE = "thwip-ci-dsse-v1";
+var TRAILER_KEY = "thwip-Receipt";
+var CARRIER_VERSION = "v1";
+var CARRIER_MAX_ENCODED = 32 * 1024;
+var ENVELOPE_MAX_DECODED = 24 * 1024;
+
+// ../protocol/dist/encoding.js
+var B64URL_RE = /^[A-Za-z0-9_-]+$/;
+var B64STD_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function b64urlDecode(s) {
+  if (s.length === 0 || !B64URL_RE.test(s))
+    throw new Error("invalid base64url");
+  const std = s.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = std.length % 4 === 0 ? "" : "=".repeat(4 - std.length % 4);
+  const bin = atob(std + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++)
+    out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64stdDecode(s) {
+  if (s.length === 0 || !B64STD_RE.test(s))
+    throw new Error("invalid base64");
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++)
+    out[i] = bin.charCodeAt(i);
+  return out;
+}
+function utf8Encode(s) {
+  return new TextEncoder().encode(s);
+}
+function utf8Decode(b) {
+  return new TextDecoder("utf-8", { fatal: true }).decode(b);
+}
+
+// ../protocol/dist/pae.js
+function dssePae(payloadType, payload) {
+  const typeBytes = utf8Encode(payloadType);
+  const header = utf8Encode(`DSSEv1 ${typeBytes.length} ${payloadType} ${payload.length} `);
+  const out = new Uint8Array(header.length + payload.length);
+  out.set(header, 0);
+  out.set(payload, header.length);
+  return out;
+}
+
+// ../protocol/dist/schema.js
+var DECIMAL_RE = /^[0-9]+$/;
+var OID_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+var SHA256_RE = /^sha256:[0-9a-f]{64}$/;
+var SUITE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+function fail(detail) {
+  return { ok: false, detail };
+}
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function str(v, name, max = 4096) {
+  if (typeof v !== "string" || v.length === 0 || v.length > max)
+    return fail(`${name} invalid`);
+  return { ok: true, value: v };
+}
+function parseEnvelope(v) {
+  if (!isRecord(v))
+    return fail("envelope not an object");
+  if (v["payloadType"] !== DSSE_PAYLOAD_TYPE)
+    return fail("payloadType unsupported");
+  const payload = str(v["payload"], "payload", 32768);
+  if (!payload.ok)
+    return payload;
+  const sigs = v["signatures"];
+  if (!Array.isArray(sigs) || sigs.length !== 1)
+    return fail("signatures must contain exactly one entry");
+  const s0 = sigs[0];
+  if (!isRecord(s0))
+    return fail("signature not an object");
+  const keyid = str(s0["keyid"], "keyid", 256);
+  if (!keyid.ok)
+    return keyid;
+  const sig = str(s0["sig"], "sig", 8192);
+  if (!sig.ok)
+    return sig;
+  return {
+    ok: true,
+    value: {
+      payloadType: DSSE_PAYLOAD_TYPE,
+      payload: payload.value,
+      signatures: [{ keyid: keyid.value, sig: sig.value }]
+    }
+  };
+}
+function parseSuite(v, i) {
+  if (!isRecord(v))
+    return fail(`suite[${i}] not an object`);
+  const id = v["id"];
+  if (typeof id !== "string" || !SUITE_ID_RE.test(id))
+    return fail(`suite[${i}].id invalid`);
+  const status = v["status"];
+  if (status !== "passed" && status !== "failed" && status !== "skipped")
+    return fail(`suite[${i}].status invalid`);
+  const durationMs = v["durationMs"];
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return fail(`suite[${i}].durationMs invalid`);
+  }
+  const out = { id, status, durationMs };
+  if (v["reportDigest"] !== void 0) {
+    if (typeof v["reportDigest"] !== "string" || !SHA256_RE.test(v["reportDigest"])) {
+      return fail(`suite[${i}].reportDigest invalid`);
+    }
+    out.reportDigest = v["reportDigest"];
+  }
+  return { ok: true, value: out };
+}
+function parseStatement(v) {
+  if (!isRecord(v))
+    return fail("statement not an object");
+  if (v["_type"] !== STATEMENT_TYPE)
+    return fail("statement _type unsupported");
+  if (v["predicateType"] !== PREDICATE_TYPE)
+    return fail("predicateType unsupported");
+  const subject = v["subject"];
+  if (!Array.isArray(subject) || subject.length !== 1)
+    return fail("subject must contain exactly one entry");
+  const sub0 = subject[0];
+  if (!isRecord(sub0) || sub0["name"] !== "git-tree" || !isRecord(sub0["digest"]))
+    return fail("subject invalid");
+  const digest = {};
+  for (const [k, val] of Object.entries(sub0["digest"])) {
+    if (k !== "sha1" && k !== "sha256")
+      return fail("subject digest algorithm unsupported");
+    if (typeof val !== "string" || !OID_RE.test(val))
+      return fail("subject digest value invalid");
+    digest[k] = val;
+  }
+  if (digest.sha1 === void 0 && digest.sha256 === void 0)
+    return fail("subject digest empty");
+  const pred = parsePredicate(v["predicate"]);
+  if (!pred.ok)
+    return pred;
+  return {
+    ok: true,
+    value: {
+      _type: STATEMENT_TYPE,
+      subject: [{ name: "git-tree", digest }],
+      predicateType: PREDICATE_TYPE,
+      predicate: pred.value
+    }
+  };
+}
+function parsePredicate(v) {
+  if (!isRecord(v))
+    return fail("predicate not an object");
+  if (v["schemaVersion"] !== "1")
+    return fail("predicate schemaVersion unsupported");
+  const repo = v["repository"];
+  if (!isRecord(repo) || repo["provider"] !== "github")
+    return fail("repository invalid");
+  const ownerId = repo["ownerId"];
+  const repositoryId = repo["repositoryId"];
+  if (typeof ownerId !== "string" || !DECIMAL_RE.test(ownerId))
+    return fail("repository.ownerId invalid");
+  if (typeof repositoryId !== "string" || !DECIMAL_RE.test(repositoryId))
+    return fail("repository.repositoryId invalid");
+  const git = v["git"];
+  if (!isRecord(git))
+    return fail("git invalid");
+  const objectFormat = git["objectFormat"];
+  if (objectFormat !== "sha1" && objectFormat !== "sha256")
+    return fail("git.objectFormat invalid");
+  const treeOid = git["treeOid"];
+  if (typeof treeOid !== "string" || !OID_RE.test(treeOid))
+    return fail("git.treeOid invalid");
+  const parentOids = git["parentOids"];
+  if (!Array.isArray(parentOids) || parentOids.length > 16)
+    return fail("git.parentOids invalid");
+  for (const p of parentOids)
+    if (typeof p !== "string" || !OID_RE.test(p))
+      return fail("git.parentOids entry invalid");
+  const baseRef = str(git["baseRef"], "git.baseRef", 512);
+  if (!baseRef.ok)
+    return baseRef;
+  const baseSha = git["baseSha"];
+  if (typeof baseSha !== "string" || !OID_RE.test(baseSha))
+    return fail("git.baseSha invalid");
+  const evaluationMode = git["evaluationMode"];
+  if (evaluationMode !== "head-tree" && evaluationMode !== "merge-tree")
+    return fail("git.evaluationMode invalid");
+  let mergeTreeOid;
+  if (git["mergeTreeOid"] !== void 0) {
+    if (typeof git["mergeTreeOid"] !== "string" || !OID_RE.test(git["mergeTreeOid"]))
+      return fail("git.mergeTreeOid invalid");
+    mergeTreeOid = git["mergeTreeOid"];
+  }
+  const policy = v["policy"];
+  if (!isRecord(policy))
+    return fail("policy invalid");
+  const policyDigest = policy["digest"];
+  if (typeof policyDigest !== "string" || !SHA256_RE.test(policyDigest))
+    return fail("policy.digest invalid");
+  const policyVersion = policy["version"];
+  if (typeof policyVersion !== "number" || !Number.isInteger(policyVersion) || policyVersion < 1) {
+    return fail("policy.version invalid");
+  }
+  const pipeline = v["pipeline"];
+  if (!isRecord(pipeline))
+    return fail("pipeline invalid");
+  const pipelineDigest = pipeline["digest"];
+  if (typeof pipelineDigest !== "string" || !SHA256_RE.test(pipelineDigest))
+    return fail("pipeline.digest invalid");
+  const runner = pipeline["runner"];
+  if (runner !== "dagger" && runner !== "command")
+    return fail("pipeline.runner invalid");
+  const run = v["run"];
+  if (!isRecord(run))
+    return fail("run invalid");
+  const startedAt = str(run["startedAt"], "run.startedAt", 64);
+  if (!startedAt.ok)
+    return startedAt;
+  const finishedAt = str(run["finishedAt"], "run.finishedAt", 64);
+  if (!finishedAt.ok)
+    return finishedAt;
+  let lease;
+  if (run["lease"] !== void 0) {
+    const l = str(run["lease"], "run.lease", 8192);
+    if (!l.ok)
+      return l;
+    lease = l.value;
+  }
+  const networkMode = run["networkMode"];
+  if (networkMode !== "disabled" && networkMode !== "restricted" && networkMode !== "unrestricted") {
+    return fail("run.networkMode invalid");
+  }
+  const cacheMode = run["cacheMode"];
+  if (cacheMode !== "disabled" && cacheMode !== "read-only" && cacheMode !== "read-write") {
+    return fail("run.cacheMode invalid");
+  }
+  const suitesRaw = run["suites"];
+  if (!Array.isArray(suitesRaw) || suitesRaw.length === 0 || suitesRaw.length > 64)
+    return fail("run.suites invalid");
+  const suites = [];
+  for (let i = 0; i < suitesRaw.length; i++) {
+    const s = parseSuite(suitesRaw[i], i);
+    if (!s.ok)
+      return s;
+    suites.push(s.value);
+  }
+  const signer = v["signer"];
+  if (!isRecord(signer))
+    return fail("signer invalid");
+  const keyId = str(signer["keyId"], "signer.keyId", 256);
+  if (!keyId.ok)
+    return keyId;
+  const githubUserId = signer["githubUserId"];
+  if (typeof githubUserId !== "string" || !DECIMAL_RE.test(githubUserId))
+    return fail("signer.githubUserId invalid");
+  const predicate = {
+    schemaVersion: "1",
+    repository: { provider: "github", ownerId, repositoryId },
+    git: {
+      objectFormat,
+      treeOid,
+      parentOids,
+      baseRef: baseRef.value,
+      baseSha,
+      evaluationMode,
+      ...mergeTreeOid !== void 0 ? { mergeTreeOid } : {}
+    },
+    policy: { digest: policyDigest, version: policyVersion },
+    pipeline: { digest: pipelineDigest, runner },
+    run: {
+      startedAt: startedAt.value,
+      finishedAt: finishedAt.value,
+      ...lease !== void 0 ? { lease } : {},
+      networkMode,
+      cacheMode,
+      suites
+    },
+    signer: { keyId: keyId.value, githubUserId }
+  };
+  return { ok: true, value: predicate };
+}
+
+// ../protocol/dist/carrier.js
+function extractCarrier(commitMessage) {
+  const lines = commitMessage.split("\n");
+  const matches = [];
+  for (const line of lines) {
+    if (line.startsWith(`${TRAILER_KEY}:`)) {
+      matches.push(line.slice(TRAILER_KEY.length + 1).trim());
+    }
+  }
+  if (matches.length === 0)
+    return { ok: false, error: { code: "RECEIPT_MISSING" } };
+  if (matches.length > 1)
+    return { ok: false, error: { code: "RECEIPT_DUPLICATE" } };
+  const value = matches[0];
+  if (value.length > CARRIER_MAX_ENCODED)
+    return { ok: false, error: { code: "RECEIPT_TOO_LARGE" } };
+  const dot = value.indexOf(".");
+  if (dot < 0)
+    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "missing version separator" } };
+  const version = value.slice(0, dot);
+  if (version !== CARRIER_VERSION) {
+    return { ok: false, error: { code: "RECEIPT_SCHEMA_UNSUPPORTED", detail: `carrier version ${version}` } };
+  }
+  let bytes;
+  try {
+    bytes = b64urlDecode(value.slice(dot + 1));
+  } catch {
+    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "invalid base64url" } };
+  }
+  if (bytes.length > ENVELOPE_MAX_DECODED)
+    return { ok: false, error: { code: "RECEIPT_TOO_LARGE" } };
+  let json;
+  try {
+    json = JSON.parse(utf8Decode(bytes));
+  } catch {
+    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: "invalid JSON envelope" } };
+  }
+  const parsed = parseEnvelope(json);
+  if (!parsed.ok)
+    return { ok: false, error: { code: "RECEIPT_MALFORMED", detail: parsed.detail } };
+  return { ok: true, envelope: parsed.value, envelopeRawBytes: bytes };
+}
+
+// ../protocol/dist/digest.js
+var import_canonicalize = __toESM(require_canonicalize(), 1);
+
+// ../verifier/dist/index.js
+var PERMISSION_RANK = {
+  none: 0,
+  read: 1,
+  triage: 2,
+  write: 3,
+  maintain: 4,
+  admin: 5
+};
+function res(code, detail, extra) {
+  return { code, ...detail !== void 0 ? { detail } : {}, ...extra };
+}
+async function verifyReceipt(input, deps) {
+  const { facts, bundle } = input;
+  const nowMs = Date.parse(input.now);
+  if (Date.parse(bundle.expiresAt) < nowMs)
+    return res("BUNDLE_EXPIRED");
+  const carrier = extractCarrier(input.commitMessage);
+  if (!carrier.ok) {
+    const e = carrier.error;
+    return res(e.code, "detail" in e ? e.detail : void 0);
+  }
+  const envelope = carrier.envelope;
+  let payloadBytes;
+  try {
+    payloadBytes = b64stdDecode(envelope.payload);
+  } catch {
+    return res("RECEIPT_MALFORMED", "payload not base64");
+  }
+  const keyid = envelope.signatures[0].keyid;
+  const key = bundle.keys.find((k) => k.keyId === keyid);
+  if (!key)
+    return res("SIGNER_KEY_UNKNOWN", keyid);
+  if (key.revokedAt !== null)
+    return res("SIGNER_KEY_REVOKED", keyid);
+  if (!bundle.policy.allowedKeyAlgorithms.includes(key.algorithm)) {
+    return res("SIGNER_KEY_ALGORITHM_FORBIDDEN", key.algorithm);
+  }
+  const pae = dssePae(DSSE_PAYLOAD_TYPE, payloadBytes);
+  let sigOk;
+  try {
+    sigOk = await deps.verifySshSignature({
+      publicKey: key.publicKey,
+      namespace: SSH_SIGN_NAMESPACE,
+      message: pae,
+      signatureBase64: envelope.signatures[0].sig
+    });
+  } catch {
+    sigOk = false;
+  }
+  if (!sigOk)
+    return res("SIGNATURE_INVALID");
+  let statementJson;
+  try {
+    statementJson = JSON.parse(utf8Decode(payloadBytes));
+  } catch {
+    return res("RECEIPT_MALFORMED", "payload not JSON");
+  }
+  const parsed = parseStatement(statementJson);
+  if (!parsed.ok)
+    return res("RECEIPT_MALFORMED", parsed.detail);
+  const statement = parsed.value;
+  const pred = statement.predicate;
+  if (pred.repository.ownerId !== facts.ownerId || pred.repository.repositoryId !== facts.repositoryId) {
+    return res("SUBJECT_REPOSITORY_MISMATCH", void 0, { statement });
+  }
+  if (bundle.repositoryId !== facts.repositoryId || bundle.ownerId !== facts.ownerId) {
+    return res("SUBJECT_REPOSITORY_MISMATCH", "bundle/facts repository disagreement", { statement });
+  }
+  if (pred.git.objectFormat !== facts.objectFormat)
+    return res("SUBJECT_TREE_MISMATCH", "object format", { statement });
+  const subjectDigest = statement.subject[0].digest[facts.objectFormat];
+  if (subjectDigest !== facts.treeOid || pred.git.treeOid !== facts.treeOid) {
+    return res("SUBJECT_TREE_MISMATCH", void 0, { statement });
+  }
+  const declaredParents = pred.git.parentOids;
+  if (declaredParents.length !== facts.parentOids.length || declaredParents.some((p, i) => p !== facts.parentOids[i])) {
+    return res("SUBJECT_ANCESTRY_MISMATCH", void 0, { statement });
+  }
+  if (pred.git.baseSha !== facts.baseSha)
+    return res("SUBJECT_BASE_MISMATCH", void 0, { statement });
+  const policyEligible = pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
+  if (!policyEligible)
+    return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
+  if (pred.git.evaluationMode !== bundle.policy.evaluationMode) {
+    return res("POLICY_NOT_ACTIVE", "evaluation mode mismatch", { statement });
+  }
+  if (pred.pipeline.digest !== bundle.policy.pipeline.digest || pred.pipeline.runner !== bundle.policy.pipeline.runner) {
+    return res("PIPELINE_DIGEST_MISMATCH", void 0, { statement });
+  }
+  if (pred.signer.keyId !== keyid)
+    return res("SIGNER_MISMATCH", "predicate keyId != envelope keyid", { statement });
+  if (pred.signer.githubUserId !== key.githubUserId) {
+    return res("SIGNER_MISMATCH", "predicate user != enrolled key user", { statement });
+  }
+  const grant = bundle.grants.find((g) => g.githubUserId === key.githubUserId);
+  if (!grant || !grant.active)
+    return res("SIGNER_PERMISSION_INSUFFICIENT", "no active grant", { statement });
+  const need = PERMISSION_RANK[bundle.policy.minimumPermission] ?? 99;
+  if ((PERMISSION_RANK[grant.permission] ?? 0) < need) {
+    return res("SIGNER_PERMISSION_INSUFFICIENT", grant.permission, { statement });
+  }
+  if (!bundle.policy.allowAuthorAsSigner && facts.prAuthorGithubUserId === key.githubUserId) {
+    return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const s of pred.run.suites) {
+    if (seen.has(s.id))
+      return res("SUITE_DUPLICATE", s.id, { statement });
+    seen.add(s.id);
+  }
+  for (const required of bundle.policy.pipeline.requiredSuites) {
+    const suite = pred.run.suites.find((s) => s.id === required);
+    if (!suite)
+      return res("SUITE_MISSING", required, { statement });
+    if (suite.status !== "passed")
+      return res("SUITE_NOT_PASSED", required, { statement });
+  }
+  const finished = Date.parse(pred.run.finishedAt);
+  if (!Number.isFinite(finished))
+    return res("RECEIPT_MALFORMED", "finishedAt unparseable", { statement });
+  if (nowMs - finished > bundle.policy.receiptMaxAgeSeconds * 1e3) {
+    return res("RECEIPT_EXPIRED", void 0, { statement });
+  }
+  if (bundle.policy.lease.required && pred.run.lease === void 0) {
+    return res("LEASE_REQUIRED", void 0, { statement });
+  }
+  return res("PASS", void 0, { statement, signerKey: key });
+}
+
+// service-public.jwk.json
+var service_public_jwk_default = {
+  kty: "EC",
+  x: "um1lpxU3JthsE-C8wiYSaon_h_hsaZAp9x8MZ6cUWjo",
+  y: "YmW9EvHEHrChYQMwKEGdkFsXl8-HulgQRCzEKyb7q5o",
+  crv: "P-256",
+  kid: "thwip-svc-1",
+  alg: "ES256"
+};
+
+// src/main.ts
+var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
+var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
+var ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+function summary(line) {
+  const f = process.env["GITHUB_STEP_SUMMARY"];
+  if (f) (0, import_node_fs.appendFileSync)(f, line + "\n");
+  console.log(line);
+}
+async function gh(path) {
+  const res2 = await fetch(`${API}${path}`, {
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "thwip-action"
+    }
+  });
+  if (!res2.ok) throw new Error(`GitHub API ${path} -> ${res2.status}`);
+  return res2.json();
+}
+async function getOidcToken(audience) {
+  const url = process.env["ACTIONS_ID_TOKEN_REQUEST_URL"];
+  const reqToken = process.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
+  if (!url || !reqToken) throw new Error("OIDC not available; set permissions id-token: write");
+  const res2 = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, {
+    headers: { authorization: `Bearer ${reqToken}`, accept: "application/json" }
+  });
+  if (!res2.ok) throw new Error(`OIDC token request failed: ${res2.status}`);
+  const body = await res2.json();
+  return body.value;
+}
+async function fetchBundle(repositoryId, headSha, keyIds) {
+  const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
+  const res2 = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
+    body: JSON.stringify({ repositoryId, headSha, keyIds })
+  });
+  if (!res2.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res2.status} ${await res2.text()}`);
+  const { bundle } = await res2.json();
+  const key = await importJWK(service_public_jwk_default, "ES256");
+  const { payload, protectedHeader } = await compactVerify(bundle, key);
+  if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
+  return JSON.parse(new TextDecoder().decode(payload));
+}
+async function mergeBase(repoFullName, base, head) {
+  const cmp = await gh(
+    `/repos/${repoFullName}/compare/${encodeURIComponent(base)}...${head}`
+  );
+  return cmp.merge_base_commit.sha;
+}
+async function main() {
+  const eventName = process.env["GITHUB_EVENT_NAME"] ?? "";
+  const event = JSON.parse((0, import_node_fs.readFileSync)(process.env["GITHUB_EVENT_PATH"], "utf8"));
+  const repo = event["repository"];
+  const repositoryId = String(repo["id"]);
+  const ownerId = String(repo["owner"]["id"]);
+  const fullName = repo["full_name"];
+  const targets = [];
+  let baseRefName;
+  if (eventName === "pull_request" || eventName === "pull_request_target") {
+    const pr = event["pull_request"];
+    baseRefName = pr["base"]["ref"];
+    targets.push({ prHeadSha: pr["head"]["sha"], prAuthorId: String(pr["user"]["id"]) });
+  } else if (eventName === "merge_group") {
+    const mg = event["merge_group"];
+    baseRefName = mg["base_ref"].replace(/^refs\/heads\//, "");
+    let cursor = mg["head_sha"];
+    const baseSha = mg["base_sha"];
+    let hops = 0;
+    while (cursor !== baseSha && hops < 50) {
+      const c = await gh(`/repos/${fullName}/git/commits/${cursor}`);
+      if (c.parents.length >= 2) targets.push({ prHeadSha: c.parents[1].sha });
+      if (c.parents.length === 0) break;
+      cursor = c.parents[0].sha;
+      hops++;
+    }
+    if (targets.length === 0) {
+      summary("thwip: FAIL \u2014 merge group contains no mergeable PR entries");
+      process.exit(1);
+    }
+  } else {
+    summary(`thwip: FAIL \u2014 unsupported event ${eventName}`);
+    process.exit(1);
+  }
+  const firstCommit = await gh(`/repos/${fullName}/git/commits/${targets[0].prHeadSha}`);
+  const bundle = await fetchBundle(repositoryId, targets[0].prHeadSha, []);
+  let allPass = true;
+  for (const target of targets) {
+    const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
+    const baseSha = await mergeBase(fullName, baseRefName, target.prHeadSha);
+    const facts = {
+      ownerId,
+      repositoryId,
+      headSha: commit.sha,
+      treeOid: commit.tree.sha,
+      parentOids: commit.parents.map((p) => p.sha),
+      baseRef: `refs/heads/${baseRefName}`,
+      baseSha,
+      objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
+      ...target.prAuthorId !== void 0 ? { prAuthorGithubUserId: target.prAuthorId } : {}
+    };
+    const result = await verifyReceipt(
+      { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
+      { verifySshSignature }
+    );
+    const icon = result.code === "PASS" ? "\u2705" : "\u274C";
+    summary(
+      `${icon} thwip \`${result.code}\`${result.detail ? ` (${result.detail})` : ""} \u2014 commit \`${commit.sha.slice(0, 12)}\` tree \`${commit.tree.sha.slice(0, 12)}\``
+    );
+    if (result.code === "PASS" && result.statement) {
+      const suites = result.statement.predicate.run.suites.map((s) => `${s.id}:${s.status}`).join(", ");
+      summary(`&nbsp;&nbsp;signer key \`${result.signerKey?.keyId}\` (user ${result.signerKey?.githubUserId}); suites asserted by signer: ${suites}`);
+    }
+    if (result.code !== "PASS") allPass = false;
+    try {
+      const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
+      await fetch(`${ENDPOINT}/v1/verification-observations`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          repositoryId,
+          headSha: commit.sha,
+          outcome: result.code,
+          runId: process.env["GITHUB_RUN_ID"] ?? null
+        })
+      });
+    } catch {
+    }
+  }
+  process.exit(allPass ? 0 : 1);
+}
+main().catch((e) => {
+  summary(`thwip: FAIL \u2014 ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+});

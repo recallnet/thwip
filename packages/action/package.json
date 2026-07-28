@@ -1,0 +1,20 @@
+{
+  "name": "@thwip/action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/main.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/index.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@thwip/protocol": "workspace:*",
+    "@thwip/sshsig": "workspace:*",
+    "@thwip/verifier": "workspace:*",
+    "jose": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0"
+  }
+}

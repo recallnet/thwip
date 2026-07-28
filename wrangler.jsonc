@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thwip",
+  "main": "apps/control-plane/src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "thwip-staging",
+      "routes": [{ "pattern": "thwip.recall.net", "custom_domain": true }],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "thwip-staging",
+          "database_id": "44c0d856-3be5-4ed7-8565-793ed0a87f84",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "queues": {
+        "producers": [{ "binding": "SYNC_QUEUE", "queue": "thwip-sync-staging" }],
+        "consumers": [
+          { "queue": "thwip-sync-staging", "dead_letter_queue": "thwip-sync-staging-dlq", "max_retries": 5 }
+        ]
+      },
+      "vars": {
+        "THWIP_ENV": "staging",
+        "PUBLIC_ORIGIN": "https://thwip.recall.net",
+        "BUILD_SHA": "dev"
+      }
+    }
+  }
+}
