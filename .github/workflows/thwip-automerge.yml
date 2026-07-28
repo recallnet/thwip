@@ -8,6 +8,11 @@ name: thwip-automerge
 # (a PR whose checks were already green never self-enqueued), so this
 # job waits for the required check on the exact head commit and calls
 # enqueuePullRequest explicitly.
+#
+# The mutation uses THWIP_ENQUEUE_TOKEN, not GITHUB_TOKEN: events caused
+# by the workflow GITHUB_TOKEN do not trigger other workflows, so a
+# merge group built from a GITHUB_TOKEN enqueue never dispatches the
+# required merge_group verification run and the entry stalls.
 
 on:
   pull_request:
@@ -32,6 +37,7 @@ jobs:
           PR_ID: ${{ github.event.pull_request.node_id }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
+          ENQUEUE_TOKEN: ${{ secrets.THWIP_ENQUEUE_TOKEN }}
         run: |
           set -euo pipefail
           role=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission || echo "none")
@@ -46,7 +52,7 @@ jobs:
             echo "thwip check: $conclusion"
             case "$conclusion" in
               success)
-                gh api graphql -f query="mutation { enqueuePullRequest(input:{pullRequestId:\"$PR_ID\"}) { clientMutationId } }" \
+                GH_TOKEN="$ENQUEUE_TOKEN" gh api graphql -f query="mutation { enqueuePullRequest(input:{pullRequestId:\"$PR_ID\"}) { clientMutationId } }" \
                   && echo "PR #$PR enqueued" || echo "enqueue failed (may already be queued)"
                 exit 0 ;;
               failure|cancelled|timed_out|action_required)
