@@ -25,7 +25,7 @@ assertion; audited and remote add independent execution evidence.
 
 They sign in with GitHub at https://thwip.recall.net. Membership, roles, and
 repository permissions come from the GitHub organization, so there are no
-invitations. Removing someone on GitHub removes their standing here too.
+invitations. Outside collaborators invited to individual repositories on GitHub count too: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
 
 ## Do commits have to be signed?
 

@@ -103,6 +103,24 @@ export async function syncInstallation(env: Env, installationId: string): Promis
     }
   }
 
+  // Outside collaborators: not org members, but invited per-repository.
+  // They authorize proofs through repository grants like anyone else, so
+  // they must be visible principals with an explicit 'outside' role.
+  const outside = await ghPaged<{ id: number; login: string; avatar_url: string }>(
+    token,
+    `/orgs/${orgLogin}/outside_collaborators`,
+  );
+  for (const m of outside) {
+    counts["members"]!++;
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO principals (id, organization_id, github_user_id, github_login, github_org_role, avatar_url)
+         VALUES (?, ?, ?, ?, 'outside', ?)
+         ON CONFLICT(organization_id, github_user_id) DO UPDATE SET github_login = excluded.github_login, github_org_role = 'outside', avatar_url = excluded.avatar_url`,
+      ).bind(`prn_gh_${m.id}`, orgId, String(m.id), m.login, m.avatar_url),
+    );
+  }
+
   // Teams, membership, and team repo permissions.
   const teams = await ghPaged<{ id: number; slug: string; name: string }>(token, `/orgs/${orgLogin}/teams`);
   for (const t of teams) {
@@ -178,6 +196,15 @@ export async function syncInstallation(env: Env, installationId: string): Promis
         c.role_name ?? (c.permissions?.["admin"] ? "admin" : c.permissions?.["maintain"] ? "maintain" : c.permissions?.["push"] ? "write" : c.permissions?.["triage"] ? "triage" : "read");
       seen.add(String(c.id));
       counts["grants"]!++;
+      // Catch-all: any collaborator with a grant is at least an 'outside'
+      // principal, so every grant row joins to a visible person.
+      grantStmts.push(
+        env.DB.prepare(
+          `INSERT INTO principals (id, organization_id, github_user_id, github_login, github_org_role)
+           VALUES (?, ?, ?, ?, 'outside')
+           ON CONFLICT(organization_id, github_user_id) DO NOTHING`,
+        ).bind(`prn_gh_${c.id}`, orgId, String(c.id), c.login),
+      );
       grantStmts.push(
         env.DB.prepare(
           `INSERT INTO repository_grants (project_id, github_user_id, github_login, permission, active, synced_at)
