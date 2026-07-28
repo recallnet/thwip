@@ -4,17 +4,31 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "deploy:staging": "wrangler deploy --env staging",
     "dev": "wrangler dev --env staging"
   },
   "dependencies": {
+    "@better-auth/stripe": "^1.6.25",
+    "better-auth": "^1.6.25",
     "hono": "^4.6.0",
-    "jose": "^6.0.0"
+    "jose": "^6.0.0",
+    "kysely": "^0.29.4",
+    "kysely-d1": "^0.4.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "stripe": "^22.3.2"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.21",
     "@cloudflare/workers-types": "^4.20250712.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "better-sqlite3": "^13.0.1",
+    "vite": "^8.1.5",
     "wrangler": "^4.0.0"
   }
 }

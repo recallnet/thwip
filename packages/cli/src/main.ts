@@ -134,17 +134,83 @@ async function cmdVerifyLocal(): Promise<number> {
   return 0;
 }
 
+const TOKEN_PATH = join(homedir(), ".config", "thwip", "session-token");
+
+/** RFC 8628 device authorization flow against the thwip control plane. */
+async function cmdLogin(argv: string[]): Promise<number> {
+  const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const codeRes = await fetch(`${endpoint}/api/auth/device/code`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_id: "thwip-cli" }),
+  });
+  if (!codeRes.ok) {
+    process.stderr.write(`device authorization unavailable: ${codeRes.status} ${await codeRes.text()}\n`);
+    return 1;
+  }
+  const code = (await codeRes.json()) as {
+    device_code: string;
+    user_code: string;
+    verification_uri?: string;
+    verification_uri_complete?: string;
+    interval?: number;
+    expires_in?: number;
+  };
+  const approveUrl =
+    code.verification_uri_complete ?? `${endpoint}/device?user_code=${encodeURIComponent(code.user_code)}`;
+  process.stderr.write(`\n[thwip] To sign in, open:\n\n    ${approveUrl}\n\n    code: ${code.user_code}\n\n`);
+  const intervalMs = (code.interval ?? 5) * 1000;
+  const deadline = Date.now() + (code.expires_in ?? 1800) * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const tokenRes = await fetch(`${endpoint}/api/auth/device/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: code.device_code,
+        client_id: "thwip-cli",
+      }),
+    });
+    const body = (await tokenRes.json().catch(() => ({}))) as { access_token?: string; error?: string };
+    if (tokenRes.ok && body.access_token) {
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      await mkdir(join(homedir(), ".config", "thwip"), { recursive: true });
+      await writeFile(TOKEN_PATH, body.access_token, { mode: 0o600 });
+      process.stderr.write(`[thwip] signed in; session token stored at ${TOKEN_PATH}\n`);
+      return 0;
+    }
+    if (body.error && body.error !== "authorization_pending" && body.error !== "slow_down") {
+      process.stderr.write(`[thwip] login failed: ${body.error}\n`);
+      return 1;
+    }
+  }
+  process.stderr.write("[thwip] login timed out\n");
+  return 1;
+}
+
+async function apiAuthHeader(): Promise<string | null> {
+  try {
+    const token = (await readFile(TOKEN_PATH, "utf8")).trim();
+    if (token) return `Bearer ${token}`;
+  } catch {
+    /* fall through */
+  }
+  const adminToken = process.env["THWIP_ADMIN_TOKEN"];
+  return adminToken ? `Bearer ${adminToken}` : null;
+}
+
 async function cmdKeysEnroll(argv: string[]): Promise<number> {
   const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
   const publicKeyPath = flag(argv, "--public-key");
   const label = flag(argv, "--label") ?? "device";
-  const adminToken = process.env["THWIP_ADMIN_TOKEN"];
+  const authHeader = await apiAuthHeader();
   if (!publicKeyPath) {
     process.stderr.write("usage: thwip keys enroll --public-key <path.pub> --label <label>\n");
     return 1;
   }
-  if (!adminToken) {
-    process.stderr.write("THWIP_ADMIN_TOKEN required for enrollment in this build\n");
+  if (!authHeader) {
+    process.stderr.write("not signed in; run: thwip login\n");
     return 1;
   }
   const publicKey = (await readFile(publicKeyPath, "utf8")).trim();
@@ -152,7 +218,7 @@ async function cmdKeysEnroll(argv: string[]): Promise<number> {
   // Proof of possession: fetch a challenge, sign it, submit.
   const challengeRes = await fetch(`${endpoint}/v1/devices/challenges`, {
     method: "POST",
-    headers: { authorization: `Bearer ${adminToken}` },
+    headers: { authorization: authHeader },
   });
   if (!challengeRes.ok) {
     process.stderr.write(`challenge failed: ${challengeRes.status}\n`);
@@ -167,24 +233,27 @@ async function cmdKeysEnroll(argv: string[]): Promise<number> {
     message: new TextEncoder().encode(challenge),
   });
 
+  // Session-authenticated enrollment binds to the signed-in GitHub identity;
+  // --github-user-id is honored only for the operator admin-token path.
   const githubUserId = flag(argv, "--github-user-id");
-  if (!githubUserId) {
-    process.stderr.write("--github-user-id required\n");
-    return 1;
-  }
   const res = await fetch(`${endpoint}/v1/devices`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    headers: { "content-type": "application/json", authorization: authHeader },
     body: JSON.stringify({ publicKey, label, githubUserId, challenge, proofOfPossession: pop }),
   });
-  const body = (await res.json()) as { keyId?: string; error?: string };
+  const body = (await res.json()) as { keyId?: string; githubUserId?: string; error?: string };
   if (!res.ok || !body.keyId) {
     process.stderr.write(`enrollment failed: ${res.status} ${JSON.stringify(body)}\n`);
     return 1;
   }
+  const boundUserId = body.githubUserId ?? githubUserId;
+  if (!boundUserId) {
+    process.stderr.write("enrollment succeeded but no GitHub user id was bound\n");
+    return 1;
+  }
   const { writeFile, mkdir } = await import("node:fs/promises");
   await mkdir(join(homedir(), ".config", "thwip"), { recursive: true });
-  const config: CliConfig = { endpoint, keyId: body.keyId, privateKeyPath, githubUserId };
+  const config: CliConfig = { endpoint, keyId: body.keyId, privateKeyPath, githubUserId: boundUserId };
   await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
   process.stderr.write(`[thwip] enrolled ${body.keyId}; config written to ${CONFIG_PATH}\n`);
   return 0;
@@ -204,11 +273,12 @@ async function main(): Promise<void> {
   const [, , cmd, sub, ...rest] = process.argv;
   let code = 1;
   if (cmd === "run") code = await cmdRun([sub ?? "", ...rest]);
+  else if (cmd === "login") code = await cmdLogin([sub ?? "", ...rest]);
   else if (cmd === "verify") code = await cmdVerifyLocal();
   else if (cmd === "keys" && sub === "enroll") code = await cmdKeysEnroll(rest);
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
   else {
-    process.stderr.write("usage: thwip <run|verify|policy digest|keys enroll> [options]\n");
+    process.stderr.write("usage: thwip <login|run|verify|policy digest|keys enroll> [options]\n");
   }
   process.exit(code);
 }

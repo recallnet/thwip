@@ -5,9 +5,17 @@
     "rootDir": "src",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "types": ["@cloudflare/workers-types"],
-    "noEmit": true
+    "types": [
+      "@cloudflare/workers-types"
+    ],
+    "noEmit": true,
+    "declaration": false
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/auth.cli.ts"
+  ]
 }
