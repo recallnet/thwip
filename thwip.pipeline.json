@@ -1,9 +1,0 @@
-{
-  "schemaVersion": "1",
-  "runner": "command",
-  "suites": [
-    { "id": "lint", "command": ["pnpm", "lint"] },
-    { "id": "typecheck", "command": ["pnpm", "typecheck"] },
-    { "id": "test", "command": ["pnpm", "test"] }
-  ]
-}

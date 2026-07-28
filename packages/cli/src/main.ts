@@ -19,7 +19,8 @@ import {
   requireCleanTree,
   showFileAtHead,
 } from "./git.js";
-import { parsePipelineDefinition, pipelineDigest, runSuites } from "./pipeline.js";
+import { runSuites } from "./pipeline.js";
+import { loadProjectConfigAtHead } from "./config.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 
 interface CliConfig {
@@ -39,13 +40,6 @@ async function loadConfig(): Promise<CliConfig> {
   }
 }
 
-async function loadPolicyAtHead(cwd: string): Promise<{ policy: PolicyBundleV1; digest: `sha256:${string}` }> {
-  const text = await showFileAtHead(cwd, "thwip.policy.json");
-  const policy = JSON.parse(text) as PolicyBundleV1;
-  const digest = await canonicalDigest(policy);
-  return { policy, digest };
-}
-
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
@@ -58,16 +52,10 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   await requireCleanTree(cwd);
   const subject = await freezeSubject(cwd, baseRef);
-  const { policy, digest: policyDigest } = await loadPolicyAtHead(cwd);
-  const pipelineText = await showFileAtHead(cwd, "thwip.pipeline.json");
-  const def = parsePipelineDefinition(pipelineText);
-  const pDigest = await pipelineDigest(pipelineText);
-  if (pDigest !== policy.pipeline.digest) {
-    process.stderr.write(
-      `[thwip] pipeline digest ${pDigest} does not match policy-approved ${policy.pipeline.digest}\n`,
-    );
-    return 1;
-  }
+  const project = await loadProjectConfigAtHead(cwd);
+  const { policy, policyDigest } = project;
+  const def = project.pipeline;
+  const pDigest = project.pipelineDigest;
 
   const startedAt = new Date().toISOString();
   const suites = await runSuites(def, cwd);
@@ -261,19 +249,135 @@ async function cmdKeysEnroll(argv: string[]): Promise<number> {
 
 async function cmdPolicyDigest(): Promise<number> {
   const cwd = process.cwd();
-  const { digest } = await loadPolicyAtHead(cwd);
-  const pipelineText = await showFileAtHead(cwd, "thwip.pipeline.json");
+  const project = await loadProjectConfigAtHead(cwd);
   process.stdout.write(
-    JSON.stringify({ policyDigest: digest, pipelineDigest: await pipelineDigest(pipelineText) }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        policyDigest: project.policyDigest,
+        pipelineDigest: project.pipelineDigest,
+        version: project.policy.version,
+        profile: project.policy.securityProfile,
+        requiredSuites: project.policy.pipeline.requiredSuites,
+      },
+      null,
+      2,
+    ) + "\n",
   );
   return 0;
 }
+
+/**
+ * thwip init: scaffold thwip.yaml (non-interactive; agents pass flags) and
+ * optionally configure git to sign commits with the enrolled thwip key.
+ */
+async function cmdInit(argv: string[]): Promise<number> {
+  const cwd = process.cwd();
+  const { existsSync } = await import("node:fs");
+  const { writeFile } = await import("node:fs/promises");
+  const { git } = await import("./git.js");
+
+  if (argv.includes("--sign-commits")) {
+    const config = await loadConfig();
+    await git(["config", "gpg.format", "ssh"], cwd);
+    await git(["config", "user.signingkey", `${config.privateKeyPath}.pub`], cwd);
+    await git(["config", "commit.gpgsign", "true"], cwd);
+    process.stderr.write("[thwip] git now signs commits with the enrolled thwip key (repo-local config)\n");
+    if (!existsSync(`${cwd}/thwip.yaml`)) return 0;
+  }
+
+  if (existsSync(`${cwd}/thwip.yaml`)) {
+    process.stderr.write("thwip.yaml already exists; edit it directly\n");
+    return 0;
+  }
+  const suitesArg = flag(argv, "--suites");
+  if (!suitesArg) {
+    process.stderr.write(
+      'usage: thwip init --suites "lint=pnpm lint,test=pnpm test" [--profile fast] [--sign-commits]\n',
+    );
+    return 1;
+  }
+  const profile = flag(argv, "--profile") ?? "fast";
+  let ownerId: string, repositoryId: string;
+  try {
+    const url = await git(["config", "--get", "remote.origin.url"], cwd);
+    const m = /github\.com[:/]([^/]+)\/([^/.]+)/.exec(url);
+    if (!m) throw new Error("origin is not a GitHub remote");
+    const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}`, {
+      headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
+    });
+    const repo = (await res.json()) as { id: number; owner: { id: number } };
+    ownerId = String(repo.owner.id);
+    repositoryId = String(repo.id);
+  } catch (e) {
+    process.stderr.write(`could not resolve GitHub repository ids: ${e instanceof Error ? e.message : e}\n`);
+    return 1;
+  }
+  const suites = suitesArg
+    .split(",")
+    .map((pair) => pair.split("=").map((s) => s.trim()))
+    .filter((kv): kv is [string, string] => kv.length === 2);
+  const yaml = [
+    "# thwip.yaml — project configuration for thwip (verified local CI)",
+    "# docs: https://thwip.recall.net/faq",
+    "version: 1",
+    `profile: ${profile}`,
+    "repository:",
+    `  owner_id: "${ownerId}"`,
+    `  repository_id: "${repositoryId}"`,
+    "suites:",
+    ...suites.map(([id, cmd]) => `  ${id}: ${cmd}`),
+    "",
+  ].join("\n");
+  await writeFile(`${cwd}/thwip.yaml`, yaml);
+  process.stderr.write("[thwip] wrote thwip.yaml; review it, commit it, and activate the policy in the dashboard\n");
+  return 0;
+}
+
+const HELP = `thwip — verified local CI (https://thwip.recall.net)
+
+Run CI where the code lives, sign a proof of the exact Git tree, and let a
+protected GitHub check verify it. Configuration lives in thwip.yaml.
+
+USAGE
+  thwip <command> [options]
+
+COMMANDS
+  login                     Sign in via device code. Prints a URL to click
+                            (works over SSH; the browser opens on the
+                            human's machine, code is prefilled).
+  init --suites "a=cmd,.."  Write thwip.yaml for this repository.
+       [--profile fast]     fast | fresh | audited | remote (see /faq)
+       [--sign-commits]     Also make git sign commits with the enrolled key.
+  keys enroll --public-key <path.pub> --label <device>
+                            Enroll this machine's dedicated signing key.
+  run [--base origin/main]  Run the approved suites against the committed
+                            tree and attach a signed proof to HEAD.
+                            Refuses dirty trees; exit 1 and no proof if any
+                            suite fails or the tree changes mid-run.
+  verify [--json]           Parse and print the proof on HEAD.
+  policy digest             Print the policy/pipeline digests for HEAD.
+
+EXAMPLES
+  thwip login
+  thwip keys enroll --public-key ~/.config/thwip/keys/laptop.pub --label laptop
+  thwip init --suites "lint=pnpm lint,typecheck=pnpm typecheck,test=pnpm test"
+  thwip run && git push
+
+EXIT CODES
+  0 success · 1 failure (reason printed to stderr; verification reasons use
+  stable codes such as PROOF_MISSING or SUBJECT_TREE_MISMATCH)
+`;
 
 async function main(): Promise<void> {
   const [, , cmd, sub, ...rest] = process.argv;
   let code = 1;
   if (cmd === "run") code = await cmdRun([sub ?? "", ...rest]);
   else if (cmd === "login") code = await cmdLogin([sub ?? "", ...rest]);
+  else if (cmd === "init") code = await cmdInit([sub ?? "", ...rest]);
+  else if (cmd === "--help" || cmd === "-h" || cmd === "help" || cmd === undefined) {
+    process.stdout.write(HELP);
+    code = 0;
+  }
   else if (cmd === "verify") code = await cmdVerifyLocal();
   else if (cmd === "keys" && sub === "enroll") code = await cmdKeysEnroll(rest);
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();

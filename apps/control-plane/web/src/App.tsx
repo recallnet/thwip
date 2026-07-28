@@ -110,77 +110,109 @@ function Slip() {
   );
 }
 
+function SiteNav({ me }: { me: Me | null | undefined }) {
+  return (
+    <nav className="thwip-nav" aria-label="Site">
+      <a className="thwip-brand" href="/">
+        thwip<small>VERIFIED LOCAL CI</small>
+      </a>
+      <span className="links">
+        <a href="/#how">How it works</a>
+        <a href="/faq">FAQ</a>
+        <a href="/install">Install</a>
+        <a href="/#pricing">Pricing</a>
+        {me ? (
+          <a className="gp-btn gp-btn--sm" href="/dashboard">
+            Dashboard
+          </a>
+        ) : (
+          <button className="gp-btn gp-btn--sm" onClick={() => void signInWithGitHub("/dashboard")}>
+            Sign in with GitHub
+          </button>
+        )}
+      </span>
+    </nav>
+  );
+}
+
+function SiteFooter() {
+  return (
+    <footer className="thwip-footer">
+      <span>thwip · commit-carried CI evidence for agent-run pipelines</span>
+      <span>
+        <a href="/faq">FAQ</a> · <a href="/install">Install</a> · <a href="/llms.txt">llms.txt</a> ·{" "}
+        <code>urn:thwip:attestation:ci-run:v1</code>
+      </span>
+    </footer>
+  );
+}
+
 function Marketing({ me }: { me: Me | null | undefined }) {
   return (
-    <article>
-      <nav className="thwip-nav" aria-label="Site">
-        <a className="thwip-brand" href="/">
-          thwip<small>VERIFIED LOCAL CI</small>
-        </a>
-        <span className="links">
-          <a href="#how">How it works</a>
-          <a href="#outcomes">Outcomes</a>
-          <a href="#pricing">Pricing</a>
-          {me ? (
-            <a className="gp-btn gp-btn--sm" href="/dashboard">
-              Dashboard
-            </a>
-          ) : (
-            <button className="gp-btn gp-btn--sm" onClick={() => void signInWithGitHub("/dashboard")}>
-              Sign in with GitHub
-            </button>
-          )}
-        </span>
-      </nav>
+    <div className="thwip-shell">
+      <SiteNav me={me} />
 
-      <header className="brief-header">
+      <header className="thwip-hero">
         <div>
-          <p className="brief-header__meta">thwip · commit-carried CI evidence</p>
-          <h1 className="brief-header__title">CI ran. Prove it in the commit.</h1>
-          <p className="brief-header__dek">
+          <p className="meta">thwip · commit-carried CI evidence</p>
+          <h1>CI ran. Prove it in the commit.</h1>
+          <p className="dek">
             Your agents already run lint, typecheck, and tests on the machine where the code lives. thwip signs a
             compact proof of that run, bound to the exact Git tree, and a protected GitHub check verifies it in
             seconds. The merge queue merges on that proof.
           </p>
+          <div className="thwip-actions">
+            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
+              Install on your org
+            </button>
+            <a className="gp-btn" href="/install">
+              Agent install prompt
+            </a>
+          </div>
+          <p className="fine">DSSE · in-toto Statement v1 · OpenSSH signatures · GitHub merge queue native</p>
         </div>
-        <div className="thwip-actions">
-          <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
-            Install on your org
-          </button>
-          <a className="gp-btn" href="#how">
-            Read how it works
-          </a>
-        </div>
+        <Slip />
       </header>
 
-      <section>
-        <Slip />
-        <p className="data-note">
-          The proof is one git trailer: a DSSE envelope over an in-toto statement, signed with a dedicated SSH key
-          enrolled to the author's device.
+      <section className="thwip-section" id="how">
+        <p className="thwip-eyebrow">The loop</p>
+        <h2>Execution stays local. Enforcement stays in GitHub.</h2>
+        <p className="lede">
+          thwip is a control plane. The work happens where your warm cache already is; the merge decision happens
+          where your branches already live.
         </p>
+        <div className="thwip-steps">
+          <div className="thwip-step">
+            <div className="k">thwip run</div>
+            <h3>Run the approved pipeline locally</h3>
+            <p>
+              The CLI refuses a dirty tree, runs the policy-approved suites against the frozen source, and signs the
+              result. If the tree changes during the run, nothing is signed.
+            </p>
+          </div>
+          <div className="thwip-step">
+            <div className="k">thwip-Proof: v1.…</div>
+            <h3>The commit carries the evidence</h3>
+            <p>
+              One trailer binds repository, tree, parents, base, policy digest, pipeline digest, and per-suite
+              results. Change any of them and verification fails closed.
+            </p>
+          </div>
+          <div className="thwip-step">
+            <div className="k">merge_group ✓</div>
+            <h3>GitHub verifies and merges</h3>
+            <p>
+              A ruleset-protected check reads the exact head commit, fetches one signed fact bundle, and verifies on
+              the runner. Green in seconds; the queue merges. CI never reruns in the cloud.
+            </p>
+          </div>
+        </div>
       </section>
 
-      <section id="how">
-        <h2>How a merge happens</h2>
-        <p>
-          <code>thwip run</code> refuses a dirty tree, runs the policy-approved suites against the frozen source, and
-          signs the result. If the tree changes during the run, nothing is signed.
-        </p>
-        <p>
-          The commit carries the evidence. One trailer binds the repository id, tree, parents, base, policy digest,
-          pipeline digest, and per-suite results. Change any of them and verification fails closed.
-        </p>
-        <p>
-          On the pull request and again in the merge group, a ruleset-protected check reads the exact head commit,
-          fetches one signed fact bundle from the control plane, and verifies everything locally on the runner. The
-          check turns green in seconds and the queue merges. Your CI never reruns in the cloud.
-        </p>
-      </section>
-
-      <section id="outcomes">
+      <section className="thwip-section" id="outcomes">
+        <p className="thwip-eyebrow">Honest security</p>
         <h2>Every verification ends in a stable code</h2>
-        <p>
+        <p className="lede">
           A proof signed by a revoked key, an old policy, or somebody else's tree fails closed, with the same code
           every time.
         </p>
@@ -220,9 +252,9 @@ function Marketing({ me }: { me: Me | null | undefined }) {
         </table>
       </section>
 
-      <section id="pricing">
-        <h2>Pricing</h2>
-        <p>Both plans verify the same way. Pro raises the limits.</p>
+      <section className="thwip-section" id="pricing">
+        <p className="thwip-eyebrow">Pricing</p>
+        <h2>Both plans verify the same way. Pro raises the limits.</h2>
         <div className="thwip-plan-grid">
           <div className="gp-panel">
             <div className="gp-panel__header">
@@ -245,12 +277,136 @@ function Marketing({ me }: { me: Me | null | undefined }) {
         </div>
       </section>
 
-      <footer>
-        <p className="data-note">
-          thwip · commit-carried CI evidence for agent-run pipelines · <code>urn:thwip:attestation:ci-run:v1</code>
+      <SiteFooter />
+    </div>
+  );
+}
+
+function FaqPage({ me }: { me: Me | null | undefined }) {
+  return (
+    <div className="thwip-shell">
+      <SiteNav me={me} />
+      <section className="thwip-section" style={{ borderTop: "none" }}>
+        <p className="thwip-eyebrow">FAQ</p>
+        <h2>Questions, answered plainly</h2>
+        <p className="lede">
+          A machine-readable copy of this page lives at <a href="/faq.md">/faq.md</a>; a site overview for agents at{" "}
+          <a href="/llms.txt">/llms.txt</a>.
         </p>
-      </footer>
-    </article>
+        <dl className="thwip-faq">
+          <dt>What are the security profiles: fast, fresh, audited, remote?</dt>
+          <dd>
+            <b>Fast</b>: a signed local proof with no pre-run contact with the control plane. Works fully offline
+            before push. <b>Fresh</b>: the CLI first requests a short-lived lease bound to the exact tree, signer,
+            and policy, so the proof also carries a trusted issuance window. <b>Audited</b>: fresh, plus a random or
+            risk-triggered independent rerun of the pipeline in GitHub Actions to deter false assertions.{" "}
+            <b>Remote</b>: the pipeline runs in GitHub for every required check, which is conventional remote CI.
+            Pick a profile per project in the dashboard or in <code>thwip.yaml</code>.
+          </dd>
+          <dt>What does a proof actually prove?</dt>
+          <dd>
+            That an enrolled signing key asserted the approved pipeline and required suites passed for this exact
+            repository, Git tree, ancestry, base, and policy version. In fast and fresh profiles the execution claim
+            is the signer's assertion; audited and remote add independent execution evidence.
+          </dd>
+          <dt>How does a teammate join?</dt>
+          <dd>
+            They sign in with GitHub. Membership, roles, and repository permissions come from the GitHub
+            organization, so there are no invitations to manage. Verification always checks current GitHub
+            permission, so removing someone on GitHub removes their standing here too.
+          </dd>
+          <dt>Do commits have to be signed?</dt>
+          <dd>
+            The proof is its own signature and does not depend on git commit signatures. If you want signed commits
+            too, <code>thwip init</code> can configure git to sign with the same enrolled SSH key, and your ruleset
+            can additionally require signed commits.
+          </dd>
+          <dt>What happens on a rebase or squash?</dt>
+          <dd>
+            The proof binds the exact tree and ancestry, so a rebase, squash, or cherry-pick needs a new{" "}
+            <code>thwip run</code>. The merge queue is configured with the MERGE method so the trailer survives into
+            the merge group, where every member PR's head proof is verified again.
+          </dd>
+          <dt>Where do project settings live?</dt>
+          <dd>
+            In <code>thwip.yaml</code>, committed to the repository: suites, security profile, and policy knobs. The
+            dashboard mirrors it. Policy changes activate through review, and a pull request can never approve its
+            own policy change.
+          </dd>
+          <dt>What data does the control plane hold?</dt>
+          <dd>
+            Organization and permission projections from GitHub, enrolled public keys, immutable policy versions,
+            and verification outcomes. No source code, no logs, no artifacts, and never a private key.
+          </dd>
+        </dl>
+      </section>
+      <SiteFooter />
+    </div>
+  );
+}
+
+const INSTALL_PROMPT = `You are installing thwip (verified local CI) into this project.
+Work step by step and ask the human before each side-effectful step.
+
+1. Install the CLI: clone https://github.com/recallnet/thwip and run
+   "pnpm install && pnpm build", then link packages/cli (or run it via
+   "node packages/cli/dist/main.js"). Confirm with: thwip --help
+2. Authenticate: run "thwip login". It prints a URL and a short code.
+   Show the human the URL so they can click it (it works over SSH; the
+   browser opens on their machine, not yours). Wait until the CLI
+   reports it is signed in.
+3. Enroll this machine's signing key: generate a dedicated key with
+   "ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''" after
+   asking the human to name the device, then run
+   "thwip keys enroll --public-key ~/.config/thwip/keys/<device>.pub --label <device>".
+4. Set up the project: ask the human which checks make up CI here
+   (for example lint, typecheck, test), then write thwip.yaml at the
+   repository root declaring those suites and the security profile
+   (start with "fast"; see https://thwip.recall.net/faq for profiles).
+   Commit it on a branch and open a pull request.
+5. Ask the human (an org owner) to enable the project and activate the
+   policy in the dashboard at https://thwip.recall.net/dashboard.
+6. Prove the loop: make a small change, run "thwip run", push, and
+   open a PR. The thwip check should pass from the proof on the head
+   commit without rerunning CI remotely.
+
+Rules: never generate or upload a private key anywhere except the
+human's ~/.config/thwip directory; never bypass a failing suite; if
+"thwip run" refuses to sign, report the reason code to the human
+instead of working around it.`;
+
+function InstallPage({ me }: { me: Me | null | undefined }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="thwip-shell">
+      <SiteNav me={me} />
+      <section className="thwip-section" style={{ borderTop: "none" }}>
+        <p className="thwip-eyebrow">Install</p>
+        <h2>Installation is an agent prompt</h2>
+        <p className="lede">
+          Paste this into your coding agent. It installs the CLI, signs you in with a click-through device code
+          (works over SSH), and sets up the project with your approval at each step. Raw copy at{" "}
+          <a href="/install.md">/install.md</a>.
+        </p>
+        <div className="gp-panel">
+          <div className="gp-panel__header">
+            <h3 className="gp-panel__title">Agent prompt</h3>
+            <button
+              className="gp-btn gp-btn--sm"
+              onClick={() => {
+                void navigator.clipboard.writeText(INSTALL_PROMPT).then(() => setCopied(true));
+              }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <div className="gp-panel__body">
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.78rem", margin: 0 }}>{INSTALL_PROMPT}</pre>
+          </div>
+        </div>
+      </section>
+      <SiteFooter />
+    </div>
   );
 }
 
@@ -292,7 +448,7 @@ function OrgSwitcher({ me }: { me: Me }) {
 function Dashboard({ me, tab }: { me: Me; tab: string }) {
   const org = me.organization;
   return (
-    <div className="gp-workspace">
+    <div className="thwip-shell gp-workspace">
       <nav className="thwip-nav" aria-label="Dashboard">
         <a className="thwip-brand" href="/">
           thwip<small>DASHBOARD</small>
@@ -965,6 +1121,8 @@ export function App() {
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
+  if (path.startsWith("/faq")) return <FaqPage me={me} />;
+  if (path.startsWith("/install")) return <InstallPage me={me} />;
   if (dashMatch) {
     if (me === undefined) return <p className="gp-panel__meta" style={{ padding: "3rem" }}>Loading…</p>;
     if (me === null) {
