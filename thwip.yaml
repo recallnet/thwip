@@ -1,11 +1,10 @@
-# thwip.yaml — project configuration for thwip (verified local CI)
+# thwip.yaml — thwip settings for this repository
 # docs: https://thwip.recall.net/faq
-version: 3
+# Repository identity comes from the git remote; suite commands come from
+# package.json scripts (or an explicit `suites:` map for non-node repos).
+version: 4
 profile: fast
-repository:
-  owner_id: "162603603"
-  repository_id: "1315419165"
-suites:
-  lint: pnpm lint
-  typecheck: pnpm typecheck
-  test: pnpm test
+required:
+  - lint
+  - typecheck
+  - test

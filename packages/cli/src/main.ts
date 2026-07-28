@@ -52,7 +52,7 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   await requireCleanTree(cwd);
   const subject = await freezeSubject(cwd, baseRef);
-  const project = await loadProjectConfigAtHead(cwd);
+  const project = await loadProjectConfigAtHead(cwd, config.endpoint, await apiAuthHeader());
   const { policy, policyDigest } = project;
   const def = project.pipeline;
   const pDigest = project.pipelineDigest;
@@ -249,7 +249,8 @@ async function cmdKeysEnroll(argv: string[]): Promise<number> {
 
 async function cmdPolicyDigest(): Promise<number> {
   const cwd = process.cwd();
-  const project = await loadProjectConfigAtHead(cwd);
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
   process.stdout.write(
     JSON.stringify(
       {
@@ -289,43 +290,25 @@ async function cmdInit(argv: string[]): Promise<number> {
     process.stderr.write("thwip.yaml already exists; edit it directly\n");
     return 0;
   }
-  const suitesArg = flag(argv, "--suites");
-  if (!suitesArg) {
-    process.stderr.write(
-      'usage: thwip init --suites "lint=pnpm lint,test=pnpm test" [--profile fast] [--sign-commits]\n',
-    );
+  const requiredArg = flag(argv, "--required");
+  if (!requiredArg) {
+    process.stderr.write('usage: thwip init --required "lint,typecheck,test" [--profile fast] [--sign-commits]\n');
     return 1;
   }
   const profile = flag(argv, "--profile") ?? "fast";
-  let ownerId: string, repositoryId: string;
-  try {
-    const url = await git(["config", "--get", "remote.origin.url"], cwd);
-    const m = /github\.com[:/]([^/]+)\/([^/.]+)/.exec(url);
-    if (!m) throw new Error("origin is not a GitHub remote");
-    const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}`, {
-      headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
-    });
-    const repo = (await res.json()) as { id: number; owner: { id: number } };
-    ownerId = String(repo.owner.id);
-    repositoryId = String(repo.id);
-  } catch (e) {
-    process.stderr.write(`could not resolve GitHub repository ids: ${e instanceof Error ? e.message : e}\n`);
-    return 1;
-  }
-  const suites = suitesArg
+  const required = requiredArg
     .split(",")
-    .map((pair) => pair.split("=").map((s) => s.trim()))
-    .filter((kv): kv is [string, string] => kv.length === 2);
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
   const yaml = [
-    "# thwip.yaml — project configuration for thwip (verified local CI)",
+    "# thwip.yaml — thwip settings for this repository",
     "# docs: https://thwip.recall.net/faq",
+    "# Repository identity comes from the git remote; suite commands come from",
+    "# package.json scripts (or an explicit `suites:` map for non-node repos).",
     "version: 1",
     `profile: ${profile}`,
-    "repository:",
-    `  owner_id: "${ownerId}"`,
-    `  repository_id: "${repositoryId}"`,
-    "suites:",
-    ...suites.map(([id, cmd]) => `  ${id}: ${cmd}`),
+    "required:",
+    ...required.map((id) => `  - ${id}`),
     "",
   ].join("\n");
   await writeFile(`${cwd}/thwip.yaml`, yaml);
@@ -345,9 +328,11 @@ COMMANDS
   login                     Sign in via device code. Prints a URL to click
                             (works over SSH; the browser opens on the
                             human's machine, code is prefilled).
-  init --suites "a=cmd,.."  Write thwip.yaml for this repository.
-       [--profile fast]     fast | fresh | audited | remote (see /faq)
-       [--sign-commits]     Also make git sign commits with the enrolled key.
+  init --required "a,b,.."  Write thwip.yaml for this repository. Suite ids
+       [--profile fast]     name package.json scripts; profile is one of
+       [--sign-commits]     fast | fresh | audited | remote (see /faq).
+                            --sign-commits also makes git sign commits with
+                            the enrolled thwip key.
   keys enroll --public-key <path.pub> --label <device>
                             Enroll this machine's dedicated signing key.
   run [--base origin/main]  Run the approved suites against the committed
@@ -360,7 +345,7 @@ COMMANDS
 EXAMPLES
   thwip login
   thwip keys enroll --public-key ~/.config/thwip/keys/laptop.pub --label laptop
-  thwip init --suites "lint=pnpm lint,typecheck=pnpm typecheck,test=pnpm test"
+  thwip init --required "lint,typecheck,test"
   thwip run && git push
 
 EXIT CODES
