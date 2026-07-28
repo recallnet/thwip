@@ -36,9 +36,9 @@
         "BUILD_SHA": "dev",
         "STRIPE_PRICE_MONTHLY": "price_1TyISWLWdKonGktl1HFOwBIU",
         "STRIPE_PRICE_ANNUAL": "price_1TyISXLWdKonGktlMUXHk6DB",
-        "GITHUB_APP_ID": "",
-        "GITHUB_APP_SLUG": "",
-        "GITHUB_APP_CLIENT_ID": ""
+        "GITHUB_APP_ID": "4419870",
+        "GITHUB_APP_SLUG": "thwip-dev",
+        "GITHUB_APP_CLIENT_ID": "Iv23lieihhxZU5ZzGg75"
       }
     }
   }

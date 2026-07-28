@@ -6,7 +6,7 @@
 **Date:** 2026-07-28  
 **Development origin:** `https://thwip.recall.net`  
 **Production origin:** `https://thwip.ai` or `https://thwip.ai` — decide before production App registration  
-**Working description:** Git-native CI receipts for agent-run Dagger pipelines
+**Working description:** Git-native CI proofs for agent-run Dagger pipelines
 
 ---
 
@@ -15,9 +15,9 @@
 thwip should be built as a control plane, not a CI compute platform.
 
 - Developers and agents run an approved Dagger pipeline locally.
-- The thwip CLI freezes the exact Git subject, runs Dagger, and attaches a signed, compact CI receipt to the commit message as a Git trailer.
-- The receipt binds the assertion to the GitHub repository’s numeric ID, Git tree, parents, base context, immutable policy, approved Dagger module, and required suites.
-- A protected GitHub ruleset workflow reads the exact PR head commit, obtains current policy/key/permission data from thwip, and performs all receipt verification inside the customer’s GitHub Actions account.
+- The thwip CLI freezes the exact Git subject, runs Dagger, and attaches a signed, compact CI proof to the commit message as a Git trailer.
+- The proof binds the assertion to the GitHub repository’s numeric ID, Git tree, parents, base context, immutable policy, approved Dagger module, and required suites.
+- A protected GitHub ruleset workflow reads the exact PR head commit, obtains current policy/key/permission data from thwip, and performs all proof verification inside the customer’s GitHub Actions account.
 - The thwip API returns a signed verification bundle; it does not return a precomputed `pass: true`.
 - The policy configuration and lifecycle live in the thwip service. The deterministic policy evaluator lives in a shared TypeScript package and executes in the GitHub Action.
 - A project may require an optional context-bound run lease before local execution. A lease establishes freshness; it does not prove Dagger ran.
@@ -25,14 +25,14 @@ thwip should be built as a control plane, not a CI compute platform.
 - Use DSSE plus an in-toto Statement v1 and a small thwip predicate. Do not adopt classic in-toto layouts in v1.
 - Use dedicated GitHub SSH **signing** keys and OpenSSH signing, not arbitrary Git transport keys and not thwip-managed private keys.
 - Run one full-stack TypeScript Worker per environment, with Workers Static Assets, D1, and Queues. Do not use R2, KV, Durable Objects, Containers, or hosted build workers in v1.
-- Use Hono, Effect, React/Vite, Better Auth, Drizzle, Octokit, Stripe, and the GitHub Actions toolkit. The intentionally custom code is the thwip receipt, exact-Git binding, policy semantics, verifier, Dagger migration experience, and product UX.
+- Use Hono, Effect, React/Vite, Better Auth, Drizzle, Octokit, Stripe, and the GitHub Actions toolkit. The intentionally custom code is the thwip proof, exact-Git binding, policy semantics, verifier, Dagger migration experience, and product UX.
 - Launch Pro at **$5/month or $50/year**. Cloudflare cost is effectively the $5 Workers Paid minimum until substantial scale. At $5 monthly, current standard US Stripe payment and Billing fees leave about $4.52 before shared infrastructure, support, tax, and chargebacks.
 
 ### The precise product claim
 
 > An enrolled signing key asserted that the approved pipeline and required suites passed for this exact repository, Git tree, ancestry/base context, and policy version.
 
-thwip must not describe an ordinary local receipt as cryptographic proof that arbitrary computation occurred. A signer controlling the key can lie. thwip makes that assertion attributable, replay-resistant across different code, policy-bound, enforceable, and optionally subject to independent audit.
+thwip must not describe an ordinary local proof as cryptographic proof that arbitrary computation occurred. A signer controlling the key can lie. thwip makes that assertion attributable, replay-resistant across different code, policy-bound, enforceable, and optionally subject to independent audit.
 
 ---
 
@@ -49,7 +49,7 @@ Agentic development increases the amount of code produced and the number of CI i
 3. Fast iterative work produces many remote CI runs whose only purpose is to reproduce work already performed.
 4. Organizations must choose between slow, expensive checks and weak enforcement.
 
-Local CI is fast, but GitHub cannot ordinarily distinguish “the approved checks really passed for this source” from “someone said they passed.” thwip creates a Git-native, policy-bound receipt that GitHub can verify cheaply.
+Local CI is fast, but GitHub cannot ordinarily distinguish “the approved checks really passed for this source” from “someone said they passed.” thwip creates a Git-native, policy-bound proof that GitHub can verify cheaply.
 
 ### 1.2 Product thesis
 
@@ -68,9 +68,9 @@ thwip separates those jobs:
 
 thwip is:
 
-- Git-native CI receipts for agents.
+- Git-native CI proofs for agents.
 - A control plane for approved local Dagger runs.
-- A fast required check that can turn green in seconds when the right receipt is already present.
+- A fast required check that can turn green in seconds when the right proof is already present.
 
 thwip is not:
 
@@ -88,13 +88,13 @@ thwip is not:
 | Organization owner | Install the GitHub App, choose repositories, enable enforcement, and manage billing. |
 | Repository administrator | Approve Dagger pipelines, policy versions, and project security profiles. |
 | Developer | Run the same approved CI locally and push a verifiable result. |
-| Coding agent | Discover project instructions, run thwip, fix failures, and produce a receipt-bearing commit. |
+| Coding agent | Discover project instructions, run thwip, fix failures, and produce a proof-bearing commit. |
 | Security reviewer | Understand what was verified, what was asserted, who signed it, and whether it was independently audited. |
 
 ### 1.5 Jobs to be done
 
 - “When my agent finishes a change, run the exact required checks locally and let the PR go green without repeating all of CI remotely.”
-- “When a receipt arrives, reject it if it belongs to different code, a different repository, an old or unapproved pipeline, an unauthorized signer, or an expired run context.”
+- “When a proof arrives, reject it if it belongs to different code, a different repository, an old or unapproved pipeline, an unauthorized signer, or an expired run context.”
 - “When CI or policy code changes, prevent the change from judging itself.”
 - “When a team member leaves or a key is revoked, stop accepting new verification immediately.”
 - “When I need greater assurance, independently rerun a sample or every run in GitHub without changing the developer workflow.”
@@ -106,9 +106,9 @@ thwip is not:
 thwip v1 must:
 
 - Make an approved local Dagger run satisfy a GitHub-required check.
-- Keep the compact signed receipt in Git, alongside the source it covers.
+- Keep the compact signed proof in Git, alongside the source it covers.
 - Use immutable numeric GitHub IDs as tenant and repository identity.
-- Bind the receipt to the exact Git tree, ancestry/base context, policy, pipeline, and suite results.
+- Bind the proof to the exact Git tree, ancestry/base context, policy, pipeline, and suite results.
 - Keep the required verifier outside the PR’s control.
 - Support an offline-before-push profile and an optional fresh lease profile.
 - Give every project a selectable security profile.
@@ -128,7 +128,7 @@ thwip v1 will not:
 - Build a generic policy language.
 - Build a custom identity provider, billing system, database, queue, crypto primitive, timestamp authority, or transparency log.
 - Retain complete run logs or build artifacts.
-- Give local receipts production credentials or permission to publish releases.
+- Give local proofs production credentials or permission to publish releases.
 - Support merge queues until explicit merge-group semantics are implemented.
 - Ship the guarded local daemon in the initial vertical slice.
 
@@ -136,14 +136,14 @@ thwip v1 will not:
 
 | Metric | Initial target |
 |---|---:|
-| Receipt-present PR check latency, excluding GitHub queue | p50 < 5 seconds; p95 < 15 seconds |
+| Proof-present PR check latency, excluding GitHub queue | p50 < 5 seconds; p95 < 15 seconds |
 | thwip API calls in an ordinary Action verification | 1 |
 | thwip-hosted customer build executions | 0 |
 | Source/log bytes uploaded to thwip in the core flow | 0 |
 | Deterministic CLI/Action decision parity | 100% over golden fixtures |
 | Initial GitHub organization import | < 2 minutes for a 1,000-member org |
-| Receipt encoded size | target < 16 KiB; hard maximum 32 KiB |
-| Pure receipt verification after bundle fetch | p95 < 1 second |
+| Proof encoded size | target < 16 KiB; hard maximum 32 KiB |
+| Pure proof verification after bundle fetch | p95 < 1 second |
 | Webhook processing | acknowledge < 2 seconds; reconcile asynchronously |
 | Security-critical authorization freshness | live or cached for at most 60 seconds during verification |
 
@@ -152,7 +152,7 @@ thwip v1 will not:
 - Organization installs App and enables at least one project.
 - First approved Dagger policy is activated.
 - At least one user enrolls a dedicated signing key.
-- First required check passes from a local receipt.
+- First required check passes from a local proof.
 - Percentage of eligible PRs that avoid a full GitHub rerun.
 - Migration mismatch rate between legacy GitHub Actions and Dagger during shadowing.
 
@@ -232,7 +232,7 @@ thwip should automate inspection, scaffolding, comparison, and instructions. It 
 3. If the project requires freshness, the CLI requests a subject-bound run lease.
 4. The CLI runs the base-approved Dagger pipeline against the frozen source.
 5. Required suites pass.
-6. The CLI creates an in-toto statement, signs its DSSE pre-auth bytes with the enrolled key, and adds exactly one `thwip-Receipt` trailer.
+6. The CLI creates an in-toto statement, signs its DSSE pre-auth bytes with the enrolled key, and adds exactly one `thwip-Proof` trailer.
 7. The commit is optionally or automatically Git-signed after the trailer is present.
 8. The user or agent pushes.
 9. The protected GitHub workflow reads the PR head commit, obtains one verification bundle from thwip with GitHub OIDC, and verifies locally.
@@ -246,7 +246,7 @@ The current base-approved policy judges the PR. The changed pipeline is a candid
 
 If a contributor is not enrolled:
 
-- The receipt-only check explains that no authorized signer is present.
+- The proof-only check explains that no authorized signer is present.
 - Project policy may allow a maintainer to run and sign the exact head tree.
 - Project policy may use the Remote profile and run Dagger in GitHub.
 - thwip must not issue secrets to fork code.
@@ -264,27 +264,27 @@ If a contributor is not enrolled:
 | Shadow principal | An imported GitHub user or team that has not activated an thwip account and does not consume a user seat. |
 | Active user | A GitHub principal linked to a Better Auth user and activated for thwip. |
 | Device key | A dedicated signing key enrolled to one active user and one device. |
-| Git subject | The repository, Git tree, parent list, base context, and optional merge-tree context covered by a receipt. |
+| Git subject | The repository, Git tree, parent list, base context, and optional merge-tree context covered by a proof. |
 | Pipeline | The approved Dagger program used to run CI. |
 | Suite | A stable, policy-addressable check such as `unit`, `lint`, or `typecheck`. |
 | Candidate pipeline | A proposed pipeline version that is not yet allowed to judge required checks. |
 | Policy bundle | An immutable, content-addressed declaration of approved pipeline material, required suites, and verification controls. |
 | Active policy | The policy digest currently authorized to judge new runs for a project. |
-| CI receipt | A compact signed statement asserting suite results for one Git subject and policy. |
+| CI proof | A compact signed statement asserting suite results for one Git subject and policy. |
 | Run lease | An optional thwip-signed, expiring token bound to a Git subject, active policy, signer, and device. |
 | Verification bundle | Current policy, key, grant, revocation, and trust data returned to the Action. It is evidence, not a pass/fail decision. |
-| Verifier | The pure deterministic package that validates a receipt and evaluates fixed thwip policy. |
+| Verifier | The pure deterministic package that validates a proof and evaluates fixed thwip policy. |
 | Verification Action | The GitHub Action adapter that obtains GitHub context and a verification bundle, then invokes the verifier. |
 | Execution assertion | A signer’s statement that a suite ran and passed. |
 | Audit rerun | An independent Dagger execution in GitHub Actions. |
-| Execution proof | Reserved for an independently trusted execution environment or rerun; do not use this term for a normal local receipt. |
-| Fast profile | Local signed receipt with no pre-run thwip lease. |
-| Fresh profile | Local signed receipt plus an expiring subject-bound lease. |
+| Execution proof | Reserved for an independently trusted execution environment or rerun; do not use this term for a normal local proof. |
+| Fast profile | Local signed proof with no pre-run thwip lease. |
+| Fresh profile | Local signed proof plus an expiring subject-bound lease. |
 | Audited profile | Fresh profile plus deterministic random and risk-triggered GitHub reruns. |
 | Guarded local | A future mode in which a separate local daemon owns the key and runs the approved pipeline before signing. |
 | Remote profile | The approved Dagger pipeline runs in GitHub for every required check. |
 
-External copy should prefer “signed CI receipt” and “verifiable local CI” over “proof that CI ran.”
+External copy should prefer “signed CI proof” and “verifiable local CI” over “proof that CI ran.”
 
 ---
 
@@ -303,7 +303,7 @@ thwip v1 trusts:
 - The local signer for execution truth in Fast and Fresh modes.
 - GitHub-hosted execution for independently audited or Remote runs.
 
-Stripe is trusted only for billing state. Stripe must never influence cryptographic receipt validity.
+Stripe is trusted only for billing state. Stripe must never influence cryptographic proof validity.
 
 ### 6.2 What is independently known
 
@@ -351,7 +351,7 @@ Recommended defaults:
 - Whether the PR author may be the signer.
 - Allowed signing-key algorithms.
 - Whether the key must still appear in the user’s GitHub SSH signing-key list.
-- Receipt age.
+- Proof age.
 - Lease requirement and TTL.
 - Head-tree or merge-tree evaluation.
 - Base-advance behavior.
@@ -366,40 +366,40 @@ Recommended defaults:
 
 | Threat | Required control | Residual risk |
 |---|---|---|
-| Receipt copied to another repository | Sign and compare numeric repository and owner IDs. | None if GitHub context is derived independently. |
-| Receipt copied to different code | Sign and compare the exact Git tree OID. | Identical trees are intentionally equivalent. |
-| Cherry-pick, rebase, or squash | Bind parent list and base context. | A new run/receipt is normally required. |
+| Proof copied to another repository | Sign and compare numeric repository and owner IDs. | None if GitHub context is derived independently. |
+| Proof copied to different code | Sign and compare the exact Git tree OID. | Identical trees are intentionally equivalent. |
+| Cherry-pick, rebase, or squash | Bind parent list and base context. | A new run/proof is normally required. |
 | Base branch advances | Bind exact base SHA or required merge tree. | Frequent rebases may require reruns. |
 | PR changes its own pipeline | Current base-approved immutable policy remains authoritative. | Policy administrators remain trusted. |
 | PR changes verifier workflow | Use an organization ruleset-required workflow pinned to immutable SHAs. | GitHub org administrators remain trusted. |
 | A different workflow spoofs the check name | Require a specific ruleset workflow, not a status context alone. | Customers lacking this GitHub feature receive a degraded compatibility mode only. |
-| Signer lies about running Dagger | Audited/Remote modes or guarded key daemon. | Un-audited Fast/Fresh receipts remain assertions. |
+| Signer lies about running Dagger | Audited/Remote modes or guarded key daemon. | Un-audited Fast/Fresh proofs remain assertions. |
 | Agent uses an available signing key as an oracle | Dedicated key, clear consent boundary, audits, future guarded daemon/hardware key. | A user may intentionally authorize an agent to sign. |
 | Key theft | OS/OpenSSH key protection, one key per device, proof of possession, rotation, immediate thwip revocation. | A compromised host can often use the key while it is unlocked. |
 | User leaves organization | Live effective-permission check and webhook reconciliation. | GitHub/API outage causes fail-closed verification. |
 | GitHub signing key is removed | Live or ≤60-second cached GitHub key-presence check; thwip revocation. | GitHub key-directory availability. |
-| Old receipt replay | Exact immutable subject binding; optional lease TTL. | Reuse for the identical subject is harmless by design. |
+| Old proof replay | Exact immutable subject binding; optional lease TTL. | Reuse for the identical subject is harmless by design. |
 | Fake local clock | Use lease `iat`/`exp` for Fresh; treat local timestamps as asserted. | Fast mode has no trusted run time. |
 | Mutable container/dependency tags | Require digests in approved policy. | Networked package resolution may remain non-hermetic if policy permits it. |
 | Local cache poisoning | Dagger isolation/content addressing, declared cache mode, audits. | Cache behavior is locally asserted without audit. |
-| Receipt parser attack | One bounded trailer, strict schema, no compression in v1, fuzz/property tests. | Parser and dependency vulnerabilities remain possible. |
-| Receipt leaks secrets | Allowlisted schema only; no logs, environment, local paths, or raw commands. | A malicious custom pipeline can still leak through its own outputs. |
+| Proof parser attack | One bounded trailer, strict schema, no compression in v1, fuzz/property tests. | Parser and dependency vulnerabilities remain possible. |
+| Proof leaks secrets | Allowlisted schema only; no logs, environment, local paths, or raw commands. | A malicious custom pipeline can still leak through its own outputs. |
 | thwip API substitutes policy/key | Signed bundles and a verifier-pinned thwip root; later organization-owned root. | Default v1 trusts thwip control-plane administrators and service signing key. |
 | API outage | Fail closed with a clear retryable result. | Required checks cannot pass during a sustained outage. |
-| Billing outage | Last confirmed entitlement plus reconciliation; billing never changes receipt validity. | Upgrades/downgrades may be delayed. |
+| Billing outage | Last confirmed entitlement plus reconciliation; billing never changes proof validity. | Upgrades/downgrades may be delayed. |
 | Cloudflare denial-of-wallet | Bounded bodies, OIDC, rate limits, static-asset-first routing, sampled success logs. | Deliberate distributed traffic still consumes quota. |
 | GitHub compromise | Out of scope. | GitHub is a fundamental trust root. |
 
 ### 7.1 Security invariants
 
 1. A PR cannot introduce the policy or verifier that alone approves that PR.
-2. Untrusted receipt fields are never used before size bounds and schema validation.
-3. The verifier derives GitHub context independently; it never trusts repository/tree/base values merely because the receipt contains them.
+2. Untrusted proof fields are never used before size bounds and schema validation.
+3. The verifier derives GitHub context independently; it never trusts repository/tree/base values merely because the proof contains them.
 4. Human-readable GitHub names are display fields; numeric IDs are authorization keys.
 5. Unknown schema, algorithm, policy, suite, key, or reason-code versions fail closed.
 6. A current revocation wins over a historical signature.
 7. An API response cannot establish its own trust root.
-8. A local receipt cannot mint deployment or release credentials.
+8. A local proof cannot mint deployment or release credentials.
 9. Fork and audit jobs receive no production secrets.
 10. The API supplies verification inputs; only the protected Action decides the required result.
 
@@ -414,7 +414,7 @@ flowchart TD
   subgraph Local["Developer or agent machine"]
     Agent["Agent or developer"] --> CLI["thwip CLI"]
     CLI --> Dagger["Approved Dagger pipeline"]
-    Dagger --> Receipt["Signed CI receipt"]
+    Dagger --> Proof["Signed CI proof"]
   end
 
   subgraph GitHub["Customer GitHub organization"]
@@ -428,7 +428,7 @@ flowchart TD
   end
 
   Stripe["Stripe"] <--> Worker
-  Receipt --> Commit
+  Proof --> Commit
   CLI -. "optional lease" .-> Worker
   Workflow -->|"OIDC bundle request"| Worker
   Worker -->|"signed verification bundle"| Workflow
@@ -438,15 +438,15 @@ flowchart TD
 
 | Component | Responsibility | Explicitly does not do |
 |---|---|---|
-| thwip CLI | Auth, device enrollment, Git subject freezing, Dagger invocation, receipt construction/signing, commit trailer management | Decide organization authorization independently of GitHub |
+| thwip CLI | Auth, device enrollment, Git subject freezing, Dagger invocation, proof construction/signing, commit trailer management | Decide organization authorization independently of GitHub |
 | Dagger | Containerized execution, dependency graph, caching, suites, services, traces | Create thwip policy or decide signer authorization |
-| Git commit | Carry the compact receipt with the source | Store raw logs/artifacts |
+| Git commit | Carry the compact proof with the source | Store raw logs/artifacts |
 | GitHub ruleset workflow | Provide protected execution identity and required-check enforcement | Trust PR-owned workflow code |
-| Verification Action | Derive GitHub facts, fetch bundle, verify receipt, evaluate policy, publish conclusion | Run ordinary customer CI unless audit/Remote requires it |
+| Verification Action | Derive GitHub facts, fetch bundle, verify proof, evaluate policy, publish conclusion | Run ordinary customer CI unless audit/Remote requires it |
 | Cloudflare Worker | UI, auth, GitHub/Stripe webhooks, sync, policy lifecycle, lease issuance, bundle resolution | Execute Dagger or make the required pass/fail decision |
 | D1 | Relational source for thwip control-plane projections | Store source code, private keys, or ordinary CI evidence blobs |
 | Queues | Retry and fan out synchronization/reconciliation | Process every CI verification |
-| Stripe | Checkout, subscriptions, payment methods, invoices, Customer Portal | Determine receipt validity |
+| Stripe | Checkout, subscriptions, payment methods, invoices, Customer Portal | Determine proof validity |
 
 ### 8.2 Normal run sequence
 
@@ -465,13 +465,13 @@ sequenceDiagram
     Edge-->>CLI: Signed expiring lease
   end
   CLI->>CLI: Run approved Dagger suites
-  CLI->>CLI: Build and sign receipt
-  CLI->>GH: Push receipt-bearing commit
+  CLI->>CLI: Build and sign proof
+  CLI->>GH: Push proof-bearing commit
   GH->>Verify: Start ruleset workflow
   Verify->>GH: Read head commit, tree, parents, base
   Verify->>Edge: OIDC-authenticated bundle request
   Edge-->>Verify: Signed policy, key, grant, revocation data
-  Verify->>Verify: Verify receipt and evaluate policy
+  Verify->>Verify: Verify proof and evaluate policy
   opt Audit selected
     Verify->>Verify: Rerun approved Dagger pipeline
   end
@@ -522,7 +522,7 @@ Staging and production share source code but not Worker names, D1 databases, que
 The Action performs:
 
 - Git commit/trailer retrieval.
-- Receipt parsing and schema validation.
+- Proof parsing and schema validation.
 - DSSE/SSHSIG verification.
 - Git subject comparison.
 - Policy evaluation.
@@ -542,11 +542,11 @@ This preserves the desired constraint: thwip hosts no per-run verifier compute b
 
 ---
 
-# Part V — Receipt, policy, and verification protocol
+# Part V — Proof, policy, and verification protocol
 
 ## 10. Git subject and commit self-reference
 
-A receipt cannot contain the final commit SHA while also living inside that commit: adding the receipt changes the commit object and therefore its SHA.
+A proof cannot contain the final commit SHA while also living inside that commit: adding the proof changes the commit object and therefore its SHA.
 
 thwip binds to the immutable inputs beneath the commit instead:
 
@@ -562,7 +562,7 @@ thwip binds to the immutable inputs beneath the commit instead:
 
 The protected Action reads the actual head commit and compares those values. For `pull_request`, it must use `github.event.pull_request.head.sha`; GitHub’s `GITHUB_SHA` is the synthetic PR merge commit. A rebase, cherry-pick, squash, or base change normally changes the bound context and requires a new run.
 
-Two commits with the same tree, parents, base, and policy but different non-thwip message text are equivalent thwip subjects. The receipt signer, not the Git `author` field, is the security identity.
+Two commits with the same tree, parents, base, and policy but different non-thwip message text are equivalent thwip subjects. The proof signer, not the Git `author` field, is the security identity.
 
 ### 10.1 Exact-source execution requirements
 
@@ -575,32 +575,32 @@ Before Dagger starts, the CLI must:
 5. Make that source read-only to the pipeline where practical.
 6. Capture parent and base context.
 7. Run the approved Dagger module from the active base policy, not unapproved module code in the PR.
-8. Recompute the tree and context before attaching the receipt.
+8. Recompute the tree and context before attaching the proof.
 9. Refuse attachment if any bound input changed.
 
 Untracked files, unstaged changes, ignored files, or files outside the Git subject must not silently affect a required run.
 
 For v1, either reject repositories with Git submodules or bind every submodule path and commit OID explicitly. Do the same for Git LFS object IDs before claiming LFS support.
 
-## 11. Receipt carrier
+## 11. Proof carrier
 
 The final commit trailer block contains exactly:
 
 ```text
-thwip-Receipt: v1.<base64url(dsse-envelope-json)>
+thwip-Proof: v1.<base64url(dsse-envelope-json)>
 ```
 
-v1 deliberately uses no additional compression. A compact digest-only predicate is expected to fit comfortably under 16 KiB, and avoiding a decompressor removes dependencies and an entire parser attack class. A later carrier version can add compression if measured receipts require it.
+v1 deliberately uses no additional compression. A compact digest-only predicate is expected to fit comfortably under 16 KiB, and avoiding a decompressor removes dependencies and an entire parser attack class. A later carrier version can add compression if measured proofs require it.
 
 Rules:
 
-- Exactly one `thwip-Receipt` trailer is allowed.
+- Exactly one `thwip-Proof` trailer is allowed.
 - Duplicate, folded, ambiguous, unknown-version, or malformed values fail closed.
 - Base64url has no padding.
 - Encoded size target: < 16 KiB.
 - Encoded hard maximum: 32 KiB.
 - Decoded envelope hard maximum: 24 KiB.
-- Receipt payload contains summaries and digests only.
+- Proof payload contains summaries and digests only.
 - It contains no raw logs, environment variables, secrets, local absolute paths, hostnames, usernames unrelated to GitHub identity, or source contents.
 - Use Git’s trailer semantics for insertion, but use a strict thwip parser for verification.
 - Git notes are not the default: they are independently mutable, inconsistently fetched, and poorly surfaced in normal GitHub review.
@@ -756,10 +756,10 @@ Store:
 Requirements:
 
 - One key may belong to only one active principal in an thwip organization.
-- Keep immutable historical public-key records after revocation so old receipts remain explainable.
+- Keep immutable historical public-key records after revocation so old proofs remain explainable.
 - Current verification must check thwip revocation and, when policy requires, current presence in GitHub’s SSH signing-key directory.
 - Support overlapping key rotation.
-- Design the receipt algorithm field for agility; Ed25519 is the v1 default, not an eternal protocol assumption.
+- Design the proof algorithm field for agility; Ed25519 is the v1 default, not an eternal protocol assumption.
 
 ### 13.3 Honest limitation
 
@@ -808,7 +808,7 @@ Do not build single-consume coordination unless a customer requirement demonstra
 
 - Store `jti` with a unique D1 constraint.
 - Consume with one conditional `UPDATE ... WHERE consumed_at IS NULL AND expires_at > ?`.
-- Bind the first accepted receipt digest idempotently.
+- Bind the first accepted proof digest idempotently.
 - Add a per-repository Durable Object only if measured D1 contention requires it.
 
 A lease proves that thwip authorized the context during a recent time window. It does not prove local execution.
@@ -833,7 +833,7 @@ An immutable policy bundle contains:
 - Lease requirement and maximum age.
 - Network/cache/secret declarations.
 - Audit rate and mandatory audit paths.
-- Receipt and verification timeout limits.
+- Proof and verification timeout limits.
 - Eligible previous-policy grace rules.
 - Critical revocation state.
 
@@ -892,7 +892,7 @@ Do not hash mutable tags or the entire developer worktree. Store the canonical m
 - Activation retires the old policy.
 - An unexpired lease from the retired policy may remain eligible if the new policy declares a grace period.
 - A critical revocation overrides all grace and fails immediately.
-- Fast receipts without a lease require the currently active digest unless the policy explicitly permits a short previous-policy window.
+- Fast proofs without a lease require the currently active digest unless the policy explicitly permits a short previous-policy window.
 
 ## 16. Verification bundle
 
@@ -951,11 +951,11 @@ The GitHub Action must execute these steps in order:
 13. Compare tree, parents, base, object format, and merge context with GitHub-derived values.
 14. Confirm signer/key binding, current thwip status, current GitHub key presence if required, and no revocation.
 15. Confirm each signer’s current effective GitHub permission satisfies policy.
-16. Confirm the receipt policy is active or explicitly grace-eligible.
+16. Confirm the proof policy is active or explicitly grace-eligible.
 17. Compare Dagger module, engine, approved image, and suite digests with policy.
 18. Validate any required lease signature, audience, expiry, signer, subject, and policy binding.
 19. Require every policy suite exactly once and with `passed`; reject duplicates and unexpected semantics.
-20. Apply author-separation, receipt age, network, cache, and other fixed controls.
+20. Apply author-separation, proof age, network, cache, and other fixed controls.
 21. Compute audit selection.
 22. If selected, require the separate unprivileged GitHub Dagger job to agree.
 23. Emit a deterministic reason code, human summary, and process exit status.
@@ -976,10 +976,10 @@ Examples:
 
 ```text
 PASS
-RECEIPT_MISSING
-RECEIPT_DUPLICATE
-RECEIPT_TOO_LARGE
-RECEIPT_SCHEMA_UNSUPPORTED
+PROOF_MISSING
+PROOF_DUPLICATE
+PROOF_TOO_LARGE
+PROOF_SCHEMA_UNSUPPORTED
 SIGNATURE_INVALID
 SIGNER_KEY_UNKNOWN
 SIGNER_KEY_REVOKED
@@ -1011,7 +1011,7 @@ An optional future public formula:
 
 ```text
 audit =
-  H(receipt_digest || first_drand_round_after_trusted_push_observation)
+  H(proof_digest || first_drand_round_after_trusted_push_observation)
   mod 10_000
   < audit_basis_points
 ```
@@ -1056,7 +1056,7 @@ Deploy one full-stack Worker artifact into two isolated Wrangler environments.
 
 | Product | Reason |
 |---|---|
-| R2 | The receipt lives in Git; v1 stores no large evidence or logs. |
+| R2 | The proof lives in Git; v1 stores no large evidence or logs. |
 | KV | Eventual consistency is inappropriate for policy, revocation, permission, and nonce state. |
 | Durable Objects | Stateless leases and D1 atomic writes are sufficient until contention is measured. |
 | Containers | thwip runs no hosted Dagger workloads. |
@@ -1098,7 +1098,7 @@ Do not build password auth, email magic links, session cookies, OAuth token refr
 | May this user sign for this repository now? | Current GitHub effective permission plus thwip key/project state |
 | Is the organization entitled to another project/user? | Better Auth Stripe subscription projection plus thwip quota transaction |
 
-Better Auth roles must never override insufficient GitHub repository permission for receipt acceptance.
+Better Auth roles must never override insufficient GitHub repository permission for proof acceptance.
 
 ### 20.3 Shadow principals
 
@@ -1254,13 +1254,13 @@ Teams use a separate principal kind or `github_teams` table; never overload nume
 Optional and compact:
 
 - Project and GitHub head SHA.
-- Receipt digest.
+- Proof digest.
 - GitHub Actions run ID/attempt.
 - Outcome reason code.
 - Audit selected/result.
 - Observed time.
 
-This is product history, not authoritative evidence. The receipt remains in Git. Define a short retention period and allow organizations to disable observation writes.
+This is product history, not authoritative evidence. The proof remains in Git. Define a short retention period and allow organizations to disable observation writes.
 
 ### 22.9 Required indexes
 
@@ -1383,12 +1383,12 @@ Webhook processing must be idempotent. Treat webhook data as the payment-state a
 
 The strongest zero-thwip-verification-compute design is an organization ruleset that requires one exact workflow file from a protected source repository.
 
-The source workflow calls thwip’s reusable verifier workflow or bundled Action, pinned to a full 40-character Git commit SHA. It does not check out or execute PR code during receipt-only verification.
+The source workflow calls thwip’s reusable verifier workflow or bundled Action, pinned to a full 40-character Git commit SHA. It does not check out or execute PR code during proof-only verification.
 
 Example source workflow:
 
 ```yaml
-name: thwip receipt verification
+name: thwip proof verification
 
 on:
   pull_request:
@@ -1408,7 +1408,7 @@ The reusable workflow:
 
 - Runs on a GitHub-hosted Ubuntu runner.
 - Pins its bundled Action to the same immutable release.
-- Uses no checkout in receipt-only mode.
+- Uses no checkout in proof-only mode.
 - Receives no repository, cloud, deployment, or production secrets.
 - Requests GitHub OIDC only for the thwip bundle endpoint.
 - Adds a separate unprivileged checkout/Dagger job only when policy selects an audit.
@@ -1434,7 +1434,7 @@ Create separate GitHub Apps for staging and production. The staging manifest:
 {
   "name": "thwip Dev",
   "url": "https://thwip.recall.net",
-  "description": "Git-native CI receipts for agent-run Dagger pipelines.",
+  "description": "Git-native CI proofs for agent-run Dagger pipelines.",
   "hook_attributes": {
     "url": "https://thwip.recall.net/api/github/webhooks",
     "active": true
@@ -1483,7 +1483,7 @@ thwip generates, but does not submit with its runtime App, a JSON payload like:
 
 ```json
 {
-  "name": "thwip receipt verification",
+  "name": "thwip proof verification",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -1538,24 +1538,24 @@ Record GitHub `run_id`, `run_attempt`, `actor_id`, and OIDC `jti` for bounded au
 
 ### Pull requests
 
-- Receipt commit: `github.event.pull_request.head.sha`.
+- Proof commit: `github.event.pull_request.head.sha`.
 - Base: `github.event.pull_request.base.sha`, refreshed through the GitHub API when needed.
-- Synthetic merge commit: never treated as the receipt-bearing commit.
-- Head-tree policy: receipt covers PR head plus exact base context.
-- Merge-tree policy: Action derives the expected merge tree independently and compares the receipt field.
+- Synthetic merge commit: never treated as the proof-bearing commit.
+- Head-tree policy: proof covers PR head plus exact base context.
+- Merge-tree policy: Action derives the expected merge tree independently and compares the proof field.
 
 ### Merge groups
 
-A merge-group SHA is newly synthesized and cannot already contain a local receipt for the group. Until explicit support ships:
+A merge-group SHA is newly synthesized and cannot already contain a local proof for the group. Until explicit support ships:
 
 - Onboarding rejects merge-queue enablement, or
 - The merge-group workflow runs the approved Dagger pipeline remotely.
 
-Do not treat a PR’s head-tree receipt as proof that the combined merge group passes.
+Do not treat a PR’s head-tree proof as proof that the combined merge group passes.
 
 ### Pushes to protected branches
 
-The primary v1 enforcement is the PR/ruleset flow. Direct pushes should already be blocked by the organization’s repository rules. If post-push verification is offered, it must be a separate informational workflow and must not confuse the PR receipt subject.
+The primary v1 enforcement is the PR/ruleset flow. Direct pushes should already be blocked by the organization’s repository rules. If post-push verification is offered, it must be a separate informational workflow and must not confuse the PR proof subject.
 
 ---
 
@@ -1586,7 +1586,7 @@ Use a pnpm workspace and TypeScript strict mode throughout.
 | Canonical JSON | `canonicalize` | RFC 8785 for policy/hash material only |
 | Unit/integration tests | Vitest, `@effect/vitest` | One TypeScript test runner |
 | Worker tests | `@cloudflare/vitest-pool-workers` | Real `workerd` bindings |
-| Property/fuzz tests | `fast-check` | Receipt/trailer/schema/adversarial inputs |
+| Property/fuzz tests | `fast-check` | Proof/trailer/schema/adversarial inputs |
 | Browser tests | Playwright | Onboarding, auth, billing, project UX |
 | Observability | Workers Logs and automatic traces | No vendor SDK initially |
 | Dependency updates | Dependabot with grouped, reviewed updates | Pin Actions to full SHAs |
@@ -1638,7 +1638,7 @@ thwip does **not** need:
 - Fulcio/keyless browser authentication on every local CI execution.
 - SLSA provenance fields that do not describe this CI assertion.
 
-There is no compelling mature TypeScript library that exactly models thwip’s dedicated-key, commit-carried receipt. The justified custom protocol code is small:
+There is no compelling mature TypeScript library that exactly models thwip’s dedicated-key, commit-carried proof. The justified custom protocol code is small:
 
 - Effect schemas for Statement and predicate.
 - DSSE pre-auth framing, backed by published vectors.
@@ -1708,7 +1708,7 @@ thwip/
 │   ├── cli/                    # thwip executable
 │   ├── db/                     # Drizzle schema, queries, and migrations
 │   ├── github/                 # Octokit App/webhook/OIDC adapters
-│   ├── protocol/               # Receipt, policy, bundle, and lease schemas
+│   ├── protocol/               # Proof, policy, bundle, and lease schemas
 │   ├── verifier/               # Pure deterministic verification
 │   └── config/                 # Shared TypeScript/ESLint/test configuration
 ├── fixtures/
@@ -1752,10 +1752,10 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 | FR-008 | Policy approval | A candidate cannot become active without protected merge and an authorized approval action. |
 | FR-009 | Exact-source execution | `thwip run` refuses an ambiguous dirty source and aborts if the bound tree or context changes during execution. |
 | FR-010 | Local execution | The approved, digest-matching Dagger module runs all required suites against the frozen source. |
-| FR-011 | Receipt attachment | Exactly one bounded `thwip-Receipt` trailer is added before final commit signing. |
+| FR-011 | Proof attachment | Exactly one bounded `thwip-Proof` trailer is added before final commit signing. |
 | FR-012 | Optional freshness | Fresh and stronger profiles obtain a signed lease bound to repository, tree, ancestry/base, policy, signer, and device. |
 | FR-013 | Protected verification | The ruleset-owned Action selects the exact PR head commit and obtains an OIDC-authenticated bundle. |
-| FR-014 | Local decision | The Action verifies the signed bundle and receipt and computes the result without a server-returned pass Boolean. |
+| FR-014 | Local decision | The Action verifies the signed bundle and proof and computes the result without a server-returned pass Boolean. |
 | FR-015 | Current authorization | A revoked key, disabled principal, removed collaborator, insufficient permission, or disabled project fails a new verification. |
 | FR-016 | Self-change protection | A PR changing Dagger or policy material is judged by the base-approved policy; its candidate cannot approve itself. |
 | FR-017 | Audit | Deterministic sampling and mandatory paths cause an unprivileged GitHub Dagger rerun in Audited mode. |
@@ -1772,9 +1772,9 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 - Verify GitHub webhook HMAC and Stripe webhook signatures over the untouched raw request body before JSON parsing.
 - Validate GitHub Actions OIDC issuer, audience, expiry, not-before time, numeric repository/owner IDs, event, ref context, `job_workflow_ref`, and `job_workflow_sha`.
 - Permit verification-bundle resolution only for the OIDC-identified repository. Request fields may narrow that repository; they may not select another tenant.
-- Apply strict size, depth, count, character-set, and time limits before expensive receipt parsing or signature work.
+- Apply strict size, depth, count, character-set, and time limits before expensive proof parsing or signature work.
 - Use constant-time library verification where applicable. Never implement cryptographic primitives.
-- Redact tokens, PEMs, JWK private members, authorization headers, cookies, webhook signatures, receipt payloads, and local paths from telemetry.
+- Redact tokens, PEMs, JWK private members, authorization headers, cookies, webhook signatures, proof payloads, and local paths from telemetry.
 - Set secure, HTTP-only, same-site cookies and a restrictive CSP. Use Cloudflare Turnstile only on abuse-prone public forms, not as an authentication factor.
 - Use GitHub installation tokens with the shortest practical lifetime and the minimum repository selection.
 - Pin third-party GitHub Actions to full commit SHAs and review Dependabot updates.
@@ -1789,7 +1789,7 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 - Security-critical bundle resolution uses live GitHub state or state refreshed no more than 60 seconds earlier.
 - Stripe webhook writes are idempotent by Stripe event ID; a scheduled reconciliation checks subscription state daily.
 - Policy activation, quota changes, key revocation, and entitlement transitions use D1 transactions and append an audit record.
-- Verification observations are best-effort. A telemetry outage must not turn a valid receipt red.
+- Verification observations are best-effort. A telemetry outage must not turn a valid proof red.
 - Use Cloudflare’s native D1 recovery/time-travel capability and periodically test a database restore into staging.
 
 ### 37.3 Performance and limits
@@ -1798,7 +1798,7 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 |---|---:|
 | Worker bundle request, excluding provider latency | p95 CPU < 20 ms |
 | Verification-bundle response | target < 64 KiB; hard maximum 256 KiB |
-| Receipt trailer | target < 16 KiB; hard maximum 32 KiB encoded |
+| Proof trailer | target < 16 KiB; hard maximum 32 KiB encoded |
 | Policy bundle | target < 64 KiB; hard maximum 256 KiB |
 | Verification bundle lifetime | 60 seconds by default; never more than 5 minutes |
 | GitHub/Stripe webhook body | maximum 2 MiB |
@@ -1819,7 +1819,7 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 | OIDC tokens, GitHub installation tokens | Never persist |
 | Source code, raw CI logs, CI artifacts, private keys | Never collect |
 
-An organization deletion enters a 30-day recoverable state, then removes tenant data except records legally required for billing. Git commit receipts remain in the customer’s Git history and are outside thwip’s deletion boundary.
+An organization deletion enters a 30-day recoverable state, then removes tenant data except records legally required for billing. Git commit proofs remain in the customer’s Git history and are outside thwip’s deletion boundary.
 
 ## 38. Test and release gates
 
@@ -1840,9 +1840,9 @@ An organization deletion enters a 30-day recoverable state, then removes tenant 
 
 Release is blocked unless the verifier rejects:
 
-- A valid receipt copied to a different repository, owner, tree, parent list, base SHA, or merge tree.
-- A receipt on an older PR commit when the head has changed.
-- A receipt created by a removed collaborator or a currently insufficient permission level.
+- A valid proof copied to a different repository, owner, tree, parent list, base SHA, or merge tree.
+- A proof on an older PR commit when the head has changed.
+- A proof created by a removed collaborator or a currently insufficient permission level.
 - A revoked, unknown, cross-user, non-signing, or mismatched GitHub key.
 - An expired, wrong-audience, wrong-environment, wrong-device, wrong-policy, or wrong-subject lease.
 - A policy/pipeline change attempting to approve itself.
@@ -1850,7 +1850,7 @@ Release is blocked unless the verifier rejects:
 - Duplicate trailers, duplicate suite IDs, skipped required suites, unknown critical fields, oversized payloads, and parser differentials.
 - An OIDC token from another repository, workflow, environment, actor context, or unpinned reusable-workflow revision.
 - A fork PR attempting to receive secrets or satisfy a privileged audit job.
-- A merge-group event being accepted with an ordinary PR-head receipt.
+- A merge-group event being accepted with an ordinary PR-head proof.
 
 Also prove the positive cases for policy grace, key rotation overlap, a base-approved policy change, an outside-contributor maintainer signature, and an audited rerun.
 
@@ -1874,7 +1874,7 @@ Also prove the positive cases for policy grace, key rotation overlap, a base-app
 ### Phase 1 — Cryptographic vertical slice
 
 - One hand-configured repository, one policy, CLI login, key enrollment, Dagger run, commit trailer, protected Action, verification bundle, and deterministic result.
-- Exit: valid exact-head receipt passes; all mandatory cross-subject/revocation fixtures fail.
+- Exit: valid exact-head proof passes; all mandatory cross-subject/revocation fixtures fail.
 
 ### Phase 2 — Organization product
 
@@ -2347,8 +2347,8 @@ The first milestone is complete only when all of these work from a fresh test or
 4. Enable the project and approve a minimal immutable policy.
 5. Create/enroll a dedicated signing key.
 6. Run `thwip init`, review the Dagger scaffold, and activate the candidate after shadowing.
-7. Run `thwip run`; inspect the single receipt trailer locally.
-8. Push a PR and see the protected Action pass from the exact head receipt.
+7. Run `thwip run`; inspect the single proof trailer locally.
+8. Push a PR and see the protected Action pass from the exact head proof.
 9. Amend the tree without rerunning and see the expected subject-mismatch failure.
 10. Remove the signer’s permission or revoke the key and see current verification fail.
 11. Upgrade in Stripe test mode, enable project 4, cancel, and exercise the downgrade grace path.
@@ -2365,7 +2365,7 @@ The model intentionally excludes customer Dagger execution because it runs on cu
 
 Per organization, per month:
 
-- 1,000 receipt verifications.
+- 1,000 proof verifications.
 - 2 Worker requests per verification.
 - 8 ms Worker CPU per request.
 - 12 D1 rows read and 5 rows written per verification.
@@ -2401,7 +2401,7 @@ The 10,000-organization line is:
 - $3.75 for 5 GB excess D1 storage.
 - $0 D1 row and Queue overage under these assumptions.
 
-The largest uncertainty is not D1; it is accidental per-run logging or unnecessary API fan-out. The implementation should preserve one bundle request per verification, avoid storing receipt bodies, and sample successful request logs.
+The largest uncertainty is not D1; it is accidental per-run logging or unnecessary API fan-out. The implementation should preserve one bundle request per verification, avoid storing proof bodies, and sample successful request logs.
 
 ## 50. Stripe economics
 
@@ -2458,25 +2458,25 @@ Alert on:
 - Policy activation and key-revocation failures.
 - Stripe event lag or entitlement mismatch.
 - D1 storage/write growth relative to the cost model.
-- Receipt outcome shifts, especially `BUNDLE_INVALID`, `OIDC_INVALID`, and unexpected policy mismatch.
+- Proof outcome shifts, especially `BUNDLE_INVALID`, `OIDC_INVALID`, and unexpected policy mismatch.
 
-Every user-visible error includes a correlation ID, never a secret or raw receipt.
+Every user-visible error includes a correlation ID, never a secret or raw proof.
 
 ## 53. Principal risks and mitigations
 
 | Risk | Consequence | Mitigation |
 |---|---|---|
-| A signer lies about local execution | Invalid code can receive a Fast/Fresh receipt | Honest product language; Audited or Remote profiles; future guarded daemon |
+| A signer lies about local execution | Invalid code can receive a Fast/Fresh proof | Honest product language; Audited or Remote profiles; future guarded daemon |
 | Agent can use a generic signing oracle | Attribution without execution assurance | Dedicated device key; guarded daemon roadmap; independent audit |
 | PR changes its own verifier/pipeline | Self-approval | Ruleset-owned workflow pinned outside target repo; base-approved policy |
-| Receipt replay | Different code/project is approved | Bind numeric repo/owner, tree, ancestry/base, policy, signer, and optional lease |
+| Proof replay | Different code/project is approved | Bind numeric repo/owner, tree, ancestry/base, policy, signer, and optional lease |
 | Stale permissions or key state | Removed user still verifies | One short-lived bundle; live/≤60s refresh; immediate thwip revocation |
 | GitHub webhook loss/reordering | Projection drifts | Idempotent Queue consumer plus scheduled reconciliation |
 | App permission sprawl | Excess customer trust | Read-only runtime App; owner-run one-time `gh api` for ruleset writes |
 | Fork or workflow secret attack | Untrusted code reaches credentials | No secrets to Dagger job; OIDC repository/workflow pinning; outside-contributor path |
 | Merge queue mismatch | PR evidence is misapplied to group code | Reject/remote-run merge-group events until explicitly supported |
 | Protocol parser differential | Signed bytes mean different things | Verify exact bytes first; strict schema; golden/property/adversarial tests |
-| Domain choice changes protocol IDs | Receipts become domain-dependent | Stable `urn:thwip:*` identifiers; environment issuer remains explicit |
+| Domain choice changes protocol IDs | Proofs become domain-dependent | Stable `urn:thwip:*` identifiers; environment issuer remains explicit |
 | `cf` preview instability | Setup/deploy blocks | Pin `cf`; keep pinned Wrangler fallback for unsupported operations |
 | $5 attracts high-support users | Healthy infra margin but poor business margin | Self-service UX, docs, annual plan, support telemetry, later Team tier |
 | Dependency compromise | Verifier/control plane compromise | Minimal packages, lockfile, full Action SHAs, provenance, SBOM, grouped review |
@@ -2492,12 +2492,12 @@ Every user-visible error includes a correlation ID, never a secret or raw receip
 7. Decide whether repositories with submodules or Git LFS are rejected in v1 or supported with the explicit bindings in section 10.
 8. Define the precise Dagger version support window and policy digest manifest.
 9. Define customer-visible history retention if it differs from section 37.4.
-10. Commission an external review of the receipt/bundle/lease threat model before calling the system production-secure.
+10. Commission an external review of the proof/bundle/lease threat model before calling the system production-secure.
 
 ## 55. Explicitly deferred
 
 - Guarded local key daemon and platform attestation.
-- Merge-queue-native local receipts.
+- Merge-queue-native local proofs.
 - Multi-provider source control.
 - Artifact/log hosting.
 - Public transparency log or Sigstore witness.
@@ -2505,12 +2505,12 @@ Every user-visible error includes a correlation ID, never a secret or raw receip
 - SSO/SAML/SCIM beyond GitHub organization identity.
 - Usage billing.
 - Team/Enterprise plans.
-- Multiple signers on one receipt.
+- Multiple signers on one proof.
 - thwip-hosted Dagger compute.
 
 ## 56. Definition of v1 done
 
-thwip v1 is done when a new GitHub organization can self-onboard, migrate and approve a Dagger pipeline, enroll users without surrendering private keys, run CI locally, carry a signed exact-subject receipt in Git, and satisfy a ruleset-protected GitHub check whose decision is computed entirely in GitHub Actions using current signed control-plane facts.
+thwip v1 is done when a new GitHub organization can self-onboard, migrate and approve a Dagger pipeline, enroll users without surrendering private keys, run CI locally, carry a signed exact-subject proof in Git, and satisfy a ruleset-protected GitHub check whose decision is computed entirely in GitHub Actions using current signed control-plane facts.
 
 It must also fail closed for the adversarial cases in section 38, enforce Free/Pro limits and Stripe lifecycle correctly, restore production-shaped D1 data into staging, and operate within the published 10,000-organization cost model.
 

@@ -20,7 +20,7 @@ import {
   showFileAtHead,
 } from "./git.js";
 import { parsePipelineDefinition, pipelineDigest, runSuites } from "./pipeline.js";
-import { attachTrailer, buildStatement, signStatement } from "./receipt.js";
+import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 
 interface CliConfig {
   endpoint: string;
@@ -82,7 +82,7 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const treeAfter = await currentTree(cwd);
   if (treeAfter !== subject.treeOid) {
-    process.stderr.write("[thwip] bound tree changed during execution; refusing to attach receipt\n");
+    process.stderr.write("[thwip] bound tree changed during execution; refusing to attach proof\n");
     return 1;
   }
 
@@ -108,10 +108,10 @@ async function cmdRun(argv: string[]): Promise<number> {
   await amendMessage(cwd, amended);
   const newHead = await currentTree(cwd);
   if (newHead !== subject.treeOid) {
-    process.stderr.write("[thwip] tree changed while attaching receipt\n");
+    process.stderr.write("[thwip] tree changed while attaching proof\n");
     return 1;
   }
-  process.stderr.write(`[thwip] receipt attached for tree ${subject.treeOid} (policy v${policy.version})\n`);
+  process.stderr.write(`[thwip] proof attached for tree ${subject.treeOid} (policy v${policy.version})\n`);
   return 0;
 }
 
@@ -126,11 +126,11 @@ async function cmdVerifyLocal(): Promise<number> {
   const payload = b64stdDecode(carrier.envelope.payload);
   const parsed = parseStatement(JSON.parse(utf8Decode(payload)));
   if (!parsed.ok) {
-    process.stderr.write(`[thwip] RECEIPT_MALFORMED ${parsed.detail}\n`);
+    process.stderr.write(`[thwip] PROOF_MALFORMED ${parsed.detail}\n`);
     return 1;
   }
   process.stdout.write(JSON.stringify(parsed.value.predicate, null, 2) + "\n");
-  process.stderr.write(`[thwip] receipt parses; signer key ${carrier.envelope.signatures[0]!.keyid}\n`);
+  process.stderr.write(`[thwip] proof parses; signer key ${carrier.envelope.signatures[0]!.keyid}\n`);
   return 0;
 }
 

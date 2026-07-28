@@ -1,9 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 /* ---------- shared API helpers ---------- */
 
+function selectedOrg(): string | null {
+  return localStorage.getItem("thwip.org");
+}
+
+function withOrg(path: string): string {
+  const org = selectedOrg();
+  if (!org) return path;
+  return path + (path.includes("?") ? "&" : "?") + "org=" + encodeURIComponent(org);
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(withOrg(path), {
     credentials: "include",
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
     ...init,
@@ -16,11 +26,19 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function signInWithGitHub(callbackURL: string): Promise<void> {
-  const res = await api<{ url?: string; redirect?: boolean }>("/api/auth/sign-in/social", {
+  const res = await api<{ url?: string }>("/api/auth/sign-in/social", {
     method: "POST",
     body: JSON.stringify({ provider: "github", callbackURL }),
   });
   if (res.url) window.location.href = res.url;
+}
+
+interface OrgSummary {
+  organizationId: string;
+  githubOrgId: string;
+  githubLogin: string;
+  githubOrgRole: string | null;
+  activated: boolean;
 }
 
 interface Me {
@@ -33,6 +51,7 @@ interface Me {
     installation_id: string | null;
     better_auth_org_id: string | null;
   } | null;
+  organizations: OrgSummary[];
 }
 
 function useMe() {
@@ -45,121 +64,127 @@ function useMe() {
   return me;
 }
 
+function useFetch<T>(path: string, deps: unknown[] = []) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(() => {
+    api<T>(path)
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
+      .catch((e: Error) => setError(e.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, ...deps]);
+  useEffect(reload, [reload]);
+  return { data, error, reload };
+}
+
 /* ---------- marketing site ---------- */
 
-const RECEIPT_TRAILER =
-  "thwip-Receipt: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5Rdi4uLiJ9";
+const TRAILER_SAMPLE =
+  "thwip-Proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5Rdi4uLiJ9";
+
+function Slip() {
+  return (
+    <figure className="thwip-slip" aria-label="A signed thwip proof carried in a git commit message">
+      <span className="thwip-stamp">VERIFIED</span>
+      <div className="dim">$ git log -1 --format=%B</div>
+      <hr />
+      <div>feat: parse lease context into verifier</div>
+      <br />
+      <div className="trailer">{TRAILER_SAMPLE.slice(0, 118)}…</div>
+      <hr />
+      <div className="dim"># protected check · repository 1315419165</div>
+      <div>
+        tree <span className="dim">9223b1ca…</span> suites <span className="pass">lint ✓ typecheck ✓ test ✓</span>
+      </div>
+      <div>
+        signer <span className="dim">key_67f1c7… (ssh-ed25519)</span>
+      </div>
+      <div>
+        verdict <span className="pass">PASS</span>
+        <span className="dim"> · 4.1s · nothing rerun</span>
+      </div>
+    </figure>
+  );
+}
 
 function Marketing({ me }: { me: Me | null | undefined }) {
   return (
-    <div className="shell">
-      <header className="nav">
-        <a className="brand" href="/">
-          thwip<small>CI RECEIPTS</small>
+    <article>
+      <nav className="thwip-nav" aria-label="Site">
+        <a className="thwip-brand" href="/">
+          thwip<small>VERIFIED LOCAL CI</small>
         </a>
-        <nav className="nav-links">
+        <span className="links">
           <a href="#how">How it works</a>
-          <a href="#assurance">Assurance</a>
+          <a href="#outcomes">Outcomes</a>
           <a href="#pricing">Pricing</a>
           {me ? (
-            <a className="btn small" href="/dashboard">
+            <a className="gp-btn gp-btn--sm" href="/dashboard">
               Dashboard
             </a>
           ) : (
-            <button className="btn small" onClick={() => void signInWithGitHub("/dashboard")}>
+            <button className="gp-btn gp-btn--sm" onClick={() => void signInWithGitHub("/dashboard")}>
               Sign in with GitHub
             </button>
           )}
-        </nav>
+        </span>
+      </nav>
+
+      <header className="brief-header">
+        <div>
+          <p className="brief-header__meta">thwip · commit-carried CI evidence</p>
+          <h1 className="brief-header__title">CI ran. Prove it in the commit.</h1>
+          <p className="brief-header__dek">
+            Your agents already run lint, typecheck, and tests on the machine where the code lives. thwip signs a
+            compact proof of that run, bound to the exact Git tree, and a protected GitHub check verifies it in
+            seconds. The merge queue merges on that proof.
+          </p>
+        </div>
+        <div className="thwip-actions">
+          <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
+            Install on your org
+          </button>
+          <a className="gp-btn" href="#how">
+            Read how it works
+          </a>
+        </div>
       </header>
 
-      <section className="hero" style={{ borderTop: "none" }}>
-        <div>
-          <h1>
-            CI ran. <em>Prove it</em> — in the commit itself.
-          </h1>
-          <p className="sub">
-            Your agents already ran lint, typecheck, and tests locally. thwip freezes the exact Git tree, signs a
-            compact receipt, and a protected GitHub check verifies it in seconds. No re-running CI in the cloud, no
-            taking anyone's word for it.
-          </p>
-          <div className="actions">
-            <button className="btn" onClick={() => void signInWithGitHub("/dashboard")}>
-              Install on your org
-            </button>
-            <a className="btn ghost" href="#how">
-              Read the protocol
-            </a>
-          </div>
-          <p className="fine">DSSE · in-toto Statement v1 · OpenSSH signatures · GitHub merge queue native</p>
-        </div>
-
-        <div className="receipt" aria-label="Example signed CI receipt inside a git commit message">
-          <span className="stamp">VERIFIED</span>
-          <div className="dim">$ git log -1 --format=%B</div>
-          <hr className="rule" />
-          <div>feat: parse lease context into verifier</div>
-          <br />
-          <div className="trailer">{RECEIPT_TRAILER.slice(0, 120)}…</div>
-          <hr className="rule" />
-          <div className="dim"># protected check · repository 1315419165</div>
-          <div>
-            tree <span className="dim">9223b1ca…</span> &nbsp;suites{" "}
-            <span className="verdict">lint ✓ typecheck ✓ test ✓</span>
-          </div>
-          <div>
-            signer <span className="dim">key_67f1c7… (ssh-ed25519)</span>
-          </div>
-          <div>
-            verdict <span className="verdict">PASS</span>
-            <span className="dim"> · 4.1s · zero reruns</span>
-          </div>
-        </div>
+      <section>
+        <Slip />
+        <p className="data-note">
+          The proof is one git trailer: a DSSE envelope over an in-toto statement, signed with a dedicated SSH key
+          enrolled to the author's device.
+        </p>
       </section>
 
       <section id="how">
-        <div className="eyebrow">The loop</div>
-        <h2>Execution stays local. Trust stays in GitHub.</h2>
-        <p className="lede">
-          thwip is a control plane, not a CI compute platform. The work happens where your warm cache already is; the
-          enforcement happens where your merges already are.
+        <h2>How a merge happens</h2>
+        <p>
+          <code>thwip run</code> refuses a dirty tree, runs the policy-approved suites against the frozen source, and
+          signs the result. If the tree changes during the run, nothing is signed.
         </p>
-        <div className="steps">
-          <div className="step">
-            <div className="k">thwip run</div>
-            <h3>Run the approved pipeline locally</h3>
-            <p>
-              The CLI refuses a dirty tree, freezes the exact Git subject, and runs the policy-approved suites. If the
-              tree changes mid-run, no receipt.
-            </p>
-          </div>
-          <div className="step">
-            <div className="k">thwip-Receipt: v1.…</div>
-            <h3>The commit carries the evidence</h3>
-            <p>
-              One signed trailer binds repository, tree, ancestry, base, policy, pipeline digest, and suite results.
-              Copy it to different code and it fails closed.
-            </p>
-          </div>
-          <div className="step">
-            <div className="k">merge_group ✓</div>
-            <h3>GitHub verifies and merges</h3>
-            <p>
-              A ruleset-protected check fetches one signed fact bundle, verifies the receipt against the exact head
-              commit, and the merge queue does the rest. <code>PASS</code> in seconds.
-            </p>
-          </div>
-        </div>
+        <p>
+          The commit carries the evidence. One trailer binds the repository id, tree, parents, base, policy digest,
+          pipeline digest, and per-suite results. Change any of them and verification fails closed.
+        </p>
+        <p>
+          On the pull request and again in the merge group, a ruleset-protected check reads the exact head commit,
+          fetches one signed fact bundle from the control plane, and verifies everything locally on the runner. The
+          check turns green in seconds and the queue merges. Your CI never reruns in the cloud.
+        </p>
       </section>
 
-      <section id="assurance">
-        <div className="eyebrow">Honest security</div>
-        <h2>Reason codes, not vibes.</h2>
-        <p className="lede">
-          Every verification ends in a stable outcome code. A receipt from a revoked key, a removed collaborator, an
-          old policy, or someone else's tree is rejected — deterministically.
+      <section id="outcomes">
+        <h2>Every verification ends in a stable code</h2>
+        <p>
+          A proof signed by a revoked key, an old policy, or somebody else's tree fails closed, with the same code
+          every time.
         </p>
-        <table className="plain">
+        <table className="gp-data-table">
           <thead>
             <tr>
               <th>Attempt</th>
@@ -168,7 +193,7 @@ function Marketing({ me }: { me: Me | null | undefined }) {
           </thead>
           <tbody>
             <tr>
-              <td>Receipt copied onto different code</td>
+              <td>Proof copied onto different code</td>
               <td className="bad">SUBJECT_TREE_MISMATCH</td>
             </tr>
             <tr>
@@ -188,7 +213,7 @@ function Marketing({ me }: { me: Me | null | undefined }) {
               <td className="bad">PIPELINE_DIGEST_MISMATCH</td>
             </tr>
             <tr>
-              <td>The exact tree, the exact policy, a current signer</td>
+              <td>The exact tree, the active policy, a current signer</td>
               <td className="ok">PASS</td>
             </tr>
           </tbody>
@@ -196,39 +221,36 @@ function Marketing({ me }: { me: Me | null | undefined }) {
       </section>
 
       <section id="pricing">
-        <div className="eyebrow">Pricing</div>
-        <h2>Same security on every plan. Pay for scale.</h2>
-        <div className="pricing">
-          <div className="plan">
-            <div className="name">Free</div>
-            <div className="price">$0</div>
-            <div className="cadence">forever</div>
-            <ul>
-              <li>3 active projects</li>
-              <li>5 active signers</li>
-              <li>All security profiles</li>
-              <li>Merge-queue verification</li>
-            </ul>
+        <h2>Pricing</h2>
+        <p>Both plans verify the same way. Pro raises the limits.</p>
+        <div className="thwip-plan-grid">
+          <div className="gp-panel">
+            <div className="gp-panel__header">
+              <h3 className="gp-panel__title">Free</h3>
+              <span className="gp-panel__meta">$0</span>
+            </div>
+            <div className="gp-panel__body">
+              <p>3 active projects. 5 active signers. All security profiles, merge-queue verification included.</p>
+            </div>
           </div>
-          <div className="plan pro">
-            <div className="name">Pro</div>
-            <div className="price">$5</div>
-            <div className="cadence">per month, or $50/year</div>
-            <ul>
-              <li>15 active projects</li>
-              <li>25 active signers</li>
-              <li>All security profiles</li>
-              <li>Priority support</li>
-            </ul>
+          <div className="gp-panel">
+            <div className="gp-panel__header">
+              <h3 className="gp-panel__title">Pro</h3>
+              <span className="gp-panel__meta">$5/month or $50/year</span>
+            </div>
+            <div className="gp-panel__body">
+              <p>15 active projects. 25 active signers. Same verification, same profiles.</p>
+            </div>
           </div>
         </div>
       </section>
 
       <footer>
-        <span>thwip — Git-native CI receipts for agent-run pipelines.</span>
-        <span className="code">urn:thwip:attestation:ci-run:v1</span>
+        <p className="data-note">
+          thwip · commit-carried CI evidence for agent-run pipelines · <code>urn:thwip:attestation:ci-run:v1</code>
+        </p>
       </footer>
-    </div>
+    </article>
   );
 }
 
@@ -244,76 +266,96 @@ const TABS = [
   ["operations", "Operations"],
 ] as const;
 
+function OrgSwitcher({ me }: { me: Me }) {
+  if (me.organizations.length <= 1) {
+    return <span className="gp-chip">{me.organization?.github_login ?? "no org"}</span>;
+  }
+  return (
+    <select
+      className="gp-btn gp-btn--sm"
+      aria-label="Organization"
+      value={selectedOrg() ?? me.organization?.github_login ?? ""}
+      onChange={(e) => {
+        localStorage.setItem("thwip.org", e.target.value);
+        window.location.reload();
+      }}
+    >
+      {me.organizations.map((o) => (
+        <option key={o.githubOrgId} value={o.githubLogin}>
+          {o.githubLogin}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function Dashboard({ me, tab }: { me: Me; tab: string }) {
   const org = me.organization;
   return (
-    <div className="shell">
-      <header className="nav">
-        <a className="brand" href="/">
+    <div className="gp-workspace">
+      <nav className="thwip-nav" aria-label="Dashboard">
+        <a className="thwip-brand" href="/">
           thwip<small>DASHBOARD</small>
         </a>
-        <nav className="nav-links">
-          {org && (
-            <span className="pill on">
-              {org.github_login} · {org.plan}
-            </span>
-          )}
-          <span className="muted">{me.principal?.github_login ?? me.viewer.githubUserId}</span>
+        <span className="links">
+          <OrgSwitcher me={me} />
+          {org && <span className="gp-chip">{org.plan}</span>}
+          <span className="gp-panel__meta">{me.principal?.github_login ?? me.viewer.githubUserId}</span>
           <button
-            className="btn ghost small"
+            className="gp-btn gp-btn--sm"
             onClick={() =>
               void api("/api/auth/sign-out", { method: "POST", body: "{}" }).then(() => (window.location.href = "/"))
             }
           >
             Sign out
           </button>
-        </nav>
-      </header>
-      <div className="dash">
-        <nav aria-label="Dashboard sections">
-          {TABS.map(([key, label]) => (
-            <a key={key} href={`/dashboard/${key}`} className={tab === key ? "active" : ""}>
+        </span>
+      </nav>
+      <ul className="tab-nav" role="tablist" style={{ marginTop: "1rem" }}>
+        {TABS.map(([key, label]) => (
+          <li key={key}>
+            <a href={`/dashboard/${key}`} className={tab === key ? "is-active" : ""}>
               {label}
             </a>
-          ))}
-        </nav>
-        <main>
-          {!org && (
-            <div className="panel">
-              <h3>Connect your GitHub organization</h3>
-              <p className="muted">
-                Your GitHub account isn't part of a synced thwip organization yet. Install the thwip GitHub App on your
-                organization, then run a sync from Operations.
+          </li>
+        ))}
+      </ul>
+      <main className="gp-workspace__content">
+        {!org && (
+          <div className="gp-panel" style={{ marginBottom: "1rem" }}>
+            <div className="gp-panel__header">
+              <h3 className="gp-panel__title">Connect your GitHub organization</h3>
+            </div>
+            <div className="gp-panel__body">
+              <p>
+                Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
+                the organization, then run a sync from Operations.
               </p>
             </div>
-          )}
-          {tab === "overview" && <Overview />}
-          {tab === "projects" && <Projects me={me} />}
-          {tab === "people" && <People />}
-          {tab === "devices" && <Devices me={me} />}
-          {tab === "policies" && <Policies />}
-          {tab === "billing" && <Billing me={me} />}
-          {tab === "operations" && <Operations me={me} />}
-        </main>
-      </div>
+          </div>
+        )}
+        {tab === "overview" && <Overview />}
+        {tab === "projects" && <Projects />}
+        {tab === "people" && <People />}
+        {tab === "devices" && <Devices me={me} />}
+        {tab === "policies" && <Policies />}
+        {tab === "billing" && <Billing />}
+        {tab === "operations" && <Operations me={me} />}
+      </main>
     </div>
   );
 }
 
-function useFetch<T>(path: string, deps: unknown[] = []) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const reload = useCallback(() => {
-    api<T>(path)
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, ...deps]);
-  useEffect(reload, [reload]);
-  return { data, error, reload };
+function Panel({ title, meta, children }: { title: string; meta?: string; children: React.ReactNode }) {
+  return (
+    <div className="gp-panel" style={{ marginBottom: "1rem" }}>
+      <div className="gp-panel__header">
+        <h3 className="gp-panel__title">{title}</h3>
+        {meta && <span className="gp-panel__meta">{meta}</span>}
+      </div>
+      <div className="gp-panel__body">{children}</div>
+    </div>
+  );
 }
 
 function Overview() {
@@ -327,50 +369,32 @@ function Overview() {
     teams: number;
     activeKeys: number;
   }>("/v1/dashboard/summary");
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+  const items: Array<[string, string]> = [
+    ["enabled projects", `${data.enabledProjects}/${data.limits.projects}`],
+    ["active users", `${data.activatedUsers}/${data.limits.users}`],
+    ["github members", String(data.members)],
+    ["github teams", String(data.teams)],
+    ["signing keys", String(data.activeKeys)],
+    ["plan", data.plan],
+  ];
   return (
     <>
-      <div className="panel">
-        <h3>Organization at a glance</h3>
-        <div className="statrow">
-          <div className="stat">
-            <div className="v">
-              {data.enabledProjects}/{data.limits.projects}
-            </div>
-            <div className="l">enabled projects</div>
+      <div className="metric-strip">
+        {items.map(([label, value]) => (
+          <div className="metric-strip__item" key={label}>
+            <span className="metric-strip__label">{label}</span>
+            <span className="metric-strip__value">{value}</span>
           </div>
-          <div className="stat">
-            <div className="v">
-              {data.activatedUsers}/{data.limits.users}
-            </div>
-            <div className="l">active users</div>
-          </div>
-          <div className="stat">
-            <div className="v">{data.members}</div>
-            <div className="l">github members</div>
-          </div>
-          <div className="stat">
-            <div className="v">{data.teams}</div>
-            <div className="l">github teams</div>
-          </div>
-          <div className="stat">
-            <div className="v">{data.activeKeys}</div>
-            <div className="l">signing keys</div>
-          </div>
-          <div className="stat">
-            <div className="v">{data.plan}</div>
-            <div className="l">plan</div>
-          </div>
-        </div>
+        ))}
       </div>
-      <div className="panel">
-        <h3>Ship something</h3>
-        <p className="muted code" style={{ fontSize: "0.85rem" }}>
-          git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create — the merge queue does
-          the rest once the receipt verifies.
+      <Panel title="Ship a change">
+        <p style={{ fontFamily: "var(--gp-mono, monospace)", fontSize: "0.82rem" }}>
+          git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
         </p>
-      </div>
+        <p className="gp-panel__meta">The merge queue merges once the proof on the head commit verifies.</p>
+      </Panel>
     </>
   );
 }
@@ -388,7 +412,7 @@ interface ProjectRow {
   last_observed_at: string | null;
 }
 
-function Projects({ me }: { me: Me }) {
+function Projects() {
   const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -415,17 +439,13 @@ function Projects({ me }: { me: Me }) {
       setBusy(null);
     }
   };
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <div className="panel">
-      <h3>Projects</h3>
-      <p className="muted" style={{ marginBottom: 12 }}>
-        Enabling a project consumes plan quota. Enable/disable requires repository admin on GitHub.
-      </p>
-      {actionError && <p className="error-note">{actionError}</p>}
-      {data.projects.length === 0 && <p className="empty">No repositories imported yet — run a sync from Operations.</p>}
-      <table className="plain">
+    <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
+      {actionError && <p className="thwip-error">{actionError}</p>}
+      {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
+      <table className="gp-data-table">
         <thead>
           <tr>
             <th>Repository</th>
@@ -440,14 +460,15 @@ function Projects({ me }: { me: Me }) {
           {data.projects.map((p) => (
             <tr key={p.id}>
               <td>
-                <span className="code">{p.github_name}</span>
-                <div className="muted" style={{ fontSize: "0.78rem" }}>
+                <code>{p.github_name}</code>
+                <div className="gp-panel__meta">
                   {p.collaborators} collaborators · {p.default_branch}
                 </div>
               </td>
-              <td>{p.enabled ? <span className="pill on">enabled</span> : <span className="pill">imported</span>}</td>
+              <td>{p.enabled ? <span className="gp-chip is-active">enabled</span> : <span className="gp-chip">imported</span>}</td>
               <td>
                 <select
+                  className="gp-btn gp-btn--sm"
                   value={p.security_profile}
                   disabled={busy === p.id}
                   onChange={(e) => void setProfile(p, e.target.value)}
@@ -459,30 +480,30 @@ function Projects({ me }: { me: Me }) {
                   <option value="remote">remote</option>
                 </select>
               </td>
-              <td className="code">{p.active_policy_digest ? `${p.active_policy_digest.slice(7, 19)}…` : "—"}</td>
+              <td>
+                <code>{p.active_policy_digest ? `${p.active_policy_digest.slice(7, 19)}…` : "—"}</code>
+              </td>
               <td>
                 {p.last_outcome ? (
                   <span className={p.last_outcome === "PASS" ? "ok" : "bad"}>{p.last_outcome}</span>
                 ) : (
-                  <span className="muted">—</span>
+                  <span className="gp-panel__meta">—</span>
                 )}
               </td>
               <td>
-                {p.enabled ? (
-                  <button className="btn ghost small" disabled={busy === p.id} onClick={() => void act(p, "disable")}>
-                    Disable
-                  </button>
-                ) : (
-                  <button className="btn small" disabled={busy === p.id} onClick={() => void act(p, "enable")}>
-                    Enable
-                  </button>
-                )}
+                <button
+                  className="gp-btn gp-btn--sm"
+                  disabled={busy === p.id}
+                  onClick={() => void act(p, p.enabled ? "disable" : "enable")}
+                >
+                  {p.enabled ? "Disable" : "Enable"}
+                </button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-    </div>
+    </Panel>
   );
 }
 
@@ -491,7 +512,6 @@ function People() {
     members: Array<{
       github_user_id: string;
       github_login: string;
-      avatar_url: string | null;
       github_org_role: string | null;
       activated_at: string | null;
       active_keys: number;
@@ -500,16 +520,12 @@ function People() {
     teamMembers: Array<{ team_id: string; github_user_id: string; github_login: string | null }>;
     grants: Array<{ github_name: string; github_login: string; permission: string; active: number }>;
   }>("/v1/dashboard/people");
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <>
-      <div className="panel">
-        <h3>Members</h3>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Imported from GitHub. Roles and permissions here are GitHub's — thwip never invents its own.
-        </p>
-        <table className="plain">
+      <Panel title="Members" meta="imported from GitHub; roles and permissions are GitHub's">
+        <table className="gp-data-table">
           <thead>
             <tr>
               <th>Member</th>
@@ -521,34 +537,44 @@ function People() {
           <tbody>
             {data.members.map((m) => (
               <tr key={m.github_user_id}>
-                <td className="code">{m.github_login}</td>
+                <td>
+                  <code>{m.github_login}</code>
+                </td>
                 <td>{m.github_org_role ?? "member"}</td>
-                <td>{m.activated_at ? <span className="pill on">active</span> : <span className="pill">shadow</span>}</td>
+                <td>{m.activated_at ? <span className="gp-chip is-active">active</span> : <span className="gp-chip">shadow</span>}</td>
                 <td>{m.active_keys}</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
-      <div className="panel">
-        <h3>Teams</h3>
-        {data.teams.length === 0 && <p className="empty">No GitHub teams synced.</p>}
-        {data.teams.map((t) => (
-          <div key={t.team_id} style={{ marginBottom: 10 }}>
-            <span className="code">@{t.slug}</span>{" "}
-            <span className="muted">
-              — {t.members} members, {t.repos} repos:{" "}
-              {data.teamMembers
-                .filter((tm) => tm.team_id === t.team_id)
-                .map((tm) => tm.github_login ?? tm.github_user_id)
-                .join(", ")}
-            </span>
-          </div>
-        ))}
-      </div>
-      <div className="panel">
-        <h3>Effective repository permissions</h3>
-        <table className="plain">
+        <p className="gp-panel__meta" style={{ marginTop: "0.6rem" }}>
+          There are no invitations. A member signs in with GitHub and gets exactly the access their GitHub role and
+          repository permissions already grant.
+        </p>
+      </Panel>
+      <Panel title="Teams">
+        {data.teams.length === 0 && <p>No GitHub teams synced.</p>}
+        <table className="gp-data-table">
+          <tbody>
+            {data.teams.map((t) => (
+              <tr key={t.team_id}>
+                <td>
+                  <code>@{t.slug}</code>
+                </td>
+                <td>
+                  {data.teamMembers
+                    .filter((tm) => tm.team_id === t.team_id)
+                    .map((tm) => tm.github_login ?? tm.github_user_id)
+                    .join(", ")}
+                </td>
+                <td className="gp-panel__meta">{t.repos} repos</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+      <Panel title="Effective repository permissions">
+        <table className="gp-data-table">
           <thead>
             <tr>
               <th>Repository</th>
@@ -560,15 +586,19 @@ function People() {
           <tbody>
             {data.grants.map((g, i) => (
               <tr key={i}>
-                <td className="code">{g.github_name}</td>
-                <td className="code">{g.github_login}</td>
+                <td>
+                  <code>{g.github_name}</code>
+                </td>
+                <td>
+                  <code>{g.github_login}</code>
+                </td>
                 <td>{g.permission}</td>
-                <td>{g.active ? <span className="pill on">current</span> : <span className="pill off">removed</span>}</td>
+                <td>{g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+      </Panel>
     </>
   );
 }
@@ -590,18 +620,13 @@ function Devices({ me }: { me: Me }) {
     await api(`/v1/dashboard/devices/${keyId}/revoke`, { method: "POST", body: "{}" });
     reload();
   };
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   const canRevoke = (d: { github_user_id: string }) =>
     d.github_user_id === me.viewer.githubUserId || me.viewer.githubOrgRole === "owner";
   return (
-    <div className="panel">
-      <h3>Signing devices</h3>
-      <p className="muted" style={{ marginBottom: 12 }}>
-        Enroll a new device with <span className="code">thwip login</span> then{" "}
-        <span className="code">thwip keys enroll</span>. Revocation takes effect on the next verification.
-      </p>
-      <table className="plain">
+    <Panel title="Signing devices" meta="thwip login, then thwip keys enroll; revocation applies on the next verification">
+      <table className="gp-data-table">
         <thead>
           <tr>
             <th>Device</th>
@@ -615,14 +640,18 @@ function Devices({ me }: { me: Me }) {
           {data.devices.map((d) => (
             <tr key={d.key_id}>
               <td>{d.device_label}</td>
-              <td className="code">{d.github_login ?? d.github_user_id}</td>
-              <td className="code" style={{ fontSize: "0.72rem" }}>
-                {d.algorithm} · {d.fingerprint.slice(0, 24)}…
+              <td>
+                <code>{d.github_login ?? d.github_user_id}</code>
               </td>
-              <td>{d.revoked_at ? <span className="pill off">revoked</span> : <span className="pill on">active</span>}</td>
+              <td>
+                <code style={{ fontSize: "0.72rem" }}>
+                  {d.algorithm} · {d.fingerprint.slice(0, 24)}…
+                </code>
+              </td>
+              <td>{d.revoked_at ? <span className="gp-chip">revoked</span> : <span className="gp-chip is-active">active</span>}</td>
               <td>
                 {!d.revoked_at && canRevoke(d) && (
-                  <button className="btn danger small" onClick={() => void revoke(d.key_id)}>
+                  <button className="gp-btn gp-btn--sm" onClick={() => void revoke(d.key_id)}>
                     Revoke
                   </button>
                 )}
@@ -631,7 +660,7 @@ function Devices({ me }: { me: Me }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </Panel>
   );
 }
 
@@ -646,16 +675,11 @@ function Policies() {
       activated_at: string | null;
     }>;
   }>("/v1/dashboard/policies");
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <div className="panel">
-      <h3>Policy history</h3>
-      <p className="muted" style={{ marginBottom: 12 }}>
-        Policies are immutable, content-addressed bundles. Only the active digest can satisfy a required check; a PR
-        can never approve its own policy change.
-      </p>
-      <table className="plain">
+    <Panel title="Policy history" meta="immutable, content-addressed; a PR can never approve its own policy change">
+      <table className="gp-data-table">
         <thead>
           <tr>
             <th>Repository</th>
@@ -668,27 +692,31 @@ function Policies() {
         <tbody>
           {data.policies.map((p) => (
             <tr key={p.digest}>
-              <td className="code">{p.github_name}</td>
-              <td>v{p.version}</td>
-              <td className="code">{p.digest.slice(7, 23)}…</td>
               <td>
-                <span className={`pill ${p.status === "active" ? "on" : ""}`}>{p.status}</span>
+                <code>{p.github_name}</code>
               </td>
-              <td className="muted">{p.activated_at?.slice(0, 10) ?? "—"}</td>
+              <td>v{p.version}</td>
+              <td>
+                <code>{p.digest.slice(7, 23)}…</code>
+              </td>
+              <td>
+                <span className={`gp-chip ${p.status === "active" ? "is-active" : ""}`}>{p.status}</span>
+              </td>
+              <td className="gp-panel__meta">{p.activated_at?.slice(0, 10) ?? "—"}</td>
             </tr>
           ))}
         </tbody>
       </table>
-    </div>
+    </Panel>
   );
 }
 
-function Billing({ me }: { me: Me }) {
+function Billing() {
   const { data, error, reload } = useFetch<{
     plan: string;
     limits: { projects: number; users: number };
     betterAuthOrgId: string | null;
-    subscription: { plan: string; status: string; periodEnd: string | null; cancelAtPeriodEnd: number | null } | null;
+    subscription: { plan: string; status: string; periodEnd: string | null } | null;
     isOwner: boolean;
   }>("/v1/dashboard/billing");
   const [working, setWorking] = useState(false);
@@ -709,7 +737,7 @@ function Billing({ me }: { me: Me }) {
     setNote(null);
     try {
       const referenceId = await ensureBillingOrg();
-      const res = await api<{ url?: string; redirect?: boolean }>("/api/auth/subscription/upgrade", {
+      const res = await api<{ url?: string }>("/api/auth/subscription/upgrade", {
         method: "POST",
         body: JSON.stringify({
           plan: "pro",
@@ -743,58 +771,57 @@ function Billing({ me }: { me: Me }) {
     }
   };
 
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <div className="panel">
-      <h3>Billing</h3>
-      <div className="statrow" style={{ marginBottom: 18 }}>
-        <div className="stat">
-          <div className="v">{data.plan}</div>
-          <div className="l">plan</div>
+    <Panel title="Billing" meta="checkout and the customer portal are hosted by Stripe">
+      <div className="metric-strip">
+        <div className="metric-strip__item">
+          <span className="metric-strip__label">plan</span>
+          <span className="metric-strip__value">{data.plan}</span>
         </div>
-        <div className="stat">
-          <div className="v">{data.limits.projects}</div>
-          <div className="l">project limit</div>
+        <div className="metric-strip__item">
+          <span className="metric-strip__label">project limit</span>
+          <span className="metric-strip__value">{data.limits.projects}</span>
         </div>
-        <div className="stat">
-          <div className="v">{data.limits.users}</div>
-          <div className="l">user limit</div>
+        <div className="metric-strip__item">
+          <span className="metric-strip__label">user limit</span>
+          <span className="metric-strip__value">{data.limits.users}</span>
         </div>
         {data.subscription && (
-          <div className="stat">
-            <div className="v">{data.subscription.status}</div>
-            <div className="l">subscription</div>
+          <div className="metric-strip__item">
+            <span className="metric-strip__label">subscription</span>
+            <span className="metric-strip__value">{data.subscription.status}</span>
           </div>
         )}
       </div>
-      {note && <p className="error-note">{note}</p>}
+      {note && <p className="thwip-error">{note}</p>}
       {data.isOwner ? (
         data.plan === "free" ? (
-          <div className="actions" style={{ display: "flex", gap: 12 }}>
-            <button className="btn" disabled={working} onClick={() => void upgrade(false)}>
-              Upgrade to Pro — $5/mo
+          <div className="thwip-actions">
+            <button className="gp-btn" disabled={working} onClick={() => void upgrade(false)}>
+              Upgrade to Pro, $5/month
             </button>
-            <button className="btn ghost" disabled={working} onClick={() => void upgrade(true)}>
-              Annual — $50/yr
+            <button className="gp-btn" disabled={working} onClick={() => void upgrade(true)}>
+              Annual, $50/year
             </button>
           </div>
         ) : (
-          <button className="btn ghost" disabled={working} onClick={() => void portal()}>
-            Manage billing (Stripe portal)
+          <button className="gp-btn" disabled={working} onClick={() => void portal()}>
+            Manage billing
           </button>
         )
       ) : (
-        <p className="muted">Only GitHub organization owners can change billing.</p>
+        <p className="gp-panel__meta">Only GitHub organization owners can change billing.</p>
       )}
-    </div>
+    </Panel>
   );
 }
 
 function Operations({ me }: { me: Me }) {
   const { data, error, reload } = useFetch<{
     deliveries: Array<{ provider: string; delivery_id: string; event: string; received_at: string }>;
-    observations: Array<{ github_name: string; head_sha: string; outcome: string; run_id: string | null; observed_at: string }>;
+    observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
   }>("/v1/dashboard/operations");
   const [syncing, setSyncing] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -811,59 +838,61 @@ function Operations({ me }: { me: Me }) {
       setSyncing(false);
     }
   };
-  if (error) return <div className="panel error-note">{error}</div>;
-  if (!data) return <div className="panel empty">Loading…</div>;
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <>
-      <div className="panel">
-        <h3>GitHub sync</h3>
-        <p className="muted" style={{ marginBottom: 10 }}>
-          Webhooks keep the projection warm; a full reconciliation re-reads members, teams, repositories, and
-          permissions from GitHub.
-        </p>
+      <Panel title="GitHub sync" meta="webhooks keep the projection warm; a full sync re-reads everything">
         {me.viewer.githubOrgRole === "owner" ? (
-          <button className="btn small" disabled={syncing} onClick={() => void sync()}>
+          <button className="gp-btn gp-btn--sm" disabled={syncing} onClick={() => void sync()}>
             {syncing ? "Syncing…" : "Run full sync"}
           </button>
         ) : (
-          <p className="muted">Org owners can trigger a full sync.</p>
+          <p className="gp-panel__meta">Org owners can trigger a full sync.</p>
         )}
-        {note && <p className="muted code" style={{ marginTop: 8, fontSize: "0.8rem" }}>{note}</p>}
-      </div>
-      <div className="panel">
-        <h3>Recent verifications</h3>
-        {data.observations.length === 0 && <p className="empty">No verifications recorded yet.</p>}
-        <table className="plain">
+        {note && (
+          <p className="gp-panel__meta" style={{ marginTop: "0.5rem" }}>
+            <code>{note}</code>
+          </p>
+        )}
+      </Panel>
+      <Panel title="Recent verifications">
+        {data.observations.length === 0 && <p>No verifications recorded yet.</p>}
+        <table className="gp-data-table">
           <tbody>
             {data.observations.map((o, i) => (
               <tr key={i}>
-                <td className="code">{o.github_name}</td>
-                <td className="code">{o.head_sha.slice(0, 12)}</td>
+                <td>
+                  <code>{o.github_name}</code>
+                </td>
+                <td>
+                  <code>{o.head_sha.slice(0, 12)}</code>
+                </td>
                 <td>
                   <span className={o.outcome === "PASS" ? "ok" : "bad"}>{o.outcome}</span>
                 </td>
-                <td className="muted">{o.observed_at.slice(0, 19)}Z</td>
+                <td className="gp-panel__meta">{o.observed_at.slice(0, 19)}Z</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
-      <div className="panel">
-        <h3>Webhook deliveries</h3>
-        {data.deliveries.length === 0 && <p className="empty">No deliveries yet.</p>}
-        <table className="plain">
+      </Panel>
+      <Panel title="Webhook deliveries">
+        {data.deliveries.length === 0 && <p>No deliveries yet.</p>}
+        <table className="gp-data-table">
           <tbody>
             {data.deliveries.map((d) => (
               <tr key={d.delivery_id}>
                 <td>{d.provider}</td>
-                <td className="code">{d.event}</td>
-                <td className="code" style={{ fontSize: "0.72rem" }}>{d.delivery_id.slice(0, 18)}</td>
-                <td className="muted">{d.received_at.slice(0, 19)}Z</td>
+                <td>
+                  <code>{d.event}</code>
+                </td>
+                <td className="gp-panel__meta">{d.received_at.slice(0, 19)}Z</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+      </Panel>
     </>
   );
 }
@@ -887,14 +916,14 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
   };
   if (me === null) {
     return (
-      <div className="shell">
-        <div className="panel device-card">
-          <h3>Sign in to approve this device</h3>
-          <p className="muted" style={{ marginBottom: 14 }}>
-            The thwip CLI is waiting for approval. Sign in with GitHub to continue.
-          </p>
+      <div className="gp-panel thwip-device-card">
+        <div className="gp-panel__header">
+          <h3 className="gp-panel__title">Sign in to approve this device</h3>
+        </div>
+        <div className="gp-panel__body">
+          <p>The thwip CLI is waiting for approval. Sign in with GitHub to continue.</p>
           <button
-            className="btn"
+            className="gp-btn"
             onClick={() => void signInWithGitHub(`/device?user_code=${encodeURIComponent(code)}`)}
           >
             Sign in with GitHub
@@ -904,25 +933,21 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
     );
   }
   return (
-    <div className="shell">
-      <div className="panel device-card">
-        <h3>Approve CLI sign-in</h3>
+    <div className="gp-panel thwip-device-card">
+      <div className="gp-panel__header">
+        <h3 className="gp-panel__title">Approve CLI sign-in</h3>
+      </div>
+      <div className="gp-panel__body">
         {state === "done" ? (
-          <p className="ok">Device approved — return to your terminal.</p>
+          <p className="ok">Device approved. Return to your terminal.</p>
         ) : (
           <>
-            <p className="muted" style={{ marginBottom: 14 }}>
-              Enter the code shown by <span className="code">thwip login</span>.
+            <p>
+              Enter the code shown by <code>thwip login</code>.
             </p>
-            <input
-              className="code"
-              style={{ fontSize: "1.3rem", padding: "10px 14px", width: "100%", marginBottom: 14, letterSpacing: "0.2em", textAlign: "center", border: "1px solid var(--hairline)", borderRadius: 3 }}
-              value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
-              aria-label="Device code"
-            />
-            {message && <p className="error-note">{message}</p>}
-            <button className="btn" disabled={state === "working" || code.length < 4} onClick={() => void approve()}>
+            <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} aria-label="Device code" />
+            {message && <p className="thwip-error">{message}</p>}
+            <button className="gp-btn" disabled={state === "working" || code.length < 4} onClick={() => void approve()}>
               Approve device
             </button>
           </>
@@ -941,16 +966,16 @@ export function App() {
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
   if (dashMatch) {
-    if (me === undefined) return <div className="shell empty" style={{ padding: 60 }}>Loading…</div>;
+    if (me === undefined) return <p className="gp-panel__meta" style={{ padding: "3rem" }}>Loading…</p>;
     if (me === null) {
       return (
-        <div className="shell">
-          <div className="panel device-card">
-            <h3>Sign in to thwip</h3>
-            <p className="muted" style={{ marginBottom: 14 }}>
-              The dashboard mirrors your GitHub organization — sign in with the account that belongs to it.
-            </p>
-            <button className="btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
+        <div className="gp-panel thwip-device-card">
+          <div className="gp-panel__header">
+            <h3 className="gp-panel__title">Sign in to thwip</h3>
+          </div>
+          <div className="gp-panel__body">
+            <p>The dashboard mirrors your GitHub organizations. Sign in with the account that belongs to them.</p>
+            <button className="gp-btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
               Sign in with GitHub
             </button>
           </div>

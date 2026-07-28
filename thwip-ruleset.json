@@ -1,5 +1,5 @@
 {
-  "name": "thwip receipt verification + merge queue",
+  "name": "thwip proof verification + merge queue",
   "target": "branch",
   "enforcement": "active",
   "conditions": {

@@ -1,7 +1,7 @@
 name: thwip-automerge
 
 # Automatically add internal-team PRs to the merge queue. The only merge
-# gate is the required thwip receipt check; once it is green this job
+# gate is the required thwip proof check; once it is green this job
 # enqueues the PR and the queue merges it without further human action.
 #
 # GitHub's native auto-merge -> merge-queue handoff proved unreliable

@@ -59,9 +59,20 @@ function timingSafeEqualHex(a: string, b: string): boolean {
   return diff === 0;
 }
 
+interface ViewerOrg {
+  organizationId: string;
+  githubOrgId: string;
+  githubLogin: string;
+  principalId: string;
+  githubOrgRole: string | null;
+  activated: boolean;
+}
+
 interface Viewer {
   baUserId: string;
   githubUserId: string;
+  orgs: ViewerOrg[];
+  /** the org selected for this request (?org=<github org id>, else first) */
   principalId: string | null;
   organizationId: string | null;
   githubOrgRole: string | null;
@@ -69,9 +80,10 @@ interface Viewer {
 }
 
 /**
- * Resolve the signed-in viewer to the GitHub projection. GitHub — not
- * Better Auth — is the authorization source: role and permissions come from
- * the synced org projection keyed by the numeric GitHub user id.
+ * Resolve the signed-in viewer to the GitHub projection. GitHub, not
+ * Better Auth, is the authorization source: roles and permissions come from
+ * the synced org projections keyed by the numeric GitHub user id. A viewer
+ * can belong to several installed organizations; `?org=` selects one.
  */
 async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
   const auth = createAuth(env);
@@ -83,24 +95,38 @@ async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
     .bind(session.user.id)
     .first<{ accountId: string }>();
   if (!account) return null;
-  const principal = await env.DB.prepare(
-    `SELECT id, organization_id, github_org_role, better_auth_user_id, activated_at FROM principals WHERE github_user_id = ?`,
+  const rows = await env.DB.prepare(
+    `SELECT p.id, p.organization_id, p.github_org_role, p.activated_at, o.github_org_id, o.github_login
+     FROM principals p JOIN organizations o ON o.id = p.organization_id
+     WHERE p.github_user_id = ? ORDER BY o.github_login`,
   )
     .bind(account.accountId)
-    .first<{
+    .all<{
       id: string;
       organization_id: string;
       github_org_role: string | null;
-      better_auth_user_id: string | null;
       activated_at: string | null;
+      github_org_id: string;
+      github_login: string;
     }>();
+  const orgs: ViewerOrg[] = rows.results.map((r) => ({
+    organizationId: r.organization_id,
+    githubOrgId: r.github_org_id,
+    githubLogin: r.github_login,
+    principalId: r.id,
+    githubOrgRole: r.github_org_role,
+    activated: r.activated_at != null,
+  }));
+  const requested = new URL(req.url).searchParams.get("org");
+  const selected = orgs.find((o) => o.githubOrgId === requested || o.githubLogin === requested) ?? orgs[0] ?? null;
   return {
     baUserId: session.user.id,
     githubUserId: account.accountId,
-    principalId: principal?.id ?? null,
-    organizationId: principal?.organization_id ?? null,
-    githubOrgRole: principal?.github_org_role ?? null,
-    activated: principal?.activated_at != null,
+    orgs,
+    principalId: selected?.principalId ?? null,
+    organizationId: selected?.organizationId ?? null,
+    githubOrgRole: selected?.githubOrgRole ?? null,
+    activated: selected?.activated ?? false,
   };
 }
 
@@ -170,7 +196,7 @@ app.get("/v1/me", async (c) => {
         .bind(viewer.principalId)
         .first()
     : null;
-  return c.json({ viewer: { ...viewer }, principal, organization: org });
+  return c.json({ viewer: { ...viewer }, principal, organization: org, organizations: viewer.orgs });
 });
 
 // Owner-run: create/link the Better Auth organization used as the Stripe
@@ -887,7 +913,7 @@ app.get("/admin/github/manifest", async (c) => {
   const manifest = {
     name: c.env.THWIP_ENV === "production" ? "thwip" : "thwip Dev",
     url: origin,
-    description: "Git-native CI receipts for agent-run pipelines.",
+    description: "Git-native CI proofs for agent-run pipelines.",
     hook_attributes: { url: `${origin}/api/github/webhooks`, active: true },
     redirect_url: `${origin}/admin/github/manifest/callback`,
     callback_urls: [`${origin}/api/auth/callback/github`],
