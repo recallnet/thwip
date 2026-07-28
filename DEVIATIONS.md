@@ -66,10 +66,10 @@ the deviation and the reason are recorded here.
   checks out `github.workflow_sha` and never executes PR-controlled code.
 - **Merge queue is supported, ahead of the plan's v1 scope.** On
   `merge_group` events the Action walks the group's first-parent chain and
-  independently verifies the receipt on every member PR's exact head commit
+  independently verifies the proof on every member PR's exact head commit
   (repository, tree, ancestry, base, policy, signer, suites). The synthetic
-  group commit itself is not treated as a receipt subject.
-- **Merge-group semantics caveat:** verifying each PR head's receipt does
+  group commit itself is not treated as a proof subject.
+- **Merge-group semantics caveat:** verifying each PR head's proof does
   not re-run CI against the combined group tree. This matches the goal
   ("the only green gate is a valid thwip proof for the PR head commit") and
   the plan's honesty requirements; the stronger group-tree rerun remains

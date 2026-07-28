@@ -12,7 +12,7 @@ import {
   type VerificationBundleV1,
 } from "@thwip/protocol";
 
-/** Facts the Action derives independently from GitHub. Never taken from the receipt. */
+/** Facts the Action derives independently from GitHub. Never taken from the proof. */
 export interface GithubFacts {
   ownerId: string;
   repositoryId: string;
@@ -68,7 +68,7 @@ function res(code: ReasonCode, detail?: string, extra?: Partial<VerifyResult>): 
   return { code, ...(detail !== undefined ? { detail } : {}), ...extra };
 }
 
-export async function verifyReceipt(input: VerifyInput, deps: VerifyDeps): Promise<VerifyResult> {
+export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise<VerifyResult> {
   const { facts, bundle } = input;
   const nowMs = Date.parse(input.now);
 
@@ -88,7 +88,7 @@ export async function verifyReceipt(input: VerifyInput, deps: VerifyDeps): Promi
   try {
     payloadBytes = b64stdDecode(envelope.payload);
   } catch {
-    return res("RECEIPT_MALFORMED", "payload not base64");
+    return res("PROOF_MALFORMED", "payload not base64");
   }
   const keyid = envelope.signatures[0]!.keyid;
   const key = bundle.keys.find((k) => k.keyId === keyid);
@@ -116,14 +116,14 @@ export async function verifyReceipt(input: VerifyInput, deps: VerifyDeps): Promi
   try {
     statementJson = JSON.parse(utf8Decode(payloadBytes));
   } catch {
-    return res("RECEIPT_MALFORMED", "payload not JSON");
+    return res("PROOF_MALFORMED", "payload not JSON");
   }
   const parsed = parseStatement(statementJson);
-  if (!parsed.ok) return res("RECEIPT_MALFORMED", parsed.detail);
+  if (!parsed.ok) return res("PROOF_MALFORMED", parsed.detail);
   const statement = parsed.value;
   const pred = statement.predicate;
 
-  // 4. Subject: repository identity from GitHub, never from the receipt.
+  // 4. Subject: repository identity from GitHub, never from the proof.
   if (pred.repository.ownerId !== facts.ownerId || pred.repository.repositoryId !== facts.repositoryId) {
     return res("SUBJECT_REPOSITORY_MISMATCH", undefined, { statement });
   }
@@ -189,11 +189,11 @@ export async function verifyReceipt(input: VerifyInput, deps: VerifyDeps): Promi
     if (suite.status !== "passed") return res("SUITE_NOT_PASSED", required, { statement });
   }
 
-  // 10. Receipt age (signer-asserted in fast profile; bounded anyway).
+  // 10. Proof age (signer-asserted in fast profile; bounded anyway).
   const finished = Date.parse(pred.run.finishedAt);
-  if (!Number.isFinite(finished)) return res("RECEIPT_MALFORMED", "finishedAt unparseable", { statement });
-  if (nowMs - finished > bundle.policy.receiptMaxAgeSeconds * 1000) {
-    return res("RECEIPT_EXPIRED", undefined, { statement });
+  if (!Number.isFinite(finished)) return res("PROOF_MALFORMED", "finishedAt unparseable", { statement });
+  if (nowMs - finished > bundle.policy.proofMaxAgeSeconds * 1000) {
+    return res("PROOF_EXPIRED", undefined, { statement });
   }
 
   // 11. Lease requirement (fresh and stronger profiles).

@@ -7,7 +7,7 @@ export const STATEMENT_TYPE = "https://in-toto.io/Statement/v1" as const;
 export const PREDICATE_TYPE = "urn:thwip:attestation:ci-run:v1" as const;
 export const DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json" as const;
 export const SSH_SIGN_NAMESPACE = "thwip-ci-dsse-v1" as const;
-export const TRAILER_KEY = "thwip-Receipt" as const;
+export const TRAILER_KEY = "thwip-Proof" as const;
 export const CARRIER_VERSION = "v1" as const;
 
 /** Encoded trailer value hard maximum (base64url chars). */
@@ -92,7 +92,7 @@ export interface PolicyBundleV1 {
     runner: "dagger" | "command";
     requiredSuites: string[];
   };
-  receiptMaxAgeSeconds: number;
+  proofMaxAgeSeconds: number;
   audit: { basisPoints: number; mandatoryPaths: string[] };
 }
 
@@ -129,11 +129,11 @@ export interface VerificationBundleV1 {
 
 export const REASON_CODES = [
   "PASS",
-  "RECEIPT_MISSING",
-  "RECEIPT_DUPLICATE",
-  "RECEIPT_TOO_LARGE",
-  "RECEIPT_MALFORMED",
-  "RECEIPT_SCHEMA_UNSUPPORTED",
+  "PROOF_MISSING",
+  "PROOF_DUPLICATE",
+  "PROOF_TOO_LARGE",
+  "PROOF_MALFORMED",
+  "PROOF_SCHEMA_UNSUPPORTED",
   "SIGNATURE_INVALID",
   "SIGNER_KEY_UNKNOWN",
   "SIGNER_KEY_REVOKED",
@@ -149,7 +149,7 @@ export const REASON_CODES = [
   "SUITE_MISSING",
   "SUITE_DUPLICATE",
   "SUITE_NOT_PASSED",
-  "RECEIPT_EXPIRED",
+  "PROOF_EXPIRED",
   "LEASE_REQUIRED",
   "LEASE_INVALID",
   "LEASE_EXPIRED",
