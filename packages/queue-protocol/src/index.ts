@@ -4,3 +4,4 @@ export * from "./queue-decision.js";
 export * from "./assignment.js";
 export * from "./merge-intent.js";
 export * from "./transition-record.js";
+export * from "./verifier-result.js";
