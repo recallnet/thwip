@@ -169,7 +169,18 @@ async function main(): Promise<void> {
     };
     const result = await verifyProof(
       { commitMessage: commit.message, facts, bundle, now: new Date().toISOString() },
-      { verifySshSignature },
+      {
+        verifySshSignature,
+        // Remote suites are proven by GitHub's own checks on this commit.
+        remoteCheckConclusions: async (headSha) => {
+          const runs = await gh<{ check_runs: Array<{ name: string; conclusion: string | null }> }>(
+            `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`,
+          );
+          const map = new Map<string, string>();
+          for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
+          return map;
+        },
+      },
     );
     renderRichSummary(result, commit, facts);
     if (result.code !== "PASS") allPass = false;
