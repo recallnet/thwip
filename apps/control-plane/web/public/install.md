@@ -1,42 +1,66 @@
-# Install thwip (agent prompt)
+# Set up your machine for thwip
 
-Paste the block below into your coding agent. It installs the CLI, signs in
-with a click-through device code (works over SSH: the URL is clicked on the
-human's machine), and sets up the project with the human's approval at each
-step.
+Paste the block below into your coding agent, or run `thwip setup` to print
+it. It installs the CLI, signs you in with a device code that works over SSH,
+and guides you through registering a signing key with GitHub. The agent never
+handles your private key.
+
+Setting up a *repository* is a separate prompt, on that project's page in the
+dashboard.
 
 ```
-You are installing thwip (verified local CI) into this project.
-Work step by step and ask the human before each side-effectful step.
+Set up my machine to sign thwip proofs (https://thwip.recall.net).
 
-1. Install the CLI: clone https://github.com/recallnet/thwip and run
-   "pnpm install && pnpm build", then link packages/cli (or run it via
-   "node packages/cli/dist/main.js"). Confirm with: thwip --help
-2. Authenticate: do not run this yourself. "thwip login" blocks until a
-   human approves it in a browser, and the browser must be theirs. Give
-   them a pastable command to run in their own terminal:
+Ground rules: ask me before anything that changes files or my GitHub account,
+and never read, copy, move, or print the contents of a private key. You may
+read and print .pub files. If a step needs my browser or my terminal, hand me
+the exact command or URL and wait.
+
+1. CLI. Check that "thwip --help" works. If it doesn't, clone
+   https://github.com/recallnet/thwip, run "pnpm install && pnpm build", and
+   use "node packages/cli/dist/main.js" as the thwip command from here on.
+
+2. Sign in. Don't run this yourself — "thwip login" blocks until I approve it
+   in a browser, and the browser has to be mine. Give me a pastable command to
+   run in my own terminal:
      thwip login
-   It prints a URL and a short code; they open it, approve, and tell you
-   when it reports "signed in". Wait for that confirmation before
-   continuing.
-3. Signing key: run "thwip keys status". It finds the ed25519 key already
-   on this machine and reports whether GitHub lists it as a signing key for
-   the human's account (GitHub owns that binding; thwip stores no keys).
-   If it is not registered, hand the human the exact
-   "gh ssh-key add ... --type signing" command it printed and wait.
-4. Set up the project: ask the human which checks make up CI here
-   (for example lint, typecheck, test), then write thwip.yaml at the
-   repository root declaring those suites and the security profile
-   (start with "fast"; see https://thwip.recall.net/faq for profiles).
-   Commit it on a branch and open a pull request.
-5. Ask the human (an org owner) to enable the project and activate the
-   policy in the dashboard at https://thwip.recall.net/dashboard.
-6. Prove the loop: make a small change, run "thwip run", push, and
-   open a PR. The thwip check should pass from the proof on the head
-   commit without rerunning CI remotely.
+   It prints a URL and a short code. I'll open it, approve, and tell you when
+   it reports "signed in". Wait for that before continuing.
 
-Rules: never generate or upload a private key anywhere except the
-human's ~/.config/thwip directory; never bypass a failing suite; if
-"thwip run" refuses to sign, report the reason code to the human
-instead of working around it.
+3. Signing key. Run "thwip keys status" and show me the whole output. It
+   reports which key on this machine would sign, and whether GitHub lists that
+   key as a signing key for the account the CLI authenticates as. Then:
+
+   - registeredWithGithub: true — done, go to step 4.
+
+   - No key found at all: propose this and let me run it myself, so the private
+     key is created by me and stays out of your context:
+       ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+     Then continue to the registration steps below.
+
+   - A key exists but isn't registered: print the public half for me to copy
+       cat ~/.ssh/id_ed25519.pub
+     and give me these instructions, which are easy to get wrong in two
+     specific ways:
+       a. Open https://github.com/settings/ssh/new
+       b. Check the account shown on that page matches the "githubLogin" value
+          from "thwip keys status". Registering the key on a different GitHub
+          account will not work, because the verifier reads the signing keys of
+          the account the proof names.
+       c. Set "Key type" to "Signing Key". It defaults to "Authentication Key",
+          which GitHub keeps in a separate list that thwip does not read. This
+          is the most common mistake.
+       d. Paste the key, give it a title, and add it.
+       e. If GitHub answers "key is already in use", that key is registered on
+          another account. Either sign in as the account from (b), or generate
+          a new key and start again.
+
+   - Re-run "thwip keys status" and confirm registeredWithGithub is now true
+     before continuing.
+
+4. Report back: the fingerprint that will appear in my proofs, the GitHub
+   account they will be attributed to, and which local key file it came from.
+
+That's the machine ready. Setting up a repository is a separate prompt, in the
+project's page at https://thwip.recall.net/dashboard/projects.
 ```

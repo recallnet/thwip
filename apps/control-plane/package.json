@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
+    "build": "node ../../scripts/generate-prompt-docs.mjs && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "deploy:staging": "wrangler deploy --env staging",
     "dev": "wrangler dev --env staging"
@@ -19,7 +19,8 @@
     "kysely-d1": "^0.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "stripe": "^22.3.2"
+    "stripe": "^22.3.2",
+    "@thwip/prompts": "workspace:*"
   },
   "devDependencies": {
     "@better-auth/cli": "^1.4.21",

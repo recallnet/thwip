@@ -22,6 +22,7 @@ import {
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
+import { developerSetupPrompt } from "@thwip/prompts";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
@@ -380,8 +381,10 @@ COMMANDS
        [--sign-commits]     fast | fresh | audited | remote (see /faq).
                             --sign-commits also makes git sign commits with
                             the enrolled thwip key.
-  keys enroll --public-key <path.pub> --label <device>
-                            Enroll this machine's dedicated signing key.
+  keys status               Show which key would sign here and whether GitHub
+                            lists it as a signing key for your account.
+  setup                     Print the agent prompt for preparing a machine
+                            (install, sign in, register a signing key).
   run [--base origin/main]  Run the approved suites against the committed
                             tree and attach a signed proof to HEAD.
                             Refuses dirty trees; exit 1 and no proof if any
@@ -412,6 +415,11 @@ async function main(): Promise<void> {
   }
   else if (cmd === "verify") code = await cmdVerifyLocal();
   else if (cmd === "keys" && (sub === "status" || sub === undefined)) code = await cmdKeysStatus();
+  else if (cmd === "setup") {
+    // Printed for agents: the human-guided machine setup, verbatim.
+    process.stdout.write(developerSetupPrompt() + "\n");
+    code = 0;
+  }
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
   else {
     process.stderr.write("usage: thwip <login|run|verify|policy digest|keys enroll> [options]\n");
