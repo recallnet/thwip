@@ -155,6 +155,25 @@ const app = new Hono<{ Bindings: Env }>();
 
 // --- Better Auth (sessions, GitHub login, device flow, Stripe billing) -----
 
+/**
+ * GitHub sends the post-installation redirect to the App's OAuth callback,
+ * but that flow was started by GitHub rather than by us, so Better Auth has
+ * no stored state and renders state_not_found. An installation_id in the
+ * query is the reliable signal; treat those as install completions: sync the
+ * new installation and land the operator on their projects.
+ */
+app.get("/api/auth/callback/github", async (c, next) => {
+  const url = new URL(c.req.url);
+  const installationId = url.searchParams.get("installation_id");
+  if (!installationId) return next();
+  try {
+    await syncInstallation(c.env, installationId);
+  } catch {
+    /* the scheduled reconciliation will pick it up */
+  }
+  return c.redirect("/dashboard/projects", 302);
+});
+
 app.on(["GET", "POST"], "/api/auth/*", (c) => createAuth(c.env).handler(c.req.raw));
 
 app.get("/health", async (c) => {
@@ -199,7 +218,15 @@ app.get("/v1/me", async (c) => {
         .bind(viewer.principalId)
         .first()
     : null;
-  return c.json({ viewer: { ...viewer }, principal, organization: org, organizations: viewer.orgs });
+  return c.json({
+    viewer: { ...viewer },
+    principal,
+    organization: org,
+    organizations: viewer.orgs,
+    // Lets the dashboard deep-link to "install thwip on another organization"
+    // without hardcoding the App slug in the client bundle.
+    appSlug: c.env.GITHUB_APP_SLUG,
+  });
 });
 
 // Owner-run: create/link the Better Auth organization used as the Stripe
