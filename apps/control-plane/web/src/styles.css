@@ -38,6 +38,7 @@
   line-height: 1.1;
   margin: 0 0 1rem;
   max-width: none;
+  text-wrap: balance;
 }
 .thwip-hero .dek { color: var(--gp-margin-ink); font-size: 1.02rem; max-width: 44ch; margin: 0 0 1.4rem; text-indent: 0; }
 .thwip-hero .meta {
@@ -48,7 +49,14 @@
   color: var(--gp-ghost-ink);
   margin: 0 0 0.6rem;
 }
-.thwip-hero .fine { margin-top: 0.9rem; font-family: var(--gp-mono, monospace); font-size: 0.7rem; color: var(--gp-ghost-ink); }
+.thwip-hero .fine {
+  margin-top: 0.9rem;
+  font-family: var(--gp-mono, monospace);
+  font-size: 0.7rem;
+  color: var(--gp-ghost-ink);
+  max-width: none;
+  text-wrap: balance;
+}
 .thwip-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 
 /* ---------- the proof slip ---------- */
@@ -181,6 +189,20 @@ footer.thwip-footer {
   color: var(--gp-ink);
   margin: 0.7rem 0;
 }
+
+.thwip-add-repos {
+  display: flex;
+  gap: 0.7rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 0.9rem;
+}
+.thwip-add-repos .gp-btn { flex-shrink: 0; }
+.thwip-add-repos .gp-panel__meta { flex: 1; min-width: 18rem; }
+
+/* Graphics Press indents run-on paragraphs (p + p) for prose; inside app
+   panels and tables every paragraph starts flush. */
+.gp-panel p, .gp-data-table p { text-indent: 0; max-width: none; }
 
 .thwip-faq dt { font-family: var(--gp-sans); font-weight: 600; margin-top: 1.1rem; }
 .thwip-faq dd { margin: 0.3rem 0 0; color: var(--gp-margin-ink); max-width: 65ch; }
