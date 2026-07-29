@@ -5,6 +5,7 @@
   "compatibility_date": "2026-07-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  "placement": { "mode": "smart" },
   "env": {
     "staging": {
       "name": "thwip-staging",
@@ -18,8 +19,8 @@
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "thwip-staging",
-          "database_id": "00000000-0000-0000-0000-000000000000",
+          "database_name": "thwip-staging-wnam",
+          "database_id": "647114a5-9ad9-4895-b23e-92bbfaf8ab41",
           "migrations_dir": "migrations"
         }
       ],
