@@ -52,6 +52,7 @@ interface Me {
     better_auth_org_id: string | null;
   } | null;
   organizations: OrgSummary[];
+  appSlug: string;
 }
 
 function useMe() {
@@ -479,25 +480,31 @@ const TABS = [
   ["operations", "Operations"],
 ] as const;
 
+const ADD_ORG = "__add__";
+
 function OrgSwitcher({ me }: { me: Me }) {
-  if (me.organizations.length <= 1) {
-    return <span className="gp-chip">{me.organization?.github_login ?? "no org"}</span>;
-  }
+  const current = selectedOrg() ?? me.organization?.github_login ?? "";
   return (
     <select
       className="gp-btn gp-btn--sm"
       aria-label="Organization"
-      value={selectedOrg() ?? me.organization?.github_login ?? ""}
+      value={current}
       onChange={(e) => {
+        if (e.target.value === ADD_ORG) {
+          window.open(`https://github.com/apps/${me.appSlug}/installations/new`, "_blank", "noreferrer");
+          return;
+        }
         localStorage.setItem("thwip.org", e.target.value);
         window.location.reload();
       }}
     >
+      {me.organizations.length === 0 && <option value="">no organization</option>}
       {me.organizations.map((o) => (
         <option key={o.githubOrgId} value={o.githubLogin}>
           {o.githubLogin}
         </option>
       ))}
+      <option value={ADD_ORG}>Add an organization…</option>
     </select>
   );
 }
@@ -512,7 +519,11 @@ function Dashboard({ me, tab, accessProjectId }: { me: Me; tab: string; accessPr
         </a>
         <span className="links">
           <OrgSwitcher me={me} />
-          {org && <span className="gp-chip">{org.plan}</span>}
+          {org && (
+            <a className="gp-chip" href="/dashboard/billing" title="Plan and limits">
+              {org.plan}
+            </a>
+          )}
           <span className="gp-panel__meta">{me.principal?.github_login ?? me.viewer.githubUserId}</span>
           <button
             className="gp-btn gp-btn--sm"
