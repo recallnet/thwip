@@ -20,4 +20,8 @@ export interface Env {
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_BA_WEBHOOK_SECRET?: string;
   GITHUB_SYNC_TOKEN?: string;
+  /* Thwip Queue: one Durable Object per repository and base ref, and the
+     workflow that drives one integration turn. */
+  BRANCH_QUEUE: DurableObjectNamespace<import("./queue/BranchQueue.js").BranchQueue>;
+  QUEUE_TURN: Workflow;
 }
