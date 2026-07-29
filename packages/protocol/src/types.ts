@@ -90,7 +90,10 @@ export interface PolicyBundleV1 {
   pipeline: {
     digest: Sha256;
     runner: "dagger" | "command";
+    /** suites that must appear, passing, in the proof */
     requiredSuites: string[];
+    /** suites that must instead pass as GitHub checks on the same commit */
+    remoteSuites?: string[];
   };
   proofMaxAgeSeconds: number;
   audit: { basisPoints: number; mandatoryPaths: string[] };
