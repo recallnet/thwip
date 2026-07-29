@@ -232,7 +232,7 @@ thwip should automate inspection, scaffolding, comparison, and instructions. It 
 3. If the project requires freshness, the CLI requests a subject-bound run lease.
 4. The CLI runs the base-approved Dagger pipeline against the frozen source.
 5. Required suites pass.
-6. The CLI creates an in-toto statement, signs its DSSE pre-auth bytes with the enrolled key, and adds exactly one `thwip-Proof` trailer.
+6. The CLI creates an in-toto statement, signs its DSSE pre-auth bytes with the enrolled key, and adds exactly one `thwip-proof` trailer.
 7. The commit is optionally or automatically Git-signed after the trailer is present.
 8. The user or agent pushes.
 9. The protected GitHub workflow reads the PR head commit, obtains one verification bundle from thwip with GitHub OIDC, and verifies locally.
@@ -587,14 +587,14 @@ For v1, either reject repositories with Git submodules or bind every submodule p
 The final commit trailer block contains exactly:
 
 ```text
-thwip-Proof: v1.<base64url(dsse-envelope-json)>
+thwip-proof: v1.<base64url(dsse-envelope-json)>
 ```
 
 v1 deliberately uses no additional compression. A compact digest-only predicate is expected to fit comfortably under 16 KiB, and avoiding a decompressor removes dependencies and an entire parser attack class. A later carrier version can add compression if measured proofs require it.
 
 Rules:
 
-- Exactly one `thwip-Proof` trailer is allowed.
+- Exactly one `thwip-proof` trailer is allowed.
 - Duplicate, folded, ambiguous, unknown-version, or malformed values fail closed.
 - Base64url has no padding.
 - Encoded size target: < 16 KiB.
@@ -1752,7 +1752,7 @@ The deployable control plane remains one Worker. Separate packages are compile-t
 | FR-008 | Policy approval | A candidate cannot become active without protected merge and an authorized approval action. |
 | FR-009 | Exact-source execution | `thwip run` refuses an ambiguous dirty source and aborts if the bound tree or context changes during execution. |
 | FR-010 | Local execution | The approved, digest-matching Dagger module runs all required suites against the frozen source. |
-| FR-011 | Proof attachment | Exactly one bounded `thwip-Proof` trailer is added before final commit signing. |
+| FR-011 | Proof attachment | Exactly one bounded `thwip-proof` trailer is added before final commit signing. |
 | FR-012 | Optional freshness | Fresh and stronger profiles obtain a signed lease bound to repository, tree, ancestry/base, policy, signer, and device. |
 | FR-013 | Protected verification | The ruleset-owned Action selects the exact PR head commit and obtains an OIDC-authenticated bundle. |
 | FR-014 | Local decision | The Action verifies the signed bundle and proof and computes the result without a server-returned pass Boolean. |
