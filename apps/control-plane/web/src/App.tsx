@@ -502,7 +502,7 @@ function OrgSwitcher({ me }: { me: Me }) {
   );
 }
 
-function Dashboard({ me, tab }: { me: Me; tab: string }) {
+function Dashboard({ me, tab, accessProjectId }: { me: Me; tab: string; accessProjectId?: string }) {
   const org = me.organization;
   return (
     <div className="thwip-shell gp-workspace">
@@ -548,7 +548,7 @@ function Dashboard({ me, tab }: { me: Me; tab: string }) {
           </div>
         )}
         {tab === "overview" && <Overview />}
-        {tab === "projects" && <Projects me={me} />}
+        {tab === "projects" && (accessProjectId ? <ProjectAccess projectId={accessProjectId} /> : <Projects me={me} />)}
         {tab === "people" && <People />}
         {tab === "devices" && <Devices me={me} />}
         {tab === "policies" && <Policies />}
@@ -677,7 +677,7 @@ function Projects({ me }: { me: Me }) {
               <td>
                 <code>{p.github_name}</code>
                 <div className="gp-panel__meta">
-                  {p.collaborators} collaborators · {p.default_branch}
+                  <a href={`/dashboard/projects/${p.id}/access`}>{p.collaborators} with access</a> · {p.default_branch}
                 </div>
               </td>
               <td>{p.enabled ? <span className="gp-chip is-active">enabled</span> : <span className="gp-chip">imported</span>}</td>
@@ -726,7 +726,6 @@ function People() {
     }>;
     teams: Array<{ team_id: string; slug: string; name: string; members: number; repos: number }>;
     teamMembers: Array<{ team_id: string; github_user_id: string; github_login: string | null }>;
-    grants: Array<{ github_name: string; github_login: string; permission: string; active: number }>;
   }>("/v1/dashboard/people");
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
@@ -782,32 +781,79 @@ function People() {
           </tbody>
         </table>
       </Panel>
-      <Panel title="Effective repository permissions">
+    </>
+  );
+}
+
+function ProjectAccess({ projectId }: { projectId: string }) {
+  const { data, error } = useFetch<{
+    project: { id: string; github_name: string };
+    grants: Array<{
+      github_user_id: string;
+      github_login: string;
+      permission: string;
+      active: number;
+      synced_at: string;
+      github_org_role: string | null;
+    }>;
+    teams: Array<{ slug: string; name: string; permission: string }>;
+  }>(`/v1/dashboard/projects/${projectId}/access`);
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+  return (
+    <>
+      <p style={{ marginBottom: "0.8rem" }}>
+        <a href="/dashboard/projects">← Projects</a>
+      </p>
+      <Panel title={`Access · ${data.project.github_name}`} meta="from GitHub; who may sign a proof for this repository">
         <table className="gp-data-table">
           <thead>
             <tr>
-              <th>Repository</th>
               <th>Member</th>
+              <th>Org role</th>
               <th>Permission</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
-            {data.grants.map((g, i) => (
-              <tr key={i}>
-                <td>
-                  <code>{g.github_name}</code>
-                </td>
+            {data.grants.map((g) => (
+              <tr key={g.github_user_id}>
                 <td>
                   <code>{g.github_login}</code>
                 </td>
+                <td>
+                  {g.github_org_role === "outside" ? (
+                    <span className="gp-chip">outside collaborator</span>
+                  ) : (
+                    (g.github_org_role ?? "member")
+                  )}
+                </td>
                 <td>{g.permission}</td>
-                <td>{g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}</td>
+                <td>
+                  {g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </Panel>
+      {data.teams.length > 0 && (
+        <Panel title="Teams with access">
+          <table className="gp-data-table">
+            <tbody>
+              {data.teams.map((t) => (
+                <tr key={t.slug}>
+                  <td>
+                    <code>@{t.slug}</code>
+                  </td>
+                  <td>{t.name}</td>
+                  <td>{t.permission}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
     </>
   );
 }
@@ -1171,6 +1217,7 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
 export function App() {
   const me = useMe();
   const path = window.location.pathname;
+  const accessMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/access/.exec(path);
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
@@ -1193,6 +1240,7 @@ export function App() {
         </div>
       );
     }
+    if (accessMatch) return <Dashboard me={me} tab="projects" accessProjectId={accessMatch[1]!} />;
     return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
   }
   return <Marketing me={me} />;
