@@ -32,8 +32,10 @@ two-party controls that SLSA's original L4 specified and v1.0 dropped.
 
 - [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit
   signing, rebases, data handling
-- [Install](https://thwip.recall.net/install.md): a step-by-step agent prompt
-  for installing the CLI, device-flow sign-in, and project setup
+- [Developer setup](https://thwip.recall.net/install.md): agent prompt for
+  preparing a machine — install the CLI, device-flow sign-in, and register an
+  ed25519 signing key with GitHub. Also printed by `thwip setup`.
+  Repository setup is a separate prompt, on each project's dashboard page.
 - [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored org
   management (requires sign-in)
 

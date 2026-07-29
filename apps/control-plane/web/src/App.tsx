@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
 
 /* ---------- shared API helpers ---------- */
 
@@ -411,38 +412,7 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
   );
 }
 
-const INSTALL_PROMPT = `You are installing thwip (verified local CI) into this project.
-Work step by step and ask the human before each side-effectful step.
-
-1. Install the CLI: clone https://github.com/recallnet/thwip and run
-   "pnpm install && pnpm build", then link packages/cli (or run it via
-   "node packages/cli/dist/main.js"). Confirm with: thwip --help
-2. Authenticate: do not run this yourself. "thwip login" blocks until a
-   human approves it in a browser, and the browser must be theirs. Give
-   them a pastable command to run in their own terminal:
-     thwip login
-   It prints a URL and a short code; they open it, approve, and tell you
-   when it reports "signed in". Wait for that confirmation before
-   continuing.
-3. Enroll this machine's signing key: generate a dedicated key with
-   "ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''" after
-   asking the human to name the device, then run
-   "thwip keys enroll --public-key ~/.config/thwip/keys/<device>.pub --label <device>".
-4. Set up the project: ask the human which checks make up CI here
-   (for example lint, typecheck, test), then write thwip.yaml at the
-   repository root declaring those suites and the security profile
-   (start with "fast"; see https://thwip.recall.net/faq for profiles).
-   Commit it on a branch and open a pull request.
-5. Ask the human (an org owner) to enable the project and activate the
-   policy in the dashboard at https://thwip.recall.net/dashboard.
-6. Prove the loop: make a small change, run "thwip run", push, and
-   open a PR. The thwip check should pass from the proof on the head
-   commit without rerunning CI remotely.
-
-Rules: never generate or upload a private key anywhere except the
-human's ~/.config/thwip directory; never bypass a failing suite; if
-"thwip run" refuses to sign, report the reason code to the human
-instead of working around it.`;
+const INSTALL_PROMPT = developerSetupPrompt();
 
 function InstallPage({ me }: { me: Me | null | undefined }) {
   const [copied, setCopied] = useState(false);
@@ -450,8 +420,8 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
     <div className="thwip-shell">
       <SiteNav me={me} />
       <section className="thwip-section" style={{ borderTop: "none" }}>
-        <p className="thwip-eyebrow">Install</p>
-        <h2>Installation is an agent prompt</h2>
+        <p className="thwip-eyebrow">Developer setup</p>
+        <h2>Setting up your machine is an agent prompt</h2>
         <p className="lede">
           Paste this into your coding agent. It installs the CLI, signs you in with a click-through device code
           (works over SSH), and sets up the project with your approval at each step. Raw copy at{" "}
@@ -610,6 +580,33 @@ function Panel({ title, meta, children }: { title: string; meta?: string; childr
   );
 }
 
+
+/** First thing a developer needs: a machine that can sign. */
+function StartUsingThwip() {
+  const [copied, setCopied] = useState(false);
+  const prompt = developerSetupPrompt();
+  return (
+    <Panel title="Start using thwip" meta="developer setup · paste into your coding agent">
+      <p style={{ marginBottom: "0.7rem" }}>
+        Before you can sign a proof, this machine needs the CLI, a signed-in session, and an ed25519 key that GitHub
+        lists as a <b>signing</b> key for your account. The prompt below walks an agent through all three and hands
+        you the browser and terminal steps rather than doing them for you. Your private key is never read.
+      </p>
+      <div className="thwip-actions">
+        <button
+          className="gp-btn gp-btn--sm"
+          onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
+        >
+          {copied ? "Copied" : "Copy setup prompt"}
+        </button>
+        <a className="gp-btn gp-btn--sm" href="/install">
+          Read it first
+        </a>
+      </div>
+    </Panel>
+  );
+}
+
 function Overview() {
   const { data, error } = useFetch<{
     plan: string;
@@ -641,6 +638,7 @@ function Overview() {
           </div>
         ))}
       </div>
+      <StartUsingThwip />
       <Panel title="Ship a change">
         <p style={{ fontFamily: "var(--gp-mono, monospace)", fontSize: "0.82rem" }}>
           git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
@@ -834,73 +832,19 @@ function People({ me }: { me: Me }) {
   );
 }
 
-function buildSetupPrompt(p: { github_name: string; default_branch: string; enabled: number; policy_version: number | null }): string {
-  return `Set up thwip (verified local CI) for ${p.github_name}. Work through this in order and
-ask me before anything that changes files, deletes workflows, or pushes.
-
-This is safe to re-run: if a step is already done, say so and move on.
-
-1. CLI. Check "thwip --help" works. If not, clone
-   https://github.com/recallnet/thwip, run "pnpm install && pnpm build", and
-   use "node packages/cli/dist/main.js" as the thwip command.
-
-2. Sign in. Don't run this one yourself — "thwip login" blocks until I
-   approve it in a browser, and the browser has to be mine. Give me a
-   pastable command to run in my own terminal, in this directory:
-     thwip login
-   It prints a URL and a short code. I'll open the URL, approve, and tell
-   you when it says "signed in". Wait for me to confirm before continuing;
-   nothing below works until then. (If ~/.config/thwip/session-token already
-   exists, I'm probably still signed in — say so and offer to skip.)
-
-3. Signing key. Run "thwip keys status". It finds the ed25519 key this
-   machine already uses and tells you whether GitHub lists it as a signing
-   key for my account. GitHub owns that binding — thwip stores no keys.
-   If it reports registeredWithGithub: false, give me the exact
-   "gh ssh-key add ... --type signing" command it printed and wait for me to
-   run it. If there is no key at all, propose creating one with ssh-keygen
-   first, then the same registration step.
-
-4. Configuration. If thwip.yaml exists, show it to me and confirm it still
-   matches the project. Otherwise read package.json (or the Makefile, or
-   whatever this repo actually uses) and propose which checks make up CI here
-   — typically lint, typecheck, test. Then run:
-     thwip init --required "<the ids you proposed>"
-   Suite ids name package.json scripts. Show me thwip.yaml before continuing.
-
-5. Retire duplicated remote CI. Read .github/workflows/*. List every job and
-   sort it into:
-     - now proven locally by thwip (the same lint/typecheck/test work) —
-       candidates for removal
-     - must stay remote (deploy, release, publish, scheduled jobs, anything
-       needing cloud secrets, anything that runs on a schedule or on main)
-     - unclear — ask me
-   Show me the list with your reasoning and wait for my decision on each
-   candidate before editing or deleting anything. Removing CI is the one step
-   I want to review carefully.
-
-6. Prove it. Commit the changes on a branch, then run "thwip run". It runs the
-   suites against the committed tree and attaches a signed proof to HEAD. If
-   it refuses to sign, tell me the reason it printed rather than working
-   around it. Then push and open a pull request.
-
-7. Finish. ${
-    p.enabled
-      ? "The project is already enabled in thwip."
-      : "Tell me to enable this project at https://thwip.recall.net/dashboard/projects (I need repository admin on GitHub)."
-  }${
-    p.policy_version
-      ? " A policy is already active; a changed thwip.yaml needs a new activation before it takes effect."
-      : " After the pull request merges, the policy from thwip.yaml gets activated."
-  }
-   The thwip check on the pull request should pass from the proof on the head
-   commit, without rerunning the suites in the cloud.
-
-Rules: never move a private key anywhere outside ~/.config/thwip; never skip
-or weaken a failing check to get a green proof; default branch here is
-${p.default_branch}.`;
+function buildSetupPrompt(p: {
+  github_name: string;
+  default_branch: string;
+  enabled: number;
+  policy_version: number | null;
+}): string {
+  return projectSetupPrompt({
+    githubName: p.github_name,
+    defaultBranch: p.default_branch,
+    enabled: p.enabled === 1,
+    hasActivePolicy: p.policy_version !== null,
+  });
 }
-
 function ProjectSetup({ projectId }: { projectId: string }) {
   const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   const [copied, setCopied] = useState(false);
