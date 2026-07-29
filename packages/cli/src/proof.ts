@@ -82,7 +82,7 @@ export async function signStatement(
 export function attachTrailer(message: string, envelope: DsseEnvelope): string {
   const stripped = message
     .split("\n")
-    .filter((l) => !l.startsWith("thwip-Proof:"))
+    .filter((l) => !l.startsWith("thwip-proof:"))
     .join("\n")
     .replace(/\n+$/, "");
   return `${stripped}\n\n${encodeCarrier(envelope)}\n`;
