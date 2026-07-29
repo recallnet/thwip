@@ -160,7 +160,21 @@ async function cmdRun(argv: string[]): Promise<number> {
   const pDigest = project.pipelineDigest;
 
   const startedAt = new Date().toISOString();
-  const suites = await runSuites(def, cwd);
+  let suites;
+  if (def.runner === "dagger") {
+    const { ensureDagger, requireContainerRuntime, runDaggerSuites } = await import("./dagger.js");
+    await requireContainerRuntime();
+    process.stderr.write(`[thwip] provisioning dagger ${def.daggerVersion} (thwip cache, not a global install)\n`);
+    const bin = await ensureDagger(def.daggerVersion!);
+    suites = await runDaggerSuites({
+      bin,
+      module: def.module!,
+      suites: def.suites.map((x) => x.id),
+      cwd,
+    });
+  } else {
+    suites = await runSuites(def, cwd);
+  }
   const finishedAt = new Date().toISOString();
 
   const failed = suites.filter((s) => s.status !== "passed");

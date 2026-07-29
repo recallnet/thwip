@@ -1458,6 +1458,22 @@ async function verifyProof(input, deps) {
     if (suite.status !== "passed")
       return res("SUITE_NOT_PASSED", required, { statement });
   }
+  const remoteSuites = bundle.policy.pipeline.remoteSuites ?? [];
+  if (remoteSuites.length > 0) {
+    if (!deps.remoteCheckConclusions) {
+      return res("SUITE_MISSING", "remote suites declared but no check reader available", { statement });
+    }
+    const conclusions = await deps.remoteCheckConclusions(facts.headSha);
+    for (const id of remoteSuites) {
+      const conclusion = conclusions.get(id) ?? conclusions.get(`thwip / ${id}`);
+      if (conclusion === void 0) {
+        return res("SUITE_MISSING", `remote suite '${id}' has no check on this commit`, { statement });
+      }
+      if (conclusion !== "success") {
+        return res("SUITE_NOT_PASSED", `remote suite '${id}' concluded ${conclusion}`, { statement });
+      }
+    }
+  }
   const finished = Date.parse(pred.run.finishedAt);
   if (!Number.isFinite(finished))
     return res("PROOF_MALFORMED", "finishedAt unparseable", { statement });
@@ -1600,7 +1616,18 @@ async function main() {
     };
     const result = await verifyProof(
       { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
-      { verifySshSignature }
+      {
+        verifySshSignature,
+        // Remote suites are proven by GitHub's own checks on this commit.
+        remoteCheckConclusions: async (headSha) => {
+          const runs = await gh(
+            `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`
+          );
+          const map = /* @__PURE__ */ new Map();
+          for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
+          return map;
+        }
+      }
     );
     renderRichSummary(result, commit, facts);
     if (result.code !== "PASS") allPass = false;

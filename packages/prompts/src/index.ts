@@ -89,11 +89,15 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    can sign.
 
 1. Configuration. If thwip.yaml exists, show it to me and confirm it still
-   matches the project. Otherwise read package.json (or the Makefile, or
-   whatever this repo actually uses) and propose which checks make up CI here
-   — typically lint, typecheck, test. Then run:
+   matches the project. Otherwise propose which checks make up CI here —
+   typically lint, typecheck, test — and run:
      thwip init --required "<the ids you proposed>"
-   Suite ids name package.json scripts. Show me thwip.yaml before continuing.
+   Suite ids name package.json scripts by default. If this repo has, or wants,
+   a Dagger module, say so: a module is the better home for matrices,
+   services, and platforms, and thwip.yaml then just names which functions are
+   required. Anything that cannot run in a Linux container — macOS or Windows
+   builds — goes under \`remote:\` instead, and GitHub runs and signs those.
+   Show me thwip.yaml before continuing.
 
 2. Retire duplicated remote CI. Read .github/workflows/*. List every job and
    sort it into:

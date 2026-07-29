@@ -28,6 +28,12 @@ export interface GithubFacts {
 
 export interface VerifyDeps {
   /**
+   * Conclusions of checks GitHub itself ran on this commit, by check name.
+   * Suites a project marks `remote` are proven by GitHub rather than by the
+   * signer, so the merge gate is one decision over two evidence sources.
+   */
+  remoteCheckConclusions?: (headSha: string) => Promise<Map<string, string>>;
+  /**
    * Verify an OpenSSH SSHSIG signature (standard base64 of the binary SSHSIG
    * blob) over `message` under `namespace` with an authorized_keys-format
    * public key. Injected so the verifier itself stays pure.
@@ -189,14 +195,32 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     if (suite.status !== "passed") return res("SUITE_NOT_PASSED", required, { statement });
   }
 
-  // 10. Proof age (signer-asserted in fast profile; bounded anyway).
+  // 10. Remote suites: proven by GitHub's own run, not by the signer.
+  const remoteSuites = bundle.policy.pipeline.remoteSuites ?? [];
+  if (remoteSuites.length > 0) {
+    if (!deps.remoteCheckConclusions) {
+      return res("SUITE_MISSING", "remote suites declared but no check reader available", { statement });
+    }
+    const conclusions = await deps.remoteCheckConclusions(facts.headSha);
+    for (const id of remoteSuites) {
+      const conclusion = conclusions.get(id) ?? conclusions.get(`thwip / ${id}`);
+      if (conclusion === undefined) {
+        return res("SUITE_MISSING", `remote suite '${id}' has no check on this commit`, { statement });
+      }
+      if (conclusion !== "success") {
+        return res("SUITE_NOT_PASSED", `remote suite '${id}' concluded ${conclusion}`, { statement });
+      }
+    }
+  }
+
+  // 11. Proof age (signer-asserted in fast profile; bounded anyway).
   const finished = Date.parse(pred.run.finishedAt);
   if (!Number.isFinite(finished)) return res("PROOF_MALFORMED", "finishedAt unparseable", { statement });
   if (nowMs - finished > bundle.policy.proofMaxAgeSeconds * 1000) {
     return res("PROOF_EXPIRED", undefined, { statement });
   }
 
-  // 11. Lease requirement (fresh and stronger profiles).
+  // 12. Lease requirement (fresh and stronger profiles).
   if (bundle.policy.lease.required && pred.run.lease === undefined) {
     return res("LEASE_REQUIRED", undefined, { statement });
   }
