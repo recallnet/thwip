@@ -17,6 +17,17 @@ Security profiles per project: fast (signed local proof), fresh (adds a
 short-lived subject-bound lease), audited (adds sampled independent reruns in
 GitHub Actions), remote (GitHub runs every check).
 
+What a proof establishes, stated precisely: who ran the approved checks, on
+exactly which Git tree, under which policy version, signed by a key enrolled
+to a GitHub account that currently holds repository permission. thwip does not
+observe execution and never sees source code. False claims are detected by
+reproducibility rather than surveillance: identical inputs produce identical
+digests on every machine, so a fabricated claim disagrees with teammates'
+runs, later commits, and any cloud run, permanently and attributably. The
+remote profile is SLSA Build L3 (GitHub builds and signs the provenance); fast
+and fresh are attributed assertions plus the hermeticity, reproducibility, and
+two-party controls that SLSA's original L4 specified and v1.0 dropped.
+
 ## Pages
 
 - [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit
