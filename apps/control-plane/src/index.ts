@@ -3,6 +3,7 @@ import { CompactSign, SignJWT, createRemoteJWKSet, importJWK, jwtVerify, type JW
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import { queueRoutes } from "./queue/routes.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -1120,6 +1121,40 @@ app.get("/admin/github/manifest/callback", async (c) => {
 });
 
 // --- Static assets (marketing site + dashboard SPA) ------------------------
+
+/* ---------- Thwip Queue ---------- */
+
+/* The queue's own routes. Authorization reuses the GitHub projection: a viewer
+   is a queue participant through their principal, and repository admin comes
+   from the synced org role. */
+app.route(
+  "/",
+  queueRoutes<Env>({
+    async authenticate(c: { req: { raw: Request } }, env: Env) {
+      const viewer = await resolveViewer(env, c.req.raw);
+      if (viewer === null) return { ok: false as const, status: 401 as const };
+      if (viewer.principalId === null) return { ok: false as const, status: 403 as const };
+      return {
+        ok: true as const,
+        principalId: viewer.principalId,
+        githubUserId: viewer.githubUserId,
+        isAdmin: viewer.githubOrgRole === "admin",
+      };
+    },
+    async verifyOidc(c: { req: { raw: Request } }, env: Env) {
+      const claims = await verifyGithubOidc({ env, req: c.req });
+      return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
+    },
+    async pinnedVerifier(env: Env, repositoryId: string) {
+      const row = await env.DB.prepare(
+        "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",
+      )
+        .bind(repositoryId)
+        .first<{ verifier_json: string }>();
+      return row === null ? null : (JSON.parse(row.verifier_json) as never);
+    },
+  }) as never,
+);
 
 app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
