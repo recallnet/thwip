@@ -61,6 +61,22 @@ They sign in with GitHub at https://thwip.recall.net. Membership, roles, and
 repository permissions come from the GitHub organization, so there are no
 invitations. Outside collaborators invited to individual repositories on GitHub count too: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
 
+## How do I express a build matrix, services, or several platforms?
+
+In your Dagger module, not in thwip.yaml. A matrix is a loop, a database is a
+service binding, a platform is an argument — all in a real language, with
+types and tests. thwip.yaml only names which module functions are required and
+where each may run, so thwip owns no pipeline dialect of its own.
+
+macOS and Windows cannot run in a Linux container, so a cross-platform matrix
+is genuinely hybrid: list those suites under `remote:` and GitHub runs and
+signs them, while everything else is proven locally. One merge gate, two
+sources of evidence — and the remote half is SLSA Build L3.
+
+The CLI provisions the pinned Dagger version into its own cache and verifies
+the download against the published checksum. Using thwip does not mean
+installing another global toolchain; it does need a container runtime.
+
 ## Where do signing keys come from?
 
 GitHub. thwip does not issue, store, or enroll keys — it reads the signing

@@ -5,6 +5,10 @@ export interface PipelineDefinition {
   schemaVersion: "1";
   runner: "command" | "dagger";
   suites: Array<{ id: string; command: string[] }>;
+  /** dagger runner only: the module and pinned engine the policy approves */
+  module?: string;
+  daggerVersion?: string;
+  moduleDigest?: string;
 }
 
 export function parsePipelineDefinition(jsonText: string): PipelineDefinition {

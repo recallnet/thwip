@@ -4,27 +4,31 @@ import type { PipelineDefinition } from "./pipeline.js";
 import { git, showFileAtHead } from "./git.js";
 
 /**
- * thwip.yaml holds only what thwip is authoritative for: the security
- * profile, which suites are required, and policy knobs. Repository identity
- * comes from the git remote; suite commands come from the repository's own
- * pipeline definition (package.json scripts today, a Dagger module when the
- * pipeline runner is dagger).
+ * thwip.yaml names which checks are required and where each may run. It does
+ * not describe how a check executes — matrices, services, platforms, and
+ * caching live in the project's Dagger module, in a real language. thwip
+ * deliberately owns no pipeline dialect.
  *
- * version: 3
+ * version: 5
  * profile: fast | fresh | audited | remote
- * required: [lint, typecheck, test]
- * suites:            # optional override for repos without package.json
- *   lint: pnpm lint
- * policy:
- *   minimum_permission: write
- *   allow_author_as_signer: true
- *   allowed_key_algorithms: [ssh-ed25519]
- *   proof_max_age_seconds: 86400
+ * pipeline:
+ *   module: ./dagger        # Dagger module; its digest is part of the policy
+ *   daggerVersion: 0.21.8   # pinned toolchain, provisioned by the CLI
+ * required: [lint, test, build]           # module functions proven locally
+ * remote:   [build-darwin, build-windows] # must run in GitHub and pass there
+ *
+ * Repositories that have not adopted Dagger may instead declare `suites:` as
+ * a map of id to shell command. That fallback cannot produce an action graph,
+ * so it is the weaker tier and is labelled as such.
  */
 export interface ThwipYaml {
   version: number;
   profile: "fast" | "fresh" | "audited" | "remote";
   required: string[];
+  /** suites that must execute in GitHub and pass there */
+  remote?: string[];
+  pipeline?: { module: string; daggerVersion?: string };
+  /** fallback for repositories without a Dagger module */
   suites?: Record<string, string>;
   policy?: {
     minimum_permission?: "triage" | "write" | "maintain" | "admin";
@@ -43,6 +47,9 @@ export interface ProjectConfig {
 
 const SUITE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
+/** Pinned unless a project names its own. */
+export const DEFAULT_DAGGER_VERSION = "0.21.8";
+
 export function parseThwipYaml(text: string): ThwipYaml {
   const y = parseYaml(text) as ThwipYaml;
   if (typeof y !== "object" || y === null) throw new Error("thwip.yaml is not a mapping");
@@ -55,6 +62,23 @@ export function parseThwipYaml(text: string): ThwipYaml {
   }
   for (const id of y.required) {
     if (typeof id !== "string" || !SUITE_ID.test(id)) throw new Error(`thwip.yaml: invalid suite id '${id}'`);
+  }
+  if (y.remote) {
+    if (!Array.isArray(y.remote)) throw new Error("thwip.yaml: 'remote' must be a list of suite ids");
+    for (const id of y.remote) {
+      if (typeof id !== "string" || !SUITE_ID.test(id)) throw new Error(`thwip.yaml: invalid remote suite id '${id}'`);
+      if (y.required.includes(id)) {
+        throw new Error(`thwip.yaml: '${id}' cannot be both required (local) and remote`);
+      }
+    }
+  }
+  if (y.pipeline) {
+    if (typeof y.pipeline.module !== "string" || y.pipeline.module.length === 0) {
+      throw new Error("thwip.yaml: pipeline.module must be a path to a Dagger module");
+    }
+    if (y.pipeline.daggerVersion !== undefined && !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(y.pipeline.daggerVersion)) {
+      throw new Error("thwip.yaml: pipeline.daggerVersion must be an exact version");
+    }
   }
   if (y.suites) {
     for (const [id, cmd] of Object.entries(y.suites)) {
@@ -120,11 +144,26 @@ export async function deriveConfig(
   cwd: string,
   ids: { ownerId: string; repositoryId: string },
 ): Promise<ProjectConfig> {
-  const suites: Array<{ id: string; command: string[] }> = [];
-  for (const id of y.required) {
-    suites.push({ id, command: ["sh", "-c", await suiteCommand(cwd, y, id)] });
+  let pipeline: PipelineDefinition;
+  if (y.pipeline) {
+    // Dagger owns execution; the policy pins the module contents and the
+    // engine version, so an approved pipeline is exact.
+    const { moduleDigest } = await import("./dagger.js");
+    pipeline = {
+      schemaVersion: "1",
+      runner: "dagger",
+      module: y.pipeline.module,
+      daggerVersion: y.pipeline.daggerVersion ?? DEFAULT_DAGGER_VERSION,
+      moduleDigest: await moduleDigest(cwd, y.pipeline.module),
+      suites: y.required.map((id) => ({ id, command: ["dagger", "call", id] })),
+    };
+  } else {
+    const suites: Array<{ id: string; command: string[] }> = [];
+    for (const id of y.required) {
+      suites.push({ id, command: ["sh", "-c", await suiteCommand(cwd, y, id)] });
+    }
+    pipeline = { schemaVersion: "1", runner: "command", suites };
   }
-  const pipeline: PipelineDefinition = { schemaVersion: "1", runner: "command", suites };
   const pipelineDigest = await canonicalDigest(pipeline);
   const policy: PolicyBundleV1 = {
     schemaVersion: "1",
@@ -139,7 +178,12 @@ export async function deriveConfig(
     allowedKeyAlgorithms: y.policy?.allowed_key_algorithms ?? ["ssh-ed25519"],
     requireGithubKeyPresence: false,
     lease: { required: y.profile !== "fast", maxAgeSeconds: 1800 },
-    pipeline: { digest: pipelineDigest, runner: "command", requiredSuites: y.required },
+    pipeline: {
+      digest: pipelineDigest,
+      runner: y.pipeline ? "dagger" : "command",
+      requiredSuites: y.required,
+      ...(y.remote && y.remote.length > 0 ? { remoteSuites: y.remote } : {}),
+    },
     proofMaxAgeSeconds: y.policy?.proof_max_age_seconds ?? 86400,
     audit: { basisPoints: 0, mandatoryPaths: [] },
   };

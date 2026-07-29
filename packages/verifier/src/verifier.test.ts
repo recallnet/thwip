@@ -310,3 +310,52 @@ describe("verifyProof decision table", () => {
     expect((await run({ now: "2026-07-28T12:06:00Z" })).code).toBe("BUNDLE_EXPIRED");
   });
 });
+
+describe("hybrid: remote suites proven by GitHub", () => {
+  const withRemote = () =>
+    makeBundle((b) => {
+      b.policy.pipeline.remoteSuites = ["build-darwin"];
+    });
+
+  it("passes when the remote suite's check succeeded on this commit", async () => {
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      {
+        ...deps,
+        remoteCheckConclusions: async () => new Map([["thwip / build-darwin", "success"]]),
+      },
+    );
+    expect(r.code).toBe("PASS");
+  });
+
+  it("fails when the remote suite has no check on this commit", async () => {
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      { ...deps, remoteCheckConclusions: async () => new Map() },
+    );
+    expect(r.code).toBe("SUITE_MISSING");
+  });
+
+  it("fails when the remote suite's check failed", async () => {
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      { ...deps, remoteCheckConclusions: async () => new Map([["build-darwin", "failure"]]) },
+    );
+    expect(r.code).toBe("SUITE_NOT_PASSED");
+  });
+});
