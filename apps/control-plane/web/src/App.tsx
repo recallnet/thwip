@@ -605,14 +605,14 @@ function Projects({ me }: { me: Me }) {
   return (
     <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
       {installUrl && (
-        <p style={{ marginBottom: "0.9rem" }}>
+        <div className="thwip-add-repos">
           <a className="gp-btn gp-btn--sm" href={installUrl} target="_blank" rel="noreferrer">
             Add repositories on GitHub
           </a>
-          <span className="gp-panel__meta" style={{ marginLeft: "0.6rem" }}>
+          <span className="gp-panel__meta">
             Grant the thwip App access to a repository there; it imports here automatically, then you enable it.
           </span>
-        </p>
+        </div>
       )}
       {actionError && <p className="thwip-error">{actionError}</p>}
       {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
