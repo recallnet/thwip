@@ -10,6 +10,7 @@
     "lint": "node scripts/lint.mjs"
   },
   "devDependencies": {
+    "fast-check": "^4.9.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
