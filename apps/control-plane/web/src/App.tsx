@@ -409,10 +409,13 @@ Work step by step and ask the human before each side-effectful step.
 1. Install the CLI: clone https://github.com/recallnet/thwip and run
    "pnpm install && pnpm build", then link packages/cli (or run it via
    "node packages/cli/dist/main.js"). Confirm with: thwip --help
-2. Authenticate: run "thwip login". It prints a URL and a short code.
-   Show the human the URL so they can click it (it works over SSH; the
-   browser opens on their machine, not yours). Wait until the CLI
-   reports it is signed in.
+2. Authenticate: do not run this yourself. "thwip login" blocks until a
+   human approves it in a browser, and the browser must be theirs. Give
+   them a pastable command to run in their own terminal:
+     thwip login
+   It prints a URL and a short code; they open it, approve, and tell you
+   when it reports "signed in". Wait for that confirmation before
+   continuing.
 3. Enroll this machine's signing key: generate a dedicated key with
    "ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''" after
    asking the human to name the device, then run
@@ -833,9 +836,14 @@ This is safe to re-run: if a step is already done, say so and move on.
    https://github.com/recallnet/thwip, run "pnpm install && pnpm build", and
    use "node packages/cli/dist/main.js" as the thwip command.
 
-2. Sign in. Run "thwip login". It prints a URL and a short code — show me the
-   URL so I can click it (this works over SSH; the browser opens on my
-   machine, not yours). Wait for it to report success.
+2. Sign in. Don't run this one yourself — "thwip login" blocks until I
+   approve it in a browser, and the browser has to be mine. Give me a
+   pastable command to run in my own terminal, in this directory:
+     thwip login
+   It prints a URL and a short code. I'll open the URL, approve, and tell
+   you when it says "signed in". Wait for me to confirm before continuing;
+   nothing below works until then. (If ~/.config/thwip/session-token already
+   exists, I'm probably still signed in — say so and offer to skip.)
 
 3. Signing key. If ~/.config/thwip/config.json already names a key, skip.
    Otherwise ask me for a device name, then:
@@ -1298,7 +1306,11 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
   const approve = async () => {
     setState("working");
     try {
-      await api("/api/auth/device/approve", { method: "POST", body: JSON.stringify({ userCode: code.trim() }) });
+      const userCode = code.trim().toUpperCase();
+      // Better Auth requires the signed-in browser to claim the code before
+      // approving it; approving without this returns invalid_request.
+      await api(`/api/auth/device?user_code=${encodeURIComponent(userCode)}`);
+      await api("/api/auth/device/approve", { method: "POST", body: JSON.stringify({ userCode }) });
       setState("done");
     } catch (e) {
       setMessage((e as Error).message);
