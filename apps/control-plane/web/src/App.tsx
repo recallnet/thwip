@@ -118,6 +118,7 @@ function SiteNav({ me }: { me: Me | null | undefined }) {
       </a>
       <span className="links">
         <a href="/#how">How it works</a>
+        <a href="/#trust">Trust</a>
         <a href="/faq">FAQ</a>
         <a href="/install">Install</a>
         <a href="/#pricing">Pricing</a>
@@ -206,6 +207,22 @@ function Marketing({ me }: { me: Me | null | undefined }) {
             </p>
           </div>
         </div>
+      </section>
+
+      <section className="thwip-section" id="trust">
+        <p className="thwip-eyebrow">What a proof means</p>
+        <h2>Signed by a person, checked by everyone's machine.</h2>
+        <p className="lede">
+          A thwip proof says who ran the checks, on exactly which code, under which rules. We don't watch the checks
+          run — nobody can watch every laptop. What makes a false claim hard to get away with is that the same code
+          produces the same fingerprints on every machine. Your teammates' runs, your next commit, and any cloud run
+          produce those same fingerprints, so a made-up claim has to survive contact with everyone else's work,
+          permanently, with a name attached.
+        </p>
+        <p className="lede">
+          When that isn't enough — auth, billing, dependency bumps — point those paths at GitHub and the checks run
+          there instead. Same proof, different signer.
+        </p>
       </section>
 
       <section className="thwip-section" id="outcomes">
@@ -305,6 +322,34 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <a href="/llms.txt">/llms.txt</a>.
         </p>
         <dl className="thwip-faq">
+          <dt>Can someone fake a proof?</dt>
+          <dd>
+            They can sign a claim without running the checks, the same way anyone can write "tests pass" in a pull
+            request. What changes is the cost. They have to use a key enrolled to their GitHub account, spend the
+            time the run would have taken, and state a fingerprint for every step. Those fingerprints are identical
+            on every machine that runs the same code, so the claim has to keep agreeing with everyone else's runs
+            forever. The first time it doesn't, the signed claim is the evidence.
+          </dd>
+          <dt>Does thwip watch my tests?</dt>
+          <dd>
+            No. thwip never sees your code and runs nothing. It checks that a signed claim matches the exact commit,
+            the approved checks, and a signer who currently has access.
+          </dd>
+          <dt>Some changes are too important to take someone's word for.</dt>
+          <dd>
+            Set those paths to run in GitHub. GitHub signs the result, so the developer isn't the source of the
+            claim. Most teams do this for auth, billing, deploy config, and lockfiles.
+          </dd>
+          <dt>How does this map to SLSA?</dt>
+          <dd>
+            The remote profile is SLSA Build L3: GitHub Actions performs the build and GitHub signs the provenance
+            with an identity the workflow can't forge. fast and fresh are deliberately not L3 — they're attributed
+            assertions plus the controls SLSA's original L4 asked for and v1.0 dropped as impractical: hermetic
+            execution, reproducible outputs, and optional two-party agreement. Those are cheap here because the
+            pipeline runs as a content-addressed graph, so identical inputs must produce identical digests on any
+            machine. Pick per path: L3 where a rerun is worth the minutes, reproducibility-backed assertions
+            everywhere else.
+          </dd>
           <dt>What are the security profiles: fast, fresh, audited, remote?</dt>
           <dd>
             <b>Fast</b>: a signed local proof with no pre-run contact with the control plane. Works fully offline
