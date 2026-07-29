@@ -1511,12 +1511,28 @@ async function getOidcToken(audience) {
   const body = await res2.json();
   return body.value;
 }
-async function fetchBundle(repositoryId, headSha, keyIds) {
+function proofHints(commitMessage) {
+  const carrier = extractCarrier(commitMessage);
+  if (!carrier.ok) return {};
+  const keyFingerprint = carrier.envelope.signatures[0]?.keyid;
+  let signerGithubUserId;
+  try {
+    const statement = JSON.parse(new TextDecoder().decode(b64stdDecode(carrier.envelope.payload)));
+    const claimed = statement.predicate?.signer?.githubUserId;
+    if (typeof claimed === "string" && /^[0-9]+$/.test(claimed)) signerGithubUserId = claimed;
+  } catch {
+  }
+  return {
+    ...signerGithubUserId !== void 0 ? { signerGithubUserId } : {},
+    ...keyFingerprint !== void 0 ? { keyFingerprint } : {}
+  };
+}
+async function fetchBundle(repositoryId, headSha, hints) {
   const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
   const res2 = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
     method: "POST",
     headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-    body: JSON.stringify({ repositoryId, headSha, keyIds })
+    body: JSON.stringify({ repositoryId, headSha, ...hints })
   });
   if (!res2.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res2.status} ${await res2.text()}`);
   const { bundle } = await res2.json();
@@ -1566,7 +1582,7 @@ async function main() {
     process.exit(1);
   }
   const firstCommit = await gh(`/repos/${fullName}/git/commits/${targets[0].prHeadSha}`);
-  const bundle = await fetchBundle(repositoryId, targets[0].prHeadSha, []);
+  const bundle = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
   let allPass = true;
   for (const target of targets) {
     const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);

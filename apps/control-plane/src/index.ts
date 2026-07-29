@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { CompactSign, SignJWT, createRemoteJWKSet, importJWK, jwtVerify, type JWK } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
-import { listInstallations, syncInstallation } from "./github-app.js";
+import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -754,7 +754,12 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
   const claims = await verifyGithubOidc(c);
   if (claims instanceof Response) return claims;
 
-  const body = (await c.req.json()) as { repositoryId?: string; headSha?: string; keyIds?: string[] };
+  const body = (await c.req.json()) as {
+    repositoryId?: string;
+    headSha?: string;
+    signerGithubUserId?: string;
+    keyFingerprint?: string;
+  };
   if (!body.repositoryId || !/^[0-9]+$/.test(body.repositoryId)) return c.json({ error: "repositoryId invalid" }, 400);
   if (String(claims.repository_id) !== body.repositoryId) {
     return c.json({ error: "repository not authorized by OIDC token" }, 403);
@@ -837,9 +842,63 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
     refreshed.push({ githubUserId: g.github_user_id, permission: g.permission, active: g.active === 1 });
   }
 
-  const keys = await c.env.DB.prepare(
-    "SELECT key_id, github_user_id, algorithm, public_key, revoked_at FROM device_keys",
-  ).all<{ key_id: string; github_user_id: string; algorithm: string; public_key: string; revoked_at: string | null }>();
+  // Signing keys come from GitHub, which owns the key-to-identity binding.
+  // thwip contributes only a deny list, for revoking a key inside the
+  // organization faster than GitHub's own removal can propagate.
+  const signerUserId = body.signerGithubUserId;
+  const signerRow = signerUserId
+    ? await c.env.DB.prepare("SELECT github_login FROM repository_grants WHERE project_id = ? AND github_user_id = ?")
+        .bind(project.id, signerUserId)
+        .first<{ github_login: string }>()
+    : null;
+  const githubKeys: Array<{
+    keyId: string;
+    githubUserId: string;
+    algorithm: string;
+    publicKey: string;
+    revokedAt: string | null;
+  }> = [];
+  if (signerRow && signerUserId) {
+    let token: string | undefined = c.env.GITHUB_SYNC_TOKEN;
+    try {
+      const org = await c.env.DB.prepare("SELECT installation_id FROM organizations WHERE github_org_id = ?")
+        .bind(project.github_org_id)
+        .first<{ installation_id: string | null }>();
+      if (org?.installation_id) token = await installationToken(c.env, org.installation_id);
+    } catch {
+      /* fall back to the sync token or an unauthenticated read */
+    }
+    let listed: Awaited<ReturnType<typeof githubSigningKeys>>;
+    try {
+      listed = await githubSigningKeys(token, signerRow.github_login);
+    } catch {
+      return c.json({ error: "cannot read signer signing keys from GitHub" }, 503);
+    }
+    const denied = await c.env.DB.prepare(
+      "SELECT fingerprint, revoked_at FROM device_keys WHERE github_user_id = ? AND revoked_at IS NOT NULL",
+    )
+      .bind(signerUserId)
+      .all<{ fingerprint: string; revoked_at: string }>();
+    const denyList = new Map(denied.results.map((d) => [d.fingerprint, d.revoked_at]));
+    for (const k of listed) {
+      const fingerprint = await sha256Fingerprint(k.publicKey);
+      githubKeys.push({
+        keyId: fingerprint,
+        githubUserId: signerUserId,
+        algorithm: k.publicKey.split(/\s+/)[0] ?? "unknown",
+        publicKey: k.publicKey,
+        revokedAt: denyList.get(fingerprint) ?? null,
+      });
+      // Remember the key so a proof stays explainable after GitHub removal.
+      await c.env.DB.prepare(
+        `INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key_id) DO NOTHING`,
+      )
+        .bind(fingerprint, signerUserId, k.publicKey.split(/\s+/)[0] ?? "unknown", k.publicKey, fingerprint, k.title)
+        .run()
+        .catch(() => undefined);
+    }
+  }
 
   const now = new Date();
   const bundle = {
@@ -850,13 +909,7 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
     activePolicyDigest: policyRow.digest,
     gracePolicyDigests: grace.results.map((g) => g.digest),
     policy: JSON.parse(policyRow.canonical_json) as unknown,
-    keys: keys.results.map((k) => ({
-      keyId: k.key_id,
-      githubUserId: k.github_user_id,
-      algorithm: k.algorithm,
-      publicKey: k.public_key,
-      revokedAt: k.revoked_at,
-    })),
+    keys: githubKeys,
     grants: refreshed,
     leaseIssuerJwks: [],
     issuedAt: now.toISOString(),

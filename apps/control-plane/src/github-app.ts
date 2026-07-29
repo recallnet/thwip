@@ -39,6 +39,27 @@ async function ghPaged<T>(token: string, path: string): Promise<T[]> {
   return out;
 }
 
+/**
+ * GitHub owns the binding between a public key and an identity. This reads a
+ * user's registered *signing* keys; the fingerprint of each is what a proof
+ * names, so no separate thwip key directory exists.
+ */
+export async function githubSigningKeys(
+  token: string | undefined,
+  login: string,
+): Promise<Array<{ githubKeyId: number; title: string; publicKey: string }>> {
+  const res = await fetch(`${API}/users/${encodeURIComponent(login)}/ssh_signing_keys?per_page=100`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "thwip-control-plane",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!res.ok) throw new Error(`signing keys for ${login} -> ${res.status}`);
+  const keys = (await res.json()) as Array<{ id: number; key: string; title: string }>;
+  return keys.map((k) => ({ githubKeyId: k.id, title: k.title, publicKey: k.key.trim() }));
+}
+
 export async function installationToken(env: Env, installationId: string): Promise<string> {
   const jwt = await appJwt(env);
   const res = await gh<{ token: string }>(jwt, `/app/installations/${installationId}/access_tokens`, {

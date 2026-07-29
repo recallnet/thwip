@@ -61,6 +61,15 @@ They sign in with GitHub at https://thwip.recall.net. Membership, roles, and
 repository permissions come from the GitHub organization, so there are no
 invitations. Outside collaborators invited to individual repositories on GitHub count too: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
 
+## Where do signing keys come from?
+
+GitHub. thwip does not issue, store, or enroll keys — it reads the signing
+keys you have registered on your GitHub account, and a proof names a key by
+its OpenSSH fingerprint, which anyone can compute from the public key. Run
+`thwip keys status` to see which key on your machine would sign and whether
+GitHub lists it. Removing a key from GitHub stops it verifying; an
+organization can also deny a key from the dashboard for faster revocation.
+
 ## Do commits have to be signed?
 
 The proof is its own signature and does not depend on git commit signatures.
