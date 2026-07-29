@@ -765,7 +765,6 @@ function People({ me }: { me: Me }) {
       github_login: string;
       github_org_role: string | null;
       activated_at: string | null;
-      active_keys: number;
     }>;
     teams: Array<{ team_id: string; slug: string; name: string; members: number; repos: number }>;
     teamMembers: Array<{ team_id: string; github_user_id: string; github_login: string | null }>;
@@ -781,7 +780,6 @@ function People({ me }: { me: Me }) {
               <th>Member</th>
               <th>GitHub role</th>
               <th>Seat</th>
-              <th>Keys</th>
             </tr>
           </thead>
           <tbody>
@@ -794,7 +792,6 @@ function People({ me }: { me: Me }) {
                 </td>
                 <td>{m.github_org_role === "outside" ? <span className="gp-chip">outside collaborator</span> : (m.github_org_role ?? "member")}</td>
                 <td>{m.activated_at ? <span className="gp-chip is-active">active</span> : <span className="gp-chip">shadow</span>}</td>
-                <td>{m.active_keys}</td>
               </tr>
             ))}
           </tbody>
@@ -968,6 +965,7 @@ function Devices({ me }: { me: Me }) {
       device_label: string;
       created_at: string;
       revoked_at: string | null;
+      source: string;
     }>;
   }>("/v1/dashboard/devices");
   const revoke = async (keyId: string) => {
@@ -979,13 +977,24 @@ function Devices({ me }: { me: Me }) {
   const canRevoke = (d: { github_user_id: string }) =>
     d.github_user_id === me.viewer.githubUserId || me.viewer.githubOrgRole === "owner";
   return (
-    <Panel title="Signing keys" meta="GitHub owns the key-to-identity binding; revoking here denies a key inside this organization">
+    <Panel
+      title="Signing keys"
+      meta="keys seen in proofs; GitHub is the authority, denying here blocks a key in this organization"
+    >
+      <p style={{ marginBottom: "0.8rem" }}>
+        thwip keeps no key directory. These are the keys it has seen sign a proof, cached so past proofs stay
+        explainable. Add or remove keys in{" "}
+        <a href="https://github.com/settings/keys" target="_blank" rel="noreferrer">
+          your GitHub settings
+        </a>{" "}
+        (type <b>Signing Key</b>); run <code>thwip keys status</code> to see which one this machine would use.
+      </p>
       <table className="gp-data-table">
         <thead>
           <tr>
-            <th>Device</th>
+            <th>Label</th>
             <th>Owner</th>
-            <th>Key</th>
+            <th>Fingerprint</th>
             <th>Status</th>
             <th></th>
           </tr>
@@ -1002,7 +1011,15 @@ function Devices({ me }: { me: Me }) {
                   {d.algorithm} · {d.fingerprint.slice(0, 24)}…
                 </code>
               </td>
-              <td>{d.revoked_at ? <span className="gp-chip">revoked</span> : <span className="gp-chip is-active">active</span>}</td>
+              <td>
+                {d.revoked_at ? (
+                  <span className="gp-chip">denied</span>
+                ) : d.source === "github" ? (
+                  <span className="gp-chip is-active">on GitHub</span>
+                ) : (
+                  <span className="gp-chip">superseded</span>
+                )}
+              </td>
               <td>
                 {!d.revoked_at && canRevoke(d) && (
                   <button className="gp-btn gp-btn--sm" onClick={() => void revoke(d.key_id)}>

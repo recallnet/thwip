@@ -361,8 +361,7 @@ app.get("/v1/dashboard/people", async (c) => {
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const orgId = viewer.organizationId;
   const members = await c.env.DB.prepare(
-    `SELECT github_user_id, github_login, avatar_url, github_org_role, activated_at,
-            (SELECT COUNT(*) FROM device_keys k WHERE k.github_user_id = principals.github_user_id AND k.revoked_at IS NULL) AS active_keys
+    `SELECT github_user_id, github_login, avatar_url, github_org_role, activated_at
      FROM principals WHERE organization_id = ? ORDER BY github_login`,
   )
     .bind(orgId)
@@ -426,9 +425,10 @@ app.get("/v1/dashboard/devices", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const rows = await c.env.DB.prepare(
-    `SELECT k.key_id, k.github_user_id, p.github_login, k.algorithm, k.fingerprint, k.device_label, k.created_at, k.revoked_at
-     FROM device_keys k LEFT JOIN principals p ON p.github_user_id = k.github_user_id AND p.organization_id = ?
-     ORDER BY k.created_at DESC`,
+    `SELECT k.key_id, k.github_user_id, p.github_login, k.algorithm, k.fingerprint, k.device_label,
+            k.created_at, k.revoked_at, k.source
+     FROM device_keys k JOIN principals p ON p.github_user_id = k.github_user_id AND p.organization_id = ?
+     ORDER BY k.source, k.created_at DESC`,
   )
     .bind(viewer.organizationId)
     .all();
@@ -891,8 +891,8 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
       });
       // Remember the key so a proof stays explainable after GitHub removal.
       await c.env.DB.prepare(
-        `INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label)
-         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key_id) DO NOTHING`,
+        `INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label, source)
+         VALUES (?, ?, ?, ?, ?, ?, 'github') ON CONFLICT(key_id) DO NOTHING`,
       )
         .bind(fingerprint, signerUserId, k.publicKey.split(/\s+/)[0] ?? "unknown", k.publicKey, fingerprint, k.title)
         .run()
