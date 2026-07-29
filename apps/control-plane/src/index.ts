@@ -421,18 +421,64 @@ app.get("/v1/dashboard/projects/:id/access", async (c) => {
   return c.json({ project, grants: grants.results, teams: teams.results });
 });
 
-app.get("/v1/dashboard/devices", async (c) => {
+/**
+ * A viewer's own keys only. Keys are personal: nobody needs to browse a
+ * colleague's, and GitHub is the authority for what is currently valid, so
+ * this returns both what GitHub lists now and what thwip has seen sign.
+ */
+app.get("/v1/dashboard/profile", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const rows = await c.env.DB.prepare(
-    `SELECT k.key_id, k.github_user_id, p.github_login, k.algorithm, k.fingerprint, k.device_label,
-            k.created_at, k.revoked_at, k.source
-     FROM device_keys k JOIN principals p ON p.github_user_id = k.github_user_id AND p.organization_id = ?
-     ORDER BY k.source, k.created_at DESC`,
+  if (!viewer) return c.json({ error: "unauthenticated" }, 401);
+
+  const principal = viewer.principalId
+    ? await c.env.DB.prepare(
+        "SELECT github_login, avatar_url, github_org_role, activated_at FROM principals WHERE id = ?",
+      )
+        .bind(viewer.principalId)
+        .first<{ github_login: string; avatar_url: string | null; github_org_role: string | null; activated_at: string | null }>()
+    : null;
+
+  const seen = await c.env.DB.prepare(
+    `SELECT key_id, algorithm, fingerprint, device_label, created_at, revoked_at, source
+     FROM device_keys WHERE github_user_id = ? ORDER BY source, created_at DESC`,
   )
-    .bind(viewer.organizationId)
+    .bind(viewer.githubUserId)
     .all();
-  return c.json({ devices: rows.results });
+
+  let registered: Array<{ fingerprint: string; title: string; githubKeyId: number }> = [];
+  let githubError: string | null = null;
+  if (principal?.github_login) {
+    try {
+      const listed = await githubSigningKeys(c.env.GITHUB_SYNC_TOKEN, principal.github_login);
+      registered = await Promise.all(
+        listed.map(async (k) => ({
+          fingerprint: await sha256Fingerprint(k.publicKey),
+          title: k.title,
+          githubKeyId: k.githubKeyId,
+        })),
+      );
+    } catch (e) {
+      githubError = e instanceof Error ? e.message : "cannot read signing keys from GitHub";
+    }
+  }
+
+  const grants = await c.env.DB.prepare(
+    `SELECT p.github_name, g.permission, g.active
+     FROM repository_grants g JOIN projects p ON p.id = g.project_id
+     WHERE g.github_user_id = ? AND p.organization_id = ? ORDER BY p.github_name`,
+  )
+    .bind(viewer.githubUserId, viewer.organizationId)
+    .all();
+
+  return c.json({
+    principal,
+    githubUserId: viewer.githubUserId,
+    organizations: viewer.orgs,
+    registered,
+    githubError,
+    seen: seen.results,
+    access: grants.results,
+  });
 });
 
 app.post("/v1/dashboard/devices/:keyId/revoke", async (c) => {
@@ -443,9 +489,10 @@ app.post("/v1/dashboard/devices/:keyId/revoke", async (c) => {
     .bind(keyId)
     .first<{ github_user_id: string }>();
   if (!key) return c.json({ error: "unknown key" }, 404);
-  // Key owner may revoke their own; GitHub org owners may revoke any.
-  if (key.github_user_id !== viewer.githubUserId && viewer.githubOrgRole !== "owner") {
-    return c.json({ error: "owner or org owner required" }, 403);
+  // Keys are personal: you may deny your own. Removing a key from GitHub is
+  // the general revocation; this is the organization-local kill switch.
+  if (key.github_user_id !== viewer.githubUserId) {
+    return c.json({ error: "you can only deny your own keys" }, 403);
   }
   await c.env.DB.prepare(
     "UPDATE device_keys SET revoked_at = ?, revoked_reason = ? WHERE key_id = ? AND revoked_at IS NULL",
