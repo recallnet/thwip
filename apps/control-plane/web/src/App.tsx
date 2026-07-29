@@ -455,7 +455,6 @@ const TABS = [
   ["overview", "Overview"],
   ["projects", "Projects"],
   ["people", "People & Teams"],
-  ["devices", "Devices"],
   ["policies", "Policies"],
   ["billing", "Billing"],
   ["operations", "Operations"],
@@ -515,7 +514,9 @@ function Dashboard({
               {org.plan}
             </a>
           )}
-          <span className="gp-panel__meta">{me.principal?.github_login ?? me.viewer.githubUserId}</span>
+          <a href="/dashboard/profile" className="gp-panel__meta" title="Your keys and access">
+            {me.principal?.github_login ?? me.viewer.githubUserId}
+          </a>
           <button
             className="gp-btn gp-btn--sm"
             onClick={() =>
@@ -559,7 +560,7 @@ function Dashboard({
             <Projects me={me} />
           ))}
         {tab === "people" && <People me={me} />}
-        {tab === "devices" && <Devices me={me} />}
+        {tab === "profile" && <Profile me={me} />}
         {tab === "policies" && <Policies />}
         {tab === "billing" && <Billing />}
         {tab === "operations" && <Operations me={me} />}
@@ -954,12 +955,15 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
   );
 }
 
-function Devices({ me }: { me: Me }) {
+function Profile({ me }: { me: Me }) {
   const { data, error, reload } = useFetch<{
-    devices: Array<{
+    principal: { github_login: string; github_org_role: string | null; activated_at: string | null } | null;
+    githubUserId: string;
+    organizations: OrgSummary[];
+    registered: Array<{ fingerprint: string; title: string; githubKeyId: number }>;
+    githubError: string | null;
+    seen: Array<{
       key_id: string;
-      github_user_id: string;
-      github_login: string | null;
       algorithm: string;
       fingerprint: string;
       device_label: string;
@@ -967,74 +971,153 @@ function Devices({ me }: { me: Me }) {
       revoked_at: string | null;
       source: string;
     }>;
-  }>("/v1/dashboard/devices");
-  const revoke = async (keyId: string) => {
+    access: Array<{ github_name: string; permission: string; active: number }>;
+  }>("/v1/dashboard/profile");
+  const [copied, setCopied] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const prompt = developerSetupPrompt();
+
+  const deny = async (keyId: string) => {
     await api(`/v1/dashboard/devices/${keyId}/revoke`, { method: "POST", body: "{}" });
     reload();
   };
+
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  const canRevoke = (d: { github_user_id: string }) =>
-    d.github_user_id === me.viewer.githubUserId || me.viewer.githubOrgRole === "owner";
+
+  const login = data.principal?.github_login ?? data.githubUserId;
+  const seenByFingerprint = new Map(data.seen.map((k) => [k.fingerprint, k]));
+
   return (
-    <Panel
-      title="Signing keys"
-      meta="keys seen in proofs; GitHub is the authority, denying here blocks a key in this organization"
-    >
-      <p style={{ marginBottom: "0.8rem" }}>
-        thwip keeps no key directory. These are the keys it has seen sign a proof, cached so past proofs stay
-        explainable. Add or remove keys in{" "}
-        <a href="https://github.com/settings/keys" target="_blank" rel="noreferrer">
-          your GitHub settings
-        </a>{" "}
-        (type <b>Signing Key</b>); run <code>thwip keys status</code> to see which one this machine would use.
-      </p>
-      <table className="gp-data-table">
-        <thead>
-          <tr>
-            <th>Label</th>
-            <th>Owner</th>
-            <th>Fingerprint</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.devices.map((d) => (
-            <tr key={d.key_id}>
-              <td>{d.device_label}</td>
-              <td>
-                <code>{d.github_login ?? d.github_user_id}</code>
-              </td>
-              <td>
-                <code style={{ fontSize: "0.72rem" }}>
-                  {d.algorithm} · {d.fingerprint.slice(0, 24)}…
-                </code>
-              </td>
-              <td>
-                {d.revoked_at ? (
-                  <span className="gp-chip">denied</span>
-                ) : d.source === "github" ? (
-                  <span className="gp-chip is-active">on GitHub</span>
-                ) : (
-                  <span className="gp-chip">superseded</span>
-                )}
-              </td>
-              <td>
-                {!d.revoked_at && canRevoke(d) && (
-                  <button className="gp-btn gp-btn--sm" onClick={() => void revoke(d.key_id)}>
-                    Revoke
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Panel>
+    <>
+      <Panel
+        title={login}
+        meta={`GitHub user ${data.githubUserId}${data.principal?.github_org_role ? ` · ${data.principal.github_org_role}` : ""}`}
+      >
+        <p>
+          Only you can see this page. Keys are personal, and GitHub is the authority for which of them are valid —
+          thwip reads your registered signing keys rather than keeping a directory of its own.
+        </p>
+      </Panel>
+
+      <Panel title="Devices and keys" meta="registered with GitHub as signing keys">
+        {data.githubError && <p className="thwip-error">Could not read GitHub: {data.githubError}</p>}
+        {data.registered.length === 0 && !data.githubError && (
+          <p>
+            GitHub lists no signing keys for {login}, so nothing on any machine can sign a proof for you yet. Add a
+            device below.
+          </p>
+        )}
+        {data.registered.length > 0 && (
+          <table className="gp-data-table">
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>Fingerprint</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.registered.map((k) => {
+                const cached = seenByFingerprint.get(k.fingerprint);
+                return (
+                  <tr key={k.fingerprint}>
+                    <td>{k.title}</td>
+                    <td>
+                      <code style={{ fontSize: "0.72rem" }}>{k.fingerprint}</code>
+                    </td>
+                    <td>
+                      {cached?.revoked_at ? (
+                        <span className="gp-chip">denied here</span>
+                      ) : (
+                        <span className="gp-chip is-active">on GitHub</span>
+                      )}
+                    </td>
+                    <td>
+                      {cached && !cached.revoked_at && (
+                        <button className="gp-btn gp-btn--sm" onClick={() => void deny(cached.key_id)}>
+                          Deny in this org
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <p className="gp-panel__meta" style={{ marginTop: "0.7rem" }}>
+          Add or remove keys in{" "}
+          <a href="https://github.com/settings/keys" target="_blank" rel="noreferrer">
+            your GitHub settings
+          </a>
+          . Denying here blocks a key in this organization without touching your GitHub account.
+        </p>
+      </Panel>
+
+      <Panel title="Add a device" meta="paste into the coding agent on that machine">
+        <p style={{ marginBottom: "0.7rem" }}>
+          Setting up another machine means installing the CLI there, signing in, and registering that machine&apos;s
+          key with GitHub as a <b>signing</b> key. The prompt below walks an agent through it and hands you the
+          browser and terminal steps; your private key is never read. Existing devices keep working.
+        </p>
+        <div className="thwip-actions">
+          <button
+            className="gp-btn gp-btn--sm"
+            onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
+          >
+            {copied ? "Copied" : "Copy prompt"}
+          </button>
+          <button className="gp-btn gp-btn--sm" onClick={() => setShowPrompt((v) => !v)}>
+            {showPrompt ? "Hide" : "Show"} prompt
+          </button>
+        </div>
+        {showPrompt && (
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.76rem", marginTop: "0.8rem" }}>{prompt}</pre>
+        )}
+      </Panel>
+
+      {data.seen.some((k) => k.source !== "github") && (
+        <Panel title="Superseded" meta="keys from before GitHub became the authority; kept so old proofs stay explainable">
+          <table className="gp-data-table">
+            <tbody>
+              {data.seen
+                .filter((k) => k.source !== "github")
+                .map((k) => (
+                  <tr key={k.key_id}>
+                    <td>{k.device_label}</td>
+                    <td>
+                      <code style={{ fontSize: "0.72rem" }}>{k.fingerprint}</code>
+                    </td>
+                    <td className="gp-panel__meta">cannot sign</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
+
+      <Panel title="Your access" meta="from GitHub; this is what your proofs may cover">
+        <table className="gp-data-table">
+          <tbody>
+            {data.access.map((g, i) => (
+              <tr key={i}>
+                <td>
+                  <a href={`https://github.com/${g.github_name}`} target="_blank" rel="noreferrer">
+                    <code>{g.github_name}</code>
+                  </a>
+                </td>
+                <td>{g.permission}</td>
+                <td>{g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+    </>
   );
 }
-
 function Policies() {
   const { data, error } = useFetch<{
     policies: Array<{
