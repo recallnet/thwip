@@ -12,10 +12,13 @@ Work step by step and ask the human before each side-effectful step.
 1. Install the CLI: clone https://github.com/recallnet/thwip and run
    "pnpm install && pnpm build", then link packages/cli (or run it via
    "node packages/cli/dist/main.js"). Confirm with: thwip --help
-2. Authenticate: run "thwip login". It prints a URL and a short code.
-   Show the human the URL so they can click it (it works over SSH; the
-   browser opens on their machine, not yours). Wait until the CLI
-   reports it is signed in.
+2. Authenticate: do not run this yourself. "thwip login" blocks until a
+   human approves it in a browser, and the browser must be theirs. Give
+   them a pastable command to run in their own terminal:
+     thwip login
+   It prints a URL and a short code; they open it, approve, and tell you
+   when it reports "signed in". Wait for that confirmation before
+   continuing.
 3. Enroll this machine's signing key: generate a dedicated key with
    "ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''" after
    asking the human to name the device, then run
