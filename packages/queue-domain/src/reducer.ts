@@ -240,7 +240,17 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const capabilityOnly = primary !== null && isCapabilityReason(primary);
       if (entry.currentAttemptId === null && entry.state !== "Merged" && entry.state !== "Cancelled") {
         if (event.ready || capabilityOnly) {
-          if (entry.state !== "Deferred" && entry.state !== "NeedsRepair") setEntryState(entry, "Ready");
+          // A deferred entry returns to Ready once its cooldown has elapsed
+          // (§9.3 "cooldown complete and capable"). Without this edge an entry
+          // that forfeited one turn would never be offered another.
+          if (entry.state === "Deferred") {
+            if (entry.cooldownUntil === null || entry.cooldownUntil <= event.at) {
+              entry.cooldownUntil = null;
+              setEntryState(entry, "Ready");
+            }
+          } else if (entry.state !== "NeedsRepair") {
+            setEntryState(entry, "Ready");
+          }
         } else {
           setEntryState(entry, "Blocked");
         }
