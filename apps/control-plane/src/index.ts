@@ -355,19 +355,44 @@ app.get("/v1/dashboard/people", async (c) => {
   )
     .bind(orgId)
     .all();
-  const grants = await c.env.DB.prepare(
-    `SELECT g.project_id, p.github_name, g.github_user_id, g.github_login, g.permission, g.active
-     FROM repository_grants g JOIN projects p ON p.id = g.project_id
-     WHERE p.organization_id = ? ORDER BY p.github_name, g.github_login`,
-  )
-    .bind(orgId)
-    .all();
   return c.json({
     members: members.results,
     teams: teams.results,
     teamMembers: teamMembers.results,
-    grants: grants.results,
   });
+});
+
+// Per-project access, so the org-wide grant list never grows as
+// projects × members.
+app.get("/v1/dashboard/projects/:id/access", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const projectId = c.req.param("id");
+  const project = await c.env.DB.prepare(
+    "SELECT id, github_name FROM projects WHERE id = ? AND organization_id = ?",
+  )
+    .bind(projectId, viewer.organizationId)
+    .first<{ id: string; github_name: string }>();
+  if (!project) return c.json({ error: "unknown project" }, 404);
+  const grants = await c.env.DB.prepare(
+    `SELECT g.github_user_id, g.github_login, g.permission, g.active, g.synced_at,
+            p.github_org_role
+     FROM repository_grants g
+     LEFT JOIN principals p ON p.organization_id = ? AND p.github_user_id = g.github_user_id
+     WHERE g.project_id = ?
+     ORDER BY g.active DESC, g.permission, g.github_login`,
+  )
+    .bind(viewer.organizationId, projectId)
+    .all();
+  const teams = await c.env.DB.prepare(
+    `SELECT t.slug, t.name, r.permission
+     FROM team_repos r JOIN github_teams t ON t.organization_id = r.organization_id AND t.team_id = r.team_id
+     WHERE r.organization_id = ? AND r.github_repository_id = (SELECT github_repository_id FROM projects WHERE id = ?)
+     ORDER BY t.slug`,
+  )
+    .bind(viewer.organizationId, projectId)
+    .all();
+  return c.json({ project, grants: grants.results, teams: teams.results });
 });
 
 app.get("/v1/dashboard/devices", async (c) => {
