@@ -509,7 +509,17 @@ function OrgSwitcher({ me }: { me: Me }) {
   );
 }
 
-function Dashboard({ me, tab, accessProjectId }: { me: Me; tab: string; accessProjectId?: string }) {
+function Dashboard({
+  me,
+  tab,
+  accessProjectId,
+  setupProjectId,
+}: {
+  me: Me;
+  tab: string;
+  accessProjectId?: string;
+  setupProjectId?: string;
+}) {
   const org = me.organization;
   return (
     <div className="thwip-shell gp-workspace">
@@ -559,8 +569,15 @@ function Dashboard({ me, tab, accessProjectId }: { me: Me; tab: string; accessPr
           </div>
         )}
         {tab === "overview" && <Overview />}
-        {tab === "projects" && (accessProjectId ? <ProjectAccess projectId={accessProjectId} /> : <Projects me={me} />)}
-        {tab === "people" && <People />}
+        {tab === "projects" &&
+          (accessProjectId ? (
+            <ProjectAccess projectId={accessProjectId} me={me} />
+          ) : setupProjectId ? (
+            <ProjectSetup projectId={setupProjectId} />
+          ) : (
+            <Projects me={me} />
+          ))}
+        {tab === "people" && <People me={me} />}
         {tab === "devices" && <Devices me={me} />}
         {tab === "policies" && <Policies />}
         {tab === "billing" && <Billing />}
@@ -686,7 +703,9 @@ function Projects({ me }: { me: Me }) {
           {data.projects.map((p) => (
             <tr key={p.id}>
               <td>
-                <code>{p.github_name}</code>
+                <a href={`https://github.com/${p.github_name}`} target="_blank" rel="noreferrer">
+                  <code>{p.github_name}</code>
+                </a>
                 <div className="gp-panel__meta">
                   <a href={`/dashboard/projects/${p.id}/access`}>{p.collaborators} with access</a> · {p.default_branch}
                 </div>
@@ -709,7 +728,10 @@ function Projects({ me }: { me: Me }) {
                   <span className="gp-panel__meta">—</span>
                 )}
               </td>
-              <td>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <a className="gp-btn gp-btn--sm" href={`/dashboard/projects/${p.id}/setup`}>
+                  Set up
+                </a>{" "}
                 <button
                   className="gp-btn gp-btn--sm"
                   disabled={busy === p.id}
@@ -726,7 +748,8 @@ function Projects({ me }: { me: Me }) {
   );
 }
 
-function People() {
+function People({ me }: { me: Me }) {
+  const orgLogin = me.organization?.github_login ?? "";
   const { data, error } = useFetch<{
     members: Array<{
       github_user_id: string;
@@ -756,7 +779,9 @@ function People() {
             {data.members.map((m) => (
               <tr key={m.github_user_id}>
                 <td>
-                  <code>{m.github_login}</code>
+                  <a href={`https://github.com/${m.github_login}`} target="_blank" rel="noreferrer">
+                    <code>{m.github_login}</code>
+                  </a>
                 </td>
                 <td>{m.github_org_role === "outside" ? <span className="gp-chip">outside collaborator</span> : (m.github_org_role ?? "member")}</td>
                 <td>{m.activated_at ? <span className="gp-chip is-active">active</span> : <span className="gp-chip">shadow</span>}</td>
@@ -778,7 +803,9 @@ function People() {
             {data.teams.map((t) => (
               <tr key={t.team_id}>
                 <td>
-                  <code>@{t.slug}</code>
+                  <a href={`https://github.com/orgs/${orgLogin}/teams/${t.slug}`} target="_blank" rel="noreferrer">
+                    <code>@{t.slug}</code>
+                  </a>
                 </td>
                 <td>
                   {data.teamMembers
@@ -796,7 +823,101 @@ function People() {
   );
 }
 
-function ProjectAccess({ projectId }: { projectId: string }) {
+function buildSetupPrompt(p: { github_name: string; default_branch: string; enabled: number; policy_version: number | null }): string {
+  return `Set up thwip (verified local CI) for ${p.github_name}. Work through this in order and
+ask me before anything that changes files, deletes workflows, or pushes.
+
+This is safe to re-run: if a step is already done, say so and move on.
+
+1. CLI. Check "thwip --help" works. If not, clone
+   https://github.com/recallnet/thwip, run "pnpm install && pnpm build", and
+   use "node packages/cli/dist/main.js" as the thwip command.
+
+2. Sign in. Run "thwip login". It prints a URL and a short code — show me the
+   URL so I can click it (this works over SSH; the browser opens on my
+   machine, not yours). Wait for it to report success.
+
+3. Signing key. If ~/.config/thwip/config.json already names a key, skip.
+   Otherwise ask me for a device name, then:
+     ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''
+     thwip keys enroll --public-key ~/.config/thwip/keys/<device>.pub --label <device>
+
+4. Configuration. If thwip.yaml exists, show it to me and confirm it still
+   matches the project. Otherwise read package.json (or the Makefile, or
+   whatever this repo actually uses) and propose which checks make up CI here
+   — typically lint, typecheck, test. Then run:
+     thwip init --required "<the ids you proposed>"
+   Suite ids name package.json scripts. Show me thwip.yaml before continuing.
+
+5. Retire duplicated remote CI. Read .github/workflows/*. List every job and
+   sort it into:
+     - now proven locally by thwip (the same lint/typecheck/test work) —
+       candidates for removal
+     - must stay remote (deploy, release, publish, scheduled jobs, anything
+       needing cloud secrets, anything that runs on a schedule or on main)
+     - unclear — ask me
+   Show me the list with your reasoning and wait for my decision on each
+   candidate before editing or deleting anything. Removing CI is the one step
+   I want to review carefully.
+
+6. Prove it. Commit the changes on a branch, then run "thwip run". It runs the
+   suites against the committed tree and attaches a signed proof to HEAD. If
+   it refuses to sign, tell me the reason it printed rather than working
+   around it. Then push and open a pull request.
+
+7. Finish. ${
+    p.enabled
+      ? "The project is already enabled in thwip."
+      : "Tell me to enable this project at https://thwip.recall.net/dashboard/projects (I need repository admin on GitHub)."
+  }${
+    p.policy_version
+      ? " A policy is already active; a changed thwip.yaml needs a new activation before it takes effect."
+      : " After the pull request merges, the policy from thwip.yaml gets activated."
+  }
+   The thwip check on the pull request should pass from the proof on the head
+   commit, without rerunning the suites in the cloud.
+
+Rules: never move a private key anywhere outside ~/.config/thwip; never skip
+or weaken a failing check to get a green proof; default branch here is
+${p.default_branch}.`;
+}
+
+function ProjectSetup({ projectId }: { projectId: string }) {
+  const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  const [copied, setCopied] = useState(false);
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+  const p = data.projects.find((x) => x.id === projectId);
+  if (!p) return <p className="thwip-error">unknown project</p>;
+  const prompt = buildSetupPrompt(p);
+  return (
+    <>
+      <p style={{ marginBottom: "0.8rem" }}>
+        <a href="/dashboard/projects">← Projects</a>
+      </p>
+      <Panel
+        title={`Set up ${p.github_name}`}
+        meta="paste into your coding agent, in a checkout of this repository"
+      >
+        <p style={{ marginBottom: "0.8rem" }}>
+          The agent installs the CLI, signs you in, writes <code>thwip.yaml</code> from the checks this repo already
+          has, proposes which GitHub Actions jobs to retire (asking before each one), runs the pipeline, and opens a
+          pull request. Re-running it is safe.
+        </p>
+        <button
+          className="gp-btn gp-btn--sm"
+          onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
+        >
+          {copied ? "Copied" : "Copy prompt"}
+        </button>
+        <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.76rem", marginTop: "0.9rem" }}>{prompt}</pre>
+      </Panel>
+    </>
+  );
+}
+
+function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
+  const orgLogin = me.organization?.github_login ?? "";
   const { data, error } = useFetch<{
     project: { id: string; github_name: string };
     grants: Array<{
@@ -830,7 +951,9 @@ function ProjectAccess({ projectId }: { projectId: string }) {
             {data.grants.map((g) => (
               <tr key={g.github_user_id}>
                 <td>
-                  <code>{g.github_login}</code>
+                  <a href={`https://github.com/${g.github_login}`} target="_blank" rel="noreferrer">
+                    <code>{g.github_login}</code>
+                  </a>
                 </td>
                 <td>
                   {g.github_org_role === "outside" ? (
@@ -855,7 +978,9 @@ function ProjectAccess({ projectId }: { projectId: string }) {
               {data.teams.map((t) => (
                 <tr key={t.slug}>
                   <td>
-                    <code>@{t.slug}</code>
+                    <a href={`https://github.com/orgs/${orgLogin}/teams/${t.slug}`} target="_blank" rel="noreferrer">
+                      <code>@{t.slug}</code>
+                    </a>
                   </td>
                   <td>{t.name}</td>
                   <td>{t.permission}</td>
@@ -1229,6 +1354,7 @@ export function App() {
   const me = useMe();
   const path = window.location.pathname;
   const accessMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/access/.exec(path);
+  const setupMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/setup/.exec(path);
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
@@ -1252,6 +1378,7 @@ export function App() {
       );
     }
     if (accessMatch) return <Dashboard me={me} tab="projects" accessProjectId={accessMatch[1]!} />;
+    if (setupMatch) return <Dashboard me={me} tab="projects" setupProjectId={setupMatch[1]!} />;
     return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
   }
   return <Marketing me={me} />;
