@@ -220,6 +220,46 @@ describe("reducer", () => {
       expect(state.attempts.get("a1")!.outcome).toBe("EXPIRED_UNCLAIMED");
     });
 
+    it("returns a deferred entry to Ready once its cooldown elapses (§9.3)", () => {
+      let state = applyEvents(base(), happyPath().slice(0, 3));
+      const ordinal = state.entries.get("e1")!.fairnessOrdinal;
+      state = applyEvent(
+        state,
+        ev({ type: "OfferExpired", attemptId: "a1", cooldownUntil: "2026-07-29T13:00:00.000Z" }),
+      );
+      expect(state.entries.get("e1")!.state).toBe("Deferred");
+
+      // Still cooling down: readiness alone does not restore eligibility.
+      state = applyEvent(state, {
+        sequence: 900,
+        idempotencyKey: "early",
+        at: "2026-07-29T12:30:00.000Z",
+        type: "ReadinessEvaluated",
+        entryId: "e1",
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+        secondaryReasons: [],
+      });
+      expect(state.entries.get("e1")!.state).toBe("Deferred");
+
+      state = applyEvent(state, {
+        sequence: 901,
+        idempotencyKey: "after-cooldown",
+        at: "2026-07-29T13:00:01.000Z",
+        type: "ReadinessEvaluated",
+        entryId: "e1",
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+        secondaryReasons: [],
+      });
+      const entry = state.entries.get("e1")!;
+      expect(entry.state).toBe("Ready");
+      expect(entry.cooldownUntil).toBeNull();
+      expect(entry.fairnessOrdinal).toBe(ordinal);
+    });
+
     it("keeps the ordinal across an ordinary head repair", () => {
       let state = applyEvents(base(), happyPath().slice(0, 2));
       const ordinal = state.entries.get("e1")!.fairnessOrdinal;
