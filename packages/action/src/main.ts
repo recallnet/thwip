@@ -2,7 +2,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { importJWK, compactVerify, type JWK } from "jose";
 import { verifySshSignature } from "@thwip/sshsig";
 import { verifyProof, type GithubFacts } from "@thwip/verifier";
-import type { VerificationBundleV1 } from "@thwip/protocol";
+import { b64stdDecode, extractCarrier, type VerificationBundleV1 } from "@thwip/protocol";
 import servicePublicJwk from "../service-public.jwk.json" with { type: "json" };
 
 interface CommitData {
@@ -46,12 +46,45 @@ async function getOidcToken(audience: string): Promise<string> {
   return body.value;
 }
 
-async function fetchBundle(repositoryId: string, headSha: string, keyIds: string[]): Promise<VerificationBundleV1> {
+/**
+ * Read the signer selectors out of the trailer without trusting them. They
+ * only decide which facts the control plane returns; the verifier re-checks
+ * every one of them against the signed payload afterwards.
+ */
+function proofHints(commitMessage: string): { signerGithubUserId?: string; keyFingerprint?: string } {
+  const carrier = extractCarrier(commitMessage);
+  if (!carrier.ok) return {};
+  const keyFingerprint = carrier.envelope.signatures[0]?.keyid;
+  let signerGithubUserId: string | undefined;
+  try {
+    const statement = JSON.parse(new TextDecoder().decode(b64stdDecode(carrier.envelope.payload))) as {
+      predicate?: { signer?: { githubUserId?: string } };
+    };
+    const claimed = statement.predicate?.signer?.githubUserId;
+    if (typeof claimed === "string" && /^[0-9]+$/.test(claimed)) signerGithubUserId = claimed;
+  } catch {
+    /* malformed proofs fail later, with a reason code */
+  }
+  return {
+    ...(signerGithubUserId !== undefined ? { signerGithubUserId } : {}),
+    ...(keyFingerprint !== undefined ? { keyFingerprint } : {}),
+  };
+}
+
+/**
+ * Selector hints come from the unverified proof; they only choose which facts
+ * to fetch. Everything is re-checked against the signed payload afterwards.
+ */
+async function fetchBundle(
+  repositoryId: string,
+  headSha: string,
+  hints: { signerGithubUserId?: string; keyFingerprint?: string },
+): Promise<VerificationBundleV1> {
   const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
   const res = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
     method: "POST",
     headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-    body: JSON.stringify({ repositoryId, headSha, keyIds }),
+    body: JSON.stringify({ repositoryId, headSha, ...hints }),
   });
   if (!res.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res.status} ${await res.text()}`);
   const { bundle } = (await res.json()) as { bundle: string };
@@ -114,7 +147,7 @@ async function main(): Promise<void> {
 
   // One bundle request per verification run.
   const firstCommit = await gh<CommitData>(`/repos/${fullName}/git/commits/${targets[0]!.prHeadSha}`);
-  const bundle = await fetchBundle(repositoryId, targets[0]!.prHeadSha, []);
+  const bundle = await fetchBundle(repositoryId, targets[0]!.prHeadSha, proofHints(firstCommit.message));
 
   let allPass = true;
   for (const target of targets) {

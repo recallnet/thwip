@@ -373,6 +373,14 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
             repositories on GitHub count too, with their per-repository permission as their standing. Verification
             always checks current GitHub permission, so removing someone on GitHub removes their standing here too.
           </dd>
+          <dt>Where do signing keys come from?</dt>
+          <dd>
+            GitHub. thwip does not issue, store, or enroll keys — it reads the signing keys you have registered on
+            your GitHub account, and a proof names a key by its OpenSSH fingerprint, which anyone can compute from
+            the public key. Run <code>thwip keys status</code> to see which key on your machine would sign and
+            whether GitHub lists it. Removing a key from GitHub stops it verifying; an organization can also deny a
+            key from the dashboard for faster revocation.
+          </dd>
           <dt>Do commits have to be signed?</dt>
           <dd>
             The proof is its own signature and does not depend on git commit signatures. If you want signed commits
@@ -845,10 +853,13 @@ This is safe to re-run: if a step is already done, say so and move on.
    nothing below works until then. (If ~/.config/thwip/session-token already
    exists, I'm probably still signed in — say so and offer to skip.)
 
-3. Signing key. If ~/.config/thwip/config.json already names a key, skip.
-   Otherwise ask me for a device name, then:
-     ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''
-     thwip keys enroll --public-key ~/.config/thwip/keys/<device>.pub --label <device>
+3. Signing key. Run "thwip keys status". It finds the ed25519 key this
+   machine already uses and tells you whether GitHub lists it as a signing
+   key for my account. GitHub owns that binding — thwip stores no keys.
+   If it reports registeredWithGithub: false, give me the exact
+   "gh ssh-key add ... --type signing" command it printed and wait for me to
+   run it. If there is no key at all, propose creating one with ssh-keygen
+   first, then the same registration step.
 
 4. Configuration. If thwip.yaml exists, show it to me and confirm it still
    matches the project. Otherwise read package.json (or the Makefile, or
@@ -1024,7 +1035,7 @@ function Devices({ me }: { me: Me }) {
   const canRevoke = (d: { github_user_id: string }) =>
     d.github_user_id === me.viewer.githubUserId || me.viewer.githubOrgRole === "owner";
   return (
-    <Panel title="Signing devices" meta="thwip login, then thwip keys enroll; revocation applies on the next verification">
+    <Panel title="Signing keys" meta="GitHub owns the key-to-identity binding; revoking here denies a key inside this organization">
       <table className="gp-data-table">
         <thead>
           <tr>
