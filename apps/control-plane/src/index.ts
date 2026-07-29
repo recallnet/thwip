@@ -1154,3 +1154,9 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+/* The Durable Object and Workflow classes the wrangler bindings name. They live
+   in ./queue and are re-exported here because Cloudflare resolves a binding's
+   class_name against the Worker's own exports. */
+export { BranchQueue } from "./queue/BranchQueue.js";
+export { IntegrationTurnWorkflow } from "./queue/IntegrationTurnWorkflow.js";
