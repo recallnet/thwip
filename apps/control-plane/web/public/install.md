@@ -19,10 +19,11 @@ Work step by step and ask the human before each side-effectful step.
    It prints a URL and a short code; they open it, approve, and tell you
    when it reports "signed in". Wait for that confirmation before
    continuing.
-3. Enroll this machine's signing key: generate a dedicated key with
-   "ssh-keygen -t ed25519 -f ~/.config/thwip/keys/<device> -N ''" after
-   asking the human to name the device, then run
-   "thwip keys enroll --public-key ~/.config/thwip/keys/<device>.pub --label <device>".
+3. Signing key: run "thwip keys status". It finds the ed25519 key already
+   on this machine and reports whether GitHub lists it as a signing key for
+   the human's account (GitHub owns that binding; thwip stores no keys).
+   If it is not registered, hand the human the exact
+   "gh ssh-key add ... --type signing" command it printed and wait.
 4. Set up the project: ask the human which checks make up CI here
    (for example lint, typecheck, test), then write thwip.yaml at the
    repository root declaring those suites and the security profile

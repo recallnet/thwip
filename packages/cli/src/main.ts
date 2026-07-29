@@ -21,13 +21,16 @@ import {
 } from "./git.js";
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead } from "./config.js";
+import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 
+/** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
-  endpoint: string;
-  keyId: string;
-  privateKeyPath: string;
-  githubUserId: string;
+  endpoint?: string;
+  /** path to a private signing key, when the machine has several */
+  signingKey?: string;
+  /** GitHub login, when it cannot be derived from gh or the remote */
+  githubLogin?: string;
 }
 
 const CONFIG_PATH = join(homedir(), ".config", "thwip", "config.json");
@@ -36,8 +39,34 @@ async function loadConfig(): Promise<CliConfig> {
   try {
     return JSON.parse(await readFile(CONFIG_PATH, "utf8")) as CliConfig;
   } catch {
-    throw new Error(`missing or invalid ${CONFIG_PATH}; run: thwip keys enroll`);
+    return {};
   }
+}
+
+/** Who GitHub says we are: gh's own auth, else the configured login. */
+async function resolveGithubIdentity(config: CliConfig): Promise<{ login: string; id: string }> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileP = promisify(execFile);
+  try {
+    const { stdout } = await execFileP("gh", ["api", "user", "--jq", "{login: .login, id: .id}"]);
+    const u = JSON.parse(stdout) as { login: string; id: number };
+    return { login: u.login, id: String(u.id) };
+  } catch {
+    /* gh missing or signed out */
+  }
+  if (config.githubLogin) {
+    const res = await fetch(`https://api.github.com/users/${encodeURIComponent(config.githubLogin)}`, {
+      headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
+    });
+    if (res.ok) {
+      const u = (await res.json()) as { login: string; id: number };
+      return { login: u.login, id: String(u.id) };
+    }
+  }
+  throw new Error(
+    "cannot determine your GitHub identity; sign in with 'gh auth login' or set githubLogin in ~/.config/thwip/config.json",
+  );
 }
 
 function flag(argv: string[], name: string): string | undefined {
@@ -45,14 +74,86 @@ function flag(argv: string[], name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+
+/**
+ * The key must be one GitHub already lists as a signing key for this user —
+ * GitHub owns the key-to-identity binding, so an unregistered key cannot be
+ * attributed to anyone and thwip will not sign with it.
+ */
+async function requireRegisteredKey(cwd: string, config: CliConfig, login: string) {
+  const key = await discoverSigningKey(cwd, config.signingKey);
+  if (!key) {
+    throw new Error(
+      [
+        "no ed25519 signing key found on this machine.",
+        "  create one:  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519",
+        "  register it: gh ssh-key add ~/.ssh/id_ed25519.pub --type signing",
+      ].join("\n"),
+    );
+  }
+  const listed = await githubSigningKeys(login);
+  const fingerprints = await Promise.all(listed.map((k) => fingerprintOfPublicKey(k.key)));
+  if (!fingerprints.includes(key.fingerprint)) {
+    throw new Error(
+      [
+        `the key at ${key.privateKeyPath} (${key.fingerprint}) is not registered as a signing key for ${login}.`,
+        `  register it: gh ssh-key add ${key.privateKeyPath}.pub --type signing`,
+        "  or point thwip at another key with signingKey in ~/.config/thwip/config.json",
+      ].join("\n"),
+    );
+  }
+  return key;
+}
+
+/** Report which key would sign here and whether GitHub lists it. */
+async function cmdKeysStatus(): Promise<number> {
+  const cwd = process.cwd();
+  const config = await loadConfig();
+  const identity = await resolveGithubIdentity(config);
+  const key = await discoverSigningKey(cwd, config.signingKey);
+  if (!key) {
+    process.stderr.write(
+      "no ed25519 signing key found.\n  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519\n  gh ssh-key add ~/.ssh/id_ed25519.pub --type signing\n",
+    );
+    return 1;
+  }
+  const listed = await githubSigningKeys(identity.login);
+  const fingerprints = await Promise.all(listed.map((k) => fingerprintOfPublicKey(k.key)));
+  const registered = fingerprints.includes(key.fingerprint);
+  process.stdout.write(
+    JSON.stringify(
+      {
+        githubLogin: identity.login,
+        githubUserId: identity.id,
+        privateKeyPath: key.privateKeyPath,
+        fingerprint: key.fingerprint,
+        source: key.source,
+        registeredWithGithub: registered,
+        githubSigningKeys: listed.map((k, i) => ({ title: k.title, fingerprint: fingerprints[i] })),
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  if (!registered) {
+    process.stderr.write(`\nnot registered. run: gh ssh-key add ${key.privateKeyPath}.pub --type signing\n`);
+    return 1;
+  }
+  return 0;
+}
+
 async function cmdRun(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const baseRef = flag(argv, "--base") ?? "origin/main";
   const config = await loadConfig();
+  const endpoint = config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+
+  const identity = await resolveGithubIdentity(config);
+  const key = await requireRegisteredKey(cwd, config, identity.login);
 
   await requireCleanTree(cwd);
   const subject = await freezeSubject(cwd, baseRef);
-  const project = await loadProjectConfigAtHead(cwd, config.endpoint, await apiAuthHeader());
+  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
   const { policy, policyDigest } = project;
   const def = project.pipeline;
   const pDigest = project.pipelineDigest;
@@ -85,11 +186,11 @@ async function cmdRun(argv: string[]): Promise<number> {
     suites,
     startedAt,
     finishedAt,
-    keyId: config.keyId,
-    githubUserId: config.githubUserId,
-    privateKeyPath: config.privateKeyPath,
+    keyId: key.fingerprint,
+    githubUserId: identity.id,
+    privateKeyPath: key.privateKeyPath,
   });
-  const envelope = await signStatement(statement, config.keyId, config.privateKeyPath);
+  const envelope = await signStatement(statement, key.fingerprint, key.privateKeyPath);
 
   const message = await headMessage(cwd);
   const amended = attachTrailer(message, envelope);
@@ -188,65 +289,6 @@ async function apiAuthHeader(): Promise<string | null> {
   return adminToken ? `Bearer ${adminToken}` : null;
 }
 
-async function cmdKeysEnroll(argv: string[]): Promise<number> {
-  const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
-  const publicKeyPath = flag(argv, "--public-key");
-  const label = flag(argv, "--label") ?? "device";
-  const authHeader = await apiAuthHeader();
-  if (!publicKeyPath) {
-    process.stderr.write("usage: thwip keys enroll --public-key <path.pub> --label <label>\n");
-    return 1;
-  }
-  if (!authHeader) {
-    process.stderr.write("not signed in; run: thwip login\n");
-    return 1;
-  }
-  const publicKey = (await readFile(publicKeyPath, "utf8")).trim();
-
-  // Proof of possession: fetch a challenge, sign it, submit.
-  const challengeRes = await fetch(`${endpoint}/v1/devices/challenges`, {
-    method: "POST",
-    headers: { authorization: authHeader },
-  });
-  if (!challengeRes.ok) {
-    process.stderr.write(`challenge failed: ${challengeRes.status}\n`);
-    return 1;
-  }
-  const { challenge } = (await challengeRes.json()) as { challenge: string };
-  const { signSsh } = await import("@thwip/sshsig");
-  const privateKeyPath = publicKeyPath.replace(/\.pub$/, "");
-  const pop = await signSsh({
-    privateKeyPath,
-    namespace: "thwip-enroll-v1",
-    message: new TextEncoder().encode(challenge),
-  });
-
-  // Session-authenticated enrollment binds to the signed-in GitHub identity;
-  // --github-user-id is honored only for the operator admin-token path.
-  const githubUserId = flag(argv, "--github-user-id");
-  const res = await fetch(`${endpoint}/v1/devices`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: authHeader },
-    body: JSON.stringify({ publicKey, label, githubUserId, challenge, proofOfPossession: pop }),
-  });
-  const body = (await res.json()) as { keyId?: string; githubUserId?: string; error?: string };
-  if (!res.ok || !body.keyId) {
-    process.stderr.write(`enrollment failed: ${res.status} ${JSON.stringify(body)}\n`);
-    return 1;
-  }
-  const boundUserId = body.githubUserId ?? githubUserId;
-  if (!boundUserId) {
-    process.stderr.write("enrollment succeeded but no GitHub user id was bound\n");
-    return 1;
-  }
-  const { writeFile, mkdir } = await import("node:fs/promises");
-  await mkdir(join(homedir(), ".config", "thwip"), { recursive: true });
-  const config: CliConfig = { endpoint, keyId: body.keyId, privateKeyPath, githubUserId: boundUserId };
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
-  process.stderr.write(`[thwip] enrolled ${body.keyId}; config written to ${CONFIG_PATH}\n`);
-  return 0;
-}
-
 async function cmdPolicyDigest(): Promise<number> {
   const cwd = process.cwd();
   const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
@@ -269,7 +311,7 @@ async function cmdPolicyDigest(): Promise<number> {
 
 /**
  * thwip init: scaffold thwip.yaml (non-interactive; agents pass flags) and
- * optionally configure git to sign commits with the enrolled thwip key.
+ * optionally point git's SSH commit signing at the same key thwip signs with.
  */
 async function cmdInit(argv: string[]): Promise<number> {
   const cwd = process.cwd();
@@ -279,10 +321,15 @@ async function cmdInit(argv: string[]): Promise<number> {
 
   if (argv.includes("--sign-commits")) {
     const config = await loadConfig();
+    const key = await discoverSigningKey(cwd, config.signingKey);
+    if (!key) {
+      process.stderr.write("no ed25519 signing key found; see: thwip keys status\n");
+      return 1;
+    }
     await git(["config", "gpg.format", "ssh"], cwd);
-    await git(["config", "user.signingkey", `${config.privateKeyPath}.pub`], cwd);
+    await git(["config", "user.signingkey", `${key.privateKeyPath}.pub`], cwd);
     await git(["config", "commit.gpgsign", "true"], cwd);
-    process.stderr.write("[thwip] git now signs commits with the enrolled thwip key (repo-local config)\n");
+    process.stderr.write(`[thwip] git signs commits with ${key.fingerprint} (repo-local config)\n`);
     if (!existsSync(`${cwd}/thwip.yaml`)) return 0;
   }
 
@@ -364,7 +411,7 @@ async function main(): Promise<void> {
     code = 0;
   }
   else if (cmd === "verify") code = await cmdVerifyLocal();
-  else if (cmd === "keys" && sub === "enroll") code = await cmdKeysEnroll(rest);
+  else if (cmd === "keys" && (sub === "status" || sub === undefined)) code = await cmdKeysStatus();
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
   else {
     process.stderr.write("usage: thwip <login|run|verify|policy digest|keys enroll> [options]\n");
