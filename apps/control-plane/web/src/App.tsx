@@ -154,7 +154,6 @@ function Marketing({ me }: { me: Me | null | undefined }) {
 
       <header className="thwip-hero">
         <div>
-          <p className="meta">thwip · commit-carried CI evidence</p>
           <h1>CI ran. Prove it in the commit.</h1>
           <p className="dek">
             Your agents already run lint, typecheck, and tests on the machine where the code lives. thwip signs a
@@ -176,10 +175,10 @@ function Marketing({ me }: { me: Me | null | undefined }) {
 
       <section className="thwip-section" id="how">
         <p className="thwip-eyebrow">The loop</p>
-        <h2>Execution stays local. Enforcement stays in GitHub.</h2>
+        <h2>Your machine runs the checks. GitHub decides the merge.</h2>
         <p className="lede">
-          thwip is a control plane. The work happens where your warm cache already is; the merge decision happens
-          where your branches already live.
+          thwip runs no CI itself. The suites run on the machine that already has the warm cache, and the check and
+          merge queue stay in GitHub, where your branches already live.
         </p>
         <div className="thwip-steps">
           <div className="thwip-step">
@@ -256,23 +255,35 @@ function Marketing({ me }: { me: Me | null | undefined }) {
         <p className="thwip-eyebrow">Pricing</p>
         <h2>Both plans verify the same way. Pro raises the limits.</h2>
         <div className="thwip-plan-grid">
-          <div className="gp-panel">
-            <div className="gp-panel__header">
-              <h3 className="gp-panel__title">Free</h3>
-              <span className="gp-panel__meta">$0</span>
-            </div>
-            <div className="gp-panel__body">
-              <p>3 active projects. 5 active signers. All security profiles, merge-queue verification included.</p>
-            </div>
+          <div className="thwip-plan">
+            <p className="thwip-plan__name">Free</p>
+            <p className="thwip-plan__price">
+              $0<span className="thwip-plan__cadence"> forever</span>
+            </p>
+            <ul className="thwip-plan__list">
+              <li>3 active projects</li>
+              <li>5 active signers</li>
+              <li>All security profiles</li>
+              <li>Merge-queue verification</li>
+            </ul>
+            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
+              Start free
+            </button>
           </div>
-          <div className="gp-panel">
-            <div className="gp-panel__header">
-              <h3 className="gp-panel__title">Pro</h3>
-              <span className="gp-panel__meta">$5/month or $50/year</span>
-            </div>
-            <div className="gp-panel__body">
-              <p>15 active projects. 25 active signers. Same verification, same profiles.</p>
-            </div>
+          <div className="thwip-plan thwip-plan--pro">
+            <p className="thwip-plan__name">Pro</p>
+            <p className="thwip-plan__price">
+              $5<span className="thwip-plan__cadence">/month · $50/year</span>
+            </p>
+            <ul className="thwip-plan__list">
+              <li>15 active projects</li>
+              <li>25 active signers</li>
+              <li>Same verification, same profiles</li>
+              <li>Priority support</li>
+            </ul>
+            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard/billing")}>
+              Upgrade in dashboard
+            </button>
           </div>
         </div>
       </section>
@@ -288,9 +299,9 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
       <SiteNav me={me} />
       <section className="thwip-section" style={{ borderTop: "none" }}>
         <p className="thwip-eyebrow">FAQ</p>
-        <h2>Questions, answered plainly</h2>
+        <h2>Frequently asked questions</h2>
         <p className="lede">
-          A machine-readable copy of this page lives at <a href="/faq.md">/faq.md</a>; a site overview for agents at{" "}
+          Agents: this page is also at <a href="/faq.md">/faq.md</a>, with a site overview at{" "}
           <a href="/llms.txt">/llms.txt</a>.
         </p>
         <dl className="thwip-faq">

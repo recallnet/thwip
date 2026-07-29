@@ -116,6 +116,41 @@
 .thwip-step p { color: var(--gp-margin-ink); font-size: 0.92rem; text-indent: 0; margin: 0; }
 
 .thwip-plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; max-width: 46rem; }
+.thwip-plan {
+  border: 0.75px solid var(--gp-rule);
+  border-top: 3px solid var(--gp-ink);
+  background: oklch(from var(--gp-paper) calc(l - 0.008) c h);
+  padding: 1.3rem 1.4rem 1.5rem;
+}
+.thwip-plan--pro { border-top-color: var(--gp-green); }
+.thwip-plan__name {
+  font-family: var(--gp-sans);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--gp-ghost-ink);
+  margin: 0 0 0.4rem;
+  text-indent: 0;
+}
+.thwip-plan__price {
+  font-family: var(--gp-serif);
+  font-style: italic;
+  font-size: 2.6rem;
+  line-height: 1;
+  margin: 0 0 1rem;
+  text-indent: 0;
+  font-variant-numeric: lining-nums;
+}
+.thwip-plan__cadence {
+  font-family: var(--gp-sans);
+  font-style: normal;
+  font-size: 0.82rem;
+  color: var(--gp-margin-ink);
+  margin-left: 0.3rem;
+}
+.thwip-plan__list { list-style: none; padding: 0; margin: 0 0 1.2rem; font-size: 0.92rem; }
+.thwip-plan__list li { padding: 0.4rem 0; border-top: 1px dashed var(--gp-light-rule); text-indent: 0; }
+.thwip-plan__list li:first-child { border-top: 0; }
 
 footer.thwip-footer {
   border-top: 0.75px solid var(--gp-rule);
