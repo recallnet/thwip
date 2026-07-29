@@ -1,0 +1,8 @@
+# The HTML shell names hashed bundles, so a shared cache holding it stale
+# serves a page that points at a bundle from a previous deploy. Keep the shell
+# uncached and let the fingerprinted assets be cached forever.
+/*
+  Cache-Control: no-store
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
