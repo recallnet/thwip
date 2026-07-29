@@ -573,8 +573,9 @@ interface ProjectRow {
   github_name: string;
   default_branch: string;
   enabled: number;
-  security_profile: string;
   active_policy_digest: string | null;
+  policy_version: number | null;
+  policy_profile: string | null;
   collaborators: number;
   last_outcome: string | null;
   last_observed_at: string | null;
@@ -596,17 +597,6 @@ function Projects() {
       setBusy(null);
     }
   };
-  const setProfile = async (p: ProjectRow, profile: string) => {
-    setBusy(p.id);
-    try {
-      await api(`/v1/dashboard/projects/${p.id}/profile`, { method: "POST", body: JSON.stringify({ profile }) });
-      reload();
-    } catch (e) {
-      setActionError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
@@ -618,8 +608,7 @@ function Projects() {
           <tr>
             <th>Repository</th>
             <th>Status</th>
-            <th>Profile</th>
-            <th>Policy</th>
+            <th>Active policy</th>
             <th>Last verification</th>
             <th></th>
           </tr>
@@ -634,22 +623,15 @@ function Projects() {
                 </div>
               </td>
               <td>{p.enabled ? <span className="gp-chip is-active">enabled</span> : <span className="gp-chip">imported</span>}</td>
-              <td>
-                <select
-                  className="gp-btn gp-btn--sm"
-                  value={p.security_profile}
-                  disabled={busy === p.id}
-                  onChange={(e) => void setProfile(p, e.target.value)}
-                  aria-label={`Security profile for ${p.github_name}`}
-                >
-                  <option value="fast">fast</option>
-                  <option value="fresh">fresh</option>
-                  <option value="audited">audited</option>
-                  <option value="remote">remote</option>
-                </select>
-              </td>
-              <td>
-                <code>{p.active_policy_digest ? `${p.active_policy_digest.slice(7, 19)}…` : "—"}</code>
+              <td title={p.active_policy_digest ?? undefined}>
+                {p.policy_version ? (
+                  <>
+                    v{p.policy_version} · {p.policy_profile ?? "fast"}
+                    <div className="gp-panel__meta">from thwip.yaml</div>
+                  </>
+                ) : (
+                  <span className="gp-panel__meta">none activated</span>
+                )}
               </td>
               <td>
                 {p.last_outcome ? (

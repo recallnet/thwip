@@ -89,34 +89,37 @@ async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
   const auth = createAuth(env);
   const session = await auth.api.getSession({ headers: req.headers });
   if (!session) return null;
-  const account = await env.DB.prepare(
-    `SELECT accountId FROM account WHERE userId = ? AND providerId = 'github'`,
+  // One round trip: GitHub account id and all org projections together.
+  const rows = await env.DB.prepare(
+    `SELECT a.accountId, p.id, p.organization_id, p.github_org_role, p.activated_at, o.github_org_id, o.github_login
+     FROM account a
+     LEFT JOIN principals p ON p.github_user_id = a.accountId
+     LEFT JOIN organizations o ON o.id = p.organization_id
+     WHERE a.userId = ? AND a.providerId = 'github'
+     ORDER BY o.github_login`,
   )
     .bind(session.user.id)
-    .first<{ accountId: string }>();
-  if (!account) return null;
-  const rows = await env.DB.prepare(
-    `SELECT p.id, p.organization_id, p.github_org_role, p.activated_at, o.github_org_id, o.github_login
-     FROM principals p JOIN organizations o ON o.id = p.organization_id
-     WHERE p.github_user_id = ? ORDER BY o.github_login`,
-  )
-    .bind(account.accountId)
     .all<{
-      id: string;
-      organization_id: string;
+      accountId: string;
+      id: string | null;
+      organization_id: string | null;
       github_org_role: string | null;
       activated_at: string | null;
-      github_org_id: string;
-      github_login: string;
+      github_org_id: string | null;
+      github_login: string | null;
     }>();
-  const orgs: ViewerOrg[] = rows.results.map((r) => ({
-    organizationId: r.organization_id,
-    githubOrgId: r.github_org_id,
-    githubLogin: r.github_login,
-    principalId: r.id,
-    githubOrgRole: r.github_org_role,
-    activated: r.activated_at != null,
-  }));
+  if (rows.results.length === 0) return null;
+  const account = { accountId: rows.results[0]!.accountId };
+  const orgs: ViewerOrg[] = rows.results
+    .filter((r) => r.id !== null && r.organization_id !== null)
+    .map((r) => ({
+      organizationId: r.organization_id!,
+      githubOrgId: r.github_org_id!,
+      githubLogin: r.github_login!,
+      principalId: r.id!,
+      githubOrgRole: r.github_org_role,
+      activated: r.activated_at != null,
+    }));
   const requested = new URL(req.url).searchParams.get("org");
   const selected = orgs.find((o) => o.githubOrgId === requested || o.githubLogin === requested) ?? orgs[0] ?? null;
   return {
@@ -255,11 +258,14 @@ app.get("/v1/dashboard/projects", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const rows = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.security_profile, p.active_policy_digest,
+    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
+            b.version AS policy_version,
+            json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
             (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
             (SELECT outcome FROM verification_observations o WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1) AS last_outcome,
             (SELECT observed_at FROM verification_observations o WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1) AS last_observed_at
-     FROM projects p WHERE p.organization_id = ? ORDER BY p.github_name`,
+     FROM projects p LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
+     WHERE p.organization_id = ? ORDER BY p.github_name`,
   )
     .bind(viewer.organizationId)
     .all();
@@ -312,25 +318,13 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
 });
 
 app.post("/v1/dashboard/projects/:id/profile", async (c) => {
-  const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const { profile } = (await c.req.json()) as { profile?: string };
-  if (!profile || !["fast", "fresh", "audited", "remote"].includes(profile)) {
-    return c.json({ error: "invalid profile" }, 400);
-  }
-  const projectId = c.req.param("id");
-  const grant = await c.env.DB.prepare(
-    "SELECT permission FROM repository_grants WHERE project_id = ? AND github_user_id = ? AND active = 1",
-  )
-    .bind(projectId, viewer.githubUserId)
-    .first<{ permission: string }>();
-  if (viewer.githubOrgRole !== "owner" && grant?.permission !== "admin") {
-    return c.json({ error: "repository admin (per GitHub) required" }, 403);
-  }
-  await c.env.DB.prepare("UPDATE projects SET security_profile = ? WHERE id = ? AND organization_id = ?")
-    .bind(profile, projectId, viewer.organizationId)
-    .run();
-  return c.json({ profile });
+  // The security profile is policy material: it lives in the repository's
+  // thwip.yaml and changes only through a reviewed policy activation. The
+  // dashboard displays it; it cannot edit it out from under the file.
+  return c.json(
+    { error: "the security profile is set in thwip.yaml and changes with a policy activation", code: "MANAGED_IN_REPO" },
+    409,
+  );
 });
 
 // --- Dashboard: people, teams, devices ------------------------------------
