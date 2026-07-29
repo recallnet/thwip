@@ -61,8 +61,13 @@ export type AppendResult =
   | { readonly status: "duplicate"; readonly sequence: number; readonly generation: number; readonly attemptRevision: number }
   | { readonly status: "rejected"; readonly detail: string };
 
-/** Event as submitted: the store assigns the sequence. */
-export type SubmittedEvent = Omit<QueueEvent, "sequence">;
+/**
+ * Event as submitted: the store assigns the sequence. Omit has to distribute
+ * over the union, or the type collapses to the fields every event shares and
+ * every command loses its own payload.
+ */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+export type SubmittedEvent = DistributiveOmit<QueueEvent, "sequence">;
 
 /** How many recent idempotency keys stay resident for deduplication. */
 const DEDUPE_WINDOW = 512;
