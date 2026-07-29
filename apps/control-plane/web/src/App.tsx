@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
+import { Home } from "./Home.js";
 
 /* ---------- shared API helpers ---------- */
 
@@ -1448,5 +1449,5 @@ export function App() {
     if (setupMatch) return <Dashboard me={me} tab="projects" setupProjectId={setupMatch[1]!} />;
     return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
   }
-  return <Marketing me={me} />;
+  return <Home me={me} signIn={() => void signInWithGitHub("/dashboard")} />;
 }
