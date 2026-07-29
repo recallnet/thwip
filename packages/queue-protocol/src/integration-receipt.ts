@@ -1,0 +1,380 @@
+import {
+  BOUNDS,
+  array,
+  counter,
+  decimalId,
+  exactKeys,
+  fail,
+  isRecord,
+  isoDateTime,
+  literal,
+  ok,
+  opaqueId,
+  parseGitSubject,
+  requireKeys,
+  sha256,
+  type GitSubject,
+  type ParseResult,
+  type Sha256,
+} from "./primitives.js";
+
+/**
+ * The Integration Receipt (plan.md §21.4) is what a runner signs after
+ * integrating a candidate: which assignment it answered, which exact tree it
+ * ran against, which suites passed, and under what conditions.
+ *
+ * It deliberately carries no log text, environment variables, absolute paths,
+ * source, or secrets. Report digests are allowed and do not imply anyone stores
+ * the reports.
+ */
+
+export const RECEIPT_NETWORK_MODES = ["disabled", "policy-egress-v1", "unrestricted-declared-v1"] as const;
+export const RECEIPT_CACHE_MODES = ["disabled", "read-only-v1", "read-write-policy-v1"] as const;
+
+export interface ReceiptSuite {
+  readonly name: string;
+  readonly outcome: "passed" | "failed";
+  readonly durationMs: number;
+  readonly reportDigest?: Sha256;
+}
+
+export interface IntegrationRunPredicateV1 {
+  readonly assignmentId: string;
+  readonly assignmentDigest: Sha256;
+  readonly attemptId: string;
+  readonly subject: GitSubject;
+  readonly policy: {
+    readonly digest: Sha256;
+    readonly daggerModuleDigest: Sha256;
+    readonly daggerEngineDigest: Sha256;
+    readonly requiredSuites: readonly string[];
+  };
+  readonly runner: {
+    readonly principalId: string;
+    readonly githubUserId: string;
+    readonly deviceKeyId: string;
+    readonly publicKeyFingerprint: string;
+  };
+  readonly run: {
+    readonly startedAt: string;
+    readonly finishedAt: string;
+    readonly environmentClass: string;
+    readonly networkMode: (typeof RECEIPT_NETWORK_MODES)[number];
+    readonly cacheMode: (typeof RECEIPT_CACHE_MODES)[number];
+    readonly suites: readonly ReceiptSuite[];
+  };
+  readonly previousWorkReceiptDigest: Sha256;
+  readonly nonce: string;
+}
+
+const KEYS = [
+  "assignmentId",
+  "assignmentDigest",
+  "attemptId",
+  "subject",
+  "policy",
+  "runner",
+  "run",
+  "previousWorkReceiptDigest",
+  "nonce",
+] as const;
+
+/** An OpenSSH fingerprint, which is how a key is named everywhere in thwip. */
+const FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}$/;
+
+function parseSuite(v: unknown, index: number): ParseResult<ReceiptSuite> {
+  if (!isRecord(v)) return fail(`suite ${index} must be an object`);
+  const shape = exactKeys(v, `suite ${index}`, ["name", "outcome", "durationMs", "reportDigest"]);
+  if (!shape.ok) return shape;
+  const name = v["name"];
+  if (typeof name !== "string" || name.length === 0) return fail(`suite ${index} name is required`);
+  if (new TextEncoder().encode(name).length > BOUNDS.suiteName) {
+    return fail(`suite ${index} name exceeds ${BOUNDS.suiteName} bytes`);
+  }
+  const outcome = literal(v["outcome"], `suite ${index} outcome`, ["passed", "failed"] as const);
+  if (!outcome.ok) return outcome;
+  const durationMs = counter(v["durationMs"], `suite ${index} durationMs`);
+  if (!durationMs.ok) return durationMs;
+  if (v["reportDigest"] === undefined) {
+    return ok({ name, outcome: outcome.value, durationMs: durationMs.value });
+  }
+  const reportDigest = sha256(v["reportDigest"], `suite ${index} reportDigest`);
+  if (!reportDigest.ok) return reportDigest;
+  return ok({ name, outcome: outcome.value, durationMs: durationMs.value, reportDigest: reportDigest.value });
+}
+
+export function parseIntegrationReceipt(v: unknown): ParseResult<IntegrationRunPredicateV1> {
+  if (!isRecord(v)) return fail("receipt must be an object");
+  const shape = exactKeys(v, "receipt", KEYS);
+  if (!shape.ok) return shape;
+  const present = requireKeys(v, "receipt", KEYS);
+  if (!present.ok) return present;
+
+  const assignmentId = opaqueId(v["assignmentId"], "receipt.assignmentId");
+  if (!assignmentId.ok) return assignmentId;
+  const assignmentDigest = sha256(v["assignmentDigest"], "receipt.assignmentDigest");
+  if (!assignmentDigest.ok) return assignmentDigest;
+  const attemptId = opaqueId(v["attemptId"], "receipt.attemptId");
+  if (!attemptId.ok) return attemptId;
+  const nonce = opaqueId(v["nonce"], "receipt.nonce");
+  if (!nonce.ok) return nonce;
+  const previousWorkReceiptDigest = sha256(
+    v["previousWorkReceiptDigest"],
+    "receipt.previousWorkReceiptDigest",
+  );
+  if (!previousWorkReceiptDigest.ok) return previousWorkReceiptDigest;
+
+  const subject = parseGitSubject(v["subject"], "receipt.subject");
+  if (!subject.ok) return subject;
+
+  const policy = v["policy"];
+  if (!isRecord(policy)) return fail("receipt.policy must be an object");
+  const policyShape = exactKeys(policy, "receipt.policy", [
+    "digest",
+    "daggerModuleDigest",
+    "daggerEngineDigest",
+    "requiredSuites",
+  ]);
+  if (!policyShape.ok) return policyShape;
+  const policyDigest = sha256(policy["digest"], "receipt.policy.digest");
+  if (!policyDigest.ok) return policyDigest;
+  const moduleDigest = sha256(policy["daggerModuleDigest"], "receipt.policy.daggerModuleDigest");
+  if (!moduleDigest.ok) return moduleDigest;
+  const engineDigest = sha256(policy["daggerEngineDigest"], "receipt.policy.daggerEngineDigest");
+  if (!engineDigest.ok) return engineDigest;
+  const requiredSuites = array(
+    policy["requiredSuites"],
+    "receipt.policy.requiredSuites",
+    BOUNDS.suiteEntries,
+    (item, i) => {
+      if (typeof item !== "string" || item.length === 0) return fail(`suite ${i} must be a string`);
+      return ok(item);
+    },
+  );
+  if (!requiredSuites.ok) return requiredSuites;
+  if (requiredSuites.value.length === 0) return fail("receipt.policy.requiredSuites must not be empty");
+
+  const runner = v["runner"];
+  if (!isRecord(runner)) return fail("receipt.runner must be an object");
+  const runnerShape = exactKeys(runner, "receipt.runner", [
+    "principalId",
+    "githubUserId",
+    "deviceKeyId",
+    "publicKeyFingerprint",
+  ]);
+  if (!runnerShape.ok) return runnerShape;
+  const principalId = opaqueId(runner["principalId"], "receipt.runner.principalId");
+  if (!principalId.ok) return principalId;
+  const githubUserId = decimalId(runner["githubUserId"], "receipt.runner.githubUserId");
+  if (!githubUserId.ok) return githubUserId;
+  const deviceKeyId = opaqueId(runner["deviceKeyId"], "receipt.runner.deviceKeyId");
+  if (!deviceKeyId.ok) return deviceKeyId;
+  const fingerprint = runner["publicKeyFingerprint"];
+  if (typeof fingerprint !== "string" || !FINGERPRINT_RE.test(fingerprint)) {
+    return fail("receipt.runner.publicKeyFingerprint must be an OpenSSH SHA256 fingerprint");
+  }
+
+  const run = v["run"];
+  if (!isRecord(run)) return fail("receipt.run must be an object");
+  const runShape = exactKeys(run, "receipt.run", [
+    "startedAt",
+    "finishedAt",
+    "environmentClass",
+    "networkMode",
+    "cacheMode",
+    "suites",
+  ]);
+  if (!runShape.ok) return runShape;
+  const startedAt = isoDateTime(run["startedAt"], "receipt.run.startedAt");
+  if (!startedAt.ok) return startedAt;
+  const finishedAt = isoDateTime(run["finishedAt"], "receipt.run.finishedAt");
+  if (!finishedAt.ok) return finishedAt;
+  if (Date.parse(finishedAt.value) < Date.parse(startedAt.value)) {
+    return fail("receipt.run finished before it started");
+  }
+  // A coarse class, not a machine description: no hostnames, no paths.
+  const environmentClass = run["environmentClass"];
+  if (typeof environmentClass !== "string" || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(environmentClass)) {
+    return fail("receipt.run.environmentClass must be a short lowercase class name");
+  }
+  const networkMode = literal(run["networkMode"], "receipt.run.networkMode", RECEIPT_NETWORK_MODES);
+  if (!networkMode.ok) return networkMode;
+  const cacheMode = literal(run["cacheMode"], "receipt.run.cacheMode", RECEIPT_CACHE_MODES);
+  if (!cacheMode.ok) return cacheMode;
+  const suites = array(run["suites"], "receipt.run.suites", BOUNDS.suiteEntries, parseSuite);
+  if (!suites.ok) return suites;
+
+  // Every required suite must appear exactly once. A receipt that omits or
+  // repeats a required suite is not a statement about the policy it names.
+  const seen = new Map<string, number>();
+  for (const suite of suites.value) seen.set(suite.name, (seen.get(suite.name) ?? 0) + 1);
+  for (const required of requiredSuites.value) {
+    const count = seen.get(required) ?? 0;
+    if (count === 0) return fail(`receipt.run.suites is missing required suite ${required}`);
+    if (count > 1) return fail(`receipt.run.suites repeats required suite ${required}`);
+  }
+
+  return ok({
+    assignmentId: assignmentId.value,
+    assignmentDigest: assignmentDigest.value,
+    attemptId: attemptId.value,
+    subject: subject.value,
+    policy: {
+      digest: policyDigest.value,
+      daggerModuleDigest: moduleDigest.value,
+      daggerEngineDigest: engineDigest.value,
+      requiredSuites: requiredSuites.value,
+    },
+    runner: {
+      principalId: principalId.value,
+      githubUserId: githubUserId.value,
+      deviceKeyId: deviceKeyId.value,
+      publicKeyFingerprint: fingerprint,
+    },
+    run: {
+      startedAt: startedAt.value,
+      finishedAt: finishedAt.value,
+      environmentClass,
+      networkMode: networkMode.value,
+      cacheMode: cacheMode.value,
+      suites: suites.value,
+    },
+    previousWorkReceiptDigest: previousWorkReceiptDigest.value,
+    nonce: nonce.value,
+  });
+}
+
+/** Did every required suite actually pass in this receipt? */
+export function receiptSatisfiesPolicy(receipt: IntegrationRunPredicateV1): { ok: true } | { ok: false; detail: string } {
+  for (const required of receipt.policy.requiredSuites) {
+    const suite = receipt.run.suites.find((s) => s.name === required);
+    if (suite === undefined) return { ok: false, detail: `suite ${required} is absent` };
+    if (suite.outcome !== "passed") return { ok: false, detail: `suite ${required} did not pass` };
+  }
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fast-path reuse evidence (plan.md §21.5). It claims that work already proven
+ * elsewhere applies to this candidate, and the equivalence is what makes that
+ * claim checkable. The GitHub verifier recomputes this equality; the scheduler
+ * asserting it is not enough.
+ */
+export interface ExactReceiptReuseV1 {
+  readonly schemaVersion: "1";
+  readonly assignmentId: string;
+  readonly assignmentDigest: Sha256;
+  readonly workReceiptDigest: Sha256;
+  readonly equivalence: {
+    readonly repositoryId: string;
+    readonly baseSha: string;
+    readonly headSha: string;
+    readonly candidateTreeOid: string;
+    readonly policyDigest: Sha256;
+    readonly pipelineDigest: Sha256;
+    readonly requiredSuitesDigest: Sha256;
+  };
+}
+
+const REUSE_KEYS = ["schemaVersion", "assignmentId", "assignmentDigest", "workReceiptDigest", "equivalence"] as const;
+const EQUIVALENCE_KEYS = [
+  "repositoryId",
+  "baseSha",
+  "headSha",
+  "candidateTreeOid",
+  "policyDigest",
+  "pipelineDigest",
+  "requiredSuitesDigest",
+] as const;
+
+export function parseExactReceiptReuse(v: unknown): ParseResult<ExactReceiptReuseV1> {
+  if (!isRecord(v)) return fail("reuse must be an object");
+  const shape = exactKeys(v, "reuse", REUSE_KEYS);
+  if (!shape.ok) return shape;
+  const present = requireKeys(v, "reuse", REUSE_KEYS);
+  if (!present.ok) return present;
+  if (v["schemaVersion"] !== "1") return fail('reuse.schemaVersion must be "1"');
+
+  const assignmentId = opaqueId(v["assignmentId"], "reuse.assignmentId");
+  if (!assignmentId.ok) return assignmentId;
+  const assignmentDigest = sha256(v["assignmentDigest"], "reuse.assignmentDigest");
+  if (!assignmentDigest.ok) return assignmentDigest;
+  const workReceiptDigest = sha256(v["workReceiptDigest"], "reuse.workReceiptDigest");
+  if (!workReceiptDigest.ok) return workReceiptDigest;
+
+  const equivalence = v["equivalence"];
+  if (!isRecord(equivalence)) return fail("reuse.equivalence must be an object");
+  const eqShape = exactKeys(equivalence, "reuse.equivalence", EQUIVALENCE_KEYS);
+  if (!eqShape.ok) return eqShape;
+  const eqPresent = requireKeys(equivalence, "reuse.equivalence", EQUIVALENCE_KEYS);
+  if (!eqPresent.ok) return eqPresent;
+
+  const repositoryId = decimalId(equivalence["repositoryId"], "reuse.equivalence.repositoryId");
+  if (!repositoryId.ok) return repositoryId;
+  const oids: Record<string, string> = {};
+  for (const key of ["baseSha", "headSha", "candidateTreeOid"] as const) {
+    const value = equivalence[key];
+    if (typeof value !== "string" || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) {
+      return fail(`reuse.equivalence.${key} must be a lowercase hex object id`);
+    }
+    oids[key] = value;
+  }
+  const digests: Record<string, Sha256> = {};
+  for (const key of ["policyDigest", "pipelineDigest", "requiredSuitesDigest"] as const) {
+    const digest = sha256(equivalence[key], `reuse.equivalence.${key}`);
+    if (!digest.ok) return digest;
+    digests[key] = digest.value;
+  }
+
+  return ok({
+    schemaVersion: "1",
+    assignmentId: assignmentId.value,
+    assignmentDigest: assignmentDigest.value,
+    workReceiptDigest: workReceiptDigest.value,
+    equivalence: {
+      repositoryId: repositoryId.value,
+      baseSha: oids["baseSha"]!,
+      headSha: oids["headSha"]!,
+      candidateTreeOid: oids["candidateTreeOid"]!,
+      policyDigest: digests["policyDigest"]!,
+      pipelineDigest: digests["pipelineDigest"]!,
+      requiredSuitesDigest: digests["requiredSuitesDigest"]!,
+    },
+  });
+}
+
+/**
+ * Recompute the reuse equality against live facts. This is the check the
+ * verifier must perform: if any bound value differs, the earlier work was done
+ * on something else and reuse would certify a tree nobody integrated.
+ */
+export function reuseEquivalenceHolds(
+  reuse: ExactReceiptReuseV1,
+  live: {
+    readonly repositoryId: string;
+    readonly baseSha: string;
+    readonly headSha: string;
+    readonly candidateTreeOid: string;
+    readonly policyDigest: Sha256;
+    readonly pipelineDigest: Sha256;
+    readonly requiredSuitesDigest: Sha256;
+  },
+): { holds: true } | { holds: false; reason: string } {
+  const fields = [
+    "repositoryId",
+    "baseSha",
+    "headSha",
+    "candidateTreeOid",
+    "policyDigest",
+    "pipelineDigest",
+    "requiredSuitesDigest",
+  ] as const;
+  for (const field of fields) {
+    if (reuse.equivalence[field] !== live[field]) {
+      return { holds: false, reason: `reuse equivalence differs on ${field}` };
+    }
+  }
+  return { holds: true };
+}
