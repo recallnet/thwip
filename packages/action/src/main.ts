@@ -138,15 +138,16 @@ async function main(): Promise<void> {
       { commitMessage: commit.message, facts, bundle, now: new Date().toISOString() },
       { verifySshSignature },
     );
-    const icon = result.code === "PASS" ? "✅" : "❌";
-    summary(
-      `${icon} thwip \`${result.code}\`${result.detail ? ` (${result.detail})` : ""} — commit \`${commit.sha.slice(0, 12)}\` tree \`${commit.tree.sha.slice(0, 12)}\``,
-    );
-    if (result.code === "PASS" && result.statement) {
-      const suites = result.statement.predicate.run.suites.map((s) => `${s.id}:${s.status}`).join(", ");
-      summary(`&nbsp;&nbsp;signer key \`${result.signerKey?.keyId}\` (user ${result.signerKey?.githubUserId}); suites asserted by signer: ${suites}`);
-    }
+    renderRichSummary(result, commit, facts);
     if (result.code !== "PASS") allPass = false;
+
+    // Per-suite check runs on the PR head, so the checks list reads like a
+    // CI matrix: each proven suite appears with its measured local duration.
+    if (result.code === "PASS" && result.statement) {
+      await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
+        /* display only; never affects the conclusion */
+      });
+    }
 
     // Best-effort observation; never affects the conclusion.
     try {
@@ -167,6 +168,119 @@ async function main(): Promise<void> {
   }
 
   process.exit(allPass ? 0 : 1);
+}
+
+/**
+ * The verifier runs its controls in a fixed order; the verdict code names the
+ * first control that failed. This table maps each display row to the codes it
+ * owns, so the summary can show what was established, what failed, and what
+ * was never reached — in the same stable vocabulary as the product.
+ */
+const CHECK_SEQUENCE: Array<[label: string, codes: string[]]> = [
+  ["Proof present on the exact head commit", ["PROOF_MISSING", "PROOF_DUPLICATE", "PROOF_TOO_LARGE", "PROOF_MALFORMED", "PROOF_SCHEMA_UNSUPPORTED"]],
+  ["Signature by an enrolled, unrevoked key", ["SIGNATURE_INVALID", "SIGNER_KEY_UNKNOWN", "SIGNER_KEY_REVOKED", "SIGNER_KEY_ALGORITHM_FORBIDDEN"]],
+  ["Repository identity matches GitHub", ["SUBJECT_REPOSITORY_MISMATCH"]],
+  ["Exact Git tree matches", ["SUBJECT_TREE_MISMATCH"]],
+  ["Ancestry (parents) matches", ["SUBJECT_ANCESTRY_MISMATCH"]],
+  ["Base context matches", ["SUBJECT_BASE_MISMATCH"]],
+  ["Policy digest is the active policy", ["POLICY_NOT_ACTIVE"]],
+  ["Pipeline digest is policy-approved", ["PIPELINE_DIGEST_MISMATCH"]],
+  ["Signer holds current repository permission", ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"]],
+  ["Every required suite passed exactly once", ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"]],
+  ["Proof age and lease within policy", ["PROOF_EXPIRED", "LEASE_REQUIRED", "LEASE_INVALID", "LEASE_EXPIRED", "LEASE_CONTEXT_MISMATCH"]],
+];
+
+function renderRichSummary(
+  result: Awaited<ReturnType<typeof verifyProof>>,
+  commit: CommitData,
+  facts: GithubFacts,
+): void {
+  const pass = result.code === "PASS";
+  const title = commit.message.split("\n")[0] ?? commit.sha;
+  summary(`## ${pass ? "✅" : "❌"} \`${result.code}\` — ${title}`);
+  summary("");
+  summary(
+    `commit \`${commit.sha.slice(0, 12)}\` · tree \`${facts.treeOid.slice(0, 12)}\` · base \`${facts.baseSha.slice(0, 12)}\`` +
+      (result.signerKey ? ` · signer \`${result.signerKey.keyId}\` (${result.signerKey.algorithm})` : ""),
+  );
+  summary("");
+
+  // Verification sequence in the product's stable outcome vocabulary.
+  const failedIndex = pass ? -1 : CHECK_SEQUENCE.findIndex(([, codes]) => codes.includes(result.code));
+  summary("| Verified | Outcome |");
+  summary("| --- | --- |");
+  CHECK_SEQUENCE.forEach(([label], i) => {
+    if (pass || (failedIndex >= 0 && i < failedIndex)) summary(`| ${label} | ✅ |`);
+    else if (i === failedIndex) summary(`| ${label} | ❌ \`${result.code}\`${result.detail ? ` (${result.detail})` : ""} |`);
+    else if (failedIndex >= 0) summary(`| ${label} | ⏭ not reached |`);
+    else summary(`| ${label} | ❌ \`${result.code}\` |`); // unmapped code: bundle/infrastructure failures
+  });
+  summary("");
+
+  // The CI sequence the proof covers, with the signer's measured durations.
+  if (result.statement) {
+    const run = result.statement.predicate.run;
+    summary("### CI sequence proven");
+    summary("");
+    summary("| Suite | Result | Duration |");
+    summary("| --- | --- | --- |");
+    for (const s of run.suites) {
+      const secs = (s.durationMs / 1000).toFixed(1);
+      summary(`| \`${s.id}\` | ${s.status === "passed" ? "✅ passed" : `❌ ${s.status}`} | ${secs}s |`);
+    }
+    summary("");
+    summary("```mermaid");
+    summary("gantt");
+    summary("  title local run · " + run.startedAt.slice(0, 19).replace("T", " ") + "Z");
+    summary("  dateFormat  X");
+    summary("  axisFormat  %Ss");
+    summary("  section suites");
+    let offset = 0;
+    for (const s of run.suites) {
+      const dur = Math.max(1, Math.round(s.durationMs / 1000));
+      summary(`  ${s.id} (${(s.durationMs / 1000).toFixed(1)}s) :${s.status === "passed" ? "done" : "crit"}, ${offset}, ${offset + dur}`);
+      offset += dur;
+    }
+    summary("```");
+    summary("");
+    summary(
+      `_Suites ran on the signer's machine against the frozen tree; results are the signer's assertion, bound to this exact commit and the active policy, and verified here without rerunning them._`,
+    );
+  }
+}
+
+/** One completed check run per proven suite, timed from the signer's run. */
+async function publishSuiteChecks(fullName: string, headSha: string, statement: NonNullable<Awaited<ReturnType<typeof verifyProof>>["statement"]>): Promise<void> {
+  const run = statement.predicate.run;
+  let startMs = Date.parse(run.startedAt);
+  for (const s of run.suites) {
+    const started = new Date(startMs);
+    const completed = new Date(startMs + s.durationMs);
+    startMs += s.durationMs;
+    await fetch(`${API}/repos/${fullName}/check-runs`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-action",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: `thwip / ${s.id}`,
+        head_sha: headSha,
+        status: "completed",
+        conclusion: s.status === "passed" ? "success" : "failure",
+        started_at: started.toISOString(),
+        completed_at: completed.toISOString(),
+        output: {
+          title: `${s.id}: ${s.status} in ${(s.durationMs / 1000).toFixed(1)}s on the signer's machine`,
+          summary:
+            `Proven by the thwip proof on \`${headSha.slice(0, 12)}\`: suite \`${s.id}\` ${s.status} in ` +
+            `${(s.durationMs / 1000).toFixed(1)}s against the frozen tree. Verified cryptographically; not rerun here.`,
+        },
+      }),
+    });
+  }
 }
 
 main().catch((e: unknown) => {
