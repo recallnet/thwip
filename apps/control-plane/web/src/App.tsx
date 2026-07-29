@@ -83,7 +83,7 @@ function useFetch<T>(path: string, deps: unknown[] = []) {
 /* ---------- marketing site ---------- */
 
 const TRAILER_SAMPLE =
-  "thwip-Proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5Rdi4uLiJ9";
+  "thwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5Rdi4uLiJ9";
 
 function Slip() {
   return (
@@ -190,7 +190,7 @@ function Marketing({ me }: { me: Me | null | undefined }) {
             </p>
           </div>
           <div className="thwip-step">
-            <div className="k">thwip-Proof: v1.…</div>
+            <div className="k">thwip-proof: v1.…</div>
             <h3>The commit carries the evidence</h3>
             <p>
               One trailer binds repository, tree, parents, base, policy digest, pipeline digest, and per-suite
@@ -503,7 +503,7 @@ function Dashboard({ me, tab }: { me: Me; tab: string }) {
           </div>
         )}
         {tab === "overview" && <Overview />}
-        {tab === "projects" && <Projects />}
+        {tab === "projects" && <Projects me={me} />}
         {tab === "people" && <People />}
         {tab === "devices" && <Devices me={me} />}
         {tab === "policies" && <Policies />}
@@ -581,8 +581,11 @@ interface ProjectRow {
   last_observed_at: string | null;
 }
 
-function Projects() {
+function Projects({ me }: { me: Me }) {
   const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  const installUrl = me.organization?.installation_id
+    ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
+    : null;
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const act = async (p: ProjectRow, action: "enable" | "disable") => {
@@ -601,6 +604,16 @@ function Projects() {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
+      {installUrl && (
+        <p style={{ marginBottom: "0.9rem" }}>
+          <a className="gp-btn gp-btn--sm" href={installUrl} target="_blank" rel="noreferrer">
+            Add repositories on GitHub
+          </a>
+          <span className="gp-panel__meta" style={{ marginLeft: "0.6rem" }}>
+            Grant the thwip App access to a repository there; it imports here automatically, then you enable it.
+          </span>
+        </p>
+      )}
       {actionError && <p className="thwip-error">{actionError}</p>}
       {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
       <table className="gp-data-table">

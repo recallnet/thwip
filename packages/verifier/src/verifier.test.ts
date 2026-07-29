@@ -167,7 +167,7 @@ describe("verifyProof decision table", () => {
   });
 
   it("fails on unknown carrier version", async () => {
-    expect((await run({ message: "x\n\nthwip-Proof: v9.abcd\n" })).code).toBe("PROOF_SCHEMA_UNSUPPORTED");
+    expect((await run({ message: "x\n\nthwip-proof: v9.abcd\n" })).code).toBe("PROOF_SCHEMA_UNSUPPORTED");
   });
 
   it("fails on bad signature", async () => {
