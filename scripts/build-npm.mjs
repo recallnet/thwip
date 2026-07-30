@@ -7,40 +7,36 @@
  * Bundling instead ships one artifact with no dependencies, which is also what
  * makes `npx thwip` a single download.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync, copyFileSync, existsSync, chmodSync } from "node:fs";
+import { build } from "esbuild";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "packages/cli/dist-npm");
-const version = JSON.parse(
-  execFileSync("cat", [join(root, "packages/cli/package.json")], { encoding: "utf8" }),
-).version;
+const version = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8")).version;
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
-const esbuild = join(root, "apps/control-plane/node_modules/.bin/esbuild");
-execFileSync(
-  esbuild,
-  [
-    join(root, "packages/cli/src/main.ts"),
-    "--bundle",
-    "--platform=node",
-    "--format=esm",
-    "--target=node22",
-    // Node builtins stay external; everything else, workspace or not, is inlined.
-    // No shebang banner: src/main.ts already starts with one and esbuild keeps it,
-    // so adding another puts a second on line 2, where it is a syntax error.
-    "--packages=bundle",
-    // yaml stays a real dependency. Its published entry is CommonJS, and inlining
-    // that into an ESM bundle produces a dynamic require Node refuses to perform.
-    "--external:yaml",
-    `--outfile=${join(out, "thwip.mjs")}`,
-  ],
-  { stdio: "inherit" },
-);
+// esbuild's API rather than its binary. Spawning the binary meant guessing where
+// a package manager had put it, and the guess only held on the machine where it
+// was written: a clean install put it somewhere else and the release failed.
+await build({
+  entryPoints: [join(root, "packages/cli/src/main.ts")],
+  outfile: join(out, "thwip.mjs"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  // Node builtins stay external; everything else, workspace or not, is inlined.
+  // No shebang banner: src/main.ts already starts with one and esbuild keeps it,
+  // so adding another puts a second on line 2, where it is a syntax error.
+  packages: "bundle",
+  // yaml stays a real dependency. Its published entry is CommonJS, and inlining
+  // that into an ESM bundle produces a dynamic require Node refuses to perform.
+  external: ["yaml"],
+});
 chmodSync(join(out, "thwip.mjs"), 0o755);
 
 writeFileSync(
