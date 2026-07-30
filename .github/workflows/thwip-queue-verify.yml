@@ -58,6 +58,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Workspace packages resolve to their built types, so typecheck cannot run
+      # from a clean checkout until they exist. A developer's tree already has
+      # them, which is why only a clean-room run of the candidate ever noticed.
+      - name: Build workspace packages
+        run: pnpm build
+
       # Each required suite runs separately so the verdict can say which one
       # failed, rather than reporting a single opaque failure.
       - name: Run required suites
