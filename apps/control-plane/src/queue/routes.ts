@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { queueKey } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
-import { projectQueueState, type D1Like } from "./projection.js";
+import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
 
 /**
  * The queue's HTTP surface (plan.md §37.1).
@@ -51,6 +51,41 @@ function branchRef(value: string | undefined): string | null {
  * Failure here is deliberately swallowed: D1 lagging is expected, and a projection
  * error must never fail the command that already succeeded.
  */
+export function projectionMessageFrom(
+  repositoryId: string,
+  baseRef: string,
+  snapshot: Awaited<ReturnType<BranchQueue["snapshot"]>>,
+): ProjectionMessage {
+  return {
+    repositoryId,
+    baseRef,
+    queueEpoch: snapshot.queueEpoch,
+    generation: snapshot.generation,
+    entries: snapshot.entries.map((e) => ({
+      entryId: e.entryId,
+      pullRequestNumber: e.pullRequestNumber,
+      sponsorPrincipalId: e.sponsorPrincipalId,
+      state: e.state,
+      primaryReason: e.primaryReason,
+      fairnessOrdinal: e.fairnessOrdinal,
+    })),
+    // The whole chain, as recorded. An earlier version of this synthesised one
+    // row from the head pointer with kind "verified" hardcoded and no prior
+    // digest, which meant an external or override transition was projected as
+    // verified and the links could not be checked from D1 at all.
+    transitions: snapshot.transitions.map((t) => ({
+      transitionSequence: t.transitionSequence,
+      kind: t.kind,
+      digest: t.digest,
+      priorDigest: t.priorDigest,
+      baseSha: t.baseSha,
+      attemptId: t.attemptId,
+      witnessCount: t.witnessPrincipalIds.length,
+      observedAt: t.recordedAt,
+    })),
+  };
+}
+
 async function project(
   env: QueueRouteEnv,
   repositoryId: string,
@@ -59,35 +94,10 @@ async function project(
 ): Promise<void> {
   try {
     const snapshot = await queue.snapshot();
-    await projectQueueState(env.DB as unknown as D1Like, {
-      repositoryId,
-      baseRef,
-      queueEpoch: 0,
-      generation: snapshot.generation,
-      entries: snapshot.entries.map((e) => ({
-        entryId: e.entryId,
-        pullRequestNumber: e.pullRequestNumber,
-        sponsorPrincipalId: e.sponsorPrincipalId,
-        state: e.state,
-        primaryReason: e.primaryReason,
-        fairnessOrdinal: e.fairnessOrdinal,
-      })),
-      transitions:
-        snapshot.chainHead === null
-          ? []
-          : [
-              {
-                transitionSequence: snapshot.chainHead.sequence,
-                kind: "verified",
-                digest: snapshot.chainHead.digest,
-                priorDigest: null,
-                baseSha: snapshot.baseSha ?? "",
-                attemptId: snapshot.activeAttemptId,
-                witnessCount: 0,
-                observedAt: new Date().toISOString(),
-              },
-            ],
-    });
+    await projectQueueState(
+      env.DB as unknown as D1Like,
+      projectionMessageFrom(repositoryId, baseRef, snapshot),
+    );
   } catch {
     /* the projection may lag; the command already succeeded */
   }
