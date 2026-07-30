@@ -119,7 +119,8 @@ export const SCHEMA: readonly string[] = [
      digest TEXT NOT NULL,
      base_sha TEXT NOT NULL,
      attempt_id TEXT,
-     witnesses TEXT NOT NULL
+     witnesses TEXT NOT NULL,
+     recorded_at TEXT
    )`,
 
   `CREATE TABLE IF NOT EXISTS outbox (
@@ -157,6 +158,25 @@ export const SCHEMA: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS entries_state ON entries (state, scheduler_eligible)`,
 ];
 
+/**
+ * Columns added after objects were already live.
+ *
+ * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a
+ * column added to SCHEMA reaches new queues only. Each patch is applied and its
+ * "duplicate column name" refusal ignored, which is the whole check: SQLite
+ * already knows whether the column is there.
+ */
+const SCHEMA_PATCHES: readonly string[] = [
+  `ALTER TABLE transitions ADD COLUMN recorded_at TEXT`,
+];
+
 export function initSchema(sql: SqlLike): void {
   for (const statement of SCHEMA) sql.exec(statement);
+  for (const patch of SCHEMA_PATCHES) {
+    try {
+      sql.exec(patch);
+    } catch {
+      /* the column is already present */
+    }
+  }
 }
