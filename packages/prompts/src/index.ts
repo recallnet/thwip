@@ -21,9 +21,11 @@ and never read, copy, move, or print the contents of a private key. You may
 read and print .pub files. If a step needs my browser or my terminal, hand me
 the exact command or URL and wait.
 
-1. CLI. Check that "thwip --help" works. If it doesn't, clone
-   https://github.com/recallnet/thwip, run "pnpm install && pnpm build", and
-   use "node packages/cli/dist/main.js" as the thwip command from here on.
+1. CLI. Check that "thwip --help" works. If it doesn't, install it:
+     npm install -g @recallnet/thwip
+   Node 22 or newer is required. The installed command is "thwip". To skip a
+   global install, "npx @recallnet/thwip" works wherever this prompt says
+   "thwip".
 
 2. Sign in. Don't run this yourself — "thwip login" blocks until I approve it
    in a browser, and the browser has to be mine. Give me a pastable command to
