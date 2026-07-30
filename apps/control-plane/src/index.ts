@@ -1263,7 +1263,7 @@ app.get("/admin/github/manifest", async (c) => {
     .run();
   const origin = c.env.PUBLIC_ORIGIN;
   const manifest = {
-    name: c.env.THWIP_ENV === "production" ? "thwip" : "thwip Dev",
+    name: c.env.THWIP_ENV === "production" ? "thwip" : "thwip dev",
     url: origin,
     description: "Git-native CI proofs for agent-run pipelines.",
     hook_attributes: { url: `${origin}/api/github/webhooks`, active: true },
