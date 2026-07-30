@@ -33,6 +33,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # The CLI imports the workspace packages through their built entry points,
+      # so they have to exist before the bundle can resolve them. A developer's
+      # tree already has them, which is why only a clean checkout ever noticed.
+      - name: Build workspace packages
+        run: pnpm build
+
       - name: Build the package
         run: node scripts/build-npm.mjs
 
