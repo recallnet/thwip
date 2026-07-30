@@ -4744,7 +4744,7 @@ If the deployed core still uses an `AIRCHIME_*` secret binding, preserve it unti
 
 ### 58.1 Environment separation
 
-Use separate **Thwip Dev** and **Thwip** GitHub Apps. If the current Apps still carry the Airchime display name, rename the display label only after confirming that numeric App IDs, installation IDs, callback URLs, webhook URLs, and OIDC predicates remain unchanged.
+Use separate **thwip dev** and **thwip** GitHub Apps. If the current Apps still carry the Airchime display name, rename the display label only after confirming that numeric App IDs, installation IDs, callback URLs, webhook URLs, and OIDC predicates remain unchanged.
 
 Core `gh` does not create or edit a GitHub App registration. Use the existing App manifest/browser registration flow and GitHub settings for that control-plane operation; use `gh` for repository and organization inspection.
 
