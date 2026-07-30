@@ -65,6 +65,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  /** Read a commit's tree and parents from GitHub, for confirming from facts. */
+  commitFacts(
+    env: TEnv,
+    repositoryId: string,
+    sha: string,
+  ): Promise<{ treeOid: string; parentShas: string[] } | null>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
 
@@ -526,12 +532,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const body = (await c.req.json().catch(() => ({}))) as {
       observed?: "merged" | "not-merged";
       reason?: string;
+      /** Required with observed=merged; the facts are read from GitHub, not taken. */
+      mergeSha?: string;
     };
-    if (body.observed !== "not-merged") {
-      // Only the negative resolution is offered here. A merge that did happen is
-      // confirmed from its own facts, never from an assertion.
-      return c.json({ error: 'observed must be "not-merged"; a merge is confirmed from its facts' }, 400);
-    }
     if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
       return c.json({ error: "a reason of at least 8 characters is required" }, 400);
     }
@@ -540,6 +543,54 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const snapshot = await queue.snapshot();
     const attemptId = snapshot.activeAttemptId;
     if (attemptId === null) return c.json({ error: "no attempt holds the lane" }, 409);
+
+    if (body.observed === "merged") {
+      // Confirmed from the commit itself, never from the operator's word. The
+      // reducer then refuses any tree that is not the candidate it authorized, so
+      // asserting a merge that did not happen cannot certify anything.
+      if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+        return c.json({ error: "mergeSha required to confirm a merge" }, 400);
+      }
+      const facts = await deps.commitFacts(c.env, repositoryId, body.mergeSha);
+      if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+
+      const confirmed = await queue.confirmMerge({
+        idempotencyKey: `reconcile:merged:${attemptId}`,
+        attemptId,
+        operationId: `merge_${attemptId}`,
+        mergeSha: body.mergeSha,
+        mergeTree: facts.treeOid,
+        parentShas: facts.parentShas,
+      });
+      if (confirmed.status === "rejected") {
+        return c.json({ error: confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+      }
+
+      const after = await queue.snapshot();
+      const sequence = (after.chainHead?.sequence ?? 0) + 1;
+      const transition = await queue.recordTransition({
+        idempotencyKey: `reconcile:transition:${attemptId}`,
+        kind: "verified",
+        transitionSequence: sequence,
+        priorDigest: after.chainHead?.digest ?? null,
+        digest: `sha256:${body.mergeSha.padEnd(64, "0").slice(0, 64)}`,
+        baseSha: body.mergeSha,
+        attemptId,
+        witnessPrincipalIds: [who.principalId],
+      });
+      return c.json({
+        resolved: confirmed.status,
+        transition: transition.status,
+        sequence,
+        attemptId,
+        actor: who.principalId,
+        reason: body.reason.trim(),
+      });
+    }
+
+    if (body.observed !== "not-merged") {
+      return c.json({ error: 'observed must be "merged" or "not-merged"' }, 400);
+    }
 
     const resolved = await queue.confirmNotMerged({
       idempotencyKey: `reconcile:${attemptId}:${body.reason.trim().slice(0, 32)}`,
