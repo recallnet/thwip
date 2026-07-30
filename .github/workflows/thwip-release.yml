@@ -1,0 +1,57 @@
+name: thwip-release
+
+# Publish the CLI to npm as @recallnet/thwip.
+#
+# Runs only when a maintainer pushes a v* tag, never on a merge, so a release is
+# something someone decided to do rather than something a merge did to them. The
+# workflow builds the bundle from the tagged tree and checks the tag matches the
+# version it is about to publish.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the package
+        run: node scripts/build-npm.mjs
+
+      - name: Confirm the tag names the version being published
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version packages/cli/dist-npm/package.json)
+          echo "tag $TAG, package version $version"
+          [ "$TAG" = "v$version" ] || {
+            echo "::error::tag $TAG does not name version $version"; exit 1; }
+
+      # Runs the built artifact rather than the source, so a bundle that cannot
+      # start is caught here instead of by whoever installs it.
+      - name: Confirm the bundle runs
+        run: node packages/cli/dist-npm/thwip.mjs --help > /dev/null
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish packages/cli/dist-npm --provenance --access public
