@@ -9,6 +9,15 @@ name: thwip-release
 on:
   push:
     tags: ["v*"]
+  # A rehearsal that consumes no version. Every credential or permission mistake
+  # used to cost a tag, because a tag was the only way to reach the publish step,
+  # and a burned tag has to be deleted and recreated before the next attempt.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish for real. Leave unchecked to rehearse everything up to the upload."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -43,6 +52,7 @@ jobs:
         run: node scripts/build-npm.mjs
 
       - name: Confirm the tag names the version being published
+        if: github.ref_type == 'tag'
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -57,7 +67,20 @@ jobs:
       - name: Confirm the bundle runs
         run: node packages/cli/dist-npm/thwip.mjs --help > /dev/null
 
+      # Checks the credential and the scope permission without uploading anything.
+      # This is what turns a bad token into a failed rehearsal rather than a
+      # failed release, and npm reports the same 404 or 401 either way.
+      - name: Rehearse the publish
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "npm user: $(npm whoami 2>&1 || echo 'not authenticated')"
+          npm publish packages/cli/dist-npm --access public --dry-run
+
       - name: Publish
+        if: github.ref_type == 'tag' || inputs.publish == true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish packages/cli/dist-npm --provenance --access public
