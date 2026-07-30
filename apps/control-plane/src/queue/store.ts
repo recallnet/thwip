@@ -25,6 +25,18 @@ import { initSchema, type SqlLike } from "./sql.js";
 
 export type DeadlineKind = "offer" | "execution" | "grace" | "merge-confirm" | "readiness";
 
+/** One recorded link of the transition chain, as it is durably stored. */
+export interface TransitionRow {
+  readonly transitionSequence: number;
+  readonly kind: string;
+  readonly priorDigest: string | null;
+  readonly digest: string;
+  readonly baseSha: string;
+  readonly attemptId: string | null;
+  readonly witnessPrincipalIds: readonly string[];
+  readonly recordedAt: string | null;
+}
+
 export interface Deadline {
   readonly kind: DeadlineKind;
   readonly attemptId: string;
@@ -130,6 +142,44 @@ export class BranchQueueStore {
 
   attemptRevision(): number {
     return this.meta().active_attempt_revision;
+  }
+
+  queueEpoch(): number {
+    return this.meta().queue_epoch;
+  }
+
+  /**
+   * The recorded transition chain, oldest first.
+   *
+   * Read from SQL rather than from reducer state because only SQL carries when
+   * each transition was observed, and a projection that invented that time would
+   * be reporting when it ran rather than when the base moved. `recordedAt` is
+   * null for transitions written before the column existed; that is an honest
+   * "not known", not a reason to substitute now().
+   */
+  transitionChain(): readonly TransitionRow[] {
+    return this.sql
+      .exec<{
+        transition_sequence: number;
+        kind: string;
+        prior_digest: string | null;
+        digest: string;
+        base_sha: string;
+        attempt_id: string | null;
+        witnesses: string;
+        recorded_at: string | null;
+      }>("SELECT * FROM transitions ORDER BY transition_sequence")
+      .toArray()
+      .map((row) => ({
+        transitionSequence: row.transition_sequence,
+        kind: row.kind,
+        priorDigest: row.prior_digest,
+        digest: row.digest,
+        baseSha: row.base_sha,
+        attemptId: row.attempt_id,
+        witnessPrincipalIds: JSON.parse(row.witnesses) as string[],
+        recordedAt: row.recorded_at ?? null,
+      }));
   }
 
   private meta(): MetaRow {
@@ -328,7 +378,7 @@ export class BranchQueueStore {
       DEDUPE_WINDOW,
     );
 
-    this.persist(next, generation, attemptRevision);
+    this.persist(next, generation, attemptRevision, event.at);
     this.applyDeadlines(options);
     this.enqueueOutbox(options.outbox ?? [], attemptRevision, event.at);
 
@@ -336,7 +386,12 @@ export class BranchQueueStore {
     return { status: "applied", sequence, generation, attemptRevision };
   }
 
-  private persist(next: BranchQueueState, generation: number, attemptRevision: number): void {
+  private persist(
+    next: BranchQueueState,
+    generation: number,
+    attemptRevision: number,
+    at: string,
+  ): void {
     this.sql.exec(
       `UPDATE queue_meta SET
          generation = ?, active_attempt_revision = ?, last_sequence = ?, turn_sequence = ?,
@@ -432,8 +487,10 @@ export class BranchQueueStore {
 
     for (const transition of next.transitions) {
       this.sql.exec(
-        `INSERT INTO transitions (transition_sequence, kind, prior_digest, digest, base_sha, attempt_id, witnesses)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (transition_sequence) DO NOTHING`,
+        `INSERT INTO transitions (
+           transition_sequence, kind, prior_digest, digest, base_sha, attempt_id, witnesses, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (transition_sequence) DO NOTHING`,
         transition.transitionSequence,
         transition.kind,
         transition.priorDigest,
@@ -441,6 +498,7 @@ export class BranchQueueStore {
         transition.baseSha,
         transition.attemptId,
         JSON.stringify(transition.witnessPrincipalIds),
+        at,
       );
     }
   }
