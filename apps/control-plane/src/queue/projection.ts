@@ -20,6 +20,10 @@ export interface ProjectionEntry {
   readonly state: string;
   readonly primaryReason: string | null;
   readonly fairnessOrdinal: string;
+  readonly schedulerEligible: boolean;
+  readonly cooldownUntil: string | null;
+  readonly lastAttemptId: string | null;
+  readonly headSha: string | null;
 }
 
 export interface ProjectionTransition {
@@ -40,6 +44,12 @@ export interface ProjectionMessage {
   readonly queueEpoch: number;
   /** The Durable Object generation this snapshot was taken at. */
   readonly generation: number;
+  /** Branch-wide facts, so a reader does not need the object to render the page. */
+  readonly activeAttemptId: string | null;
+  readonly paused: boolean;
+  readonly pauseReason: string | null;
+  readonly rebaselineRequired: boolean;
+  readonly baseSha: string | null;
   readonly entries: readonly ProjectionEntry[];
   readonly transitions: readonly ProjectionTransition[];
 }
@@ -95,13 +105,18 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
         .prepare(
           `INSERT INTO queue_entries_index (
              id, github_repository_id, base_ref, entry_id, pull_request_number,
-             sponsor_principal_id, state, primary_reason, fairness_ordinal, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             sponsor_principal_id, state, primary_reason, fairness_ordinal,
+             scheduler_eligible, cooldown_until, last_attempt_id, head_sha, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
            ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
              state = excluded.state,
              primary_reason = excluded.primary_reason,
              fairness_ordinal = excluded.fairness_ordinal,
              sponsor_principal_id = excluded.sponsor_principal_id,
+             scheduler_eligible = excluded.scheduler_eligible,
+             cooldown_until = excluded.cooldown_until,
+             last_attempt_id = excluded.last_attempt_id,
+             head_sha = excluded.head_sha,
              updated_at = excluded.updated_at`,
         )
         .bind(
@@ -114,6 +129,10 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           entry.state,
           entry.primaryReason,
           entry.fairnessOrdinal,
+          entry.schedulerEligible ? 1 : 0,
+          entry.cooldownUntil,
+          entry.lastAttemptId,
+          entry.headSha,
         ),
     );
   }
@@ -150,12 +169,31 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
   statements.push(
     db
       .prepare(
-        `INSERT INTO queue_projection_marks (github_repository_id, base_ref, generation, projected_at)
-         VALUES (?, ?, ?, datetime('now'))
+        `INSERT INTO queue_projection_marks (
+           github_repository_id, base_ref, generation, projected_at,
+           active_attempt_id, paused, pause_reason, rebaseline_required, base_sha, queue_epoch
+         ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)
          ON CONFLICT (github_repository_id, base_ref) DO UPDATE SET
-           generation = excluded.generation, projected_at = excluded.projected_at`,
+           generation = excluded.generation,
+           projected_at = excluded.projected_at,
+           active_attempt_id = excluded.active_attempt_id,
+           paused = excluded.paused,
+           pause_reason = excluded.pause_reason,
+           rebaseline_required = excluded.rebaseline_required,
+           base_sha = excluded.base_sha,
+           queue_epoch = excluded.queue_epoch`,
       )
-      .bind(message.repositoryId, message.baseRef, message.generation),
+      .bind(
+        message.repositoryId,
+        message.baseRef,
+        message.generation,
+        message.activeAttemptId,
+        message.paused ? 1 : 0,
+        message.pauseReason,
+        message.rebaselineRequired ? 1 : 0,
+        message.baseSha,
+        message.queueEpoch,
+      ),
   );
 
   await db.batch(statements);
@@ -180,4 +218,119 @@ export async function projectionLag(
     .first<{ generation: number }>();
   const projected = row?.generation ?? 0;
   return { projected, live: liveGeneration, behind: Math.max(0, liveGeneration - projected) };
+}
+
+/**
+ * Answer a queue read from the projection.
+ *
+ * Shaped exactly like the object's snapshot, so a caller cannot tell the two
+ * apart except by `source`. That matters: the dashboard renders one component
+ * either way, and a second shape would be a second thing to keep correct.
+ *
+ * Returns null when nothing has been projected for this branch yet, which is a
+ * different answer from an empty queue and has to stay distinguishable.
+ */
+export async function readProjectedQueue(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+): Promise<Record<string, unknown> | null> {
+  const mark = await db
+    .prepare(
+      `SELECT generation, queue_epoch, active_attempt_id, paused, pause_reason,
+              rebaseline_required, base_sha, projected_at
+         FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ?`,
+    )
+    .bind(repositoryId, baseRef)
+    .first<{
+      generation: number;
+      queue_epoch: number;
+      active_attempt_id: string | null;
+      paused: number;
+      pause_reason: string | null;
+      rebaseline_required: number;
+      base_sha: string | null;
+      projected_at: string;
+    }>();
+  if (mark === null) return null;
+
+  const entries = await db
+    .prepare(
+      `SELECT entry_id, pull_request_number, sponsor_principal_id, state, primary_reason,
+              fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id, head_sha
+         FROM queue_entries_index
+        WHERE github_repository_id = ? AND base_ref = ?
+        ORDER BY fairness_ordinal`,
+    )
+    .bind(repositoryId, baseRef)
+    .all<{
+      entry_id: string;
+      pull_request_number: number;
+      sponsor_principal_id: string;
+      state: string;
+      primary_reason: string | null;
+      fairness_ordinal: string;
+      scheduler_eligible: number;
+      cooldown_until: string | null;
+      last_attempt_id: string | null;
+      head_sha: string | null;
+    }>();
+
+  const transitions = await db
+    .prepare(
+      `SELECT transition_sequence, kind, digest, prior_digest, base_sha, attempt_id,
+              witness_count, observed_at
+         FROM queue_transitions_index
+        WHERE github_repository_id = ? AND base_ref = ?
+        ORDER BY transition_sequence`,
+    )
+    .bind(repositoryId, baseRef)
+    .all<{
+      transition_sequence: number;
+      kind: string;
+      digest: string;
+      prior_digest: string | null;
+      base_sha: string;
+      attempt_id: string | null;
+      witness_count: number;
+      observed_at: string | null;
+    }>();
+
+  const head = transitions.results.at(-1);
+  return {
+    source: "projection",
+    projectedAt: mark.projected_at,
+    generation: mark.generation,
+    queueEpoch: mark.queue_epoch,
+    attemptRevision: 0,
+    paused: mark.paused === 1,
+    pauseReason: mark.pause_reason,
+    rebaselineRequired: mark.rebaseline_required === 1,
+    baseSha: mark.base_sha,
+    activeAttemptId: mark.active_attempt_id,
+    activeEntryId: null,
+    chainHead: head === undefined ? null : { sequence: head.transition_sequence, digest: head.digest },
+    transitions: transitions.results.map((t) => ({
+      transitionSequence: t.transition_sequence,
+      kind: t.kind,
+      digest: t.digest,
+      priorDigest: t.prior_digest,
+      baseSha: t.base_sha,
+      attemptId: t.attempt_id,
+      witnessPrincipalIds: [],
+      recordedAt: t.observed_at,
+    })),
+    entries: entries.results.map((e) => ({
+      entryId: e.entry_id,
+      pullRequestNumber: e.pull_request_number,
+      sponsorPrincipalId: e.sponsor_principal_id,
+      state: e.state,
+      primaryReason: e.primary_reason,
+      schedulerEligible: e.scheduler_eligible === 1,
+      fairnessOrdinal: e.fairness_ordinal,
+      cooldownUntil: e.cooldown_until,
+      lastAttemptId: e.last_attempt_id,
+      headSha: e.head_sha,
+    })),
+  };
 }
