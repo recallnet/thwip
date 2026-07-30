@@ -7,7 +7,8 @@
     "build": "node ../../scripts/generate-prompt-docs.mjs && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "deploy:staging": "wrangler deploy --env staging",
-    "dev": "wrangler dev --env staging"
+    "dev": "wrangler dev --env staging",
+    "test:workers": "vitest run --config vitest.workers.config.ts"
   },
   "dependencies": {
     "@andrewxhill/graphics-press-css": "^4.7.2",
