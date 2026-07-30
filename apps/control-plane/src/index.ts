@@ -1395,14 +1395,20 @@ app.route(
     async activePolicy(env: Env, repositoryId: string) {
       const row = await env.DB.prepare(
         `SELECT p.active_policy_digest AS digest, p.security_profile AS profile,
-                b.canonical_json AS bundle, q.verifier_json AS verifier
+                p.organization_id AS org, b.canonical_json AS bundle, q.verifier_json AS verifier
            FROM projects p
            JOIN policy_bundles b ON b.digest = p.active_policy_digest
            LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
           WHERE p.github_repository_id = ?`,
       )
         .bind(repositoryId)
-        .first<{ digest: string; profile: string; bundle: string; verifier: string | null }>();
+        .first<{
+          digest: string;
+          profile: string;
+          org: string;
+          bundle: string;
+          verifier: string | null;
+        }>();
       if (row === null) return null;
 
       const bundle = JSON.parse(row.bundle) as { pipeline?: { requiredSuites?: string[] } };
@@ -1422,7 +1428,13 @@ app.route(
               workflowSha: typeof raw["workflowSha"] === "string" ? raw["workflowSha"] : null,
             }
           : null;
-      return { policyDigest: row.digest, requiredSuites, securityProfile: row.profile, verifier };
+      return {
+        policyDigest: row.digest,
+        requiredSuites,
+        securityProfile: row.profile,
+        organizationId: row.org,
+        verifier,
+      };
     },
     async dispatchCandidateVerification(
       env: Env,

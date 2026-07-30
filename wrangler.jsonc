@@ -29,6 +29,12 @@
           "class_name": "IntegrationTurnWorkflow"
         }
       ],
+      "r2_buckets": [
+        {
+          "binding": "EVIDENCE",
+          "bucket_name": "thwip-evidence-staging"
+        }
+      ],
       "d1_databases": [
         {
           "binding": "DB",
