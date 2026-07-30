@@ -13,6 +13,8 @@ permissions:
   contents: read
   id-token: write
   checks: write
+  # Reading the pull request and the candidate commit GitHub simulated for it.
+  pull-requests: read
 
 jobs:
   thwip:
