@@ -8,6 +8,7 @@ import {
   type D1Like,
   type ProjectionMessage,
 } from "./projection.js";
+import { declineFromProjection, type ProjectedQueue } from "./fast-decline.js";
 import {
   candidateResultBytes,
   candidateResultDigest,
@@ -102,6 +103,7 @@ export function projectionMessageFrom(
       schedulerEligible: e.schedulerEligible,
       cooldownUntil: e.cooldownUntil,
       lastAttemptId: e.lastAttemptId,
+      headSha: e.headSha,
     })),
     // The whole chain, as recorded. An earlier version of this synthesised one
     // row from the head pointer with kind "verified" hardcoded and no prior
@@ -790,8 +792,38 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
 
     const principalId = await deps.principalFor(c.env, String(body.authorGithubUserId ?? ""));
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
+
+    // Try to answer from the projection first. It may only ever decline, never
+    // authorize, so this cannot let two pull requests merge at once. In a queue of
+    // N, N-1 are waiting, and every one of those answers here for the price of a
+    // D1 row read instead of a Durable Object request.
+    //
+    // The merge writer always escalates: preparing a merge is a decision, and
+    // decisions belong to the object.
+    if (body.prepare !== true) {
+      const projected = (await readProjectedQueue(
+        c.env.DB as unknown as D1Like,
+        repositoryId,
+        baseRef,
+      )) as ProjectedQueue | null;
+      const declined = declineFromProjection(projected, { entryId, headSha: body.headSha });
+      if (declined.decline) {
+        const enforcing = project.activationState === "canary" || project.activationState === "enforced";
+        return c.json({
+          authorized: !enforcing,
+          enforcing,
+          activationState: project.activationState,
+          reason: declined.reason,
+          entryId,
+          operationId: null,
+          queuePosition: declined.queuePosition,
+          source: "projection",
+        });
+      }
+    }
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
 
     // Captured after validation: TypeScript discards the narrowing inside a
     // closure, and re-checking would be checking the same thing twice.

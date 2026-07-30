@@ -23,6 +23,7 @@ export interface ProjectionEntry {
   readonly schedulerEligible: boolean;
   readonly cooldownUntil: string | null;
   readonly lastAttemptId: string | null;
+  readonly headSha: string | null;
 }
 
 export interface ProjectionTransition {
@@ -105,8 +106,8 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           `INSERT INTO queue_entries_index (
              id, github_repository_id, base_ref, entry_id, pull_request_number,
              sponsor_principal_id, state, primary_reason, fairness_ordinal,
-             scheduler_eligible, cooldown_until, last_attempt_id, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             scheduler_eligible, cooldown_until, last_attempt_id, head_sha, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
            ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
              state = excluded.state,
              primary_reason = excluded.primary_reason,
@@ -115,6 +116,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
              scheduler_eligible = excluded.scheduler_eligible,
              cooldown_until = excluded.cooldown_until,
              last_attempt_id = excluded.last_attempt_id,
+             head_sha = excluded.head_sha,
              updated_at = excluded.updated_at`,
         )
         .bind(
@@ -130,6 +132,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           entry.schedulerEligible ? 1 : 0,
           entry.cooldownUntil,
           entry.lastAttemptId,
+          entry.headSha,
         ),
     );
   }
@@ -254,7 +257,7 @@ export async function readProjectedQueue(
   const entries = await db
     .prepare(
       `SELECT entry_id, pull_request_number, sponsor_principal_id, state, primary_reason,
-              fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id
+              fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id, head_sha
          FROM queue_entries_index
         WHERE github_repository_id = ? AND base_ref = ?
         ORDER BY fairness_ordinal`,
@@ -270,6 +273,7 @@ export async function readProjectedQueue(
       scheduler_eligible: number;
       cooldown_until: string | null;
       last_attempt_id: string | null;
+      head_sha: string | null;
     }>();
 
   const transitions = await db
@@ -326,6 +330,7 @@ export async function readProjectedQueue(
       fairnessOrdinal: e.fairness_ordinal,
       cooldownUntil: e.cooldown_until,
       lastAttemptId: e.last_attempt_id,
+      headSha: e.head_sha,
     })),
   };
 }
