@@ -2,7 +2,8 @@
 // Minimal repo lint: every tracked JSON/JSONC manifest parses, and no
 // source file imports node builtins inside the Worker bundle.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { validateWorkflow } from "./workflow-lint.mjs";
 
 let failures = 0;
 
@@ -40,12 +41,10 @@ if (failures > 0) {
 // Workflows must parse. One that does not is silently not run by GitHub, which is
 // worse than one that fails — I shipped exactly that mistake once.
 {
-  const { readdirSync, readFileSync } = await import("node:fs");
-  const { execFileSync } = await import("node:child_process");
   const dir = ".github/workflows";
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"))) {
-    execFileSync("python3", ["-c", "import yaml,sys;yaml.safe_load(open(sys.argv[1]))", `${dir}/${f}`]);
-    if (!/^on:/m.test(readFileSync(`${dir}/${f}`, "utf8"))) throw new Error(`${f}: no trigger`);
+    const path = `${dir}/${f}`;
+    validateWorkflow(path, readFileSync(path, "utf8"));
   }
 }
 

@@ -18,7 +18,7 @@ const workspaceSource = Object.fromEntries(
 export default defineConfig({
   resolve: { alias: workspaceSource },
   test: {
-    include: ["packages/**/src/**/*.test.ts", "apps/**/src/**/*.test.ts"],
+    include: ["packages/**/src/**/*.test.ts", "apps/**/src/**/*.test.ts", "scripts/**/*.test.mjs"],
     // The workerd chaos suite imports cloudflare:test and needs the Workers pool.
     // It runs under `pnpm test:workers`, not here.
     exclude: ["**/node_modules/**", "**/*.workers.test.ts"],
