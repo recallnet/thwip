@@ -59,6 +59,67 @@ interface Me {
   appSlug: string;
 }
 
+/**
+ * Client-side navigation for the dashboard.
+ *
+ * The tabs were plain links, so every tab click reloaded the whole application
+ * and refetched the session. While that fetch was in flight the router rendered a
+ * bare paragraph with no header and no tabs, which read as the page breaking.
+ */
+const NAVIGATED = "thwip:navigated";
+
+function usePath(): string {
+  const [path, setPath] = useState(window.location.pathname);
+  useEffect(() => {
+    const sync = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", sync);
+    window.addEventListener(NAVIGATED, sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener(NAVIGATED, sync);
+    };
+  }, []);
+  return path;
+}
+
+function navigate(to: string): void {
+  if (window.location.pathname === to) return;
+  window.history.pushState({}, "", to);
+  window.dispatchEvent(new Event(NAVIGATED));
+}
+
+/**
+ * A link that stays inside the application. The href is real, so opening it in a
+ * new tab, middle-clicking, and copying the address all keep working; only an
+ * ordinary left click is intercepted.
+ */
+function NavLink({
+  to,
+  className,
+  title,
+  children,
+}: {
+  to: string;
+  className?: string;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <a
+      href={to}
+      className={className}
+      title={title}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(to);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 function useMe() {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   useEffect(() => {
@@ -313,9 +374,9 @@ function Dashboard({
       <ul className="tab-nav" role="tablist" style={{ marginTop: "1rem" }}>
         {TABS.map(([key, label]) => (
           <li key={key}>
-            <a href={`/dashboard/${key}`} className={tab === key ? "is-active" : ""}>
+            <NavLink to={`/dashboard/${key}`} className={tab === key ? "is-active" : ""}>
               {label}
-            </a>
+            </NavLink>
           </li>
         ))}
       </ul>
@@ -1241,7 +1302,7 @@ function QueueTab() {
 
 export function App() {
   const me = useMe();
-  const path = window.location.pathname;
+  const path = usePath();
   const accessMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/access/.exec(path);
   const setupMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/setup/.exec(path);
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
@@ -1250,7 +1311,24 @@ export function App() {
   if (path.startsWith("/faq")) return <FaqPage me={me} />;
   if (path.startsWith("/install")) return <InstallPage me={me} />;
   if (dashMatch) {
-    if (me === undefined) return <p className="gp-panel__meta" style={{ padding: "3rem" }}>Loading…</p>;
+    // Keep the frame while the session loads. Returning a bare paragraph here
+    // dropped the header and the tabs on every cold load of a dashboard page.
+    if (me === undefined) {
+      return (
+        <div className="thwip-shell gp-workspace">
+          <nav className="thwip-nav" aria-label="Dashboard">
+            <a className="thwip-brand" href="/">
+              thwip<small>DASHBOARD</small>
+            </a>
+          </nav>
+          <main className="gp-workspace__content">
+            <p className="gp-panel__meta" style={{ padding: "3rem 0" }}>
+              Loading your organization…
+            </p>
+          </main>
+        </div>
+      );
+    }
     if (me === null) {
       return (
         <div className="gp-panel thwip-device-card">
