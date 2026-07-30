@@ -175,8 +175,14 @@ jobs:
 
   merge:
     name: merge
+    # Ordered after the verification, but not gated on its conclusion. The queue is
+    # the authority on whether a merge may happen, and it has the verdict: if the
+    # candidate was refused it answers CANDIDATE_REJECTED, and if the profile never
+    # asked for one it merges on the head proof. Gating here instead would make this
+    # workflow a second, silent decision-maker — and a verification job that cannot
+    # run would block the very merge that fixes it.
     needs: verify-candidate
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    if: always() && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Merge under Thwip Queue authorization
