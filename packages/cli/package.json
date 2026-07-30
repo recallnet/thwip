@@ -20,7 +20,8 @@
     "@thwip/sshsig": "workspace:*",
     "@thwip/verifier": "workspace:*",
     "yaml": "^2.9.0",
-    "@thwip/prompts": "workspace:*"
+    "@thwip/prompts": "workspace:*",
+    "@thwip/queue-domain": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

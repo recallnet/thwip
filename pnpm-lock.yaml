@@ -124,6 +124,9 @@ importers:
       '@thwip/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@thwip/queue-domain':
+        specifier: workspace:*
+        version: link:../queue-domain
       '@thwip/sshsig':
         specifier: workspace:*
         version: link:../sshsig
