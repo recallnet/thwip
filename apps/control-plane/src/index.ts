@@ -1403,27 +1403,20 @@ app.route(
       )
         .bind(repositoryId)
         .first<{ digest: string; profile: string; bundle: string; verifier: string | null }>();
-      if (row === null || row.verifier === null) return null;
+      if (row === null) return null;
 
       const bundle = JSON.parse(row.bundle) as { pipeline?: { requiredSuites?: string[] } };
-      const verifier = JSON.parse(row.verifier) as { workflowRef?: string; workflowSha?: string };
       const requiredSuites = bundle.pipeline?.requiredSuites ?? [];
-      if (
-        requiredSuites.length === 0 ||
-        typeof verifier.workflowRef !== "string" ||
-        typeof verifier.workflowSha !== "string"
-      ) {
-        // A policy that requires no suite, or a repository with no pinned verifier,
-        // cannot establish anything about a candidate. Saying so beats certifying.
-        return null;
-      }
-      return {
-        policyDigest: row.digest,
-        requiredSuites,
-        securityProfile: row.profile,
-        verifierWorkflowRef: verifier.workflowRef,
-        verifierWorkflowSha: verifier.workflowSha,
-      };
+      // The verifier pin is reported separately from the policy. Folding a missing
+      // pin into "no policy" would throw away the security profile, and a fast
+      // repository with no verifier would then be told it needed an integrated run
+      // that its policy never asked for.
+      const raw = row.verifier === null ? null : (JSON.parse(row.verifier) as Record<string, unknown>);
+      const verifier =
+        typeof raw?.["workflowRef"] === "string" && typeof raw["workflowSha"] === "string"
+          ? { workflowRef: raw["workflowRef"], workflowSha: raw["workflowSha"] }
+          : null;
+      return { policyDigest: row.digest, requiredSuites, securityProfile: row.profile, verifier };
     },
     async dispatchCandidateVerification(
       env: Env,
