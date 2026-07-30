@@ -79,7 +79,7 @@ async function fetchBundle(
   repositoryId: string,
   headSha: string,
   hints: { signerGithubUserId?: string; keyFingerprint?: string },
-): Promise<VerificationBundleV1> {
+): Promise<{ kind: "bundle"; bundle: VerificationBundleV1 } | { kind: "bootstrap"; detail: string }> {
   const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
   const res = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
     method: "POST",
@@ -87,11 +87,20 @@ async function fetchBundle(
     body: JSON.stringify({ repositoryId, headSha, ...hints }),
   });
   if (!res.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res.status} ${await res.text()}`);
-  const { bundle } = (await res.json()) as { bundle: string };
+  const body = (await res.json()) as { bundle?: string; bootstrap?: boolean; detail?: string };
+
+  // A project that is enabled with no policy yet has nothing to verify against.
+  // Failing here would block the merge that activates the first policy, which is
+  // a deadlock a repository cannot get out of on its own.
+  if (body.bootstrap === true) {
+    return { kind: "bootstrap", detail: body.detail ?? "no active policy yet" };
+  }
+  if (typeof body.bundle !== "string") throw new Error("BUNDLE_UNAVAILABLE: no bundle in response");
+
   const key = await importJWK(servicePublicJwk as JWK, "ES256");
-  const { payload, protectedHeader } = await compactVerify(bundle, key);
+  const { payload, protectedHeader } = await compactVerify(body.bundle, key);
   if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
-  return JSON.parse(new TextDecoder().decode(payload)) as VerificationBundleV1;
+  return { kind: "bundle", bundle: JSON.parse(new TextDecoder().decode(payload)) as VerificationBundleV1 };
 }
 
 async function mergeBase(repoFullName: string, base: string, head: string): Promise<string> {
@@ -147,7 +156,14 @@ async function main(): Promise<void> {
 
   // One bundle request per verification run.
   const firstCommit = await gh<CommitData>(`/repos/${fullName}/git/commits/${targets[0]!.prHeadSha}`);
-  const bundle = await fetchBundle(repositoryId, targets[0]!.prHeadSha, proofHints(firstCommit.message));
+  const resolved = await fetchBundle(repositoryId, targets[0]!.prHeadSha, proofHints(firstCommit.message));
+  if (resolved.kind === "bootstrap") {
+    // Says plainly that nothing was verified. A green check here is thwip having
+    // no policy to enforce, not thwip approving the commit.
+    summary(`thwip: BOOTSTRAP — nothing verified. ${resolved.detail}`);
+    return;
+  }
+  const bundle = resolved.bundle;
 
   let allPass = true;
   for (const target of targets) {

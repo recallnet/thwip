@@ -1,0 +1,57 @@
+name: thwip-policy
+
+run-name: "thwip: activate the policy on ${{ github.ref_name }}"
+
+# Activate the policy the default branch carries.
+#
+# Reaching the default branch already meant passing the thwip check under the
+# policy that was active before, so a change that weakens the required suites had
+# to survive review first. The first policy has nothing before it and is trusted
+# because a repository admin enabled the project.
+#
+# This runs on push rather than as a webhook because the policy cannot be derived
+# server-side: its pipeline digest comes from the working tree, from package.json
+# scripts or a hashed Dagger module. Deriving it here uses the same code that
+# signs proofs, so the digest a proof cites and the digest the control plane
+# stores can never drift apart.
+on:
+  push:
+    branches: [main]
+    paths:
+      - thwip.yaml
+      - package.json
+      - "**/package.json"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  activate:
+    name: activate policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Publish the policy this branch carries
+        env:
+          THWIP_ENDPOINT: https://thwip.recall.net
+        run: |
+          set -uo pipefail
+          raw=$(curl -sS -w '\n%{http_code}' \
+            -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${THWIP_ENDPOINT}/api/github-actions" || true)
+          code=$(printf '%s' "$raw" | tail -n1)
+          THWIP_OIDC_TOKEN=$(printf '%s' "$raw" | sed '$d' | jq -r '.value // empty')
+          if [ "$code" != "200" ] || [ -z "$THWIP_OIDC_TOKEN" ]; then
+            echo "::error::could not obtain an OIDC token (http $code)"
+            exit 1
+          fi
+          export THWIP_OIDC_TOKEN
+          npx --yes @recallnet/thwip policy publish

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalDigest,
+  canonicalJson,
   extractCarrier,
   parseStatement,
   utf8Decode,
@@ -305,6 +306,48 @@ async function apiAuthHeader(): Promise<string | null> {
   }
   const adminToken = process.env["THWIP_ADMIN_TOKEN"];
   return adminToken ? `Bearer ${adminToken}` : null;
+}
+
+/**
+ * Submit the policy this checkout carries, so the control plane can activate it.
+ *
+ * The policy cannot be derived server-side: its pipeline digest comes from the
+ * working tree, from package.json scripts or a hashed Dagger module. This is the
+ * one implementation of that derivation, and the same one that signs proofs, so
+ * the digest a proof cites and the digest the control plane stores are computed
+ * by the same code.
+ *
+ * Authorization is the caller's Actions OIDC token. The control plane refuses
+ * anything that is not the default branch, so a pull request cannot choose the
+ * rules it will be judged by.
+ */
+async function cmdPolicyPublish(): Promise<number> {
+  const cwd = process.cwd();
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const oidc = process.env["THWIP_OIDC_TOKEN"];
+  if (oidc === undefined || oidc.length === 0) {
+    process.stderr.write(
+      "thwip: policy publish needs an Actions OIDC token in THWIP_OIDC_TOKEN.\n" +
+        "It runs from a workflow on the default branch, which is what authorizes it.\n",
+    );
+    return 2;
+  }
+
+  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
+  const canonical = canonicalJson(project.policy);
+
+  const res = await fetch(`${endpoint}/v1/policies:activate`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
+    body: JSON.stringify({ canonicalJson: canonical, digest: project.policyDigest }),
+  });
+  const text = await res.text();
+  process.stdout.write(`${text}\n`);
+  if (!res.ok) {
+    process.stderr.write(`thwip: the control plane refused the policy (http ${res.status})\n`);
+    return 1;
+  }
+  return 0;
 }
 
 async function cmdPolicyDigest(): Promise<number> {
@@ -673,8 +716,11 @@ async function main(): Promise<void> {
     code = 0;
   }
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
+  else if (cmd === "policy" && sub === "publish") code = await cmdPolicyPublish();
   else {
-    process.stderr.write("usage: thwip <login|ship|queue|run|verify|policy digest|keys status> [options]\n");
+    process.stderr.write(
+      "usage: thwip <login|ship|queue|run|verify|policy digest|policy publish|keys status> [options]\n",
+    );
   }
   process.exit(code);
 }

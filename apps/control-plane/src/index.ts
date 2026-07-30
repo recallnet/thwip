@@ -657,6 +657,102 @@ app.post("/v1/devices/:keyId/revoke", async (c) => {
 
 // --- Admin bootstrap / sync ------------------------------------------------
 
+/**
+ * Activate the policy a repository's default branch carries.
+ *
+ * The policy cannot be derived server-side. Its pipeline digest is computed from
+ * the working tree: suite commands come from package.json scripts, and a Dagger
+ * pipeline is hashed from the module directory. Reimplementing that here would
+ * mean two implementations of a security-critical digest that must agree forever,
+ * and the day they disagree every proof stops verifying. So the canonical bundle
+ * is submitted by something holding a checkout, and this endpoint decides whether
+ * to trust it.
+ *
+ * What makes it safe is the ref. The caller must be a workflow running on the
+ * default branch, which its OIDC token proves. Reaching the default branch means
+ * passing the check under the policy that was active before, so a change that
+ * weakens the required suites has to survive review first. The first policy has
+ * nothing before it and is trusted because a repository admin enabled the project.
+ */
+app.post("/v1/policies:activate", async (c) => {
+  const claims = await verifyGithubOidc({ env: c.env, req: c.req });
+  if (claims instanceof Response) return claims;
+  const claim = claims as unknown as Record<string, unknown>;
+
+  const repositoryId = String(claim["repository_id"] ?? "");
+  if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "token has no repository_id" }, 403);
+
+  const project = await c.env.DB.prepare(
+    "SELECT id, default_branch, active_policy_digest FROM projects WHERE github_repository_id = ? AND enabled = 1",
+  )
+    .bind(repositoryId)
+    .first<{ id: string; default_branch: string; active_policy_digest: string | null }>();
+  if (project === null) return c.json({ error: "project not enabled", code: "PROJECT_NOT_ENABLED" }, 404);
+
+  // Only the default branch may set the policy. A pull request that could
+  // activate its own policy would be choosing the rules it is judged by.
+  const ref = String(claim["ref"] ?? "");
+  if (ref !== `refs/heads/${project.default_branch}`) {
+    return c.json(
+      { error: `policy may only be activated from refs/heads/${project.default_branch}`, code: "NOT_DEFAULT_BRANCH" },
+      403,
+    );
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as { canonicalJson?: string; digest?: string };
+  if (typeof body.canonicalJson !== "string" || typeof body.digest !== "string") {
+    return c.json({ error: "canonicalJson and digest are required" }, 400);
+  }
+  if (body.canonicalJson.length > 64 * 1024) return c.json({ error: "policy is too large" }, 400);
+
+  // Recomputed, never trusted. A digest that does not name its own content would
+  // let a proof cite one policy while the stored bundle said something else.
+  const hash = await crypto.subtle.digest("SHA-256", te.encode(body.canonicalJson));
+  const actual = `sha256:${[...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  if (actual !== body.digest) {
+    return c.json({ error: "digest does not match canonicalJson", code: "POLICY_DIGEST_MISMATCH" }, 400);
+  }
+
+  let parsed: { version?: number; repositoryId?: string };
+  try {
+    parsed = JSON.parse(body.canonicalJson) as { version?: number; repositoryId?: string };
+  } catch {
+    return c.json({ error: "policy is not JSON" }, 400);
+  }
+  if (parsed.repositoryId !== repositoryId) {
+    return c.json({ error: "policy names another repository", code: "POLICY_REPOSITORY_MISMATCH" }, 400);
+  }
+  if (typeof parsed.version !== "number" || !Number.isSafeInteger(parsed.version) || parsed.version < 1) {
+    return c.json({ error: "policy has no version" }, 400);
+  }
+
+  if (project.active_policy_digest === body.digest) {
+    return c.json({ activated: false, reason: "ALREADY_ACTIVE", digest: body.digest, version: parsed.version });
+  }
+
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status, activated_at)
+       VALUES (?, ?, ?, ?, 'active', datetime('now'))
+       ON CONFLICT(digest) DO UPDATE SET status = 'active', activated_at = datetime('now')`,
+    ).bind(body.digest, project.id, parsed.version, body.canonicalJson),
+    // The one it replaces stays readable for the grace window, so a proof signed
+    // moments before the change still verifies rather than failing on timing.
+    c.env.DB.prepare(
+      "UPDATE policy_bundles SET status = 'retired' WHERE project_id = ? AND digest != ? AND status = 'active'",
+    ).bind(project.id, body.digest),
+    c.env.DB.prepare("UPDATE projects SET active_policy_digest = ? WHERE id = ?").bind(body.digest, project.id),
+  ]);
+
+  return c.json({
+    activated: true,
+    digest: body.digest,
+    version: parsed.version,
+    previous: project.active_policy_digest,
+    first: project.active_policy_digest === null,
+  });
+});
+
 app.post("/admin/seed", async (c) => {
   if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
   const body = (await c.req.json()) as {
@@ -914,7 +1010,26 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
       active_policy_digest: string;
       github_org_id: string;
     }>();
-  if (!project || !project.active_policy_digest) return c.json({ error: "project not enabled" }, 404);
+  if (!project) return c.json({ error: "project not enabled", code: "PROJECT_NOT_ENABLED" }, 404);
+
+  // Enabled with no policy is not the same as not enabled, and answering with the
+  // latter is what deadlocked the first cutover on a repository: the check went
+  // red, the branch would not admit a red head to its merge queue, and merging is
+  // what activates the first policy. There is nothing to verify against yet, so
+  // this says so and does not block the merge that fixes it.
+  if (!project.active_policy_digest) {
+    return c.json(
+      {
+        bootstrap: true,
+        code: "BOOTSTRAP_NO_POLICY",
+        repository: project.github_name,
+        detail:
+          "This project is enabled and has no active policy yet. thwip verified nothing on this commit. " +
+          "Merge thwip.yaml to the default branch and the policy activates from it.",
+      },
+      200,
+    );
+  }
 
   const policyRow = await c.env.DB.prepare(
     "SELECT digest, version, canonical_json, status FROM policy_bundles WHERE digest = ?",

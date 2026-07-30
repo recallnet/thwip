@@ -1551,11 +1551,15 @@ async function fetchBundle(repositoryId, headSha, hints) {
     body: JSON.stringify({ repositoryId, headSha, ...hints })
   });
   if (!res2.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res2.status} ${await res2.text()}`);
-  const { bundle } = await res2.json();
+  const body = await res2.json();
+  if (body.bootstrap === true) {
+    return { kind: "bootstrap", detail: body.detail ?? "no active policy yet" };
+  }
+  if (typeof body.bundle !== "string") throw new Error("BUNDLE_UNAVAILABLE: no bundle in response");
   const key = await importJWK(service_public_jwk_default, "ES256");
-  const { payload, protectedHeader } = await compactVerify(bundle, key);
+  const { payload, protectedHeader } = await compactVerify(body.bundle, key);
   if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
-  return JSON.parse(new TextDecoder().decode(payload));
+  return { kind: "bundle", bundle: JSON.parse(new TextDecoder().decode(payload)) };
 }
 async function mergeBase(repoFullName, base, head) {
   const cmp = await gh(
@@ -1598,7 +1602,12 @@ async function main() {
     process.exit(1);
   }
   const firstCommit = await gh(`/repos/${fullName}/git/commits/${targets[0].prHeadSha}`);
-  const bundle = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
+  const resolved = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
+  if (resolved.kind === "bootstrap") {
+    summary(`thwip: BOOTSTRAP \u2014 nothing verified. ${resolved.detail}`);
+    return;
+  }
+  const bundle = resolved.bundle;
   let allPass = true;
   for (const target of targets) {
     const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
