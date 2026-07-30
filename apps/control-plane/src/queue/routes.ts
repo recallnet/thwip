@@ -61,6 +61,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   verifyOidc(c: { req: { raw: Request } }, env: TEnv): Promise<Record<string, unknown> | null>;
   /** The pinned verifier identity for a repository, or null when not configured. */
   pinnedVerifier(env: TEnv, repositoryId: string): Promise<PinnedVerifier | null>;
+  /** Queue configuration for a branch, or null when the branch has no queue. */
+  queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
+  /** The activated principal for a GitHub user id, or null. */
+  principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
 
@@ -276,6 +280,102 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       resultDigest: body.resultDigest,
     });
     return c.json({ result }, result.status === "rejected" ? 409 : 202);
+  });
+
+
+  /**
+   * The gate the queue decides.
+   *
+   * Called by the pinned verification workflow, which checks out its own revision
+   * rather than the pull request's, so nothing here executes contributor-controlled
+   * code. The OIDC token binds the repository, and the event payload comes from
+   * GitHub rather than from the branch under test.
+   *
+   * This is what lets Thwip Queue make real merge decisions without the App being
+   * able to publish its own check: the required check that already gates this
+   * branch now also asks the queue whether this pull request holds the turn.
+   */
+  app.post("/v1/queue/:repositoryId/authorize", async (c) => {
+    const claims = await deps.verifyOidc(c, c.env);
+    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
+
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+    const tokenRepositoryId = String(claims["repository_id"] ?? "");
+    if (tokenRepositoryId !== repositoryId) {
+      return c.json({ error: "token is for another repository" }, 403);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      pullRequestNumber?: number;
+      headSha?: string;
+      baseRef?: string;
+      authorGithubUserId?: string;
+      proofAccepted?: boolean;
+      draft?: boolean;
+    };
+    const baseRef = branchRef(body.baseRef);
+    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    if (typeof body.pullRequestNumber !== "number" || !Number.isSafeInteger(body.pullRequestNumber)) {
+      return c.json({ error: "pullRequestNumber required" }, 400);
+    }
+    if (typeof body.headSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.headSha)) {
+      return c.json({ error: "headSha must be a lowercase hex object id" }, 400);
+    }
+
+    const project = await deps.queueProject(c.env, repositoryId, baseRef);
+    if (project === null) {
+      // Not a queue branch: the check must not start failing because a queue was
+      // never configured here.
+      return c.json({ authorized: true, reason: "QUEUE_NOT_CONFIGURED", enforcing: false });
+    }
+
+    const principalId = await deps.principalFor(c.env, String(body.authorGithubUserId ?? ""));
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
+
+    if (principalId !== null) {
+      await queue.request({
+        idempotencyKey: `authorize:request:${entryId}`,
+        entryId,
+        pullRequestNumber: body.pullRequestNumber,
+        sponsorPrincipalId: principalId,
+        sponsorGithubUserId: String(body.authorGithubUserId),
+        headSha: body.headSha,
+      });
+      // Readiness is derived from what the verifier just established plus the
+      // branch state. A missing proof is the one thing this caller knows for
+      // certain, because it just verified it.
+      await queue.readiness({
+        idempotencyKey: `authorize:ready:${entryId}:${body.headSha}`,
+        entryId,
+        ready: body.proofAccepted === true && body.draft !== true,
+        schedulerEligible: body.proofAccepted === true && body.draft !== true,
+        primaryReason:
+          body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
+      });
+      await queue.tick({
+        idempotencyKey: `authorize:tick:${entryId}:${body.headSha}`,
+        decisionDigest: `sha256:${"0".repeat(64)}`,
+      });
+    }
+
+    const snapshot = await queue.snapshot();
+    const entry = snapshot.entries.find((e) => e.entryId === entryId);
+    const holdsLane = snapshot.activeAttemptId !== null && entry !== undefined && entry.state !== "Ready";
+    const enforcing = project.activationState === "canary" || project.activationState === "enforced";
+
+    // In observe the answer is always yes, and the reason says what it would have
+    // been. That is what makes adoption reversible.
+    const authorized = enforcing ? holdsLane : true;
+    return c.json({
+      authorized,
+      enforcing,
+      activationState: project.activationState,
+      reason: holdsLane ? "HOLDS_TURN" : (entry?.primaryReason ?? "WAITING_FOR_TURN"),
+      entryId,
+      queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
+    });
   });
 
   return app;
