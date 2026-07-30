@@ -46,8 +46,15 @@ export interface PinnedVerifier {
   readonly workflowSha: string | null;
   readonly reusableWorkflowRef: string;
   readonly reusableWorkflowSha: string | null;
-  /** The event the dispatch uses; anything else did not come from us (§17.1). */
-  readonly expectedEventName: "repository_dispatch";
+  /**
+   * The event the verifier runs on. Anything else did not come from us (§17.1).
+   *
+   * `repository_dispatch` is the control plane asking directly. `workflow_run` is
+   * the queue's own merge workflow running the verification inline; it executes the
+   * default branch's copy in the base branch's context, which is the same property
+   * that makes a dispatch safe — a pull request cannot edit either one.
+   */
+  readonly expectedEventName: "repository_dispatch" | "workflow_run";
   /** The verifier must run from the default branch, never from a pull request. */
   readonly defaultBranchRef: string;
 }
