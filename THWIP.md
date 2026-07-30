@@ -15,3 +15,5 @@ The verification runs from the default branch's copy of the workflow, in the bas
 branch's context, so a pull request cannot edit the thing that judges it. Only
 the code under test comes from the candidate. The verdict's digest is computed
 from its own content, so a result edited after the fact no longer matches it.
+
+The queue verifies the integrated candidate before it certifies a merge.
