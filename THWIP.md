@@ -17,3 +17,5 @@ the code under test comes from the candidate. The verdict's digest is computed
 from its own content, so a result edited after the fact no longer matches it.
 
 The queue verifies the integrated candidate before it certifies a merge.
+
+A merge under a stronger profile carries a verdict bound to the tree that landed.
