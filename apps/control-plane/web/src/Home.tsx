@@ -218,18 +218,18 @@ const SEQUENCE: Array<{ step: string; asks: string; codes: string[] }> = [
 const PROFILES = [
   {
     name: "Fast",
-    body: "No lease. The run records its own network and cache modes, signed.",
-    fact: "lease.required = false",
+    body: "The run signs its own network and cache modes along with the result.",
+    fact: "Reuses the run you already did",
   },
   {
     name: "Fresh",
-    body: "A lease, claimed before the run, so it cannot be back-dated.",
-    fact: "lease.required = true · 1800s",
+    body: "The run claims its window before it starts, so it cannot be back-dated.",
+    fact: "Pins when the run happened",
   },
   {
     name: "Remote",
-    body: "Named suites run on GitHub. The check needs GitHub's own conclusion.",
-    fact: "verified from check runs",
+    body: "Named suites run on GitHub, and the check waits for GitHub's own answer.",
+    fact: "GitHub ran and signed it",
   },
 ];
 
@@ -283,9 +283,7 @@ export function Home({
                 Read the trust model
               </a>
             </div>
-            <p className="nt-note">
-              Both figures come from the record below, on commit {RECORD.commit} of this control plane.
-            </p>
+            <p className="nt-note">Both figures come from the record below.</p>
           </div>
         </section>
 
@@ -337,8 +335,8 @@ export function Home({
             <p className="nt-note">{RECORD.trailerBytes} bytes, carried as a Git trailer:</p>
             <pre className="nt-raw">{RECORD.trailer}…</pre>
             <p>
-              A DSSE envelope over an in-toto Statement, signed with an SSH key. GitHub owns the binding from key
-              to person, so thwip keeps no identity system of its own.
+              Signed with the SSH key GitHub already lists for you, so thwip never asks you to create an account
+              with it.
             </p>
           </div>
         </section>
@@ -390,8 +388,7 @@ export function Home({
             </table>
             </div>
             <p className="nt-note">
-              The verifier is a pure function, so <code>thwip verify</code> gives you the answer the check will
-              give.
+              <code>thwip verify</code> runs the same twelve steps locally, so you see the answer before you push.
             </p>
           </div>
         </section>
@@ -416,9 +413,6 @@ export function Home({
                 </div>
               ))}
             </div>
-            <p className="nt-note">
-              A macOS or Windows build belongs under <code>remote:</code>.
-            </p>
           </div>
         </section>
 
@@ -435,11 +429,7 @@ required:
   - lint
   - typecheck
   - test`}</pre>
-            <p>
-              Suite ids name package.json scripts, or <code>pipeline.module</code> points at a Dagger module and
-              matrices live there. The CLI provisions its own Dagger engine, so adopting thwip is not adopting
-              another global toolchain.
-            </p>
+            <p>Suite ids name the package.json scripts you already run.</p>
             <div className="nt-cmd">
               <span>$</span> thwip init --required &quot;lint,typecheck,test&quot;
             </div>
