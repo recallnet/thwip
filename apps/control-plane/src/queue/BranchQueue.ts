@@ -120,6 +120,8 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
       schedulerEligible: boolean;
       fairnessOrdinal: string;
       cooldownUntil: string | null;
+      /** Lets a reader join a recorded transition back to the pull request it merged. */
+      lastAttemptId: string | null;
     }>;
   }> {
     const { store } = this.require();
@@ -153,6 +155,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
           schedulerEligible: entry.schedulerEligible,
           fairnessOrdinal: entry.fairnessOrdinal.toString(),
           cooldownUntil: entry.cooldownUntil,
+          lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
         })),
     };
   }
