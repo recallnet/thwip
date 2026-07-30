@@ -1496,6 +1496,30 @@ var service_public_jwk_default = {
   alg: "ES256"
 };
 
+// src/bundle-resolution.ts
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function parseBundleResolutionBody(value) {
+  if (!record(value)) throw new Error("BUNDLE_UNAVAILABLE: resolver returned a non-object");
+  if (value["state"] === "bootstrap_pending") {
+    if (value["code"] !== "POLICY_AWAITING_FIRST_MERGE" || typeof value["repository"] !== "string" || typeof value["repositoryId"] !== "string" || typeof value["defaultBranch"] !== "string") {
+      throw new Error("BUNDLE_UNAVAILABLE: malformed bootstrap state");
+    }
+    return {
+      kind: "bootstrap_pending",
+      code: value["code"],
+      repository: value["repository"],
+      repositoryId: value["repositoryId"],
+      defaultBranch: value["defaultBranch"]
+    };
+  }
+  if ((value["state"] === void 0 || value["state"] === "active") && typeof value["bundle"] === "string") {
+    return { kind: "active", bundle: value["bundle"] };
+  }
+  throw new Error("BUNDLE_UNAVAILABLE: resolver returned neither an active bundle nor bootstrap state");
+}
+
 // src/main.ts
 var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
 var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
@@ -1551,17 +1575,49 @@ async function fetchBundle(repositoryId, headSha, hints) {
     body: JSON.stringify({ repositoryId, headSha, ...hints })
   });
   if (!res2.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res2.status} ${await res2.text()}`);
-  const { bundle } = await res2.json();
+  const resolution = parseBundleResolutionBody(await res2.json());
+  if (resolution.kind === "bootstrap_pending") return resolution;
   const key = await importJWK(service_public_jwk_default, "ES256");
-  const { payload, protectedHeader } = await compactVerify(bundle, key);
+  const { payload, protectedHeader } = await compactVerify(resolution.bundle, key);
   if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
-  return JSON.parse(new TextDecoder().decode(payload));
+  return {
+    kind: "active",
+    bundle: JSON.parse(new TextDecoder().decode(payload))
+  };
 }
 async function mergeBase(repoFullName, base, head) {
   const cmp = await gh(
     `/repos/${repoFullName}/compare/${encodeURIComponent(base)}...${head}`
   );
   return cmp.merge_base_commit.sha;
+}
+async function requireBootstrapPrerequisites(fullName, ownerId, repositoryId, targets, firstCommit) {
+  for (const target of targets) {
+    const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
+    const carrier = extractCarrier(commit.message);
+    if (!carrier.ok) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no parseable proof (${carrier.error.code})`);
+    }
+    let parsed;
+    try {
+      parsed = parseStatement(JSON.parse(utf8Decode(b64stdDecode(carrier.envelope.payload))));
+    } catch {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has a malformed proof payload`);
+    }
+    if (!parsed.ok) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof payload ${parsed.detail}`);
+    }
+    const predicate = parsed.value.predicate;
+    const objectFormat = commit.sha.length === 64 ? "sha256" : "sha1";
+    if (predicate.repository.ownerId !== ownerId || predicate.repository.repositoryId !== repositoryId || predicate.git.treeOid !== commit.tree.sha || predicate.git.parentOids.length !== commit.parents.length || predicate.git.parentOids.some((parent, index) => parent !== commit.parents[index]?.sha) || parsed.value.subject[0]?.digest[objectFormat] !== commit.tree.sha) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof is not bound to this repository tree`);
+    }
+    try {
+      await gh(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
+    } catch {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no committed thwip.yaml`);
+    }
+  }
 }
 async function main() {
   const eventName = process.env["GITHUB_EVENT_NAME"] ?? "";
@@ -1598,7 +1654,22 @@ async function main() {
     process.exit(1);
   }
   const firstCommit = await gh(`/repos/${fullName}/git/commits/${targets[0].prHeadSha}`);
-  const bundle = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
+  const resolution = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
+  if (resolution.kind === "bootstrap_pending") {
+    await requireBootstrapPrerequisites(fullName, ownerId, repositoryId, targets, firstCommit);
+    summary("## \u{1F7E1} `BOOTSTRAP_PENDING` \u2014 waiting for the first canonical policy");
+    summary("");
+    summary(
+      `${resolution.repository} is enabled, but has no active policy yet. This successful bootstrap result keeps onboarding eligible for the native merge queue.`
+    );
+    summary("");
+    summary(
+      `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`
+    );
+    await recordObservation(repositoryId, firstCommit.sha, "BOOTSTRAP_PENDING");
+    process.exit(0);
+  }
+  const bundle = resolution.bundle;
   let allPass = true;
   for (const target of targets) {
     const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
@@ -1635,22 +1706,25 @@ async function main() {
       await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
       });
     }
-    try {
-      const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
-      await fetch(`${ENDPOINT}/v1/verification-observations`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          repositoryId,
-          headSha: commit.sha,
-          outcome: result.code,
-          runId: process.env["GITHUB_RUN_ID"] ?? null
-        })
-      });
-    } catch {
-    }
+    await recordObservation(repositoryId, commit.sha, result.code);
   }
   process.exit(allPass ? 0 : 1);
+}
+async function recordObservation(repositoryId, headSha, outcome) {
+  try {
+    const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
+    await fetch(`${ENDPOINT}/v1/verification-observations`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        repositoryId,
+        headSha,
+        outcome,
+        runId: process.env["GITHUB_RUN_ID"] ?? null
+      })
+    });
+  } catch {
+  }
 }
 var CHECK_SEQUENCE = [
   ["Proof present on the exact head commit", ["PROOF_MISSING", "PROOF_DUPLICATE", "PROOF_TOO_LARGE", "PROOF_MALFORMED", "PROOF_SCHEMA_UNSUPPORTED"]],

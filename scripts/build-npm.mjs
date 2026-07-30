@@ -1,8 +1,8 @@
 /**
  * Build the publishable `thwip` package.
  *
- * The CLI depends on five workspace packages, and `workspace:*` means nothing to
- * npm. Publishing all six would put five packages nobody installs directly into a
+ * The CLI depends on six workspace packages, and `workspace:*` means nothing to
+ * npm. Publishing all seven would put six packages nobody installs directly into a
  * public namespace, and every release would have to keep their versions in step.
  * Bundling instead ships one artifact with no dependencies, which is also what
  * makes `npx thwip` a single download.

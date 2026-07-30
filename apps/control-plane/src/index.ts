@@ -3,6 +3,14 @@ import { CompactSign, SignJWT, createRemoteJWKSet, importJWK, jwtVerify, type JW
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import {
+  activatePolicyFromDefaultBranchPush,
+  policyPushFromGithubWebhook,
+  reconcileInstallationPolicies,
+  type GithubPolicyWebhookPayload,
+  type PolicyPush,
+} from "./policy-activation.js";
+import { projectPolicyState } from "./policy-state.js";
 import { queueRoutes } from "./queue/routes.js";
 import { queueKey as queueKeyOf } from "@thwip/queue-domain";
 import type { Env } from "./env.js";
@@ -170,6 +178,7 @@ app.get("/api/auth/callback/github", async (c, next) => {
   if (!installationId) return next();
   try {
     await syncInstallation(c.env, installationId);
+    await reconcileInstallationPolicies(c.env, installationId);
   } catch {
     /* the scheduled reconciliation will pick it up */
   }
@@ -288,6 +297,11 @@ app.get("/v1/dashboard/projects", async (c) => {
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const rows = await c.env.DB.prepare(
     `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
+            CASE
+              WHEN p.enabled = 0 THEN 'disabled'
+              WHEN p.active_policy_digest IS NULL THEN 'awaiting_first_merge'
+              ELSE 'active'
+            END AS activation_state,
             b.version AS policy_version,
             json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
             (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
@@ -324,6 +338,20 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
     .run();
   if ((result.meta.changes ?? 0) === 0) {
     return c.json({ error: `plan '${plan}' allows ${limit} enabled projects`, code: "BILLING_LIMIT" }, 402);
+  }
+  const organization = await c.env.DB.prepare(
+    "SELECT installation_id FROM organizations WHERE id = ?",
+  )
+    .bind(viewer.organizationId)
+    .first<{ installation_id: string | null }>();
+  if (organization?.installation_id) {
+    await c.env.SYNC_QUEUE.send({
+      provider: "dashboard",
+      delivery: randomId("enable"),
+      event: "policy_reconcile",
+      installationId: organization.installation_id,
+      policyPush: null,
+    }).catch(() => undefined);
   }
   return c.json({ enabled: true });
 });
@@ -711,7 +739,10 @@ app.post("/admin/sync", async (c) => {
   const installations = await listInstallations(c.env);
   const results: Record<string, unknown> = {};
   for (const inst of installations) {
-    results[inst.account.login] = await syncInstallation(c.env, String(inst.id));
+    const installationId = String(inst.id);
+    const projection = await syncInstallation(c.env, installationId);
+    const policies = await reconcileInstallationPolicies(c.env, installationId);
+    results[inst.account.login] = { projection, policies };
   }
   return c.json({ installations: results });
 });
@@ -902,26 +933,46 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
   }
 
   const project = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id, p.github_name, p.active_policy_digest, o.github_org_id
+    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled,
+            p.active_policy_digest, o.github_org_id
      FROM projects p JOIN organizations o ON o.id = p.organization_id
-     WHERE p.github_repository_id = ? AND p.enabled = 1`,
+     WHERE p.github_repository_id = ?`,
   )
     .bind(body.repositoryId)
     .first<{
       id: string;
       github_repository_id: string;
       github_name: string;
-      active_policy_digest: string;
+      default_branch: string;
+      enabled: number;
+      active_policy_digest: string | null;
       github_org_id: string;
     }>();
-  if (!project || !project.active_policy_digest) return c.json({ error: "project not enabled" }, 404);
+  if (project === null) {
+    return c.json({ error: "project is not imported", code: projectPolicyState(null).code }, 404);
+  }
+  const policyState = projectPolicyState(project);
+  if (policyState.kind === "disabled") {
+    return c.json({ error: "project is disabled", code: policyState.code }, 403);
+  }
+  if (policyState.kind === "bootstrap_pending") {
+    return c.json({
+      state: "bootstrap_pending",
+      code: policyState.code,
+      repositoryId: project!.github_repository_id,
+      repository: project!.github_name,
+      defaultBranch: project!.default_branch,
+    });
+  }
 
   const policyRow = await c.env.DB.prepare(
     "SELECT digest, version, canonical_json, status FROM policy_bundles WHERE digest = ?",
   )
-    .bind(project.active_policy_digest)
+    .bind(policyState.digest)
     .first<{ digest: string; version: number; canonical_json: string; status: string }>();
-  if (!policyRow || policyRow.status !== "active") return c.json({ error: "no active policy" }, 404);
+  if (!policyRow || policyRow.status !== "active") {
+    return c.json({ error: "active policy record is unavailable", code: "ACTIVE_POLICY_UNAVAILABLE" }, 500);
+  }
 
   const grace = await c.env.DB.prepare(
     "SELECT digest FROM policy_bundles WHERE project_id = ? AND status = 'retired' AND activated_at > datetime('now','-1 day')",
@@ -1052,7 +1103,7 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
     expiresAt: new Date(now.getTime() + 60_000).toISOString(),
   };
   const jws = await signPayload(c.env, bundle, "thwip-bundle+jws");
-  return c.json({ bundle: jws });
+  return c.json({ state: "active", bundle: jws });
 });
 
 app.post("/v1/verification-observations", async (c) => {
@@ -1173,16 +1224,18 @@ app.post("/api/github/webhooks", async (c) => {
   if (!timingSafeEqualHex(sig, expected)) return c.json({ error: "bad signature" }, 401);
   const delivery = c.req.header("x-github-delivery") ?? randomId("dlv");
   const event = c.req.header("x-github-event") ?? "unknown";
+  let duplicate = false;
   try {
     await c.env.DB.prepare("INSERT INTO webhook_deliveries (provider, delivery_id, event) VALUES ('github', ?, ?)")
       .bind(delivery, event)
       .run();
   } catch {
-    return c.json({ ok: true, duplicate: true });
+    duplicate = true;
   }
   let installationId: string | null = null;
+  let payload: GithubPolicyWebhookPayload = {};
   try {
-    const payload = JSON.parse(new TextDecoder().decode(raw)) as { installation?: { id?: number } };
+    payload = JSON.parse(new TextDecoder().decode(raw)) as typeof payload;
     installationId = payload.installation?.id != null ? String(payload.installation.id) : null;
   } catch {
     /* hint only */
@@ -1193,14 +1246,15 @@ app.post("/api/github/webhooks", async (c) => {
   let queued = { handled: false, detail: "not a queue event" };
   if (event === "pull_request") {
     try {
-      queued = await queueFromPullRequest(c.env, JSON.parse(new TextDecoder().decode(raw)) as never);
+      queued = await queueFromPullRequest(c.env, payload as never);
     } catch (error) {
       queued = { handled: false, detail: error instanceof Error ? error.message : "queue placement failed" };
     }
   }
 
-  await c.env.SYNC_QUEUE.send({ provider: "github", delivery, event, installationId });
-  return c.json({ ok: true, queued });
+  const policyPush = policyPushFromGithubWebhook(event, payload);
+  await c.env.SYNC_QUEUE.send({ provider: "github", delivery, event, installationId, policyPush });
+  return c.json({ ok: true, duplicate, queued });
 });
 
 // --- Stripe webhooks (entitlement mirror; Better Auth has its own route) ---
@@ -1273,8 +1327,14 @@ app.get("/admin/github/manifest", async (c) => {
     setup_on_update: true,
     request_oauth_on_install: true,
     public: false,
-    default_permissions: { contents: "read", emails: "read", members: "read", metadata: "read" },
-    default_events: ["member", "membership", "organization", "repository", "team"],
+    default_permissions: {
+      contents: "read",
+      emails: "read",
+      members: "read",
+      metadata: "read",
+      pull_requests: "read",
+    },
+    default_events: ["member", "membership", "organization", "pull_request", "push", "repository", "team"],
   };
   return c.html(
     `<!doctype html><meta charset="utf-8"><title>Register thwip GitHub App</title>
@@ -1513,12 +1573,22 @@ export default {
   async queue(batch: MessageBatch, env: Env): Promise<void> {
     const synced = new Set<string>();
     for (const msg of batch.messages) {
-      const body = msg.body as { installationId?: string | null };
+      const body = msg.body as {
+        event?: string;
+        installationId?: string | null;
+        policyPush?: PolicyPush | null;
+      };
       const inst = body?.installationId;
       try {
         if (inst && !synced.has(inst)) {
           await syncInstallation(env, inst);
           synced.add(inst);
+        }
+        if (body.policyPush != null) {
+          await activatePolicyFromDefaultBranchPush(env, body.policyPush);
+        }
+        if (body.event === "policy_reconcile" && inst) {
+          await reconcileInstallationPolicies(env, inst);
         }
         msg.ack();
       } catch {
@@ -1533,6 +1603,7 @@ export default {
     for (const o of orgs.results) {
       try {
         await syncInstallation(env, o.installation_id);
+        await reconcileInstallationPolicies(env, o.installation_id);
       } catch {
         /* retried next run */
       }

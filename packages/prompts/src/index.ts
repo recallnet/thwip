@@ -81,6 +81,16 @@ export interface ProjectPromptFacts {
 
 /** Putting one repository on thwip, assuming the machine is already set up. */
 export function projectSetupPrompt(p: ProjectPromptFacts): string {
+  const finish = !p.enabled
+    ? `This project is currently disabled in thwip. Tell me to enable it at ${SITE}/dashboard/projects (I need repository admin on GitHub) before expecting the thwip check to pass. ${
+        p.hasActivePolicy
+          ? "Its recorded active policy applies again when the project is enabled; until then the resolver reports PROJECT_DISABLED."
+          : `Once enabled, the onboarding check reports BOOTSTRAP_PENDING successfully so it does not deadlock the native merge queue; that result explicitly does not approve the pull request's candidate policy or proof. After the pull request merges, thwip reads the exact thwip.yaml and pipeline from canonical ${p.defaultBranch}, records their bundle and digest, and activates that first policy.`
+      }`
+    : p.hasActivePolicy
+      ? "The project is already enabled and a policy is active. This pull request is verified under that policy. A changed thwip.yaml takes effect only after its protected merge lands. The thwip check should pass from the proof on the head commit, without rerunning the suites in the cloud."
+      : `The project is already enabled, but no policy is active yet. The onboarding check reports BOOTSTRAP_PENDING successfully so it does not deadlock the native merge queue; that result explicitly does not approve this pull request's candidate policy or proof. After the pull request merges, thwip reads the exact thwip.yaml and pipeline from canonical ${p.defaultBranch}, records their bundle and digest, and activates that first policy. Later pull requests are verified from their signed head proofs under that active policy; a candidate policy never approves itself.`;
+
   return `Set up thwip (verified local CI) for ${p.githubName}. Work through this in
 order and ask me before anything that changes files, deletes workflows, or
 pushes. This is safe to re-run: if a step is already done, say so and move on.
@@ -117,17 +127,7 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    refuses to sign, tell me the reason it printed rather than working around
    it. Then push and open a pull request.
 
-4. Finish. ${
-    p.enabled
-      ? "The project is already enabled in thwip."
-      : `Tell me to enable this project at ${SITE}/dashboard/projects (I need repository admin on GitHub).`
-  }${
-    p.hasActivePolicy
-      ? " A policy is already active; a changed thwip.yaml needs a new activation before it takes effect."
-      : " After the pull request merges, the policy from thwip.yaml gets activated."
-  }
-   The thwip check on the pull request should pass from the proof on the head
-   commit, without rerunning the suites in the cloud.
+4. Finish. ${finish}
 
 Rules: never move a private key anywhere outside my ~/.ssh or ~/.config/thwip;
 never skip or weaken a failing check to get a green proof; the default branch
