@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { queueKey } from "@thwip/queue-domain";
-import { BranchQueueStore, type TransitionRow } from "./store.js";
+import { BranchQueueStore, type CandidateVerdict, type TransitionRow } from "./store.js";
 import { DEFAULT_TIMINGS, QueueCommands, type QueueTimings } from "./commands.js";
 import type { SqlLike } from "./sql.js";
 
@@ -253,6 +253,19 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
 
   async cancel(input: Parameters<QueueCommands["cancel"]>[0]) {
     return this.withAlarm(({ commands }) => commands.cancel(input));
+  }
+
+  /**
+   * Evidence about a tree, not a change of queue state, so it does not go through
+   * the reducer: no entry moves and no attempt advances. The merge gate reads it
+   * as an input the way it reads the head proof.
+   */
+  async recordCandidateVerdict(verdict: CandidateVerdict) {
+    return this.require().store.recordCandidateVerdict(verdict);
+  }
+
+  async candidateVerdict(candidateTreeOid: string): Promise<CandidateVerdict | null> {
+    return this.require().store.candidateVerdict(candidateTreeOid);
   }
 
   /**

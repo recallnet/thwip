@@ -1386,6 +1386,72 @@ app.route(
         .first<{ verifier_json: string }>();
       return row === null ? null : (JSON.parse(row.verifier_json) as never);
     },
+    /**
+     * What the active policy requires of an integrated candidate.
+     *
+     * Read from the policy bundle rather than from anything the caller sends, so
+     * the suite list a verdict is judged against is the one the project activated.
+     */
+    async activePolicy(env: Env, repositoryId: string) {
+      const row = await env.DB.prepare(
+        `SELECT p.active_policy_digest AS digest, p.security_profile AS profile,
+                b.canonical_json AS bundle, q.verifier_json AS verifier
+           FROM projects p
+           JOIN policy_bundles b ON b.digest = p.active_policy_digest
+           LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
+          WHERE p.github_repository_id = ?`,
+      )
+        .bind(repositoryId)
+        .first<{ digest: string; profile: string; bundle: string; verifier: string | null }>();
+      if (row === null) return null;
+
+      const bundle = JSON.parse(row.bundle) as { pipeline?: { requiredSuites?: string[] } };
+      const requiredSuites = bundle.pipeline?.requiredSuites ?? [];
+      // The verifier pin is reported separately from the policy. Folding a missing
+      // pin into "no policy" would throw away the security profile, and a fast
+      // repository with no verifier would then be told it needed an integrated run
+      // that its policy never asked for.
+      const raw = row.verifier === null ? null : (JSON.parse(row.verifier) as Record<string, unknown>);
+      const verifier =
+        typeof raw?.["workflowRef"] === "string" && typeof raw["workflowSha"] === "string"
+          ? { workflowRef: raw["workflowRef"], workflowSha: raw["workflowSha"] }
+          : null;
+      return { policyDigest: row.digest, requiredSuites, securityProfile: row.profile, verifier };
+    },
+    async dispatchCandidateVerification(
+      env: Env,
+      repositoryId: string,
+      payload: {
+        baseRef: string;
+        pullRequestNumber: number;
+        attemptId: string;
+        baseSha: string;
+        candidateSha: string;
+        candidateTreeOid: string;
+      },
+    ) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return;
+      const token = await installationToken(env, project.installation_id);
+      // repository_dispatch runs the default branch's copy of the workflow. That is
+      // the whole reason the candidate verifier is dispatched rather than triggered
+      // by the pull request: a pull request can edit its own workflow file, and a
+      // verifier a contributor can edit verifies nothing.
+      await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "thwip-control-plane",
+        },
+        body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
+      });
+    },
   }) as never,
 );
 
