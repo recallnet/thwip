@@ -26,14 +26,11 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.workflow_sha }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
       - name: Verify thwip proof for the exact PR head commit
+        uses: ./
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: https://thwip.recall.net
-        run: node packages/action/dist/index.cjs
       # Ask Thwip Queue whether this pull request may merge now.
       #
       # This step is what makes the queue decide rather than merely observe. It
