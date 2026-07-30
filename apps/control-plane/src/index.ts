@@ -4,6 +4,7 @@ import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import { queueRoutes } from "./queue/routes.js";
+import { queueKey as queueKeyOf } from "@thwip/queue-domain";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -1072,6 +1073,94 @@ app.post("/v1/verification-observations", async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Turn a pull_request webhook into a queue entry and a readiness evaluation.
+ *
+ * This is why no workflow needs to enqueue anything: the control plane learns
+ * about a pull request from GitHub directly, so the queue cannot be bypassed by
+ * someone not running a command, and there is no token in CI that can enqueue on
+ * a developer's behalf.
+ *
+ * It is deliberately tolerant. A repository with no queue configured, or an event
+ * for a branch the queue does not manage, is ignored rather than treated as an
+ * error — most repositories in an installation are not queue projects.
+ */
+async function queueFromPullRequest(env: Env, payload: {
+  action?: string;
+  pull_request?: {
+    number?: number;
+    draft?: boolean;
+    state?: string;
+    base?: { ref?: string; repo?: { id?: number } };
+    head?: { sha?: string };
+    user?: { id?: number; login?: string; type?: string };
+  };
+}): Promise<{ handled: boolean; detail: string }> {
+  const pr = payload.pull_request;
+  const repositoryId = pr?.base?.repo?.id;
+  const baseRef = pr?.base?.ref;
+  const number = pr?.number;
+  const headSha = pr?.head?.sha;
+  if (repositoryId == null || baseRef == null || number == null || headSha == null) {
+    return { handled: false, detail: "not a pull request event we can place" };
+  }
+
+  const ref = `refs/heads/${baseRef}`;
+  const project = await env.DB.prepare(
+    "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+  )
+    .bind(String(repositoryId), ref)
+    .first<{ activation_state: string }>();
+  if (project === null) return { handled: false, detail: "no queue configured for this branch" };
+
+  // The sponsor is the pull request's author, resolved through the projection so a
+  // fairness share belongs to a person rather than to a login string.
+  const authorId = pr?.user?.id;
+  const principal =
+    authorId == null
+      ? null
+      : await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
+          .bind(String(authorId))
+          .first<{ id: string }>();
+  if (principal === null) return { handled: false, detail: "author has no activated principal" };
+
+  const key = await queueKeyOf(String(repositoryId), ref);
+  const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key));
+  await stub.bind({ queueKey: key, repositoryId: String(repositoryId), baseRef: ref });
+
+  const entryId = `entry_${repositoryId}_${number}`;
+  if (payload.action === "closed") {
+    await stub.cancel({
+      idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+      entryId,
+      actorPrincipalId: "github",
+      reason: "the pull request was closed",
+    });
+    return { handled: true, detail: "entry cancelled" };
+  }
+
+  await stub.request({
+    idempotencyKey: `webhook:request:${entryId}`,
+    entryId,
+    pullRequestNumber: number,
+    sponsorPrincipalId: principal.id,
+    sponsorGithubUserId: String(authorId),
+    headSha,
+  });
+
+  // Readiness is re-derived from what GitHub just told us plus what it already
+  // said; the event alone never decides it.
+  await stub.readiness({
+    idempotencyKey: `webhook:ready:${entryId}:${headSha}:${payload.action ?? "sync"}`,
+    entryId,
+    ready: pr?.draft !== true && pr?.state === "open",
+    schedulerEligible: false,
+    primaryReason: pr?.draft === true ? "PR_DRAFT" : pr?.state !== "open" ? "PR_CLOSED" : "AGENT_OFFLINE",
+  });
+
+  return { handled: true, detail: `placed in ${project.activation_state}` };
+}
+
 // --- GitHub webhooks -------------------------------------------------------
 
 app.post("/api/github/webhooks", async (c) => {
@@ -1098,8 +1187,20 @@ app.post("/api/github/webhooks", async (c) => {
   } catch {
     /* hint only */
   }
+  // Queue placement happens inline rather than through the projection queue: the
+  // Durable Object is the authority and a delayed entry would mean a pull request
+  // sits outside the queue for as long as the backlog is deep.
+  let queued = { handled: false, detail: "not a queue event" };
+  if (event === "pull_request") {
+    try {
+      queued = await queueFromPullRequest(c.env, JSON.parse(new TextDecoder().decode(raw)) as never);
+    } catch (error) {
+      queued = { handled: false, detail: error instanceof Error ? error.message : "queue placement failed" };
+    }
+  }
+
   await c.env.SYNC_QUEUE.send({ provider: "github", delivery, event, installationId });
-  return c.json({ ok: true });
+  return c.json({ ok: true, queued });
 });
 
 // --- Stripe webhooks (entitlement mirror; Better Auth has its own route) ---
