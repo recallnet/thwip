@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { queueKey } from "@thwip/queue-domain";
-import { BranchQueueStore } from "./store.js";
+import { BranchQueueStore, type TransitionRow } from "./store.js";
 import { DEFAULT_TIMINGS, QueueCommands, type QueueTimings } from "./commands.js";
 import type { SqlLike } from "./sql.js";
 
@@ -100,12 +100,15 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
   async snapshot(): Promise<{
     generation: number;
     attemptRevision: number;
+    queueEpoch: number;
     paused: boolean;
     pauseReason: string | null;
     rebaselineRequired: boolean;
     baseSha: string | null;
     activeAttemptId: string | null;
     chainHead: { sequence: number; digest: string } | null;
+    /** The whole recorded chain, oldest first, so a reader can check the links. */
+    transitions: readonly TransitionRow[];
     entries: Array<{
       entryId: string;
       pullRequestNumber: number;
@@ -123,12 +126,14 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     return {
       generation: store.generation(),
       attemptRevision: store.attemptRevision(),
+      queueEpoch: store.queueEpoch(),
       paused: state.paused,
       pauseReason: state.pauseReason,
       rebaselineRequired: state.rebaselineRequired,
       baseSha: state.baseSha,
       activeAttemptId: state.activeAttemptId,
       chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
+      transitions: store.transitionChain(),
       // Projected order only: an exact permanent position would be a lie,
       // because readiness changes after every GitHub event (plan.md §8.3).
       entries: [...state.entries.values()]

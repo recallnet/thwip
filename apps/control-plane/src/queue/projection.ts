@@ -30,7 +30,8 @@ export interface ProjectionTransition {
   readonly baseSha: string;
   readonly attemptId: string | null;
   readonly witnessCount: number;
-  readonly observedAt: string;
+  /** Null when the object recorded the transition before it tracked the time. */
+  readonly observedAt: string | null;
 }
 
 export interface ProjectionMessage {
