@@ -49,6 +49,7 @@ const NEXT_ACTION: Record<string, string> = {
   CONVERSATION_UNRESOLVED: "Resolve the open review conversations.",
   REQUIRED_CHECK_PENDING: "A required check is still running.",
   REQUIRED_CHECK_FAILED: "A required check failed. Fix and push; the place is kept.",
+  VERIFICATION_REJECTED: "The verifier refused the candidate. thwip verify explains why; the place is kept.",
   MERGE_CONFLICT: "Rebase or merge the base branch to clear the conflict.",
   LOCAL_RECEIPT_MISSING: "Run thwip run on this commit and push.",
   LOCAL_RECEIPT_REJECTED: "The proof was not accepted. thwip verify explains why.",

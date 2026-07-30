@@ -51,6 +51,8 @@ const NEXT_ACTION: Record<string, string> = {
   CONVERSATION_UNRESOLVED: "Resolve the open review conversations.",
   REQUIRED_CHECK_PENDING: "A required check is still running.",
   REQUIRED_CHECK_FAILED: "A required check failed. Fix it and push again; your place is kept.",
+  VERIFICATION_REJECTED:
+    "The verifier refused this candidate. Run thwip verify to see why; your place is kept.",
   MERGE_CONFLICT: "Rebase or merge the base branch to clear the conflict.",
   LOCAL_RECEIPT_MISSING: "Run thwip run on this commit and push, so the head carries a proof.",
   LOCAL_RECEIPT_REJECTED: "The proof on this commit was not accepted. thwip verify explains why.",
@@ -191,6 +193,8 @@ function titleFor(reason: string): string {
       return "Conflict with the base branch";
     case "REQUIRED_CHECK_FAILED":
       return "A required check failed";
+    case "VERIFICATION_REJECTED":
+      return "The verifier refused the candidate";
     case "REQUIRED_CHECK_PENDING":
       return "Waiting for a required check";
     case "LOCAL_RECEIPT_MISSING":
