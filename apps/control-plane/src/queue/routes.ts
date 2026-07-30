@@ -120,9 +120,11 @@ async function project(
   repositoryId: string,
   baseRef: string,
   queue: BranchQueue,
+  /** Reuse a snapshot the caller already read, rather than reading it twice. */
+  known?: Awaited<ReturnType<BranchQueue["snapshot"]>>,
 ): Promise<void> {
   try {
-    const snapshot = await queue.snapshot();
+    const snapshot = known ?? (await queue.snapshot());
     await projectQueueState(
       env.DB as unknown as D1Like,
       projectionMessageFrom(repositoryId, baseRef, snapshot),
@@ -157,10 +159,14 @@ async function resolveQueue(
   env: QueueRouteEnv,
   repositoryId: string,
   baseRef: string,
+  options: { create?: boolean } = {},
 ): Promise<BranchQueue> {
   const key = await queueKey(repositoryId, baseRef);
   const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key)) as unknown as BranchQueue;
-  await stub.bind({ queueKey: key, repositoryId, baseRef });
+  // Binding on every call was a whole round trip to tell the object something it
+  // had already written to its own disk. It reopens itself now, so only the path
+  // that creates a queue needs to say what it is.
+  if (options.create === true) await stub.bind({ queueKey: key, repositoryId, baseRef });
   return stub;
 }
 
@@ -171,16 +177,56 @@ async function resolveQueue(
  * single storage constraint failure cost several round trips through a worker tail.
  * The message is safe to return: it names an invariant or a table, never user data.
  */
-function failure(error: unknown): { code: string; detail: string; status: 409 | 500 } {
+function failure(error: unknown): {
+  code: string;
+  /** Shown to the caller. Written by us, never taken from the thrown error. */
+  message: string;
+  /** Logged, never returned. */
+  detail: string;
+  status: 409 | 429 | 500;
+} {
   const detail = error instanceof Error ? error.message : String(error);
-  if (/invariant violation/i.test(detail)) return { code: "QUEUE_INVARIANT_VIOLATION", detail, status: 409 };
+  if (/invariant violation/i.test(detail)) {
+    return {
+      code: "QUEUE_INVARIANT_VIOLATION",
+      message: "The queue refused this because it would break one of its own rules.",
+      detail,
+      status: 409,
+    };
+  }
   if (/UNIQUE constraint|SQLITE_CONSTRAINT/i.test(detail)) {
-    return { code: "QUEUE_STORAGE_CONFLICT", detail, status: 409 };
+    return {
+      code: "QUEUE_STORAGE_CONFLICT",
+      message: "Something else changed this queue at the same moment. Try again.",
+      detail,
+      status: 409,
+    };
   }
   if (/has not been bound|queue key does not match/i.test(detail)) {
-    return { code: "QUEUE_NOT_BOUND", detail, status: 409 };
+    return {
+      code: "QUEUE_NOT_BOUND",
+      message: "No queue is configured for this repository and branch.",
+      detail,
+      status: 409,
+    };
   }
-  return { code: "QUEUE_COMMAND_FAILED", detail, status: 500 };
+  // What the provider says about capacity is about us. Naming Durable Objects and
+  // a free tier in a customer's dashboard tells them about our bill and gives them
+  // nothing they can act on.
+  if (/exceeded|rate limit|too many|overloaded|quota/i.test(detail)) {
+    return {
+      code: "QUEUE_TEMPORARILY_UNAVAILABLE",
+      message: "The queue is temporarily unavailable. Nothing has been lost; this view will catch up.",
+      detail,
+      status: 429,
+    };
+  }
+  return {
+    code: "QUEUE_COMMAND_FAILED",
+    message: "The queue could not complete that. Nothing was changed.",
+    detail,
+    status: 500,
+  };
 }
 
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
@@ -244,8 +290,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   // One place where a thrown error becomes a named one.
   app.onError((error, c) => {
-    const { code, detail, status } = failure(error);
-    return c.json({ error: detail, code }, status);
+    const { code, message, detail, status } = failure(error);
+    console.error(`queue ${code}: ${detail}`);
+    return c.json({ error: message, code }, status);
   });
 
   /**
@@ -706,64 +753,35 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const queue = await resolveQueue(c.env, repositoryId, baseRef);
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
 
-    if (principalId !== null) {
-      await queue.request({
-        idempotencyKey: `authorize:request:${entryId}`,
-        entryId,
-        pullRequestNumber: body.pullRequestNumber,
-        sponsorPrincipalId: principalId,
-        sponsorGithubUserId: String(body.authorGithubUserId),
-        headSha: body.headSha,
-      });
-      // Readiness is derived from what the verifier just established plus the
-      // branch state. A missing proof is the one thing this caller knows for
-      // certain, because it just verified it.
-      //
-      // The key carries the same time bucket as the tick. Keyed on the head alone,
-      // an entry that had been deferred after an unclaimed offer could never be
-      // promoted back to Ready, because the only event that promotes it would be
-      // deduplicated forever.
-      const readyBucket = Math.floor(Date.now() / 60_000);
-      await queue.readiness({
-        idempotencyKey: `authorize:ready:${entryId}:${body.headSha}:${readyBucket}`,
-        entryId,
-        ready: body.proofAccepted === true && body.draft !== true,
-        schedulerEligible: body.proofAccepted === true && body.draft !== true,
-        primaryReason:
-          body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
-      });
-      // A time bucket, so a retried check re-evaluates rather than being
-      // deduplicated against a decision taken minutes ago, while a burst of
-      // parallel jobs for one head still collapses to one turn.
-      const bucket = Math.floor(Date.now() / 60_000);
-      await queue.tick({
-        idempotencyKey: `authorize:tick:${entryId}:${body.headSha}:${bucket}`,
-        decisionDigest: `sha256:${"0".repeat(64)}`,
-      });
+    // Captured after validation: TypeScript discards the narrowing inside a
+    // closure, and re-checking would be checking the same thing twice.
+    const pullRequestNumber = body.pullRequestNumber;
+    const headSha = body.headSha;
 
-      // Claim the offer on the server's behalf. Nothing else will: in this gate
-      // the required check is the consumer, so an unclaimed offer would expire
-      // after its deadline and the branch would be told to wait forever. §8.2
-      // provides exactly this — a synthetic claim that consumes the sponsor's
-      // ordinary turn once and cannot be submitted by a client.
-      const offered = await queue.snapshot();
-      if (offered.activeAttemptId !== null) {
-        const holder = offered.entries.find((e) => e.entryId === entryId);
-        if (holder?.state === "Offered") {
-          await queue.claim({
-            idempotencyKey: `authorize:claim:${offered.activeAttemptId}`,
-            attemptId: offered.activeAttemptId,
-            executionMode: "fast-reuse",
+    // One call, not six. The object serializes anyway, so a round trip per step
+    // bought nothing and every one was a billed request.
+    const held =
+      principalId === null
+        ? await queue.snapshot()
+        : await queue.admit({
+            entryId,
+            pullRequestNumber,
+            sponsorPrincipalId: principalId,
+            sponsorGithubUserId: String(body.authorGithubUserId),
+            headSha,
+            ready: body.proofAccepted === true && body.draft !== true,
+            schedulerEligible: body.proofAccepted === true && body.draft !== true,
+            primaryReason:
+              body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
+            // Time buckets, so a retried check re-evaluates rather than being
+            // deduplicated against a decision taken minutes ago, while a burst of
+            // parallel jobs for one head still collapses to one turn.
+            readinessBucket: Math.floor(Date.now() / 60_000),
+            tickBucket: Math.floor(Date.now() / 60_000),
+            decisionDigest: `sha256:${"0".repeat(64)}`,
           });
-        }
-      }
-    }
 
-    // With the lane held, walk the attempt to the point where a merge may be
-    // written. The evidence is the proof already on the head, which is the fast
-    // profile: this reuses work rather than claiming an integrated run happened.
     let operationId: string | null = null;
-    const held = await queue.snapshot();
     const cand = body.candidate;
     if (
       body.prepare === true &&
@@ -878,57 +896,23 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       }
 
       if (holder !== undefined && holder.state === "Active") {
-        const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
-        const prepared = await queue.candidatePrepared({
-          idempotencyKey: `authorize:candidate:${attemptId}`,
+        // One call, not seven. Each step is still its own event in the log and the
+        // reducer still refuses any it considers out of order.
+        const walked = await queue.walkToMergeReady({
           attemptId,
           baseSha: cand.baseSha,
-          headSha: body.headSha,
+          headSha,
           candidateSha: cand.candidateSha,
           candidateTree: cand.candidateTreeOid,
           policyDigest: candidatePolicyDigest,
           runner: needsIntegratedRun ? "verified-candidate" : "reuse",
+          assignmentDigest: `sha256:${"1".repeat(64)}`,
+          receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
+          verifierResultDigest: verifiedResultDigest,
+          intentDigest: `sha256:${"4".repeat(64)}`,
+          operationId: `merge_${attemptId}`,
         });
-        if (ok(prepared)) {
-          await queue.assign({
-            idempotencyKey: `authorize:assign:${attemptId}`,
-            attemptId,
-            assignmentDigest: `sha256:${"1".repeat(64)}`,
-          });
-          await queue.receipt({
-            idempotencyKey: `authorize:receipt:${attemptId}`,
-            attemptId,
-            receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
-          });
-          const started = await queue.startVerification({
-            idempotencyKey: `authorize:verify:${attemptId}`,
-            attemptId,
-          });
-          const nonce = "nonce" in started ? started.nonce : undefined;
-          if (nonce !== undefined) {
-            await queue.completeVerification({
-              idempotencyKey: `authorize:verdict:${attemptId}`,
-              attemptId,
-              nonce,
-              accepted: true,
-              // The digest of the verifier's real result for this exact tree.
-              resultDigest: verifiedResultDigest,
-            });
-            await queue.mergeIntent({
-              idempotencyKey: `authorize:intent:${attemptId}`,
-              attemptId,
-              intentDigest: `sha256:${"4".repeat(64)}`,
-            });
-            const begun = await queue.beginMergeWrite({
-              idempotencyKey: `authorize:write:${attemptId}`,
-              attemptId,
-              operationId: `merge_${attemptId}`,
-            });
-            if (begun.status === "applied" || begun.status === "already-started") {
-              operationId = `merge_${attemptId}`;
-            }
-          }
-        }
+        operationId = walked.operationId;
       }
     }
 

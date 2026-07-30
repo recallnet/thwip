@@ -66,10 +66,33 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
   }
 
   private require(): { store: BranchQueueStore; commands: QueueCommands } {
+    // Reopen from the identity this object already stored. Every call used to be
+    // preceded by a bind() from the caller, which is a whole round trip to say
+    // something the object could read off its own disk, and it doubled the request
+    // count of every read and every command.
+    if (this.store === null || this.commands === null) this.reopen();
     if (this.store === null || this.commands === null) {
       throw new Error("branch queue has not been bound to a repository and base ref");
     }
     return { store: this.store, commands: this.commands };
+  }
+
+  /** The identity a bound object wrote when it was created, or nothing. */
+  private reopen(): void {
+    const sql = this.ctx.storage.sql as unknown as SqlLike;
+    let row: { queue_key: string; repository_id: string; base_ref: string } | undefined;
+    try {
+      row = sql
+        .exec<{ queue_key: string; repository_id: string; base_ref: string }>(
+          "SELECT queue_key, repository_id, base_ref FROM queue_meta WHERE id = 1",
+        )
+        .toArray()[0];
+    } catch {
+      // No schema yet, so this object has never been bound.
+      return;
+    }
+    if (row === undefined) return;
+    this.open({ queueKey: row.queue_key, repositoryId: row.repository_id, baseRef: row.base_ref });
   }
 
   /**
@@ -124,7 +147,11 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
       lastAttemptId: string | null;
     }>;
   }> {
-    const { store } = this.require();
+    return this.buildSnapshot(this.require().store);
+  }
+
+  /** The same snapshot, without a round trip, for callers already inside the object. */
+  private buildSnapshot(store: BranchQueueStore) {
     const state = store.state();
     const head = state.transitions.at(-1);
     return {
@@ -265,6 +292,145 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
    */
   async recordCandidateVerdict(verdict: CandidateVerdict) {
     return this.require().store.recordCandidateVerdict(verdict);
+  }
+
+  /**
+   * Everything the merge gate does to get a pull request holding the lane, in one
+   * call.
+   *
+   * This was thirteen separate round trips from the route: enqueue, evaluate
+   * readiness, tick the scheduler, claim the offer, read back, and so on. The
+   * object serializes calls anyway, so each hop bought nothing and every one was
+   * a billed request. Thirteen per authorization, and the merge workflow polls
+   * authorization while it waits, which is how a single repository spent a day's
+   * request budget.
+   *
+   * The steps are unchanged and the reducer still decides each one. They just
+   * happen where the state already is.
+   */
+  async admit(input: {
+    entryId: string;
+    pullRequestNumber: number;
+    sponsorPrincipalId: string;
+    sponsorGithubUserId: string;
+    headSha: string;
+    ready: boolean;
+    schedulerEligible: boolean;
+    primaryReason: string | null;
+    readinessBucket: number;
+    tickBucket: number;
+    decisionDigest: string;
+  }) {
+    return this.withAlarm(({ commands, store }) => {
+      commands.requestQueue({
+        idempotencyKey: `authorize:request:${input.entryId}`,
+        entryId: input.entryId,
+        pullRequestNumber: input.pullRequestNumber,
+        sponsorPrincipalId: input.sponsorPrincipalId,
+        sponsorGithubUserId: input.sponsorGithubUserId,
+        headSha: input.headSha,
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: `authorize:ready:${input.entryId}:${input.headSha}:${input.readinessBucket}`,
+        entryId: input.entryId,
+        ready: input.ready,
+        schedulerEligible: input.schedulerEligible,
+        primaryReason: input.primaryReason as never,
+      });
+      commands.tick({
+        idempotencyKey: `authorize:tick:${input.entryId}:${input.headSha}:${input.tickBucket}`,
+        decisionDigest: input.decisionDigest,
+      });
+
+      // Claim on the server's behalf. In this gate the required check is the
+      // consumer, so an unclaimed offer would expire and the branch would be told
+      // to wait forever (plan.md §8.2).
+      const state = store.state();
+      const attemptId = state.activeAttemptId;
+      if (attemptId !== null && state.entries.get(input.entryId)?.state === "Offered") {
+        commands.claim({
+          idempotencyKey: `authorize:claim:${attemptId}`,
+          attemptId,
+          executionMode: "fast-reuse",
+        });
+      }
+      return this.buildSnapshot(store);
+    });
+  }
+
+  /**
+   * Walk a held attempt to the point a merge may be written, in one call.
+   *
+   * Seven round trips became one. Each step is still a separate event in the log
+   * and the reducer still refuses any it considers out of order.
+   */
+  async walkToMergeReady(input: {
+    attemptId: string;
+    baseSha: string;
+    headSha: string;
+    candidateSha: string;
+    candidateTree: string;
+    policyDigest: string;
+    runner: string;
+    assignmentDigest: string;
+    receiptDigest: string;
+    verifierResultDigest: string;
+    intentDigest: string;
+    operationId: string;
+  }): Promise<{ operationId: string | null }> {
+    return this.withAlarm(({ commands }) => {
+      const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
+      const prepared = commands.candidatePrepared({
+        idempotencyKey: `authorize:candidate:${input.attemptId}`,
+        attemptId: input.attemptId,
+        baseSha: input.baseSha,
+        headSha: input.headSha,
+        candidateSha: input.candidateSha,
+        candidateTree: input.candidateTree,
+        policyDigest: input.policyDigest,
+        runner: input.runner as never,
+      });
+      if (!ok(prepared)) return { operationId: null };
+
+      commands.assign({
+        idempotencyKey: `authorize:assign:${input.attemptId}`,
+        attemptId: input.attemptId,
+        assignmentDigest: input.assignmentDigest,
+      });
+      commands.submitReceipt({
+        idempotencyKey: `authorize:receipt:${input.attemptId}`,
+        attemptId: input.attemptId,
+        receiptDigest: input.receiptDigest,
+      });
+      const started = commands.startVerification({
+        idempotencyKey: `authorize:verify:${input.attemptId}`,
+        attemptId: input.attemptId,
+      });
+      const nonce = "nonce" in started ? (started as { nonce: string }).nonce : undefined;
+      if (nonce === undefined) return { operationId: null };
+
+      commands.completeVerification({
+        idempotencyKey: `authorize:verdict:${input.attemptId}`,
+        attemptId: input.attemptId,
+        nonce,
+        accepted: true,
+        resultDigest: input.verifierResultDigest,
+      });
+      commands.createMergeIntent({
+        idempotencyKey: `authorize:intent:${input.attemptId}`,
+        attemptId: input.attemptId,
+        intentDigest: input.intentDigest,
+      });
+      const begun = commands.beginMergeWrite({
+        idempotencyKey: `authorize:write:${input.attemptId}`,
+        attemptId: input.attemptId,
+        operationId: input.operationId,
+      });
+      return {
+        operationId:
+          begun.status === "applied" || begun.status === "already-started" ? input.operationId : null,
+      };
+    });
   }
 
   /** True only for the caller that should ask a verifier to run. */
