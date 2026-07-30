@@ -153,6 +153,36 @@ export const SCHEMA: readonly string[] = [
      attached_at TEXT NOT NULL
    )`,
 
+  /**
+   * What a pinned verifier observed when it ran the required suites against one
+   * integrated candidate tree (plan.md §16).
+   *
+   * Keyed by tree rather than by attempt on purpose. The claim being recorded is
+   * about a tree — "these suites, named by this policy, passed against exactly
+   * this integration" — and it stays true if the attempt is superseded and the
+   * same tree comes back. A verdict for a different tree is a verdict about
+   * different code and must never be reused, which the primary key enforces.
+   *
+   * This is evidence, not queue state: the reducer consumes it as an input at
+   * merge-preparation time, the way it consumes the head proof, and never stores
+   * it. That is why it lives beside the log rather than in it.
+   */
+  `CREATE TABLE IF NOT EXISTS candidate_verdicts (
+     candidate_tree_oid TEXT PRIMARY KEY,
+     candidate_sha TEXT NOT NULL,
+     base_sha TEXT NOT NULL,
+     pull_request_number INTEGER NOT NULL,
+     accepted INTEGER NOT NULL,
+     result_digest TEXT NOT NULL,
+     policy_digest TEXT NOT NULL,
+     suites TEXT NOT NULL,
+     reason_codes TEXT NOT NULL,
+     workflow_ref TEXT NOT NULL,
+     workflow_sha TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     observed_at TEXT NOT NULL
+   )`,
+
   `CREATE INDEX IF NOT EXISTS deadlines_due ON deadlines (due_at)`,
   `CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (acknowledged, outbox_id)`,
   `CREATE INDEX IF NOT EXISTS entries_state ON entries (state, scheduler_eligible)`,
