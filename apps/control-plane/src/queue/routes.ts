@@ -156,8 +156,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     policyDigest: string;
     requiredSuites: readonly string[];
     securityProfile: string;
-    verifierWorkflowRef: string;
-    verifierWorkflowSha: string;
+    /** Null when no verifier is pinned, which only matters to a stronger profile. */
+    verifier: { workflowRef: string; workflowSha: string } | null;
   } | null>;
   /** Ask the pinned verifier to run the required suites against a candidate. */
   dispatchCandidateVerification(
@@ -693,18 +693,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // queue is about to claim the integration itself was run, and that claim needs
       // a result. A profile that makes the stronger claim with no pinned verifier
       // cannot be satisfied by anything, so it refuses rather than quietly weakening.
-      const needsIntegratedRun = policy === null || requiresIntegratedRun(policy.securityProfile);
+      // No active policy means no stronger claim is being made, so the head proof
+      // stands, as it did before candidate verification existed.
+      const needsIntegratedRun = policy !== null && requiresIntegratedRun(policy.securityProfile);
       let verifiedResultDigest = `sha256:${"3".repeat(64)}`;
       let candidatePolicyDigest = policy?.policyDigest ?? `sha256:${"0".repeat(64)}`;
 
-      if (needsIntegratedRun) {
-        if (policy === null) {
+      if (needsIntegratedRun && policy !== null) {
+        if (policy.verifier === null || policy.requiredSuites.length === 0) {
           return c.json({
             authorized: false,
             enforcing: true,
             activationState: project.activationState,
             reason: "NO_PINNED_VERIFIER",
-            detail: "this profile claims the integrated candidate was run, and nothing can establish that",
+            detail:
+              "this profile claims the integrated candidate was run, and no pinned verifier or required suite can establish that",
             entryId,
             operationId: null,
           });
@@ -716,8 +719,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           baseSha: cand.baseSha,
           requiredSuites: policy.requiredSuites,
           policyDigest: policy.policyDigest,
-          workflowRef: policy.verifierWorkflowRef,
-          workflowSha: policy.verifierWorkflowSha,
+          workflowRef: policy.verifier.workflowRef,
+          workflowSha: policy.verifier.workflowSha,
         });
 
         if (!decision.ok) {
