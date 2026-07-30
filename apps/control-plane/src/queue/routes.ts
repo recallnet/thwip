@@ -2,7 +2,12 @@ import { Hono } from "hono";
 import { queueKey } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
-import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
+import {
+  projectQueueState,
+  readProjectedQueue,
+  type D1Like,
+  type ProjectionMessage,
+} from "./projection.js";
 import {
   candidateResultBytes,
   candidateResultDigest,
@@ -77,6 +82,11 @@ export function projectionMessageFrom(
     baseRef,
     queueEpoch: snapshot.queueEpoch,
     generation: snapshot.generation,
+    activeAttemptId: snapshot.activeAttemptId,
+    paused: snapshot.paused,
+    pauseReason: snapshot.pauseReason,
+    rebaselineRequired: snapshot.rebaselineRequired,
+    baseSha: snapshot.baseSha,
     entries: snapshot.entries.map((e) => ({
       entryId: e.entryId,
       pullRequestNumber: e.pullRequestNumber,
@@ -84,6 +94,9 @@ export function projectionMessageFrom(
       state: e.state,
       primaryReason: e.primaryReason,
       fairnessOrdinal: e.fairnessOrdinal,
+      schedulerEligible: e.schedulerEligible,
+      cooldownUntil: e.cooldownUntil,
+      lastAttemptId: e.lastAttemptId,
     })),
     // The whole chain, as recorded. An earlier version of this synthesised one
     // row from the head pointer with kind "verified" hardcoded and no prior
@@ -279,8 +292,30 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
+    // Served from the projection, not the object.
+    //
+    // The dashboard polls this, once per project, on a timer. Answering from the
+    // Durable Object meant two RPCs per project per poll, and a single open
+    // browser tab was enough to spend the Durable Objects free tier for a month.
+    // The projection exists precisely so a read never has to wake the object.
+    //
+    // `?live=1` still reads the object, for the cases where being a few seconds
+    // stale is the wrong answer: an operator checking after a manual repair.
+    if (c.req.query("live") === "1") {
+      const queue = await resolveQueue(c.env, repositoryId, baseRef);
+      return c.json({ ...(await queue.snapshot()), source: "object" });
+    }
+    const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    if (projected !== null) return c.json(projected);
+
+    // Nothing projected yet, which is not the same as no queue. Read the object
+    // once and fill the projection from it, so this costs one wake rather than
+    // one per read forever. Without this, a migration that resets the marks would
+    // send every read back to the object until somebody happened to merge.
     const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    return c.json(await queue.snapshot());
+    const snapshot = await queue.snapshot();
+    await project(c.env, repositoryId, baseRef, queue);
+    return c.json({ ...snapshot, source: "object" });
   });
 
   /**

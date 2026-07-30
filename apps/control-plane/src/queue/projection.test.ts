@@ -1,4 +1,7 @@
 import Database from "better-sqlite3";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { projectionLag, projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
 
@@ -15,23 +18,31 @@ const open: Array<{ close(): void }> = [];
 function d1(): D1Like {
   const db = new Database(":memory:");
   open.push(db);
-  db.exec(`
-    CREATE TABLE queue_entries_index (
-      id TEXT PRIMARY KEY, github_repository_id TEXT NOT NULL, base_ref TEXT NOT NULL,
-      entry_id TEXT NOT NULL, pull_request_number INTEGER NOT NULL,
-      sponsor_principal_id TEXT NOT NULL, state TEXT NOT NULL, primary_reason TEXT,
-      fairness_ordinal TEXT NOT NULL, updated_at TEXT NOT NULL,
-      UNIQUE (github_repository_id, base_ref, entry_id));
-    CREATE TABLE queue_transitions_index (
-      id TEXT PRIMARY KEY, github_repository_id TEXT NOT NULL, base_ref TEXT NOT NULL,
-      queue_epoch INTEGER NOT NULL, transition_sequence INTEGER NOT NULL, kind TEXT NOT NULL,
-      digest TEXT NOT NULL, prior_digest TEXT, base_sha TEXT NOT NULL, attempt_id TEXT,
-      witness_count INTEGER NOT NULL, observed_at TEXT NOT NULL,
-      UNIQUE (github_repository_id, base_ref, queue_epoch, transition_sequence));
-    CREATE TABLE queue_projection_marks (
-      github_repository_id TEXT NOT NULL, base_ref TEXT NOT NULL, generation INTEGER NOT NULL,
-      projected_at TEXT NOT NULL, PRIMARY KEY (github_repository_id, base_ref));
-  `);
+  // Build the schema from the migrations rather than restating it here. Two
+  // copies drift: a column added to a migration left this file describing a
+  // different table, and every test kept passing against the old one.
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
+  for (const file of readdirSync(dir).sort()) {
+    if (!file.endsWith(".sql")) continue;
+    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
+      // Drop comment lines rather than the whole chunk: a statement that follows
+      // a comment block lives in the same chunk as the comment, and skipping on
+      // a leading "--" silently threw away the statement with it.
+      const sql = statement
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("--"))
+        .join("\n")
+        .trim();
+      if (sql.length === 0) continue;
+      try {
+        db.exec(sql);
+      } catch (error) {
+        // Migrations for tables this suite does not exercise reference schema it
+        // never creates. Anything touching a queue projection table must work.
+        if (/queue_(entries|transitions)_index|queue_projection_marks/.test(sql)) throw error;
+      }
+    }
+  }
 
   const prepare = (query: string) => ({
     bind: (...values: unknown[]) => ({
