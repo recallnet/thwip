@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
+import { Home } from "./Home.js";
+import { SiteBar, SiteFoot } from "./Chrome.js";
+import { QueuePanel } from "./Queue.js";
 
 /* ---------- shared API helpers ---------- */
 
@@ -82,248 +85,21 @@ function useFetch<T>(path: string, deps: unknown[] = []) {
   return { data, error, reload };
 }
 
-/* ---------- marketing site ---------- */
-
-const TRAILER_SAMPLE =
-  "thwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5Rdi4uLiJ9";
-
-function Slip() {
-  return (
-    <figure className="thwip-slip" aria-label="A signed thwip proof carried in a git commit message">
-      <span className="thwip-stamp">VERIFIED</span>
-      <div className="dim">$ git log -1 --format=%B</div>
-      <hr />
-      <div>feat: parse lease context into verifier</div>
-      <br />
-      <div className="trailer">{TRAILER_SAMPLE.slice(0, 118)}…</div>
-      <hr />
-      <div className="dim"># protected check · repository 1315419165</div>
-      <div>
-        tree <span className="dim">9223b1ca…</span> suites <span className="pass">lint ✓ typecheck ✓ test ✓</span>
-      </div>
-      <div>
-        signer <span className="dim">key_67f1c7… (ssh-ed25519)</span>
-      </div>
-      <div>
-        verdict <span className="pass">PASS</span>
-        <span className="dim"> · 4.1s · nothing rerun</span>
-      </div>
-    </figure>
-  );
-}
-
-function SiteNav({ me }: { me: Me | null | undefined }) {
-  return (
-    <nav className="thwip-nav" aria-label="Site">
-      <a className="thwip-brand" href="/">
-        thwip<small>VERIFIED LOCAL CI</small>
-      </a>
-      <span className="links">
-        <a href="/#how">How it works</a>
-        <a href="/#trust">Trust</a>
-        <a href="/faq">FAQ</a>
-        <a href="/install">Install</a>
-        <a href="/#pricing">Pricing</a>
-        {me ? (
-          <a className="gp-btn gp-btn--sm" href="/dashboard">
-            Dashboard
-          </a>
-        ) : (
-          <button className="gp-btn gp-btn--sm" onClick={() => void signInWithGitHub("/dashboard")}>
-            Sign in with GitHub
-          </button>
-        )}
-      </span>
-    </nav>
-  );
-}
-
-function SiteFooter() {
-  return (
-    <footer className="thwip-footer">
-      <span>thwip · commit-carried CI evidence for agent-run pipelines</span>
-      <span>
-        <a href="/faq">FAQ</a> · <a href="/install">Install</a> · <a href="/llms.txt">llms.txt</a> ·{" "}
-        <code>urn:thwip:attestation:ci-run:v1</code>
-      </span>
-    </footer>
-  );
-}
-
-function Marketing({ me }: { me: Me | null | undefined }) {
-  return (
-    <div className="thwip-shell">
-      <SiteNav me={me} />
-
-      <header className="thwip-hero">
-        <div>
-          <h1>CI ran. Prove it in the commit.</h1>
-          <p className="dek">
-            Your agents already run lint, typecheck, and tests on the machine where the code lives. thwip signs a
-            compact proof of that run, bound to the exact Git tree, and a protected GitHub check verifies it in
-            seconds. The merge queue merges on that proof.
-          </p>
-          <div className="thwip-actions">
-            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
-              Install on your org
-            </button>
-            <a className="gp-btn" href="/install">
-              Agent install prompt
-            </a>
-          </div>
-          <p className="fine">DSSE · in-toto Statement v1 · OpenSSH signatures · GitHub merge queue native</p>
-        </div>
-        <Slip />
-      </header>
-
-      <section className="thwip-section" id="how">
-        <p className="thwip-eyebrow">The loop</p>
-        <h2>Your machine runs the checks. GitHub decides the merge.</h2>
-        <p className="lede">
-          thwip runs no CI itself. The suites run on the machine that already has the warm cache, and the check and
-          merge queue stay in GitHub, where your branches already live.
-        </p>
-        <div className="thwip-steps">
-          <div className="thwip-step">
-            <div className="k">thwip run</div>
-            <h3>Run the approved pipeline locally</h3>
-            <p>
-              The CLI refuses a dirty tree, runs the policy-approved suites against the frozen source, and signs the
-              result. If the tree changes during the run, nothing is signed.
-            </p>
-          </div>
-          <div className="thwip-step">
-            <div className="k">thwip-proof: v1.…</div>
-            <h3>The commit carries the evidence</h3>
-            <p>
-              One trailer binds repository, tree, parents, base, policy digest, pipeline digest, and per-suite
-              results. Change any of them and verification fails closed.
-            </p>
-          </div>
-          <div className="thwip-step">
-            <div className="k">merge_group ✓</div>
-            <h3>GitHub verifies and merges</h3>
-            <p>
-              A ruleset-protected check reads the exact head commit, fetches one signed fact bundle, and verifies on
-              the runner. Green in seconds; the queue merges. CI never reruns in the cloud.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section className="thwip-section" id="trust">
-        <p className="thwip-eyebrow">What a proof means</p>
-        <h2>Signed by a person, checked by everyone's machine.</h2>
-        <p className="lede">
-          A thwip proof says who ran the checks, on exactly which code, under which rules. We don't watch the checks
-          run — nobody can watch every laptop. What makes a false claim hard to get away with is that the same code
-          produces the same fingerprints on every machine. Your teammates' runs, your next commit, and any cloud run
-          produce those same fingerprints, so a made-up claim has to survive contact with everyone else's work,
-          permanently, with a name attached.
-        </p>
-        <p className="lede">
-          When that isn't enough — auth, billing, dependency bumps — point those paths at GitHub and the checks run
-          there instead. Same proof, different signer.
-        </p>
-      </section>
-
-      <section className="thwip-section" id="outcomes">
-        <p className="thwip-eyebrow">Honest security</p>
-        <h2>Every verification ends in a stable code</h2>
-        <p className="lede">
-          A proof signed by a revoked key, an old policy, or somebody else's tree fails closed, with the same code
-          every time.
-        </p>
-        <table className="gp-data-table">
-          <thead>
-            <tr>
-              <th>Attempt</th>
-              <th>Outcome</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Proof copied onto different code</td>
-              <td className="bad">SUBJECT_TREE_MISMATCH</td>
-            </tr>
-            <tr>
-              <td>Rebase or squash after signing</td>
-              <td className="bad">SUBJECT_ANCESTRY_MISMATCH</td>
-            </tr>
-            <tr>
-              <td>Signer lost repository access</td>
-              <td className="bad">SIGNER_PERMISSION_INSUFFICIENT</td>
-            </tr>
-            <tr>
-              <td>Key revoked five seconds ago</td>
-              <td className="bad">SIGNER_KEY_REVOKED</td>
-            </tr>
-            <tr>
-              <td>Pipeline changed by the PR it judges</td>
-              <td className="bad">PIPELINE_DIGEST_MISMATCH</td>
-            </tr>
-            <tr>
-              <td>The exact tree, the active policy, a current signer</td>
-              <td className="ok">PASS</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section className="thwip-section" id="pricing">
-        <p className="thwip-eyebrow">Pricing</p>
-        <h2>Both plans verify the same way. Pro raises the limits.</h2>
-        <div className="thwip-plan-grid">
-          <div className="thwip-plan">
-            <p className="thwip-plan__name">Free</p>
-            <p className="thwip-plan__price">
-              $0<span className="thwip-plan__cadence"> forever</span>
-            </p>
-            <ul className="thwip-plan__list">
-              <li>3 active projects</li>
-              <li>5 active signers</li>
-              <li>All security profiles</li>
-              <li>Merge-queue verification</li>
-            </ul>
-            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard")}>
-              Start free
-            </button>
-          </div>
-          <div className="thwip-plan thwip-plan--pro">
-            <p className="thwip-plan__name">Pro</p>
-            <p className="thwip-plan__price">
-              $5<span className="thwip-plan__cadence">/month · $50/year</span>
-            </p>
-            <ul className="thwip-plan__list">
-              <li>15 active projects</li>
-              <li>25 active signers</li>
-              <li>Same verification, same profiles</li>
-              <li>Priority support</li>
-            </ul>
-            <button className="gp-btn" onClick={() => void signInWithGitHub("/dashboard/billing")}>
-              Upgrade in dashboard
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <SiteFooter />
-    </div>
-  );
-}
-
 function FaqPage({ me }: { me: Me | null | undefined }) {
   return (
-    <div className="thwip-shell">
-      <SiteNav me={me} />
-      <section className="thwip-section" style={{ borderTop: "none" }}>
-        <p className="thwip-eyebrow">FAQ</p>
-        <h2>Frequently asked questions</h2>
-        <p className="lede">
+    <div className="nt">
+      <div className="nt-page">
+        <SiteBar me={me} signIn={() => void signInWithGitHub("/dashboard")} />
+        <section className="nt-field">
+          <div className="nt-label">
+            Reference<b>Questions</b>
+          </div>
+          <div className="nt-body">
+        <p className="nt-lede">
           Agents: this page is also at <a href="/faq.md">/faq.md</a>, with a site overview at{" "}
           <a href="/llms.txt">/llms.txt</a>.
         </p>
-        <dl className="thwip-faq">
+        <dl className="nt-qa">
           <dt>Can someone fake a proof?</dt>
           <dd>
             They can sign a claim without running the checks, the same way anyone can write "tests pass" in a pull
@@ -405,9 +181,11 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
             Organization and permission projections from GitHub, enrolled public keys, immutable policy versions,
             and verification outcomes. No source code, no logs, no artifacts, and never a private key.
           </dd>
-        </dl>
-      </section>
-      <SiteFooter />
+            </dl>
+          </div>
+        </section>
+        <SiteFoot />
+      </div>
     </div>
   );
 }
@@ -417,34 +195,38 @@ const INSTALL_PROMPT = developerSetupPrompt();
 function InstallPage({ me }: { me: Me | null | undefined }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="thwip-shell">
-      <SiteNav me={me} />
-      <section className="thwip-section" style={{ borderTop: "none" }}>
-        <p className="thwip-eyebrow">Developer setup</p>
-        <h2>Setting up your machine is an agent prompt</h2>
-        <p className="lede">
-          Paste this into your coding agent. It installs the CLI, signs you in with a click-through device code
-          (works over SSH), and sets up the project with your approval at each step. Raw copy at{" "}
-          <a href="/install.md">/install.md</a>.
-        </p>
-        <div className="gp-panel">
-          <div className="gp-panel__header">
-            <h3 className="gp-panel__title">Agent prompt</h3>
-            <button
-              className="gp-btn gp-btn--sm"
-              onClick={() => {
-                void navigator.clipboard.writeText(INSTALL_PROMPT).then(() => setCopied(true));
-              }}
-            >
-              {copied ? "Copied" : "Copy"}
-            </button>
+    <div className="nt">
+      <div className="nt-page">
+        <SiteBar me={me} signIn={() => void signInWithGitHub("/dashboard")} />
+        <section className="nt-field">
+          <div className="nt-label">
+            Install<b>Developer setup</b>
           </div>
-          <div className="gp-panel__body">
-            <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.78rem", margin: 0 }}>{INSTALL_PROMPT}</pre>
+          <div className="nt-body">
+            <h2>Setting up your machine is a prompt, not a checklist.</h2>
+            <p>
+              Paste this into your coding agent. It installs the CLI, signs you in through a device code that
+              works over SSH, and stops for your approval at every step that changes a file or your GitHub
+              account. Raw copy at <a href="/install.md">/install.md</a>.
+            </p>
+            <figure className="nt-record">
+              <div className="nt-record__head">
+                <span>Agent prompt</span>
+                <button
+                  className="nt-copy"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(INSTALL_PROMPT).then(() => setCopied(true));
+                  }}
+                >
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <pre className="nt-prompt">{INSTALL_PROMPT}</pre>
+            </figure>
           </div>
-        </div>
-      </section>
-      <SiteFooter />
+        </section>
+        <SiteFoot />
+      </div>
     </div>
   );
 }
@@ -454,6 +236,7 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
 const TABS = [
   ["overview", "Overview"],
   ["projects", "Projects"],
+  ["queue", "Queue"],
   ["people", "People & Teams"],
   ["policies", "Policies"],
   ["billing", "Billing"],
@@ -559,6 +342,7 @@ function Dashboard({
           ) : (
             <Projects me={me} />
           ))}
+        {tab === "queue" && <QueueTab />}
         {tab === "people" && <People me={me} />}
         {tab === "profile" && <Profile me={me} />}
         {tab === "policies" && <Policies />}
@@ -1415,6 +1199,44 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
   );
 }
 
+/**
+ * The queue tab. One queue exists per repository and base branch, so this lists
+ * the enabled projects and shows the queue for each project's default branch —
+ * a single combined view would hide that `main` and `release` are independent
+ * protected resources (plan.md §6.1).
+ */
+function QueueTab() {
+  const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+
+  const enabled = data.projects.filter((p) => p.enabled === 1);
+  if (enabled.length === 0) {
+    return (
+      <div className="gp-panel">
+        <div className="gp-panel__body">
+          <p className="gp-panel__meta">
+            No project is enabled yet. Enable one under Projects, then run <code>thwip ship --wait</code>.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {enabled.map((project) => (
+        <QueuePanel
+          key={project.id}
+          repositoryId={project.github_repository_id}
+          baseRef={`refs/heads/${project.default_branch}`}
+          repositoryName={project.github_name}
+        />
+      ))}
+    </>
+  );
+}
+
 /* ---------- router ---------- */
 
 export function App() {
@@ -1448,5 +1270,5 @@ export function App() {
     if (setupMatch) return <Dashboard me={me} tab="projects" setupProjectId={setupMatch[1]!} />;
     return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
   }
-  return <Marketing me={me} />;
+  return <Home me={me} signIn={() => void signInWithGitHub("/dashboard")} />;
 }

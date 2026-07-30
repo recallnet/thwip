@@ -1,0 +1,138 @@
+name: thwip-merge
+
+# The merge Thwip Queue authorized.
+#
+# This cannot live inside the `thwip` job: that job *is* the required check, so the
+# branch cannot be mergeable while it is still running. GitHub answers 405 and the
+# queue would appear to be refusing when it had in fact authorized. So the merge
+# waits for that workflow to conclude and then runs here.
+#
+# workflow_run executes in the base branch's context with the base branch's code,
+# never the pull request's, which is what makes it safe to hold a token that can
+# write.
+
+on:
+  workflow_run:
+    workflows: [thwip]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  merge:
+    name: merge
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge under Thwip Queue authorization
+        env:
+          THWIP_ENDPOINT: https://thwip.recall.net
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN: ${{ secrets.THWIP_ENQUEUE_TOKEN }}
+          REPO_ID: ${{ github.event.repository.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          if [ -z "${MERGE_TOKEN:-}" ]; then
+            echo "::notice::no merge token available; leaving the merge to a maintainer"
+            exit 0
+          fi
+
+          # Resolve the pull request from the head commit the check ran on, so this
+          # can never merge a different pull request than the one that was verified.
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
+                 --jq '[.[] | select(.state=="open")][0] // empty')
+          if [ -z "$pr" ]; then
+            echo "::notice::no open pull request for $HEAD_SHA"
+            exit 0
+          fi
+          PR=$(printf '%s' "$pr" | jq -r .number)
+          BASE_REF="refs/heads/$(printf '%s' "$pr" | jq -r .base.ref)"
+          AUTHOR_ID=$(printf '%s' "$pr" | jq -r .user.id)
+          DRAFT=$(printf '%s' "$pr" | jq -r .draft)
+          echo "pull request #$PR onto $BASE_REF"
+
+          oidc() {
+            curl -sS -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${THWIP_ENDPOINT}/api/github-actions" | jq -r .value
+          }
+
+          # Ask the queue again. Idempotent, and it is the queue — not this
+          # workflow — that decides whether this pull request holds the turn.
+          base_sha=$(printf '%s' "$pr" | jq -r .base.sha)
+          merge_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.merge_commit_sha // empty')
+          candidate='null'
+          if [ -n "$merge_sha" ]; then
+            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
+            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \
+              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \
+              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \
+              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
+          fi
+
+          body=$(jq -nc --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
+            --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" --argjson candidate "$candidate" \
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
+
+          out=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
+            -H "content-type: application/json" -d "$body" \
+            "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
+          code=$(printf '%s' "$out" | tail -n1); abody=$(printf '%s' "$out" | sed '$d')
+          echo "authorize: http $code"; echo "$abody"
+          [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
+
+          authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
+          enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
+          op=$(printf '%s' "$abody" | jq -r '.operationId // empty')
+          if [ "$enforcing" != "true" ]; then
+            echo "queue is observing; not merging"; exit 0
+          fi
+          if [ "$authorized" != "true" ] || [ -z "$op" ]; then
+            echo "queue did not authorize a merge: $(printf '%s' "$abody" | jq -r .reason)"; exit 0
+          fi
+
+          # printf, so the trailer's blank line never appears literally in YAML.
+          msg=$(printf 'Integrated by Thwip Queue.\n\nthwip-queue-operation: %s\n' "$op")
+          resp=$(curl -sS -w '\n%{http_code}' -X PUT \
+            -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \
+            -H "content-type: application/json" \
+            -d "$(jq -nc --arg sha "$HEAD_SHA" --arg title "Merge pull request #$PR (Thwip Queue)" \
+                  --arg msg "$msg" '{sha:$sha, merge_method:"merge", commit_title:$title, commit_message:$msg}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
+          mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
+          echo "merge: http $mcode"
+          if [ "$mcode" != "200" ]; then
+            reason=$(printf '%s' "$payload" | jq -r '.message // "no message"')
+            case "$mcode" in
+              405|409|422)
+                # A definite refusal. Tell the queue so the lane frees now rather
+                # than waiting for a deadline and then needing an operator.
+                curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
+                  -H "content-type: application/json" \
+                  -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" --arg detail "$mcode $reason" \
+                        '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
+                  "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+                echo "::error::GitHub refused the merge ($mcode: $reason); the queue has released the lane"
+                ;;
+              *)
+                # Anything unclear is left to reconciliation, never retried here.
+                echo "::error::merge outcome unclear ($mcode: $reason); leaving it to reconciliation"
+                ;;
+            esac
+            exit 1
+          fi
+
+          landed=$(printf '%s' "$payload" | jq -r .sha)
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$landed" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
+          report=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
+            -H "content-type: application/json" \
+            -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" \
+                  --arg sha "$landed" --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \
+                  --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \
+                  '{baseRef:$base, attemptId:$attempt, operationId:$op, mergeSha:$sha, mergeTree:$tree, parentShas:$parents}')" \
+            "$THWIP_ENDPOINT/v1/queue/$REPO_ID/merged" || true)
+          echo "queue record: http $(printf '%s' "$report" | tail -n1)"
+          printf '%s' "$report" | sed '$d'

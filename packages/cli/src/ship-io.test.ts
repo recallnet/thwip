@@ -1,0 +1,165 @@
+import { describe, expect, it } from "vitest";
+import { runShip, type ShipPorts } from "./ship-io.js";
+import { EXIT } from "./queue-exit.js";
+import type { ShipState } from "./ship.js";
+
+/**
+ * The loop, driven with fake ports. What matters here is that it cannot spin: a
+ * port that reports success without changing anything must end the run with a
+ * diagnosis rather than looping against a live queue forever.
+ */
+
+function state(over: Partial<ShipState> = {}): ShipState {
+  return {
+    authenticated: true,
+    workingTreeClean: true,
+    headProof: "accepted",
+    pushedHeadMatchesLocal: true,
+    pullRequestNumber: 42,
+    queueEntryExists: true,
+    turn: "none",
+    options: { wait: true, queue: true, jsonEvents: true },
+    ...over,
+  };
+}
+
+/** Ports that walk a scripted sequence of states. */
+function scripted(states: ShipState[], over: Partial<ShipPorts> = {}) {
+  let i = 0;
+  const calls: string[] = [];
+  const base: ShipPorts = {
+    observe: async () => states[Math.min(i++, states.length - 1)]!,
+    runSuites: async () => ({ ok: true }),
+    push: async () => {},
+    openOrUpdatePullRequest: async () => ({ pullRequestNumber: 42 }),
+    joinQueue: async () => ({}),
+    awaitTurn: async () => ({}),
+    executeTurn: async () => ({}),
+    awaitMerge: async () => ({}),
+    releaseTurn: async () => {},
+  };
+
+  // Record around the override, not inside the default. Recording inside would
+  // make an overridden port invisible and quietly weaken every assertion about
+  // how many times it was called.
+  const merged = { ...base, ...over } as ShipPorts;
+  const ports = Object.fromEntries(
+    (Object.keys(base) as Array<keyof ShipPorts>).map((name) => [
+      name,
+      async (input: never) => {
+        if (name !== "observe") calls.push(name);
+        return (merged[name] as (arg: never) => unknown)(input);
+      },
+    ]),
+  ) as unknown as ShipPorts;
+
+  return { ports, calls };
+}
+
+function collect() {
+  const lines: string[] = [];
+  return { emit: (t: string) => void lines.push(t), lines };
+}
+
+describe("runShip", () => {
+  it("walks to a confirmed merge and reports it once", async () => {
+    const { ports } = scripted([
+      state({ headProof: "missing" }),
+      state({ pushedHeadMatchesLocal: false }),
+      state({ pullRequestNumber: null }),
+      state({ queueEntryExists: false }),
+      state({ turn: "none" }),
+      state({ turn: "offered" }),
+      state({ turn: "verified" }),
+      state({ turn: "merged" }),
+    ]);
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: true });
+    expect(report).toMatchObject({ exitCode: EXIT.ok, outcome: "MERGE_CONFIRMED" });
+    expect(out.lines.filter((l) => l.includes("merge_confirmed"))).toHaveLength(1);
+  });
+
+  it("stops on something a person must fix, without touching the queue further", async () => {
+    const { ports, calls } = scripted([state({ turn: "none" })], {
+      awaitTurn: async () => ({ reasonCode: "REVIEW_REQUIRED" }),
+    });
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: true });
+    expect(report).toMatchObject({ exitCode: EXIT.humanRequired, reasonCode: "REVIEW_REQUIRED" });
+    expect(calls.filter((c) => c === "awaitTurn")).toHaveLength(1);
+  });
+
+  it("keeps waiting through a lost turn, because the place is kept", async () => {
+    let attempts = 0;
+    const { ports } = scripted(
+      [state({ turn: "none" }), state({ turn: "none" }), state({ turn: "merged" })],
+      {
+        awaitTurn: async () => {
+          attempts += 1;
+          return attempts === 1 ? { reasonCode: "EXPIRED_UNCLAIMED" } : {};
+        },
+      },
+    );
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: true });
+    expect(report).toMatchObject({ outcome: "MERGE_CONFIRMED" });
+    expect(out.lines.some((l) => l.includes("ship.waiting") && l.includes("EXPIRED_UNCLAIMED"))).toBe(true);
+  });
+
+  it("cannot spin when a port reports success but nothing changes", async () => {
+    // The failure this guards: a live loop hammering a real queue forever.
+    const { ports, calls } = scripted([state({ turn: "none" })]);
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: true });
+    expect(report).toMatchObject({ exitCode: EXIT.invariant, reasonCode: "INTERNAL_FAILURE" });
+    expect(out.lines.some((l) => l.includes("ship.stalled"))).toBe(true);
+    // It stopped well short of the hard bound.
+    expect(calls.length).toBeLessThan(100);
+  });
+
+  it("respects an explicit turn bound", async () => {
+    const { ports } = scripted([state({ turn: "none" })], { awaitTurn: async () => ({}) });
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: true, maxTurns: 3 });
+    expect(report.exitCode).toBe(EXIT.invariant);
+  });
+
+  it("emits NDJSON when asked and plain lines otherwise", async () => {
+    const json = collect();
+    await runShip(scripted([state({ turn: "merged" })]).ports, json.emit, { jsonEvents: true });
+    expect(() => JSON.parse(json.lines[0]!)).not.toThrow();
+
+    const plain = collect();
+    await runShip(scripted([state({ turn: "merged" })]).ports, plain.emit, { jsonEvents: false });
+    expect(() => JSON.parse(plain.lines[0]!)).toThrow();
+  });
+
+  it("stops before doing anything when the tree is dirty", async () => {
+    const { ports, calls } = scripted([state({ workingTreeClean: false })]);
+    const report = await runShip(ports, collect().emit, { jsonEvents: true });
+    expect(report).toMatchObject({ reasonCode: "UNCOMMITTED_CHANGES" });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not run suites when the head already carries an accepted proof", async () => {
+    const { ports, calls } = scripted([state({ turn: "merged" })]);
+    await runShip(ports, collect().emit, { jsonEvents: true });
+    expect(calls).not.toContain("runSuites");
+  });
+
+  it("reports a failing suite as a suite failure, not as something to retry", async () => {
+    const { ports } = scripted([state({ headProof: "missing" })], {
+      runSuites: async () => ({ ok: false, reasonCode: "SUITE_FAILED" }),
+    });
+    const report = await runShip(ports, collect().emit, { jsonEvents: true });
+    expect(report).toMatchObject({ exitCode: EXIT.suiteFailed, reasonCode: "SUITE_FAILED" });
+  });
+
+  it("stops rather than waiting when --wait was not given", async () => {
+    const { ports } = scripted([
+      state({ turn: "none", options: { wait: false, queue: true, jsonEvents: true } }),
+    ]);
+    const report = await runShip(ports, collect().emit, { jsonEvents: true });
+    expect(report).toMatchObject({ outcome: "QUEUE_REQUESTED", exitCode: EXIT.ok });
+  });
+});

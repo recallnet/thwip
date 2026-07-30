@@ -23,6 +23,9 @@ import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
 import { developerSetupPrompt } from "@thwip/prompts";
+import { planQueueCommand } from "./queue-commands.js";
+import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "./ship-io.js";
+import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
@@ -390,6 +393,13 @@ COMMANDS
   login                     Sign in via device code. Prints a URL to click
                             (works over SSH; the browser opens on the
                             human's machine, code is prefilled).
+  ship [--wait]            Run the suites, sign a proof, push, open or update
+       [--no-queue]        the pull request, and take a fair queue turn.
+       [--json-events]     --wait follows it through to the merge; Ctrl-C
+                           detaches safely and keeps your place in line.
+  queue <status|list|join|leave|pause|resume|rebaseline|eject|bypass|doctor>
+                           Read or operate the branch queue. Mutations need
+                           --reason; bypass needs --confirm owner/name#pr.
   init --required "a,b,.."  Write thwip.yaml for this repository. Suite ids
        [--profile fast]     name package.json scripts; profile is one of
        [--sign-commits]     fast | fresh | audited | remote (see /faq).
@@ -417,10 +427,235 @@ EXIT CODES
   stable codes such as PROOF_MISSING or SUBJECT_TREE_MISMATCH)
 `;
 
+/**
+ * `thwip ship`. The loop and every decision it makes are tested in ship.ts and
+ * ship-io.ts; this supplies only the ports that touch git, gh, and the queue.
+ */
+async function cmdShip(argv: string[]): Promise<number> {
+  const cwd = process.cwd();
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const jsonEvents = argv.includes("--json-events");
+  const wait = argv.includes("--wait");
+  const useQueue = !argv.includes("--no-queue");
+  const auth = await apiAuthHeader();
+  if (auth === null) {
+    process.stderr.write("not signed in: run `thwip login`\n");
+    return EXIT.authRequired;
+  }
+
+  const project = await loadProjectConfigAtHead(cwd, endpoint, auth);
+  const repositoryId = project.policy.repositoryId;
+  // The queue is per base branch, and the branch a pull request targets is what
+  // GitHub reports, not something the policy pins.
+  const baseRef = "refs/heads/" + (await defaultBranch(cwd));
+
+  let prNumber: number | null = await currentPrNumber(cwd);
+  let headProof: "accepted" | "missing" | "stale" = "missing";
+
+  const call = async (method: string, path: string, body?: unknown) => {
+    const res = await fetch(endpoint + path, {
+      method,
+      headers: { authorization: auth, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  };
+  const queuePath = (suffix = "") =>
+    `/v1/queue/${repositoryId}${suffix}?ref=${encodeURIComponent(baseRef)}`;
+
+  const ports: ShipPorts = {
+    async observe() {
+      const git = await readGitState(cwd);
+      // The queue owns the entry and the turn; git owns the tree. Neither fact is
+      // inferred from the other.
+      const snapshot = useQueue ? await call("GET", queuePath()) : { status: 404, body: {} };
+      const entries = (snapshot.body["entries"] as Array<Record<string, unknown>> | undefined) ?? [];
+      const mine = entries.find((e) => String(e["entryId"]).endsWith("_" + String(prNumber)));
+      return {
+        authenticated: true,
+        workingTreeClean: git.workingTreeClean,
+        headProof,
+        pushedHeadMatchesLocal: git.pushedHeadMatchesLocal,
+        pullRequestNumber: prNumber,
+        queueEntryExists: mine !== undefined && mine["state"] !== "Cancelled",
+        turn: turnFrom(mine?.["state"]),
+        options: { wait, queue: useQueue, jsonEvents },
+      };
+    },
+    async runSuites() {
+      const code = await cmdRun([]);
+      if (code !== 0) return { ok: false, reasonCode: "SUITE_FAILED" };
+      headProof = "accepted";
+      return { ok: true };
+    },
+    async push() {
+      await run("git", ["push", "--set-upstream", "origin", "HEAD"], cwd);
+    },
+    async openOrUpdatePullRequest() {
+      // gh handles the difference between opening and updating, and is already a
+      // prerequisite of this workflow.
+      await run("gh", ["pr", "create", "--fill"], cwd).catch(() => "");
+      prNumber = await currentPrNumber(cwd);
+      return { pullRequestNumber: prNumber ?? 0 };
+    },
+    async joinQueue() {
+      if (prNumber === null) return { reasonCode: "INTERNAL_FAILURE" };
+      const git = await readGitState(cwd);
+      const result = await call("POST", queuePath("/entries"), {
+        pullRequestNumber: prNumber,
+        headSha: git.headSha,
+      });
+      return result.status >= 400
+        ? { reasonCode: String(result.body["error"] ?? "SERVICE_UNAVAILABLE") }
+        : {};
+    },
+    async awaitTurn() {
+      await sleep(5000);
+      const result = await call("POST", queuePath("/tick"));
+      return result.status >= 500 ? { reasonCode: "SERVICE_UNAVAILABLE" } : {};
+    },
+    async executeTurn() {
+      // The control plane's workflow drives the turn; the CLI keeps this device
+      // present while it runs.
+      await sleep(5000);
+      return {};
+    },
+    async awaitMerge() {
+      await sleep(5000);
+      return {};
+    },
+    async releaseTurn() {
+      if (prNumber === null) return;
+      await call(
+        "DELETE",
+        `/v1/queue/${repositoryId}/entries/entry_${repositoryId}_${prNumber}?ref=${encodeURIComponent(baseRef)}&reason=interrupted`,
+      );
+    },
+  };
+
+  headProof = (await cmdVerifyLocal()) === 0 ? "accepted" : "missing";
+
+  const detach = installInterruptHandler(ports, (t) => process.stdout.write(t + "\n"), { jsonEvents });
+  try {
+    const report = await runShip(ports, (t) => process.stdout.write(t + "\n"), { jsonEvents });
+    return report.exitCode;
+  } finally {
+    detach();
+  }
+}
+
+function turnFrom(
+  state: unknown,
+): "none" | "offered" | "claimed" | "running" | "verified" | "merging" | "merged" {
+  switch (state) {
+    case "Offered":
+      return "offered";
+    case "Active":
+    case "ReconnectGrace":
+      return "running";
+    case "Verifying":
+    case "MergeGuard":
+      return "verified";
+    case "Merging":
+    case "Reconciling":
+      return "merging";
+    case "Merged":
+      return "merged";
+    default:
+      return "none";
+  }
+}
+
+/** The branch this pull request targets, as GitHub reports it. */
+async function defaultBranch(cwd: string): Promise<string> {
+  try {
+    const out = await run("gh", ["pr", "view", "--json", "baseRefName", "-q", ".baseRefName"], cwd);
+    const name = out.trim();
+    if (name.length > 0) return name;
+  } catch {
+    /* no pull request yet */
+  }
+  try {
+    const out = await run("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], cwd);
+    const name = out.trim();
+    if (name.length > 0) return name;
+  } catch {
+    /* fall through */
+  }
+  return "main";
+}
+
+async function currentPrNumber(cwd: string): Promise<number | null> {
+  try {
+    const out = await run("gh", ["pr", "view", "--json", "number", "-q", ".number"], cwd);
+    const n = Number(out.trim());
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function run(cmd: string, args: string[], cwd: string): Promise<string> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { stdout } = await promisify(execFile)(cmd, args, { cwd });
+  return stdout;
+}
+
+/** `thwip queue …`. Parsing, authority, and confirmations live in queue-commands.ts. */
+async function cmdQueue(argv: string[]): Promise<number> {
+  const parsed = planQueueCommand(argv);
+  if (!parsed.ok) {
+    process.stderr.write(parsed.message + "\n");
+    return parsed.exitCode;
+  }
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const auth = await apiAuthHeader();
+  if (auth === null) {
+    process.stderr.write("not signed in: run `thwip login`\n");
+    return EXIT.authRequired;
+  }
+
+  const repo = flag(argv, "--repo") ?? "";
+  let path = parsed.plan.path;
+  if (path.includes("{repositoryId}")) {
+    const resolved = await fetch(
+      endpoint + "/v1/resolve-repo?name=" + encodeURIComponent(repo),
+      { headers: { authorization: auth } },
+    );
+    if (!resolved.ok) {
+      process.stderr.write(`cannot resolve ${repo}: ${resolved.status}\n`);
+      return EXIT.setupInvalid;
+    }
+    const { repositoryId } = (await resolved.json()) as { repositoryId: string };
+    path = path.replaceAll("{repositoryId}", repositoryId);
+  }
+
+  const res = await fetch(endpoint + path, {
+    method: parsed.plan.method,
+    headers: {
+      authorization: auth,
+      "content-type": "application/json",
+      ...(parsed.plan.idempotencyKey === undefined
+        ? {}
+        : { "idempotency-key": parsed.plan.idempotencyKey }),
+    },
+    ...(parsed.plan.body === undefined ? {} : { body: JSON.stringify(parsed.plan.body) }),
+  });
+  process.stdout.write((await res.text()) + "\n");
+  return res.ok ? 0 : res.status === 403 ? EXIT.permission : EXIT.unavailable;
+}
+
 async function main(): Promise<void> {
   const [, , cmd, sub, ...rest] = process.argv;
   let code = 1;
   if (cmd === "run") code = await cmdRun([sub ?? "", ...rest]);
+  else if (cmd === "ship") code = await cmdShip([sub ?? "", ...rest].filter((a) => a !== ""));
+  else if (cmd === "queue") code = await cmdQueue([sub ?? "", ...rest].filter((a) => a !== ""));
   else if (cmd === "login") code = await cmdLogin([sub ?? "", ...rest]);
   else if (cmd === "init") code = await cmdInit([sub ?? "", ...rest]);
   else if (cmd === "--help" || cmd === "-h" || cmd === "help" || cmd === undefined) {
@@ -436,7 +671,7 @@ async function main(): Promise<void> {
   }
   else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
   else {
-    process.stderr.write("usage: thwip <login|run|verify|policy digest|keys enroll> [options]\n");
+    process.stderr.write("usage: thwip <login|ship|queue|run|verify|policy digest|keys status> [options]\n");
   }
   process.exit(code);
 }

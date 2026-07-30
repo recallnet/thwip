@@ -1,0 +1,423 @@
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it } from "vitest";
+import { checkInvariants } from "@thwip/queue-domain";
+import { BranchQueueStore } from "./store.js";
+import type { SqlLike } from "./sql.js";
+import { DEFAULT_TIMINGS, QueueCommands, validateTimings } from "./commands.js";
+
+/**
+ * The command layer end to end, including the alarm. Time and identifiers are
+ * injected so a whole turn can be driven deterministically, which is the only
+ * way to assert that an at-least-once alarm is genuinely idempotent.
+ */
+
+const open: Array<{ close(): void }> = [];
+
+function sqlite(): SqlLike {
+  const db = new Database(":memory:");
+  open.push(db);
+  return {
+    exec<T = Record<string, unknown>>(query: string, ...bindings: unknown[]) {
+      const statement = db.prepare(query);
+      if (statement.reader) return { toArray: () => statement.all(...(bindings as never[])) as T[] };
+      statement.run(...(bindings as never[]));
+      return { toArray: () => [] as T[] };
+    },
+  };
+}
+
+afterEach(() => {
+  while (open.length > 0) open.pop()!.close();
+});
+
+class Clock {
+  constructor(private t = Date.UTC(2026, 6, 29, 12, 0, 0)) {}
+  now(): string {
+    return new Date(this.t).toISOString();
+  }
+  advance(seconds: number): void {
+    this.t += seconds * 1000;
+  }
+}
+
+function harness() {
+  const sql = sqlite();
+  const store = BranchQueueStore.open(sql, {
+    queueKey: "qk",
+    repositoryId: "1315419165",
+    baseRef: "refs/heads/main",
+  });
+  const clock = new Clock();
+  let counter = 0;
+  const ids = {
+    attemptId: () => `att-${++counter}`,
+    operationId: () => `op-${++counter}`,
+    nonce: () => `nonce-${++counter}`,
+    claimToken: () => `tok-${++counter}`,
+  };
+  return { sql, store, clock, commands: new QueueCommands(store, clock, ids) };
+}
+
+function ready(commands: QueueCommands, entryId: string, principal: string, pr: number) {
+  commands.requestQueue({
+    idempotencyKey: `req-${entryId}`,
+    entryId,
+    pullRequestNumber: pr,
+    sponsorPrincipalId: principal,
+    sponsorGithubUserId: principal === "alice" ? "1" : "2",
+    headSha: "h".repeat(40),
+  });
+  commands.evaluateReadiness({
+    idempotencyKey: `ready-${entryId}`,
+    entryId,
+    ready: true,
+    schedulerEligible: true,
+    primaryReason: null,
+  });
+}
+
+describe("validateTimings", () => {
+  it("accepts the defaults and rejects windows outside the allowed range", () => {
+    expect(validateTimings(DEFAULT_TIMINGS)).toEqual({ ok: true });
+    expect(validateTimings({ ...DEFAULT_TIMINGS, offerSeconds: 10 })).toMatchObject({ ok: false });
+    expect(validateTimings({ ...DEFAULT_TIMINGS, offerSeconds: 600 })).toMatchObject({ ok: false });
+    expect(validateTimings({ ...DEFAULT_TIMINGS, executionSeconds: 60 })).toMatchObject({ ok: false });
+    expect(validateTimings({ ...DEFAULT_TIMINGS, executionSeconds: 60 * 60 })).toMatchObject({ ok: false });
+  });
+});
+
+describe("QueueCommands", () => {
+  it("reports noop when nothing is eligible", () => {
+    const { commands } = harness();
+    expect(commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" })).toMatchObject({
+      status: "noop",
+    });
+  });
+
+  it("offers a turn, sets the offer deadline, and queues an outbox item", () => {
+    const { store, commands } = harness();
+    ready(commands, "e1", "alice", 7);
+    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+    expect(offered.status).toBe("applied");
+    expect(store.earliestDeadline()).toBe("2026-07-29T12:01:30.000Z");
+    expect(store.pendingOutbox().map((o) => o.kind)).toEqual(["offer-created"]);
+  });
+
+  it("refuses a device claim with no device id", () => {
+    const { commands } = harness();
+    ready(commands, "e1", "alice", 7);
+    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    expect(
+      commands.claim({ idempotencyKey: "c1", attemptId: offered.attemptId, executionMode: "device" }),
+    ).toMatchObject({ status: "rejected" });
+  });
+
+  it("lets the server claim its own turn for fast reuse", () => {
+    const { store, commands } = harness();
+    ready(commands, "e1", "alice", 7);
+    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    expect(
+      commands.claim({ idempotencyKey: "c1", attemptId: offered.attemptId, executionMode: "fast-reuse" }),
+    ).toMatchObject({ status: "applied" });
+    expect(store.pendingOutbox().map((o) => o.kind)).toEqual(["offer-created", "start-workflow"]);
+  });
+
+  it("drives a full turn to a recorded transition", () => {
+    const { store, commands, clock } = harness();
+    ready(commands, "e1", "alice", 7);
+    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    const attemptId = offered.attemptId;
+
+    commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
+    commands.candidatePrepared({
+      idempotencyKey: "p1",
+      attemptId,
+      baseSha: "b".repeat(40),
+      headSha: "h".repeat(40),
+      candidateSha: "c".repeat(40),
+      candidateTree: "t".repeat(40),
+      policyDigest: "sha256:pol",
+      runner: "dagger",
+    });
+    commands.assign({ idempotencyKey: "a1", attemptId, assignmentDigest: "sha256:asg" });
+    commands.heartbeat({ idempotencyKey: "hb-1", attemptId });
+    commands.submitReceipt({ idempotencyKey: "r1", attemptId, receiptDigest: "sha256:rcpt" });
+    const started = commands.startVerification({ idempotencyKey: "v1", attemptId }) as { nonce: string };
+    commands.completeVerification({
+      idempotencyKey: "v2",
+      attemptId,
+      nonce: started.nonce,
+      accepted: true,
+      resultDigest: "sha256:res",
+    });
+    commands.createMergeIntent({ idempotencyKey: "i1", attemptId, intentDigest: "sha256:intent" });
+    const write = commands.beginMergeWrite({ idempotencyKey: "m1", attemptId, operationId: "op-x" });
+    expect(write.status).toBe("applied");
+    clock.advance(2);
+    commands.confirmMerge({
+      idempotencyKey: "m2",
+      attemptId,
+      operationId: "op-x",
+      mergeSha: "m".repeat(40),
+      mergeTree: "t".repeat(40),
+      parentShas: ["b".repeat(40), "h".repeat(40)],
+    });
+    commands.recordTransition({
+      idempotencyKey: "tr1",
+      kind: "verified",
+      transitionSequence: 1,
+      priorDigest: null,
+      digest: "sha256:tr1",
+      baseSha: "m".repeat(40),
+      attemptId,
+      witnessPrincipalIds: ["alice"],
+    });
+
+    const state = store.state();
+    expect(state.entries.get("e1")!.state).toBe("Merged");
+    expect(state.activeAttemptId).toBeNull();
+    expect(state.transitions).toHaveLength(1);
+    expect(store.mergeOperation("op-x")).toMatchObject({ outcome: "MERGED" });
+    expect(store.earliestDeadline()).toBeNull();
+    expect(checkInvariants(state)).toEqual([]);
+  });
+
+  describe("the alarm", () => {
+    it("expires an unclaimed offer and keeps the entry's place", () => {
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      const ordinal = store.state().entries.get("e1")!.fairnessOrdinal;
+
+      clock.advance(120);
+      const first = commands.runAlarm();
+      expect(first.handled.map((d) => d.kind)).toEqual(["offer"]);
+      expect(first.results[0]).toMatchObject({ status: "applied" });
+
+      const entry = store.state().entries.get("e1")!;
+      expect(entry.state).toBe("Deferred");
+      expect(entry.fairnessOrdinal).toBe(ordinal);
+      expect(store.state().activeAttemptId).toBeNull();
+    });
+
+    it("is idempotent when delivered twice", () => {
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      clock.advance(120);
+
+      const first = commands.runAlarm();
+      const generationAfterFirst = store.generation();
+      const second = commands.runAlarm();
+
+      expect(first.results[0]).toMatchObject({ status: "applied" });
+      expect(second.handled).toEqual([]);
+      expect(store.generation()).toBe(generationAfterFirst);
+      expect(checkInvariants(store.state())).toEqual([]);
+    });
+
+    it("is idempotent when the same deadline is redelivered after a lost clear", () => {
+      // The clear and the action commit together, but alarm delivery is
+      // at-least-once and a crash can lose the clear. The second delivery must
+      // recognise the action by its deadline-derived key, not by the absence of
+      // the row.
+      const { sql, store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+        attemptId: string;
+      };
+      clock.advance(120);
+
+      const due = store.dueDeadlines(clock.now());
+      expect(due).toHaveLength(1);
+      const first = commands.runAlarm();
+      expect(first.results[0]).toMatchObject({ status: "applied" });
+      const generation = store.generation();
+
+      // Put the identical deadline row back, as a redelivery would find it.
+      sql.exec(
+        "INSERT INTO deadlines (kind, attempt_id, due_at) VALUES (?, ?, ?)",
+        due[0]!.kind,
+        due[0]!.attemptId,
+        due[0]!.dueAt,
+      );
+      store.evict();
+
+      const second = commands.runAlarm();
+      expect(second.handled).toHaveLength(1);
+      expect(second.results[0]).toMatchObject({ status: "duplicate" });
+      expect(store.generation()).toBe(generation);
+      expect(store.state().attempts.get(offered.attemptId)!.outcome).toBe("EXPIRED_UNCLAIMED");
+      expect(checkInvariants(store.state())).toEqual([]);
+    });
+
+    it("supersedes an attempt whose reconnect grace ran out", () => {
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+        attemptId: string;
+      };
+      const attemptId = offered.attemptId;
+      commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
+      commands.candidatePrepared({
+        idempotencyKey: "p1",
+        attemptId,
+        baseSha: "b".repeat(40),
+        headSha: "h".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTree: "t".repeat(40),
+        policyDigest: "sha256:pol",
+        runner: "dagger",
+      });
+      commands.assign({ idempotencyKey: "a1", attemptId, assignmentDigest: "sha256:asg" });
+      commands.heartbeat({ idempotencyKey: "hb-1", attemptId });
+
+      commands.heartbeatLost({ idempotencyKey: "hl-1", attemptId });
+      expect(store.state().entries.get("e1")!.state).toBe("ReconnectGrace");
+      expect(store.state().activeAttemptId).toBe(attemptId);
+
+      clock.advance(61);
+      const alarm = commands.runAlarm();
+      expect(alarm.handled.map((d) => d.kind)).toEqual(["grace"]);
+      expect(store.state().attempts.get(attemptId)!.outcome).toBe("SUPERSEDED");
+      expect(store.state().entries.get("e1")!.state).toBe("Deferred");
+      expect(store.state().activeAttemptId).toBeNull();
+    });
+
+    it("converts a missing merge confirmation into an unknown outcome, never a retry", () => {
+      const { store, commands, clock } = harness();
+      const attemptId = driveToMergeRequested(commands);
+
+      clock.advance(120);
+      const alarm = commands.runAlarm();
+      expect(alarm.handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
+      expect(store.state().entries.get("e1")!.state).toBe("Reconciling");
+      expect(store.pendingOutbox().some((o) => o.kind === "reconcile-merge")).toBe(true);
+      // Crucially, no second merge-write item was produced.
+      expect(store.pendingOutbox().filter((o) => o.kind === "merge-write")).toHaveLength(1);
+    });
+
+    it("reschedules to the next earliest deadline", () => {
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+        attemptId: string;
+      };
+      commands.claim({
+        idempotencyKey: "c1",
+        attemptId: offered.attemptId,
+        executionMode: "device",
+        deviceId: "d1",
+      });
+      // The offer deadline is gone; execution is now the earliest.
+      expect(store.earliestDeadline()).toBe("2026-07-29T12:20:00.000Z");
+      clock.advance(30);
+      expect(commands.runAlarm().nextAlarm).toBe("2026-07-29T12:20:00.000Z");
+    });
+  });
+
+  describe("the merge write guard", () => {
+    it("refuses a second write for the same operation", () => {
+      const { commands } = harness();
+      const attemptId = driveToMergeRequested(commands);
+      const again = commands.beginMergeWrite({ idempotencyKey: "m1b", attemptId, operationId: "op-x" });
+      expect(again).toMatchObject({ status: "already-started" });
+    });
+
+    it("refuses to start a write for an unpinned candidate", () => {
+      const { commands } = harness();
+      ready(commands, "e1", "alice", 7);
+      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+        attemptId: string;
+      };
+      expect(
+        commands.beginMergeWrite({ idempotencyKey: "m1", attemptId: offered.attemptId, operationId: "op-y" }),
+      ).toMatchObject({ status: "rejected" });
+    });
+
+    it("resolves a proven non-merge without creating another operation", () => {
+      const { store, commands } = harness();
+      const attemptId = driveToMergeRequested(commands);
+      commands.mergeOutcomeUnknown({ idempotencyKey: "u1", attemptId });
+      commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
+      expect(store.state().attempts.get(attemptId)!.outcome).toBe("CONFIRMED_NOT_MERGED");
+      expect(store.mergeOperation("op-x")).toMatchObject({ outcome: "CONFIRMED_NOT_MERGED" });
+      expect(store.state().entries.get("e1")!.state).toBe("Ready");
+      expect(checkInvariants(store.state())).toEqual([]);
+    });
+  });
+
+  it("pauses on an external transition and demands a rebaseline before resuming", () => {
+    const { store, commands } = harness();
+    ready(commands, "e1", "alice", 7);
+    commands.observedExternalTransition({ idempotencyKey: "x1", observedBaseSha: "x".repeat(40) });
+    expect(store.state().paused).toBe(true);
+    expect(commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" })).toMatchObject({
+      status: "noop",
+    });
+    expect(commands.resume({ idempotencyKey: "r1", actorPrincipalId: "admin" })).toMatchObject({
+      status: "rejected",
+    });
+    commands.rebaseline({ idempotencyKey: "rb1", actorPrincipalId: "admin", baseSha: "x".repeat(40) });
+    expect(commands.resume({ idempotencyKey: "r1", actorPrincipalId: "admin" })).toMatchObject({
+      status: "applied",
+    });
+    expect(store.state().paused).toBe(false);
+  });
+
+  it("bumps the attempt revision when a live attempt's readiness changes", () => {
+    const { store, commands } = harness();
+    ready(commands, "e1", "alice", 7);
+    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+      attemptId: string;
+    };
+    commands.claim({
+      idempotencyKey: "c1",
+      attemptId: offered.attemptId,
+      executionMode: "device",
+      deviceId: "d1",
+    });
+    const revision = store.attemptRevision();
+    commands.evaluateReadiness({
+      idempotencyKey: "ready-changed",
+      entryId: "e1",
+      ready: false,
+      schedulerEligible: false,
+      primaryReason: "REVIEW_REQUIRED",
+    });
+    expect(store.attemptRevision()).toBeGreaterThan(revision);
+    expect(store.classifyCallback(offered.attemptId, revision)).toBe("CURRENT_ATTEMPT_INVARIANT_CONFLICT");
+  });
+});
+
+/** Everything up to and including the merge write starting. */
+function driveToMergeRequested(commands: QueueCommands): string {
+  ready(commands, "e1", "alice", 7);
+  const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+  const attemptId = offered.attemptId;
+  commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
+  commands.candidatePrepared({
+    idempotencyKey: "p1",
+    attemptId,
+    baseSha: "b".repeat(40),
+    headSha: "h".repeat(40),
+    candidateSha: "c".repeat(40),
+    candidateTree: "t".repeat(40),
+    policyDigest: "sha256:pol",
+    runner: "dagger",
+  });
+  commands.assign({ idempotencyKey: "a1", attemptId, assignmentDigest: "sha256:asg" });
+  commands.heartbeat({ idempotencyKey: "hb-1", attemptId });
+  commands.submitReceipt({ idempotencyKey: "r1", attemptId, receiptDigest: "sha256:rcpt" });
+  const started = commands.startVerification({ idempotencyKey: "v1", attemptId }) as { nonce: string };
+  commands.completeVerification({
+    idempotencyKey: "v2",
+    attemptId,
+    nonce: started.nonce,
+    accepted: true,
+    resultDigest: "sha256:res",
+  });
+  commands.createMergeIntent({ idempotencyKey: "i1", attemptId, intentDigest: "sha256:intent" });
+  commands.beginMergeWrite({ idempotencyKey: "m1", attemptId, operationId: "op-x" });
+  return attemptId;
+}
