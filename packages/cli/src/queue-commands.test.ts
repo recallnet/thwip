@@ -207,6 +207,42 @@ describe("idempotency", () => {
   });
 });
 
+describe("explain", () => {
+  it("is a read, needs no admin, and defaults its event count", () => {
+    const p = plan(["explain", ...REPO]);
+    expect(p.method).toBe("GET");
+    expect(p.requiresAdmin).toBe(false);
+    expect(p.idempotencyKey).toBeUndefined();
+    expect(p.path).toContain("events=25");
+  });
+
+  it("rejects a silly event count", () => {
+    expect(planQueueCommand(["explain", ...REPO, "--events", "abc"])).toMatchObject({ ok: false });
+    expect(planQueueCommand(["explain", ...REPO, "--events", "99999"])).toMatchObject({ ok: false });
+  });
+});
+
+describe("reconcile", () => {
+  const base = ["reconcile", ...REPO, "--reason", "the merge was refused with 405"];
+
+  it("requires a recognised observation", () => {
+    expect(planQueueCommand([...base, "--observed", "probably"])).toMatchObject({ ok: false });
+  });
+
+  it("requires a merge sha for anything but not-merged", () => {
+    expect(planQueueCommand([...base, "--observed", "merged"])).toMatchObject({ ok: false });
+    expect(
+      planQueueCommand([...base, "--observed", "merged", "--merge-sha", "a".repeat(40)]),
+    ).toMatchObject({ ok: true });
+    expect(planQueueCommand([...base, "--observed", "not-merged"])).toMatchObject({ ok: true });
+  });
+
+  it("requires a reason and admin standing", () => {
+    expect(planQueueCommand(["reconcile", ...REPO, "--observed", "not-merged"])).toMatchObject({ ok: false });
+    expect(plan([...base, "--observed", "not-merged"]).requiresAdmin).toBe(true);
+  });
+});
+
 describe("isMutating", () => {
   it("agrees with the plans that carry an idempotency key", () => {
     for (const subcommand of MUTATING_SUBCOMMANDS) expect(isMutating(subcommand)).toBe(true);
