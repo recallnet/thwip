@@ -145,6 +145,8 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
       cooldownUntil: string | null;
       /** Lets a reader join a recorded transition back to the pull request it merged. */
       lastAttemptId: string | null;
+      /** So a projection reader can tell it is answering about this commit. */
+      headSha: string | null;
     }>;
   }> {
     return this.buildSnapshot(this.require().store);
@@ -183,6 +185,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
           fairnessOrdinal: entry.fairnessOrdinal.toString(),
           cooldownUntil: entry.cooldownUntil,
           lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
+          headSha: entry.headSha,
         })),
     };
   }
