@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
 import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
+import { QueuePanel } from "./Queue.js";
 
 /* ---------- shared API helpers ---------- */
 
@@ -235,6 +236,7 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
 const TABS = [
   ["overview", "Overview"],
   ["projects", "Projects"],
+  ["queue", "Queue"],
   ["people", "People & Teams"],
   ["policies", "Policies"],
   ["billing", "Billing"],
@@ -340,6 +342,7 @@ function Dashboard({
           ) : (
             <Projects me={me} />
           ))}
+        {tab === "queue" && <QueueTab />}
         {tab === "people" && <People me={me} />}
         {tab === "profile" && <Profile me={me} />}
         {tab === "policies" && <Policies />}
@@ -1193,6 +1196,44 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The queue tab. One queue exists per repository and base branch, so this lists
+ * the enabled projects and shows the queue for each project's default branch —
+ * a single combined view would hide that `main` and `release` are independent
+ * protected resources (plan.md §6.1).
+ */
+function QueueTab() {
+  const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+
+  const enabled = data.projects.filter((p) => p.enabled === 1);
+  if (enabled.length === 0) {
+    return (
+      <div className="gp-panel">
+        <div className="gp-panel__body">
+          <p className="gp-panel__meta">
+            No project is enabled yet. Enable one under Projects, then run <code>thwip ship --wait</code>.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {enabled.map((project) => (
+        <QueuePanel
+          key={project.id}
+          repositoryId={project.github_repository_id}
+          baseRef={`refs/heads/${project.default_branch}`}
+          repositoryName={project.github_name}
+        />
+      ))}
+    </>
   );
 }
 
