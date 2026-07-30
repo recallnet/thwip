@@ -5,5 +5,8 @@ allowBuilds:
   '@prisma/client': false
   better-sqlite3: true
   esbuild: true
-  sharp: set this to true or false
+  # A transitive dependency of miniflare that nothing here imports. Its native
+  # build is not needed to lint, typecheck or test, and leaving the choice
+  # unmade fails every clean install with ERR_PNPM_IGNORED_BUILDS.
+  sharp: false
   workerd: true
