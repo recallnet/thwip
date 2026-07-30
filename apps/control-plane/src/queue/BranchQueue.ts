@@ -106,6 +106,8 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     rebaselineRequired: boolean;
     baseSha: string | null;
     activeAttemptId: string | null;
+    /** The entry whose attempt holds the lane, so a caller can act on the entry too. */
+    activeEntryId: string | null;
     chainHead: { sequence: number; digest: string } | null;
     /** The whole recorded chain, oldest first, so a reader can check the links. */
     transitions: readonly TransitionRow[];
@@ -132,6 +134,10 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
       rebaselineRequired: state.rebaselineRequired,
       baseSha: state.baseSha,
       activeAttemptId: state.activeAttemptId,
+      activeEntryId:
+        state.activeAttemptId === null
+          ? null
+          : (state.attempts.get(state.activeAttemptId)?.entryId ?? null),
       chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
       transitions: store.transitionChain(),
       // Projected order only: an exact permanent position would be a lie,

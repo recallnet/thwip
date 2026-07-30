@@ -170,9 +170,49 @@ function terminate(state: BranchQueueState, attempt: Attempt, outcome: AttemptOu
   }
 }
 
-function setEntryState(entry: Entry, next: EntryState): void {
+/**
+ * Every state but Blocked. Blocking goes through `blockEntry` so the reason is a
+ * parameter rather than something a caller may forget: a live queue once held a
+ * merged pull request in Blocked with a null reason, which every reader rendered
+ * as though nothing were wrong.
+ */
+function setEntryState(entry: Entry, next: Exclude<EntryState, "Blocked">): void {
   entry.state = next;
 }
+
+function blockEntry(entry: Entry, reason: BlockingReason): void {
+  entry.state = "Blocked";
+  entry.primaryReason = reason;
+}
+
+/**
+ * Why an entry is blocked after its turn ended badly.
+ *
+ * A total map rather than a default, so adding an attempt outcome forces a
+ * decision about what a reader should be told instead of silently becoming
+ * "needs repair".
+ */
+const BLOCK_REASON_FOR_OUTCOME: Record<AttemptOutcome, BlockingReason> = {
+  EXPIRED_UNCLAIMED: "NEEDS_REPAIR",
+  EXPIRED_EXECUTION: "NEEDS_REPAIR",
+  CI_FAILED: "REQUIRED_CHECK_FAILED",
+  RECEIPT_REJECTED: "LOCAL_RECEIPT_REJECTED",
+  VERIFICATION_FAILED: "VERIFICATION_REJECTED",
+  HEAD_MOVED: "NEEDS_REPAIR",
+  BASE_MOVED: "NEEDS_REPAIR",
+  POLICY_CHANGED: "POLICY_CHANGED",
+  REVIEWS_CHANGED: "REVIEW_REQUIRED",
+  PERMISSION_REVOKED: "APP_PERMISSION_DRIFT",
+  MERGE_CONFLICT: "MERGE_CONFLICT",
+  MERGE_REJECTED: "NEEDS_REPAIR",
+  CONFIRMED_NOT_MERGED: "NEEDS_REPAIR",
+  PROVIDER_FAILURE: "NEEDS_REPAIR",
+  INVARIANT_FAILURE: "NEEDS_REPAIR",
+  APP_UNINSTALLED: "APP_PERMISSION_DRIFT",
+  ADMIN_CANCELLED: "NEEDS_REPAIR",
+  SUPERSEDED: "NEEDS_REPAIR",
+  INTERNAL_FAILURE: "NEEDS_REPAIR",
+};
 
 function checkReason(reason: BlockingReason | null): BlockingReason | null {
   if (reason === null) return null;
@@ -252,7 +292,9 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
             setEntryState(entry, "Ready");
           }
         } else {
-          setEntryState(entry, "Blocked");
+          // Not ready always comes with a reason from the readiness evaluation.
+          // If it somehow did not, saying so beats saying nothing.
+          blockEntry(entry, primary ?? "NEEDS_REPAIR");
         }
       }
       break;
@@ -437,7 +479,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       }
       if (!event.accepted) {
         terminate(state, attempt, "VERIFICATION_FAILED");
-        setEntryState(requireEntry(state, attempt.entryId), "Blocked");
+        blockEntry(requireEntry(state, attempt.entryId), "VERIFICATION_REJECTED");
         break;
       }
       advancePhase(attempt, "VERIFIED");
@@ -515,10 +557,11 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const entry = state.entries.get(attempt.entryId);
       terminate(state, attempt, event.outcome);
       if (entry !== undefined && entry.state !== "Merged" && entry.state !== "Cancelled") {
-        setEntryState(
-          entry,
-          event.outcome === "SUPERSEDED" || event.outcome === "EXPIRED_EXECUTION" ? "Deferred" : "Blocked",
-        );
+        if (event.outcome === "SUPERSEDED" || event.outcome === "EXPIRED_EXECUTION") {
+          setEntryState(entry, "Deferred");
+        } else {
+          blockEntry(entry, BLOCK_REASON_FOR_OUTCOME[event.outcome as AttemptOutcome]);
+        }
       }
       break;
     }
