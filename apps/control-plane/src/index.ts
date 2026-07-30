@@ -721,17 +721,31 @@ app.post("/admin/sync", async (c) => {
  * ruleset produced effective enforcement, nor that the App can publish the check
  * the branch will require.
  */
-app.get("/admin/queue/doctor", async (c) => {
-  if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
-  const repo = c.req.query("repo") ?? "";
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return c.json({ error: "repo must be owner/name" }, 400);
+/**
+ * The same diagnostic, reachable by a repository administrator with their normal
+ * session. A person who can change the ruleset needs to be able to see whether the
+ * App can actually publish the check it would require; making that operator-only
+ * would mean the people doing the setup cannot check their own work.
+ */
+/**
+ * Who counts as an administrator for queue operations.
+ *
+ * GitHub's projections use `owner` for the people who created or own the
+ * organization and `admin` for org administrators, and both can change rulesets.
+ * Checking only for `admin` locked out owners — the people most likely to be
+ * running setup in the first place.
+ */
+function isOrgAdmin(role: string | null): boolean {
+  return role === "admin" || role === "owner";
+}
 
-  const installations = await listInstallations(c.env);
+async function queueDoctor(env: Env, repo: string): Promise<Response> {
+  const installations = await listInstallations(env);
   const owner = repo.split("/")[0];
   const installation = installations.find((i) => i.account.login.toLowerCase() === owner?.toLowerCase());
-  if (installation === undefined) return c.json({ error: `no installation for ${owner}` }, 404);
+  if (installation === undefined) return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
 
-  const token = await installationToken(c.env, String(installation.id));
+  const token = await installationToken(env, String(installation.id));
   const gh = async <T>(path: string): Promise<T | { error: string; status: number }> => {
     const res = await fetch(`https://api.github.com${path}`, {
       headers: {
@@ -744,13 +758,9 @@ app.get("/admin/queue/doctor", async (c) => {
     return (await res.json()) as T;
   };
 
-  // The App's own view of its installation, which is the authoritative list of
-  // granted permissions.
-  const self = await gh<{ permissions?: Record<string, string> }>("/installation/repositories?per_page=1");
   const rulesets = await gh<Array<{ id: number; name: string; enforcement: string }>>(
     `/repos/${repo}/rulesets`,
   );
-
   const required: Record<string, string> = {
     checks: "write",
     contents: "write",
@@ -760,7 +770,7 @@ app.get("/admin/queue/doctor", async (c) => {
   const granted = (installation as unknown as { permissions?: Record<string, string> }).permissions ?? {};
   const missing = Object.entries(required).filter(([scope, level]) => granted[scope] !== level);
 
-  return c.json({
+  return Response.json({
     repo,
     installationId: String(installation.id),
     grantedPermissions: granted,
@@ -768,9 +778,28 @@ app.get("/admin/queue/doctor", async (c) => {
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
     canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
-    rulesets: Array.isArray(rulesets) ? rulesets : rulesets,
-    repositoriesVisible: "error" in self ? self : "ok",
+    rulesets,
   });
+}
+
+app.get("/admin/queue/doctor", async (c) => {
+  if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
+  const repo = c.req.query("repo") ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return c.json({ error: "repo must be owner/name" }, 400);
+  return queueDoctor(c.env, repo);
+});
+
+app.get("/v1/queue/:repositoryId/doctor", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (viewer === null) return c.json({ error: "unauthorized" }, 401);
+  if (!isOrgAdmin(viewer.githubOrgRole)) return c.json({ error: "repository admin required" }, 403);
+  const repositoryId = c.req.param("repositoryId");
+  if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "invalid repository id" }, 400);
+  const row = await c.env.DB.prepare("SELECT github_name FROM projects WHERE github_repository_id = ?")
+    .bind(repositoryId)
+    .first<{ github_name: string }>();
+  if (row === null) return c.json({ error: "unknown repository" }, 404);
+  return queueDoctor(c.env, row.github_name);
 });
 
 // Resolve a repository's GitHub numeric ids from its full name. The
@@ -1196,7 +1225,7 @@ app.route(
         ok: true as const,
         principalId: viewer.principalId,
         githubUserId: viewer.githubUserId,
-        isAdmin: viewer.githubOrgRole === "admin",
+        isAdmin: isOrgAdmin(viewer.githubOrgRole),
       };
     },
     async verifyOidc(c: { req: { raw: Request } }, env: Env) {
