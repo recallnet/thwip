@@ -3,6 +3,8 @@ import { queueKey } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
+import { candidateResultDigest, decideCandidate, requiresIntegratedRun } from "./candidate-verdict.js";
+import type { CandidateSuite } from "./store.js";
 
 /**
  * The queue's HTTP surface (plan.md §37.1).
@@ -142,6 +144,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   verifyOidc(c: { req: { raw: Request } }, env: TEnv): Promise<Record<string, unknown> | null>;
   /** The pinned verifier identity for a repository, or null when not configured. */
   pinnedVerifier(env: TEnv, repositoryId: string): Promise<PinnedVerifier | null>;
+  /**
+   * What the active policy requires of a candidate, and which workflow may say it
+   * was met. Null when the repository has no active policy, in which case there is
+   * nothing to verify against and no merge may be certified.
+   */
+  activePolicy(
+    env: TEnv,
+    repositoryId: string,
+  ): Promise<{
+    policyDigest: string;
+    requiredSuites: readonly string[];
+    securityProfile: string;
+    verifierWorkflowRef: string;
+    verifierWorkflowSha: string;
+  } | null>;
+  /** Ask the pinned verifier to run the required suites against a candidate. */
+  dispatchCandidateVerification(
+    env: TEnv,
+    repositoryId: string,
+    payload: {
+      baseRef: string;
+      pullRequestNumber: number;
+      attemptId: string;
+      baseSha: string;
+      candidateSha: string;
+      candidateTreeOid: string;
+    },
+  ): Promise<void>;
   /** Queue configuration for a branch, or null when the branch has no queue. */
   queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
@@ -416,6 +446,108 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
 
   /**
+   * A pinned verifier reports what the required suites did against one integrated
+   * candidate (plan.md §16).
+   *
+   * This is the evidence the merge gate was missing. Before it existed the gate
+   * walked an attempt to merge-ready with a constant standing in for a verifier
+   * result, so the queue certified integrations nothing had ever run.
+   *
+   * The caller does not choose the digest. It is computed here from the reported
+   * content, so a verdict cannot claim to be about work other than the work it
+   * describes.
+   */
+  app.post("/v1/queue/:repositoryId/candidate-result", async (c) => {
+    const claims = await deps.verifyOidc(c, c.env);
+    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
+
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+    if (String(claims["repository_id"] ?? "") !== repositoryId) {
+      return c.json({ error: "token is for another repository" }, 403);
+    }
+
+    const pinned = await deps.pinnedVerifier(c.env, repositoryId);
+    if (pinned === null) return c.json({ error: "no verifier is pinned for this repository" }, 409);
+    const identity = verifyVerifierIdentity(claims, pinned);
+    if (!identity.ok) return c.json({ error: identity.reason, code: "VERIFIER_NOT_PINNED" }, 403);
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      baseRef?: string;
+      pullRequestNumber?: number;
+      candidateSha?: string;
+      candidateTreeOid?: string;
+      baseSha?: string;
+      accepted?: boolean;
+      suites?: Array<{ name?: string; outcome?: string; durationMs?: number }>;
+      reasonCodes?: string[];
+    };
+    const baseRef = branchRef(body.baseRef);
+    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    const oid = (v: unknown) => (typeof v === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v) ? v : null);
+    const candidateSha = oid(body.candidateSha);
+    const candidateTreeOid = oid(body.candidateTreeOid);
+    const baseSha = oid(body.baseSha);
+    if (candidateSha === null || candidateTreeOid === null || baseSha === null) {
+      return c.json({ error: "candidateSha, candidateTreeOid and baseSha are required" }, 400);
+    }
+    if (typeof body.accepted !== "boolean") return c.json({ error: "accepted required" }, 400);
+    if (typeof body.pullRequestNumber !== "number" || !Number.isSafeInteger(body.pullRequestNumber)) {
+      return c.json({ error: "pullRequestNumber required" }, 400);
+    }
+
+    const suites: CandidateSuite[] = [];
+    for (const raw of body.suites ?? []) {
+      if (typeof raw?.name !== "string" || !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(raw.name)) {
+        return c.json({ error: "each suite needs a name" }, 400);
+      }
+      if (raw.outcome !== "passed" && raw.outcome !== "failed" && raw.outcome !== "skipped") {
+        return c.json({ error: `suite ${raw.name} has an unknown outcome` }, 400);
+      }
+      const durationMs = typeof raw.durationMs === "number" && raw.durationMs >= 0 ? raw.durationMs : 0;
+      suites.push({ name: raw.name, outcome: raw.outcome, durationMs });
+    }
+    if (suites.length > 32) return c.json({ error: "too many suites" }, 400);
+
+    const reasonCodes = (body.reasonCodes ?? []).filter(
+      (r): r is string => typeof r === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(r),
+    );
+    // A refusal that will not say why cannot be shown to anyone.
+    if (body.accepted === false && reasonCodes.length === 0) {
+      return c.json({ error: "a rejected candidate must carry at least one reason code" }, 400);
+    }
+
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    if (policy === null) return c.json({ error: "no active policy for this repository" }, 409);
+
+    // The identity fields come from the pinned record, which verifyVerifierIdentity
+    // has just proved the token matches. Taking them from the token instead would
+    // record whatever the caller presented.
+    const content = {
+      candidateTreeOid,
+      candidateSha,
+      baseSha,
+      pullRequestNumber: body.pullRequestNumber,
+      accepted: body.accepted,
+      policyDigest: policy.policyDigest,
+      suites,
+      reasonCodes,
+      workflowRef: pinned.workflowRef,
+      workflowSha: pinned.workflowSha,
+      runId: identity.runId,
+    };
+    const resultDigest = await candidateResultDigest(content);
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const stored = await queue.recordCandidateVerdict({
+      ...content,
+      resultDigest,
+      observedAt: new Date().toISOString(),
+    });
+    return c.json({ recorded: stored.status, resultDigest, candidateTreeOid }, 202);
+  });
+
+  /**
    * The gate the queue decides.
    *
    * Called by the pinned verification workflow, which checks out its own revision
@@ -549,6 +681,83 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     ) {
       const attemptId = held.activeAttemptId;
       const holder = held.entries.find((e) => e.entryId === entryId);
+
+      // Nothing may be certified until the integrated candidate has actually been
+      // run. Until this check existed the walk below used a constant in place of a
+      // verifier result, so the queue recorded a verified transition for an
+      // integration no suite had ever seen.
+      const policy = await deps.activePolicy(c.env, repositoryId);
+
+      // Under the fast profile the policy's own evidence is the proof on the head,
+      // so there is nothing further to establish. Under every other profile the
+      // queue is about to claim the integration itself was run, and that claim needs
+      // a result. A profile that makes the stronger claim with no pinned verifier
+      // cannot be satisfied by anything, so it refuses rather than quietly weakening.
+      const needsIntegratedRun = policy === null || requiresIntegratedRun(policy.securityProfile);
+      let verifiedResultDigest = `sha256:${"3".repeat(64)}`;
+      let candidatePolicyDigest = policy?.policyDigest ?? `sha256:${"0".repeat(64)}`;
+
+      if (needsIntegratedRun) {
+        if (policy === null) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: "NO_PINNED_VERIFIER",
+            detail: "this profile claims the integrated candidate was run, and nothing can establish that",
+            entryId,
+            operationId: null,
+          });
+        }
+        const stored = await queue.candidateVerdict(cand.candidateTreeOid);
+        const decision = await decideCandidate(stored, {
+          candidateTreeOid: cand.candidateTreeOid,
+          candidateSha: cand.candidateSha,
+          baseSha: cand.baseSha,
+          requiredSuites: policy.requiredSuites,
+          policyDigest: policy.policyDigest,
+          workflowRef: policy.verifierWorkflowRef,
+          workflowSha: policy.verifierWorkflowSha,
+        });
+
+        if (!decision.ok) {
+          // Nothing has run this candidate yet: ask the pinned verifier to, and tell
+          // the caller to come back. The caller waits rather than failing, because
+          // an untested candidate is a normal early state, not a refusal.
+          if (decision.code === "CANDIDATE_NOT_VERIFIED") {
+            await deps.dispatchCandidateVerification(c.env, repositoryId, {
+              baseRef,
+              pullRequestNumber: body.pullRequestNumber,
+              attemptId,
+              baseSha: cand.baseSha,
+              candidateSha: cand.candidateSha,
+              candidateTreeOid: cand.candidateTreeOid,
+            });
+            return c.json({
+              authorized: true,
+              enforcing: project.activationState !== "observe",
+              activationState: project.activationState,
+              reason: "HOLDS_TURN",
+              candidate: "verification-requested",
+              entryId,
+              operationId: null,
+              retryAfterSeconds: 20,
+            });
+          }
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: decision.code,
+            detail: decision.detail,
+            entryId,
+            operationId: null,
+          });
+        }
+        verifiedResultDigest = decision.resultDigest;
+        candidatePolicyDigest = policy.policyDigest;
+      }
+
       if (holder !== undefined && holder.state === "Active") {
         const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
         const prepared = await queue.candidatePrepared({
@@ -558,8 +767,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           headSha: body.headSha,
           candidateSha: cand.candidateSha,
           candidateTree: cand.candidateTreeOid,
-          policyDigest: `sha256:${"0".repeat(64)}`,
-          runner: "reuse",
+          policyDigest: candidatePolicyDigest,
+          runner: needsIntegratedRun ? "verified-candidate" : "reuse",
         });
         if (ok(prepared)) {
           await queue.assign({
@@ -583,7 +792,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
               attemptId,
               nonce,
               accepted: true,
-              resultDigest: `sha256:${"3".repeat(64)}`,
+              // The digest of the verifier's real result for this exact tree.
+              resultDigest: verifiedResultDigest,
             });
             await queue.mergeIntent({
               idempotencyKey: `authorize:intent:${attemptId}`,

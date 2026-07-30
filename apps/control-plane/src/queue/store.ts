@@ -25,6 +25,36 @@ import { initSchema, type SqlLike } from "./sql.js";
 
 export type DeadlineKind = "offer" | "execution" | "grace" | "merge-confirm" | "readiness";
 
+/** One suite the verifier ran against the integrated candidate. */
+export interface CandidateSuite {
+  readonly name: string;
+  readonly outcome: "passed" | "failed" | "skipped";
+  readonly durationMs: number;
+}
+
+/**
+ * A pinned verifier's verdict on one integrated candidate tree.
+ *
+ * `resultDigest` is computed from the verdict's own content, so a stored verdict
+ * that has been edited no longer matches its digest. The merge gate recomputes it
+ * rather than trusting the field.
+ */
+export interface CandidateVerdict {
+  readonly candidateTreeOid: string;
+  readonly candidateSha: string;
+  readonly baseSha: string;
+  readonly pullRequestNumber: number;
+  readonly accepted: boolean;
+  readonly resultDigest: string;
+  readonly policyDigest: string;
+  readonly suites: readonly CandidateSuite[];
+  readonly reasonCodes: readonly string[];
+  readonly workflowRef: string;
+  readonly workflowSha: string;
+  readonly runId: string;
+  readonly observedAt: string;
+}
+
 /** One recorded link of the transition chain, as it is durably stored. */
 export interface TransitionRow {
   readonly transitionSequence: number;
@@ -146,6 +176,77 @@ export class BranchQueueStore {
 
   queueEpoch(): number {
     return this.meta().queue_epoch;
+  }
+
+  /**
+   * Record what a verifier observed for one candidate tree.
+   *
+   * First writer wins. A second verdict for the same tree is either the same run
+   * retrying or a second run reaching the same place; either way the tree has
+   * already been judged, and letting a later call overwrite it would let a
+   * re-dispatched workflow turn a refusal into an acceptance.
+   */
+  recordCandidateVerdict(verdict: CandidateVerdict): { status: "applied" | "duplicate" } {
+    const existing = this.candidateVerdict(verdict.candidateTreeOid);
+    if (existing !== null) return { status: "duplicate" };
+    this.sql.exec(
+      `INSERT INTO candidate_verdicts (
+         candidate_tree_oid, candidate_sha, base_sha, pull_request_number, accepted,
+         result_digest, policy_digest, suites, reason_codes, workflow_ref, workflow_sha,
+         run_id, observed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (candidate_tree_oid) DO NOTHING`,
+      verdict.candidateTreeOid,
+      verdict.candidateSha,
+      verdict.baseSha,
+      verdict.pullRequestNumber,
+      verdict.accepted ? 1 : 0,
+      verdict.resultDigest,
+      verdict.policyDigest,
+      JSON.stringify(verdict.suites),
+      JSON.stringify(verdict.reasonCodes),
+      verdict.workflowRef,
+      verdict.workflowSha,
+      verdict.runId,
+      verdict.observedAt,
+    );
+    return { status: "applied" };
+  }
+
+  candidateVerdict(candidateTreeOid: string): CandidateVerdict | null {
+    const row = this.sql
+      .exec<{
+        candidate_tree_oid: string;
+        candidate_sha: string;
+        base_sha: string;
+        pull_request_number: number;
+        accepted: number;
+        result_digest: string;
+        policy_digest: string;
+        suites: string;
+        reason_codes: string;
+        workflow_ref: string;
+        workflow_sha: string;
+        run_id: string;
+        observed_at: string;
+      }>("SELECT * FROM candidate_verdicts WHERE candidate_tree_oid = ?", candidateTreeOid)
+      .toArray()[0];
+    if (row === undefined) return null;
+    return {
+      candidateTreeOid: row.candidate_tree_oid,
+      candidateSha: row.candidate_sha,
+      baseSha: row.base_sha,
+      pullRequestNumber: row.pull_request_number,
+      accepted: row.accepted === 1,
+      resultDigest: row.result_digest,
+      policyDigest: row.policy_digest,
+      suites: JSON.parse(row.suites) as CandidateSuite[],
+      reasonCodes: JSON.parse(row.reason_codes) as string[],
+      workflowRef: row.workflow_ref,
+      workflowSha: row.workflow_sha,
+      runId: row.run_id,
+      observedAt: row.observed_at,
+    };
   }
 
   /**
