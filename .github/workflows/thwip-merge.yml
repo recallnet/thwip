@@ -81,8 +81,6 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         if: steps.candidate.outputs.skip == '0'
-        with:
-          version: 10
 
       # Confirm the checkout is the tree the queue will be told about, before
       # running anything. Reporting on a different tree is worse than not running.

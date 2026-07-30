@@ -39,8 +39,6 @@ jobs:
           node-version: 24
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
-        with:
-          version: 10
 
       # Confirm the checkout is the tree the control plane pinned before running
       # anything. If it is not, the run would report on code the queue did not ask
