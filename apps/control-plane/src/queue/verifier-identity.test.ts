@@ -42,6 +42,47 @@ describe("verifyVerifierIdentity", () => {
       runId: "998877",
       runAttempt: 1,
       jti: "jti-1",
+      workflowSha: "5".repeat(40),
+    });
+  });
+
+  /**
+   * A repository_dispatch run executes the default branch's current head, so its
+   * workflow_sha changes with every merge. A repository that merges often cannot
+   * keep an exact pin current, and a stale pin refuses every verdict. Null means
+   * "any revision of this path on the default branch" — the pin that carries the
+   * weight, since only a merge can change it.
+   */
+  describe("an unpinned revision", () => {
+    const anyRevision = { ...pinned, workflowSha: null, reusableWorkflowSha: null };
+
+    it("accepts the pinned path at a revision the pin does not name", () => {
+      const later = claims({ workflow_sha: "9".repeat(40), job_workflow_sha: "9".repeat(40) });
+      expect(verifyVerifierIdentity(later, anyRevision)).toMatchObject({ ok: true });
+    });
+
+    it("records the revision it ran from even though it is not pinned", () => {
+      const later = claims({ workflow_sha: "9".repeat(40), job_workflow_sha: "9".repeat(40) });
+      expect(verifyVerifierIdentity(later, anyRevision)).toMatchObject({
+        workflowSha: "9".repeat(40),
+      });
+    });
+
+    it("still refuses another workflow path", () => {
+      const other = claims({ workflow_ref: "recallnet/thwip/.github/workflows/evil.yml@refs/heads/main" });
+      expect(verifyVerifierIdentity(other, anyRevision)).toMatchObject({ ok: false });
+    });
+
+    it("still refuses a run from outside the default branch", () => {
+      expect(verifyVerifierIdentity(claims({ ref: "refs/pull/7/merge" }), anyRevision)).toMatchObject({
+        ok: false,
+      });
+    });
+
+    it("still refuses a token carrying no revision at all", () => {
+      expect(verifyVerifierIdentity(claims({ workflow_sha: undefined }), anyRevision)).toMatchObject({
+        ok: false,
+      });
     });
   });
 
