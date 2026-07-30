@@ -285,14 +285,6 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     return this.withAlarm(({ commands }) => commands.cancel(input));
   }
 
-  /**
-   * Evidence about a tree, not a change of queue state, so it does not go through
-   * the reducer: no entry moves and no attempt advances. The merge gate reads it
-   * as an input the way it reads the head proof.
-   */
-  async recordCandidateVerdict(verdict: CandidateVerdict) {
-    return this.require().store.recordCandidateVerdict(verdict);
-  }
 
   /**
    * Everything the merge gate does to get a pull request holding the lane, in one
@@ -433,14 +425,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     });
   }
 
-  /** True only for the caller that should ask a verifier to run. */
-  async claimCandidateDispatch(candidateTreeOid: string, at: string, staleAfterMs: number) {
-    return this.require().store.claimCandidateDispatch(candidateTreeOid, at, staleAfterMs);
-  }
 
-  async candidateVerdict(candidateTreeOid: string): Promise<CandidateVerdict | null> {
-    return this.require().store.candidateVerdict(candidateTreeOid);
-  }
 
   /**
    * Classify a callback before acting on it. A callback for an older attempt is

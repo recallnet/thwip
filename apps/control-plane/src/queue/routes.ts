@@ -16,6 +16,11 @@ import {
 } from "./candidate-verdict.js";
 import { putEvidence, type R2Like } from "./evidence-store.js";
 import type { CandidateSuite } from "./store.js";
+import {
+  candidateVerdict as readCandidateVerdict,
+  claimCandidateDispatch,
+  recordCandidateVerdict,
+} from "./candidate-store.js";
 
 /**
  * The queue's HTTP surface (plan.md §37.1).
@@ -666,8 +671,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     };
     const resultDigest = await candidateResultDigest(content);
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const stored = await queue.recordCandidateVerdict({
+    // D1, not the object. A verdict is an immutable record about a tree; waking
+    // the coordination object to store or read one is what made the merge
+    // workflow's wait cost a Durable Object request every twenty seconds.
+    const stored = await recordCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, {
       ...content,
       resultDigest,
       observedAt: new Date().toISOString(),
@@ -685,6 +692,39 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     });
 
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
+  });
+
+  /**
+   * Has this candidate been verified yet?
+   *
+   * The merge workflow waits here rather than on the authorization endpoint. It
+   * used to poll authorization every twenty seconds, and each poll woke the
+   * Durable Object, which is the one resource with a hard daily cap. This reads a
+   * single D1 row and touches no object at all, so waiting is free and the object
+   * is only involved when there is something to decide.
+   */
+  app.get("/v1/queue/:repositoryId/candidate", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    const tree = c.req.query("tree");
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    if (typeof tree !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) {
+      return c.json({ error: "tree must be a lowercase hex object id" }, 400);
+    }
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+
+    const verdict = await readCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, tree);
+    if (verdict === null) return c.json({ verified: false, candidateTreeOid: tree });
+    return c.json({
+      verified: true,
+      accepted: verdict.accepted,
+      candidateTreeOid: tree,
+      resultDigest: verdict.resultDigest,
+      reasonCodes: verdict.reasonCodes,
+      suites: verdict.suites,
+      observedAt: verdict.observedAt,
+    });
   });
 
   /**
@@ -823,7 +863,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             operationId: null,
           });
         }
-        const stored = await queue.candidateVerdict(cand.candidateTreeOid);
+        const stored = await readCandidateVerdict(
+          c.env.DB as unknown as D1Like,
+          repositoryId,
+          baseRef,
+          cand.candidateTreeOid,
+        );
         const decision = await decideCandidate(stored, {
           candidateTreeOid: cand.candidateTreeOid,
           candidateSha: cand.candidateSha,
@@ -842,7 +887,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             // Only the first asker dispatches. The caller polls this endpoint while
             // it waits, and dispatching on every poll once cost one candidate four
             // full CI runs.
-            const mine = await queue.claimCandidateDispatch(
+            const mine = await claimCandidateDispatch(
+              c.env.DB as unknown as D1Like,
+              repositoryId,
+              baseRef,
               cand.candidateTreeOid,
               new Date().toISOString(),
               CANDIDATE_DISPATCH_STALE_MS,
