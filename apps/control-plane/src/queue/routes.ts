@@ -489,6 +489,98 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
+   * Operator reconciliation (plan.md §30.4, §68.1).
+   *
+   * An attempt whose merge outcome is unknown holds the lane until something
+   * resolves it, and only two things can: a confirmation, or a person who has
+   * looked. This is the second. It requires the operator to say what they observed
+   * and why, because declaring a merge did not happen when it did would let the
+   * queue certify the same integration twice.
+   */
+  app.post("/v1/queue/:repositoryId/reconcile", async (c) => {
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      observed?: "merged" | "not-merged";
+      reason?: string;
+    };
+    if (body.observed !== "not-merged") {
+      // Only the negative resolution is offered here. A merge that did happen is
+      // confirmed from its own facts, never from an assertion.
+      return c.json({ error: 'observed must be "not-merged"; a merge is confirmed from its facts' }, 400);
+    }
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const snapshot = await queue.snapshot();
+    const attemptId = snapshot.activeAttemptId;
+    if (attemptId === null) return c.json({ error: "no attempt holds the lane" }, 409);
+
+    const resolved = await queue.confirmNotMerged({
+      idempotencyKey: `reconcile:${attemptId}:${body.reason.trim().slice(0, 32)}`,
+      attemptId,
+      operationId: `merge_${attemptId}`,
+    });
+    return c.json({
+      resolved: resolved.status,
+      attemptId,
+      actor: who.principalId,
+      reason: body.reason.trim(),
+    });
+  });
+
+  /**
+   * Report that an authorized merge definitely did not happen.
+   *
+   * Without this the lane stays held: the operation was persisted before the write,
+   * the write was refused, and the queue is left reconciling until an operator
+   * intervenes. GitHub refusing outright is knowledge, not ambiguity, so the caller
+   * that saw the refusal is the right one to resolve it.
+   */
+  app.post("/v1/queue/:repositoryId/not-merged", async (c) => {
+    const claims = await deps.verifyOidc(c, c.env);
+    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+    if (String(claims["repository_id"] ?? "") !== repositoryId) {
+      return c.json({ error: "token is for another repository" }, 403);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      baseRef?: string;
+      attemptId?: string;
+      operationId?: string;
+      detail?: string;
+    };
+    const baseRef = branchRef(body.baseRef);
+    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    if (typeof body.attemptId !== "string" || typeof body.operationId !== "string") {
+      return c.json({ error: "attemptId and operationId required" }, 400);
+    }
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    // An outcome already in doubt has to be declared unknown before it can be
+    // resolved, which is the reducer refusing to skip reconciliation.
+    await queue.mergeOutcomeUnknown({
+      idempotencyKey: `not-merged:unknown:${body.attemptId}`,
+      attemptId: body.attemptId,
+    });
+    const resolved = await queue.confirmNotMerged({
+      idempotencyKey: `not-merged:${body.attemptId}`,
+      attemptId: body.attemptId,
+      operationId: body.operationId,
+    });
+    return c.json({ resolved: resolved.status, detail: body.detail ?? null });
+  });
+
+  /**
    * Report the merge the queue authorized. The write happens in CI because the App
    * cannot yet merge, so the queue must be told what landed — and it refuses
    * anything that is not the candidate it authorized, which is the guard that makes

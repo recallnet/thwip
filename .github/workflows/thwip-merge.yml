@@ -105,8 +105,23 @@ jobs:
           mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
           echo "merge: http $mcode"
           if [ "$mcode" != "200" ]; then
-            # Never retried here. An unclear result belongs to reconciliation.
-            echo "::error::merge returned $mcode: $(printf '%s' "$payload" | jq -r '.message // "no message"')"
+            reason=$(printf '%s' "$payload" | jq -r '.message // "no message"')
+            case "$mcode" in
+              405|409|422)
+                # A definite refusal. Tell the queue so the lane frees now rather
+                # than waiting for a deadline and then needing an operator.
+                curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
+                  -H "content-type: application/json" \
+                  -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" --arg detail "$mcode $reason" \
+                        '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
+                  "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+                echo "::error::GitHub refused the merge ($mcode: $reason); the queue has released the lane"
+                ;;
+              *)
+                # Anything unclear is left to reconciliation, never retried here.
+                echo "::error::merge outcome unclear ($mcode: $reason); leaving it to reconciliation"
+                ;;
+            esac
             exit 1
           fi
 
