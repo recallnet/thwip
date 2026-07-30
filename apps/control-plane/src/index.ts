@@ -1441,13 +1441,15 @@ app.route(
       )
         .bind(repositoryId)
         .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return;
+      if (project === null || project.installation_id === null) {
+        return { ok: false as const, status: 0, detail: "no installation for this repository" };
+      }
       const token = await installationToken(env, project.installation_id);
       // repository_dispatch runs the default branch's copy of the workflow. That is
       // the whole reason the candidate verifier is dispatched rather than triggered
       // by the pull request: a pull request can edit its own workflow file, and a
       // verifier a contributor can edit verifies nothing.
-      await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
+      const res = await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${token}`,
@@ -1457,6 +1459,9 @@ app.route(
         },
         body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
       });
+      if (res.status === 204) return { ok: true as const };
+      const detail = (await res.text().catch(() => "")).slice(0, 300);
+      return { ok: false as const, status: res.status, detail };
     },
   }) as never,
 );
