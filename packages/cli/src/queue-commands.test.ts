@@ -35,6 +35,11 @@ describe("shape", () => {
     if (!result.ok) expect(result.message).toMatch(/unknown flag --forse/);
   });
 
+  it("rejects unexpected positional and short-flag arguments", () => {
+    expect(planQueueCommand(["status", ...REPO, "surprise"])).toMatchObject({ ok: false });
+    expect(planQueueCommand(["status", ...REPO, "-x"])).toMatchObject({ ok: false });
+  });
+
   it("requires a well-formed repository", () => {
     for (const repo of ["thwip", "recallnet/", "/thwip", "recallnet/thwip/extra", ""]) {
       expect(planQueueCommand(["status", "--repo", repo]), repo).toMatchObject({ ok: false });
