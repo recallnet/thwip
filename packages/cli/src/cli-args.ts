@@ -38,7 +38,8 @@ const HELP_FLAGS = new Set(["--help", "-h"]);
 const HELP = `thwip — verified local CI (https://thwip.recall.net)
 
 Run CI where the code lives, sign a proof of the exact Git tree, and let a
-protected GitHub check verify it. Configuration lives in thwip.yaml.
+protected GitHub check verify it. Repositories inherit organization defaults;
+an optional thwip.yaml overrides them after it reaches the default branch.
 
 USAGE
   thwip <command> [options]
@@ -64,7 +65,7 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Run approved suites, attach a proof, push, and open or update the pull request.\n`,
   init:
     `Usage: thwip init --required "lint,typecheck,test" [--profile PROFILE] [--sign-commits]\n\n` +
-    `Create thwip.yaml and optionally configure SSH commit signing.\n`,
+    `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
   verify: `Usage: thwip verify [--json]\n\nParse and print the proof carried by HEAD.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,

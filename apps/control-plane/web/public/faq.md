@@ -46,7 +46,8 @@ everywhere else.
 - **remote**: the pipeline runs in GitHub for every required check
   (conventional remote CI).
 
-Pick a profile per project in the dashboard or in `thwip.yaml`.
+Pick organization defaults in the dashboard; use `thwip.yaml` only where a
+repository needs to override them.
 
 ## What does a proof actually prove?
 
@@ -102,9 +103,22 @@ is verified again.
 
 ## Where do project settings live?
 
-In `thwip.yaml`, committed to the repository: suites, security profile, and
-policy knobs. The dashboard mirrors it. A pull request can never approve its
-own policy change.
+Organization proof defaults live in the dashboard. A repository may commit a
+partial `thwip.yaml` whose fields override those defaults after the file
+reaches the protected default branch. Candidate pull-request configuration is
+never used to approve itself.
+
+## Who publishes the required proof check?
+
+The thwip GitHub App evaluates the exact pull-request head or merge-group
+members and publishes the `thwip` check directly. New and migrated projects
+start with a distinct `thwip / proof (observe)` check. After that check passes,
+an administrator can enforce the App check and pin the required context to the
+thwip App without an unprotected cutover.
+
+Every evaluation produces a service-signed audit record containing the exact
+subject, base, policy, verifier version, signer outcomes, and GitHub check-run
+id. A rerun creates another record instead of overwriting history.
 
 ## What data does the control plane hold?
 

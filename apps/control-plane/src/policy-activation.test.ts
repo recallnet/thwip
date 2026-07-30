@@ -87,7 +87,8 @@ function fixture(): { database: Database.Database; env: Env } {
       id TEXT PRIMARY KEY,
       github_org_id TEXT NOT NULL UNIQUE,
       github_login TEXT NOT NULL,
-      installation_id TEXT
+      installation_id TEXT,
+      proof_defaults_json TEXT
     );
     CREATE TABLE projects (
       id TEXT PRIMARY KEY,
@@ -108,7 +109,7 @@ function fixture(): { database: Database.Database; env: Env } {
       activated_at TEXT,
       source_ref TEXT,
       source_sha TEXT,
-      UNIQUE (project_id, version)
+      config_source TEXT NOT NULL DEFAULT 'repository'
     );
     INSERT INTO organizations (id, github_org_id, github_login, installation_id)
     VALUES ('org_1', '10', 'recallnet', 'installation_1');
@@ -269,6 +270,107 @@ suites:
       { digest: expectedFirst.policyDigest, status: "retired" },
       { digest: expectedSecond.policyDigest, status: "active" },
     ]);
+  });
+
+  it("activates organization defaults and lets canonical repository yaml override them", async () => {
+    const { database, env } = fixture();
+    const sha1 = "c".repeat(40);
+    const sha2 = "d".repeat(40);
+    const sha3 = "e".repeat(40);
+    const defaults = {
+      version: 1,
+      profile: "fast",
+      required: ["lint", "test"],
+      suites: { lint: "npm run lint", test: "npm test" },
+      policy: { minimum_permission: "maintain", allow_author_as_signer: true },
+    };
+    database
+      .prepare("UPDATE organizations SET proof_defaults_json = ? WHERE id = 'org_1'")
+      .run(JSON.stringify(defaults));
+    database.prepare("UPDATE projects SET enabled = 1 WHERE id = 'project_1'").run();
+
+    const repositoryOverride =
+      "version: 2\nprofile: audited\nrequired: [test]\npolicy:\n  allow_author_as_signer: false\n";
+    const snapshots = new Map<string, RepositorySnapshot>([
+      [sha1, new MemorySnapshot({ "package-lock.json": "{}" })],
+      [
+        sha2,
+        new MemorySnapshot({
+          "package-lock.json": "{}",
+          "thwip.yaml": repositoryOverride,
+        }),
+      ],
+      [sha3, new MemorySnapshot({ "package-lock.json": "{}", "thwip.yaml": repositoryOverride })],
+    ]);
+    let currentSha = sha1;
+    const dependencies: PolicyActivationDependencies = {
+      installationToken: async () => "token",
+      currentCommitSha: async () => currentSha,
+      loadSnapshot: async (_token, _repository, sha) => snapshots.get(sha)!,
+    };
+
+    const global = await activatePolicyFromDefaultBranchPush(
+      env,
+      { repositoryId: "20", ref: "refs/heads/main", after: sha1 },
+      dependencies,
+    );
+    expect(global.status).toBe("activated");
+    expect(database.prepare("SELECT config_source FROM policy_bundles WHERE status = 'active'").get()).toEqual({
+      config_source: "global",
+    });
+    expect(
+      JSON.parse(
+        (
+          database.prepare("SELECT canonical_json FROM policy_bundles WHERE status = 'active'").get() as {
+            canonical_json: string;
+          }
+        ).canonical_json,
+      ),
+    ).toMatchObject({
+      securityProfile: "fast",
+      minimumPermission: "maintain",
+      pipeline: { requiredSuites: ["lint", "test"] },
+    });
+
+    currentSha = sha2;
+    const overridden = await activatePolicyFromDefaultBranchPush(
+      env,
+      { repositoryId: "20", ref: "refs/heads/main", after: sha2 },
+      dependencies,
+    );
+    expect(overridden.status).toBe("activated");
+    expect(database.prepare("SELECT config_source FROM policy_bundles WHERE status = 'active'").get()).toEqual({
+      config_source: "repository-override",
+    });
+    expect(
+      JSON.parse(
+        (
+          database.prepare("SELECT canonical_json FROM policy_bundles WHERE status = 'active'").get() as {
+            canonical_json: string;
+          }
+        ).canonical_json,
+      ),
+    ).toMatchObject({
+      version: 2,
+      securityProfile: "audited",
+      minimumPermission: "maintain",
+      allowAuthorAsSigner: false,
+      pipeline: { requiredSuites: ["test"] },
+    });
+
+    database
+      .prepare("UPDATE organizations SET proof_defaults_json = ? WHERE id = 'org_1'")
+      .run(JSON.stringify({ ...defaults, policy: { ...defaults.policy, minimum_permission: "admin" } }));
+    currentSha = sha3;
+    const layeredUpdate = await activatePolicyFromDefaultBranchPush(
+      env,
+      { repositoryId: "20", ref: "refs/heads/main", after: sha3 },
+      dependencies,
+    );
+    expect(layeredUpdate).toMatchObject({ status: "activated", version: 2 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM policy_bundles WHERE version = 2").get()).toEqual({
+      count: 2,
+    });
   });
 
   it("ignores a stale delivery instead of rolling policy back", async () => {
