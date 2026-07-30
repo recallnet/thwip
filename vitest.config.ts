@@ -10,7 +10,7 @@ import { defineConfig } from "vitest/config";
  * suite passed anyway. A test that reads a stale artifact is not a test.
  */
 const workspaceSource = Object.fromEntries(
-  ["action", "cli", "prompts", "protocol", "queue-domain", "queue-protocol", "sshsig", "verifier"].map(
+  ["action", "cli", "policy", "prompts", "protocol", "queue-domain", "queue-protocol", "sshsig", "verifier"].map(
     (name) => [`@thwip/${name}`, new URL(`./packages/${name}/src/index.ts`, import.meta.url).pathname],
   ),
 );
