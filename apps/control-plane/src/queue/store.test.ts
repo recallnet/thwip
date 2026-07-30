@@ -529,3 +529,49 @@ function dump(store: BranchQueueStore): unknown {
     transitions: state.transitions,
   };
 }
+
+/**
+ * Four full CI runs once verified one candidate, because the merge gate asked
+ * whether a verdict existed every twenty seconds and dispatched a verifier every
+ * time the answer was no. Three of those runs were wasted, and the last two to
+ * report were told their verdict was a duplicate.
+ */
+describe("claiming a candidate dispatch", () => {
+  const TREE = "4".repeat(40);
+  const t = (minutes: number) => new Date(Date.UTC(2026, 6, 30, 16, minutes, 0)).toISOString();
+  const STALE_MS = 15 * 60_000;
+
+  it("lets the first caller dispatch", () => {
+    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    expect(store.claimCandidateDispatch(TREE, t(0), STALE_MS)).toBe(true);
+  });
+
+  it("refuses a second caller while the first run may still be going", () => {
+    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    store.claimCandidateDispatch(TREE, t(0), STALE_MS);
+    for (const minute of [0, 1, 5, 14]) {
+      expect(store.claimCandidateDispatch(TREE, t(minute), STALE_MS), `minute ${minute}`).toBe(false);
+    }
+  });
+
+  it("dispatches again once the first attempt is old enough to have died", () => {
+    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    store.claimCandidateDispatch(TREE, t(0), STALE_MS);
+    expect(store.claimCandidateDispatch(TREE, t(15), STALE_MS)).toBe(true);
+    // and the clock restarts from the new attempt
+    expect(store.claimCandidateDispatch(TREE, t(16), STALE_MS)).toBe(false);
+  });
+
+  it("treats a different candidate as its own claim", () => {
+    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    store.claimCandidateDispatch(TREE, t(0), STALE_MS);
+    expect(store.claimCandidateDispatch("9".repeat(40), t(0), STALE_MS)).toBe(true);
+  });
+
+  it("survives eviction, so a cold object does not re-dispatch", () => {
+    const sql = sqlite();
+    BranchQueueStore.open(sql, IDENTITY).claimCandidateDispatch(TREE, t(0), STALE_MS);
+    const cold = BranchQueueStore.open(sql, IDENTITY);
+    expect(cold.claimCandidateDispatch(TREE, t(1), STALE_MS)).toBe(false);
+  });
+});
