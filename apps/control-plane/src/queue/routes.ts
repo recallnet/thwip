@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { queueKey } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
+import { projectQueueState, type D1Like } from "./projection.js";
 
 /**
  * The queue's HTTP surface (plan.md §37.1).
@@ -41,6 +42,57 @@ function branchRef(value: string | undefined): string | null {
   return value;
 }
 
+/**
+ * Mirror the object's state into D1 after a mutation.
+ *
+ * The projection exists so organization-wide reads and exports do not have to touch
+ * every Durable Object, and it was written and tested but never called — which meant
+ * the tables stayed empty and the only way to see queue state was the object itself.
+ * Failure here is deliberately swallowed: D1 lagging is expected, and a projection
+ * error must never fail the command that already succeeded.
+ */
+async function project(
+  env: QueueRouteEnv,
+  repositoryId: string,
+  baseRef: string,
+  queue: BranchQueue,
+): Promise<void> {
+  try {
+    const snapshot = await queue.snapshot();
+    await projectQueueState(env.DB as unknown as D1Like, {
+      repositoryId,
+      baseRef,
+      queueEpoch: 0,
+      generation: snapshot.generation,
+      entries: snapshot.entries.map((e) => ({
+        entryId: e.entryId,
+        pullRequestNumber: e.pullRequestNumber,
+        sponsorPrincipalId: e.sponsorPrincipalId,
+        state: e.state,
+        primaryReason: e.primaryReason,
+        fairnessOrdinal: e.fairnessOrdinal,
+      })),
+      transitions:
+        snapshot.chainHead === null
+          ? []
+          : [
+              {
+                transitionSequence: snapshot.chainHead.sequence,
+                kind: "verified",
+                digest: snapshot.chainHead.digest,
+                priorDigest: null,
+                baseSha: snapshot.baseSha ?? "",
+                attemptId: snapshot.activeAttemptId,
+                witnessCount: 0,
+                observedAt: new Date().toISOString(),
+              },
+            ],
+    });
+  } catch {
+    /* the projection may lag; the command already succeeded */
+  }
+}
+
 async function resolveQueue(
   env: QueueRouteEnv,
   repositoryId: string,
@@ -50,6 +102,25 @@ async function resolveQueue(
   const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key)) as unknown as BranchQueue;
   await stub.bind({ queueKey: key, repositoryId, baseRef });
   return stub;
+}
+
+/**
+ * Turn a thrown error into something a caller can act on.
+ *
+ * Every one of these used to surface as "Internal Server Error", and diagnosing a
+ * single storage constraint failure cost several round trips through a worker tail.
+ * The message is safe to return: it names an invariant or a table, never user data.
+ */
+function failure(error: unknown): { code: string; detail: string; status: 409 | 500 } {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/invariant violation/i.test(detail)) return { code: "QUEUE_INVARIANT_VIOLATION", detail, status: 409 };
+  if (/UNIQUE constraint|SQLITE_CONSTRAINT/i.test(detail)) {
+    return { code: "QUEUE_STORAGE_CONFLICT", detail, status: 409 };
+  }
+  if (/has not been bound|queue key does not match/i.test(detail)) {
+    return { code: "QUEUE_NOT_BOUND", detail, status: 409 };
+  }
+  return { code: "QUEUE_COMMAND_FAILED", detail, status: 500 };
 }
 
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
@@ -65,8 +136,55 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  /** Read a commit's tree and parents from GitHub, for confirming from facts. */
+  commitFacts(
+    env: TEnv,
+    repositoryId: string,
+    sha: string,
+  ): Promise<{ treeOid: string; parentShas: string[] } | null>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
+
+  // One place where a thrown error becomes a named one.
+  app.onError((error, c) => {
+    const { code, detail, status } = failure(error);
+    return c.json({ error: detail, code }, status);
+  });
+
+  /**
+   * One call that explains the queue. Added because every diagnosis previously took
+   * a state read, a workflow-log grep, and a guess.
+   */
+  app.get("/v1/queue/:repositoryId/explain", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const report = await queue.diagnose(Number(c.req.query("events") ?? 25));
+
+    // Say why each entry is not schedulable, rather than leaving the reader to work
+    // it out from a state name and a timestamp.
+    const now = new Date().toISOString();
+    const why = report.snapshot.entries.map((e) => ({
+      pullRequestNumber: e.pullRequestNumber,
+      state: e.state,
+      blockedBy:
+        e.state === "Merged" || e.state === "Cancelled"
+          ? null
+          : e.cooldownUntil !== null && e.cooldownUntil > now
+            ? `cooling down until ${e.cooldownUntil}`
+            : !e.schedulerEligible
+              ? (e.primaryReason ?? "not schedulable")
+              : report.snapshot.activeAttemptId !== null && e.state === "Ready"
+                ? "another entry holds the lane"
+                : (e.primaryReason ?? null),
+    }));
+
+    return c.json({ ...report, why, now });
+  });
 
   /** Read the queue. Safe for any authenticated member of the repository. */
   app.get("/v1/queue/:repositoryId", async (c) => {
@@ -124,6 +242,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       sponsorGithubUserId,
       headSha: body.headSha,
     });
+    await project(c.env, repositoryId, baseRef, queue);
     return c.json({ entryId, result }, result.status === "rejected" ? 409 : 202);
   });
 
@@ -144,6 +263,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       actorPrincipalId: who.principalId,
       reason,
     });
+    await project(c.env, repositoryId, baseRef, queue);
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -164,6 +284,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`),
       decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     });
+    await project(c.env, repositoryId, baseRef, queue);
     return c.json({ result });
   });
 
@@ -205,6 +326,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       actorPrincipalId: who.principalId,
     });
     // A refusal here means a rebaseline is still required after external movement.
+    await project(c.env, repositoryId, baseRef, queue);
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -524,14 +646,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
 
     const body = (await c.req.json().catch(() => ({}))) as {
-      observed?: "merged" | "not-merged";
+      observed?: "merged" | "not-merged" | "merged-outside-the-turn";
       reason?: string;
+      /** Required with observed=merged; the facts are read from GitHub, not taken. */
+      mergeSha?: string;
     };
-    if (body.observed !== "not-merged") {
-      // Only the negative resolution is offered here. A merge that did happen is
-      // confirmed from its own facts, never from an assertion.
-      return c.json({ error: 'observed must be "not-merged"; a merge is confirmed from its facts' }, 400);
-    }
     if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
       return c.json({ error: "a reason of at least 8 characters is required" }, 400);
     }
@@ -540,6 +659,88 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const snapshot = await queue.snapshot();
     const attemptId = snapshot.activeAttemptId;
     if (attemptId === null) return c.json({ error: "no attempt holds the lane" }, 409);
+
+    if (body.observed === "merged") {
+      // Confirmed from the commit itself, never from the operator's word. The
+      // reducer then refuses any tree that is not the candidate it authorized, so
+      // asserting a merge that did not happen cannot certify anything.
+      if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+        return c.json({ error: "mergeSha required to confirm a merge" }, 400);
+      }
+      const facts = await deps.commitFacts(c.env, repositoryId, body.mergeSha);
+      if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+
+      const confirmed = await queue.confirmMerge({
+        idempotencyKey: `reconcile:merged:${attemptId}`,
+        attemptId,
+        operationId: `merge_${attemptId}`,
+        mergeSha: body.mergeSha,
+        mergeTree: facts.treeOid,
+        parentShas: facts.parentShas,
+      });
+      if (confirmed.status === "rejected") {
+        return c.json({ error: confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+      }
+
+      const after = await queue.snapshot();
+      const sequence = (after.chainHead?.sequence ?? 0) + 1;
+      const transition = await queue.recordTransition({
+        idempotencyKey: `reconcile:transition:${attemptId}`,
+        kind: "verified",
+        transitionSequence: sequence,
+        priorDigest: after.chainHead?.digest ?? null,
+        digest: `sha256:${body.mergeSha.padEnd(64, "0").slice(0, 64)}`,
+        baseSha: body.mergeSha,
+        attemptId,
+        witnessPrincipalIds: [who.principalId],
+      });
+      return c.json({
+        resolved: confirmed.status,
+        transition: transition.status,
+        sequence,
+        attemptId,
+        actor: who.principalId,
+        reason: body.reason.trim(),
+      });
+    }
+
+    if (body.observed === "merged-outside-the-turn") {
+      // A merge that landed while an attempt was held but had not requested a write.
+      // The queue cannot certify it: it never pinned a candidate for it. So the
+      // attempt ends and the movement is recorded as external, which is what it was
+      // from the chain's point of view — honest rather than flattering.
+      if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+        return c.json({ error: "mergeSha required" }, 400);
+      }
+      await queue.terminateAttempt({
+        idempotencyKey: `outside:${attemptId}`,
+        attemptId,
+        outcome: "ADMIN_CANCELLED",
+      });
+      const after = await queue.snapshot();
+      const sequence = (after.chainHead?.sequence ?? 0) + 1;
+      const transition = await queue.recordTransition({
+        idempotencyKey: `outside:transition:${attemptId}`,
+        kind: "external",
+        transitionSequence: sequence,
+        priorDigest: after.chainHead?.digest ?? null,
+        digest: `sha256:${body.mergeSha.padEnd(64, "0").slice(0, 64)}`,
+        baseSha: body.mergeSha,
+        attemptId: null,
+        witnessPrincipalIds: [],
+      });
+      return c.json({
+        resolved: "external",
+        transition: transition.status,
+        sequence,
+        attemptId,
+        note: "recorded as external: the queue held a turn but never pinned a candidate for this merge",
+      });
+    }
+
+    if (body.observed !== "not-merged") {
+      return c.json({ error: 'observed must be "merged", "not-merged", or "merged-outside-the-turn"' }, 400);
+    }
 
     const resolved = await queue.confirmNotMerged({
       idempotencyKey: `reconcile:${attemptId}:${body.reason.trim().slice(0, 32)}`,
@@ -661,6 +862,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
     });
 
+    await project(c.env, repositoryId, baseRef, queue);
     return c.json({ merged: true, confirmed: confirmed.status, transition: transition.status, sequence });
   });
 

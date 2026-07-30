@@ -397,7 +397,10 @@ COMMANDS
        [--no-queue]        the pull request, and take a fair queue turn.
        [--json-events]     --wait follows it through to the merge; Ctrl-C
                            detaches safely and keeps your place in line.
-  queue <status|list|join|leave|pause|resume|rebaseline|eject|bypass|doctor>
+  queue explain            Why the queue is doing what it is doing: lane holder,
+                           what each entry waits on, deadlines, recent events.
+  queue <status|list|join|leave|pause|resume|rebaseline|eject|bypass
+         |reconcile|doctor>
                            Read or operate the branch queue. Mutations need
                            --reason; bypass needs --confirm owner/name#pr.
   init --required "a,b,.."  Write thwip.yaml for this repository. Suite ids

@@ -1319,6 +1319,12 @@ app.route(
   "/",
   queueRoutes<Env>({
     async authenticate(c: { req: { raw: Request } }, env: Env) {
+      // The operator token authenticates too. Every administrative action needing a
+      // browser session was a reason to leave the terminal, and an operator fixing a
+      // stuck lane at 3am should not have to.
+      if (requireAdmin(env, c.req.raw)) {
+        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true };
+      }
       const viewer = await resolveViewer(env, c.req.raw);
       if (viewer === null) return { ok: false as const, status: 401 as const };
       if (viewer.principalId === null) return { ok: false as const, status: 403 as const };
@@ -1347,6 +1353,30 @@ app.route(
         .bind(githubUserId)
         .first<{ id: string }>();
       return row?.id ?? null;
+    },
+    async commitFacts(env: Env, repositoryId: string, sha: string) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const res = await fetch(`https://api.github.com/repos/${project.github_name}/git/commits/${sha}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
+        },
+      });
+      if (!res.ok) return null;
+      const commit = (await res.json()) as { tree?: { sha?: string }; parents?: Array<{ sha?: string }> };
+      const treeOid = commit.tree?.sha;
+      if (typeof treeOid !== "string") return null;
+      return {
+        treeOid,
+        parentShas: (commit.parents ?? []).map((p) => p.sha).filter((v): v is string => typeof v === "string"),
+      };
     },
     async pinnedVerifier(env: Env, repositoryId: string) {
       const row = await env.DB.prepare(
