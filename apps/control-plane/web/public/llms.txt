@@ -55,6 +55,9 @@ Node 22 or newer.
 
 - Membership and permissions come from the GitHub organization; there are no
   invitations. Verification checks current GitHub permission.
-- Project settings live in thwip.yaml committed to the repository.
+- Project settings inherit organization defaults from the dashboard. A
+  committed thwip.yaml can partially override them after protected merge.
+- The thwip GitHub App evaluates exact PR and merge-group subjects and owns the
+  required proof check; observe mode makes workflow-to-App migration safe.
 - Plans: Free (3 projects, 5 signers), Pro $5/month or $50/year (15 projects,
   25 signers). Both verify identically.

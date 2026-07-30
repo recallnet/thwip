@@ -196,7 +196,8 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
             and policy, so the proof also carries a trusted issuance window. <b>Audited</b>: fresh, plus a random or
             risk-triggered independent rerun of the pipeline in GitHub Actions to deter false assertions.{" "}
             <b>Remote</b>: the pipeline runs in GitHub for every required check, which is conventional remote CI.
-            Pick a profile per project in the dashboard or in <code>thwip.yaml</code>.
+            Pick organization defaults in the dashboard; use <code>thwip.yaml</code> only where a repository needs
+            to override them.
           </dd>
           <dt>What does a proof actually prove?</dt>
           <dd>
@@ -233,9 +234,16 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           </dd>
           <dt>Where do project settings live?</dt>
           <dd>
-            In <code>thwip.yaml</code>, committed to the repository: suites, security profile, and policy knobs. The
-            dashboard mirrors it. Policy changes activate through review, and a pull request can never approve its
-            own policy change.
+            Organization proof defaults live in the dashboard. A repository may commit a partial{" "}
+            <code>thwip.yaml</code> whose fields override those defaults after the file reaches the protected
+            default branch. Candidate pull-request configuration is never used to approve itself.
+          </dd>
+          <dt>Who publishes the required proof check?</dt>
+          <dd>
+            The thwip GitHub App evaluates the exact pull-request head or merge-group members and publishes the{" "}
+            <code>thwip</code> check directly. Projects start with a distinct{" "}
+            <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. Every evaluation has
+            a service-signed, immutable audit record.
           </dd>
           <dt>What data does the control plane hold?</dt>
           <dd>
@@ -583,13 +591,92 @@ interface ProjectRow {
   github_name: string;
   default_branch: string;
   enabled: number;
-  activation_state: "disabled" | "awaiting_first_merge" | "active";
+  activation_state: "disabled" | "awaiting_policy" | "active";
   active_policy_digest: string | null;
   policy_version: number | null;
   policy_profile: string | null;
+  config_source: "global" | "repository-override" | "repository" | null;
+  proof_check_mode: "observe" | "enforced";
   collaborators: number;
   last_outcome: string | null;
   last_observed_at: string | null;
+}
+
+function ProofDefaults({ canEdit }: { canEdit: boolean }) {
+  const { data, error, reload } = useFetch<{ defaults: Record<string, unknown> | null }>(
+    "/v1/dashboard/proof-defaults",
+  );
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    setText(
+      JSON.stringify(
+        data.defaults ?? {
+          version: 1,
+          profile: "fast",
+          required: ["lint", "typecheck", "test"],
+        },
+        null,
+        2,
+      ),
+    );
+  }, [data]);
+  const save = async (defaults: Record<string, unknown> | null) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api("/v1/dashboard/proof-defaults", {
+        method: "PUT",
+        body: JSON.stringify({ defaults }),
+      });
+      reload();
+    } catch (cause) {
+      setSaveError((cause as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Panel
+      title="Organization proof defaults"
+      meta="repositories inherit these settings; committed thwip.yaml fields override them after protected merge"
+    >
+      {error && <p className="thwip-error">{error}</p>}
+      <textarea
+        aria-label="Organization proof defaults"
+        value={text}
+        disabled={!canEdit || saving}
+        onChange={(event) => setText(event.target.value)}
+        rows={9}
+        style={{ width: "100%", fontFamily: "var(--gp-mono, monospace)", fontSize: "0.8rem" }}
+      />
+      {saveError && <p className="thwip-error">{saveError}</p>}
+      {canEdit ? (
+        <p>
+          <button
+            className="gp-btn gp-btn--sm"
+            disabled={saving}
+            onClick={() => {
+              try {
+                void save(JSON.parse(text) as Record<string, unknown>);
+              } catch {
+                setSaveError("defaults must be valid JSON");
+              }
+            }}
+          >
+            Save defaults
+          </button>{" "}
+          <button className="gp-btn gp-btn--sm" disabled={saving} onClick={() => void save(null)}>
+            Clear defaults
+          </button>
+        </p>
+      ) : (
+        <p className="gp-panel__meta">Only a GitHub organization owner can change these defaults.</p>
+      )}
+    </Panel>
+  );
 }
 
 function Projects({ me }: { me: Me }) {
@@ -611,10 +698,27 @@ function Projects({ me }: { me: Me }) {
       setBusy(null);
     }
   };
+  const setProofMode = async (p: ProjectRow, mode: "observe" | "enforced") => {
+    setBusy(p.id);
+    setActionError(null);
+    try {
+      await api(`/v1/dashboard/projects/${p.id}/proof-mode`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      });
+      reload();
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
+    <>
+      <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
+      <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
       {installUrl && (
         <div className="thwip-add-repos">
           <a className="gp-btn gp-btn--sm" href={installUrl} target="_blank" rel="noreferrer">
@@ -651,8 +755,8 @@ function Projects({ me }: { me: Me }) {
               <td>
                 {p.activation_state === "active" ? (
                   <span className="gp-chip is-active">enabled · active</span>
-                ) : p.activation_state === "awaiting_first_merge" ? (
-                  <span className="gp-chip is-active">enabled · awaiting first merge</span>
+                ) : p.activation_state === "awaiting_policy" ? (
+                  <span className="gp-chip is-active">enabled · awaiting policy</span>
                 ) : (
                   <span className="gp-chip">imported · disabled</span>
                 )}
@@ -661,12 +765,18 @@ function Projects({ me }: { me: Me }) {
                 {p.policy_version ? (
                   <>
                     v{p.policy_version} · {p.policy_profile ?? "fast"}
-                    <div className="gp-panel__meta">from thwip.yaml</div>
+                    <div className="gp-panel__meta">
+                      {p.config_source === "global"
+                        ? "from organization defaults"
+                        : p.config_source === "repository-override"
+                          ? "repository override over organization defaults"
+                          : "from thwip.yaml"}
+                    </div>
                   </>
                 ) : (
                   <span className="gp-panel__meta">
-                    {p.activation_state === "awaiting_first_merge"
-                      ? `activates from canonical ${p.default_branch}`
+                    {p.activation_state === "awaiting_policy"
+                      ? `add organization defaults or activate from canonical ${p.default_branch}`
                       : "none activated"}
                   </span>
                 )}
@@ -699,13 +809,26 @@ function Projects({ me }: { me: Me }) {
                   onClick={() => void act(p, p.enabled ? "disable" : "enable")}
                 >
                   {p.enabled ? "Disable" : "Enable"}
-                </button>
+                </button>{" "}
+                {p.enabled ? (
+                  <button
+                    className="gp-btn gp-btn--sm"
+                    disabled={busy === p.id}
+                    onClick={() =>
+                      void setProofMode(p, p.proof_check_mode === "observe" ? "enforced" : "observe")
+                    }
+                  >
+                    {p.proof_check_mode === "observe" ? "Enforce App check" : "Observe only"}
+                  </button>
+                ) : null}
+                <div className="gp-panel__meta">App check: {p.proof_check_mode}</div>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-    </Panel>
+      </Panel>
+    </>
   );
 }
 
@@ -812,9 +935,9 @@ function ProjectSetup({ projectId }: { projectId: string }) {
         meta="paste into your coding agent, in a checkout of this repository"
       >
         <p style={{ marginBottom: "0.8rem" }}>
-          The agent installs the CLI, signs you in, writes <code>thwip.yaml</code> from the checks this repo already
-          has, proposes which GitHub Actions jobs to retire (asking before each one), runs the pipeline, and opens a
-          pull request. Re-running it is safe.
+          The agent installs the CLI, signs you in, resolves organization defaults, proposes only the repository
+          overrides this project needs, proves the App-owned check in observe mode, and guides a no-gap ruleset
+          cutover before proposing which GitHub Actions jobs to retire. Re-running it is safe.
         </p>
         <button
           className="gp-btn gp-btn--sm"

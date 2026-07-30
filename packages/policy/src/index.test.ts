@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { bytesDigest } from "@thwip/protocol";
 import {
+  deriveEffectiveProjectConfig,
   deriveProjectConfigFromText,
   parseThwipYaml,
+  resolveThwipYaml,
   type RepositorySnapshot,
+  type ThwipYaml,
 } from "./index.js";
 
 class MemorySnapshot implements RepositorySnapshot {
@@ -99,5 +102,110 @@ pipeline:
   module: ../outside
 `),
     ).toThrow("must stay inside the repository");
+  });
+
+  it("derives a policy from organization defaults when the repository has no yaml", async () => {
+    const defaults: ThwipYaml = {
+      version: 4,
+      profile: "fast",
+      required: ["lint", "test"],
+      suites: { lint: "npm run lint", test: "npm test" },
+      policy: { minimum_permission: "maintain" },
+    };
+    const config = await deriveEffectiveProjectConfig(
+      defaults,
+      null,
+      { ownerId: "10", repositoryId: "20" },
+      new MemorySnapshot({ "package-lock.json": "{}" }),
+    );
+
+    expect(config.configSource).toBe("global");
+    expect(config.policy).toMatchObject({
+      version: 4,
+      securityProfile: "fast",
+      minimumPermission: "maintain",
+      pipeline: { requiredSuites: ["lint", "test"] },
+    });
+    expect(config.pipeline.suites).toEqual([
+      { id: "lint", command: ["sh", "-c", "npm run lint"] },
+      { id: "test", command: ["sh", "-c", "npm test"] },
+    ]);
+  });
+
+  it("lets repository yaml override selected global fields without discarding the rest", () => {
+    const defaults: ThwipYaml = {
+      version: 3,
+      profile: "fast",
+      required: ["lint", "test"],
+      remote: ["windows"],
+      suites: { lint: "npm run lint", test: "npm test" },
+      policy: {
+        minimum_permission: "write",
+        allow_author_as_signer: true,
+        proof_max_age_seconds: 3600,
+      },
+    };
+    const resolved = resolveThwipYaml(
+      defaults,
+      `
+version: 4
+profile: audited
+required: [lint, integration]
+suites:
+  integration: npm run integration
+policy:
+  allow_author_as_signer: false
+`,
+    );
+
+    expect(resolved).toEqual({
+      source: "repository-override",
+      config: {
+        version: 4,
+        profile: "audited",
+        required: ["lint", "integration"],
+        remote: ["windows"],
+        suites: {
+          lint: "npm run lint",
+          test: "npm test",
+          integration: "npm run integration",
+        },
+        policy: {
+          minimum_permission: "write",
+          allow_author_as_signer: false,
+          proof_max_age_seconds: 3600,
+        },
+      },
+    });
+  });
+
+  it("requires either global defaults or a complete repository document", () => {
+    expect(() => resolveThwipYaml(null, null)).toThrow("no thwip.yaml or organization defaults");
+    expect(() => resolveThwipYaml(null, "profile: fast")).toThrow("version must be a positive integer");
+  });
+
+  it("rejects malformed policy defaults instead of silently weakening them", () => {
+    expect(() =>
+      resolveThwipYaml(
+        {
+          version: 1,
+          profile: "fast",
+          required: ["test"],
+          policy: "not-a-mapping" as never,
+        },
+        null,
+      ),
+    ).toThrow("policy");
+    expect(() =>
+      resolveThwipYaml(
+        {
+          version: 1,
+          profile: "fast",
+          required: ["test"],
+          policy: { minimum_permission: "read" as never },
+        },
+        null,
+      ),
+    ).toThrow("minimum_permission");
   });
 });

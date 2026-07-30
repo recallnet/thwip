@@ -25,7 +25,8 @@
     "@thwip/policy": "workspace:*",
     "@thwip/queue-domain": "workspace:*",
     "@thwip/queue-protocol": "workspace:*",
-    "@thwip/protocol": "workspace:*"
+    "@thwip/protocol": "workspace:*",
+    "@thwip/verifier": "workspace:*"
   },
   "devDependencies": {
     "@better-auth/cli": "^1.4.21",

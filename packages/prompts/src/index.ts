@@ -85,11 +85,11 @@ export function projectSetupPrompt(p: ProjectPromptFacts): string {
     ? `This project is currently disabled in thwip. Tell me to enable it at ${SITE}/dashboard/projects (I need repository admin on GitHub) before expecting the thwip check to pass. ${
         p.hasActivePolicy
           ? "Its recorded active policy applies again when the project is enabled; until then the resolver reports PROJECT_DISABLED."
-          : `Once enabled, the onboarding check reports BOOTSTRAP_PENDING successfully so it does not deadlock the native merge queue; that result explicitly does not approve the pull request's candidate policy or proof. After the pull request merges, thwip reads the exact thwip.yaml and pipeline from canonical ${p.defaultBranch}, records their bundle and digest, and activates that first policy.`
+          : `Once enabled, organization defaults can activate immediately. If this repository instead needs a thwip.yaml override, it activates only from canonical ${p.defaultBranch} after review and merge. Until an effective policy exists, BOOTSTRAP_PENDING is informational and does not approve a candidate policy or proof.`
       }`
     : p.hasActivePolicy
-      ? "The project is already enabled and a policy is active. This pull request is verified under that policy. A changed thwip.yaml takes effect only after its protected merge lands. The thwip check should pass from the proof on the head commit, without rerunning the suites in the cloud."
-      : `The project is already enabled, but no policy is active yet. The onboarding check reports BOOTSTRAP_PENDING successfully so it does not deadlock the native merge queue; that result explicitly does not approve this pull request's candidate policy or proof. After the pull request merges, thwip reads the exact thwip.yaml and pipeline from canonical ${p.defaultBranch}, records their bundle and digest, and activates that first policy. Later pull requests are verified from their signed head proofs under that active policy; a candidate policy never approves itself.`;
+      ? "The project is already enabled and a policy is active. This pull request is verified under that policy. A changed thwip.yaml override takes effect only after its protected merge lands. The thwip check should pass from the proof on the head commit, without rerunning the suites in the cloud."
+      : `The project is already enabled, but no policy is active yet. Configure organization defaults in the dashboard or merge a thwip.yaml override into canonical ${p.defaultBranch}. BOOTSTRAP_PENDING is informational and does not approve this pull request's candidate policy or proof. Later pull requests are verified under the active effective policy; a candidate policy never approves itself.`;
 
   return `Set up thwip (verified local CI) for ${p.githubName}. Work through this in
 order and ask me before anything that changes files, deletes workflows, or
@@ -100,18 +100,36 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    ${SITE}/install first — this repository can't be set up until this machine
    can sign.
 
-1. Configuration. If thwip.yaml exists, show it to me and confirm it still
-   matches the project. Otherwise propose which checks make up CI here —
-   typically lint, typecheck, test — and run:
+1. Effective configuration. Run "thwip policy digest" and show me its
+   configSource, required checks, profile, and digests. Organization defaults
+   are preferred for ordinary repositories and need no repository file. If
+   this repository differs, propose the smallest partial thwip.yaml override;
+   committed fields override organization defaults only after they reach
+   canonical ${p.defaultBranch}, so a pull request cannot approve itself.
+   If neither source exists, propose which checks make up CI here — typically
+   lint, typecheck, test — and either ask an organization owner to set defaults
+   or run:
      thwip init --required "<the ids you proposed>"
    Suite ids name package.json scripts by default. If this repo has, or wants,
    a Dagger module, say so: a module is the better home for matrices,
-   services, and platforms, and thwip.yaml then just names which functions are
-   required. Anything that cannot run in a Linux container — macOS or Windows
-   builds — goes under \`remote:\` instead, and GitHub runs and signs those.
-   Show me thwip.yaml before continuing.
+   services, and platforms. Anything that cannot run in a Linux container —
+   macOS or Windows builds — goes under \`remote:\` instead, and GitHub runs
+   and signs those. Show me any proposed thwip.yaml before continuing.
 
-2. Retire duplicated remote CI. Read .github/workflows/*. List every job and
+2. Prove it. Commit configuration changes on a branch, then run "thwip run".
+   It runs the suites against the committed tree and attaches a signed proof
+   to HEAD. If it refuses to sign, tell me the reason it printed rather than
+   working around it. Push and open a pull request. Keep the current required
+   check unchanged while the App-owned "thwip / proof (observe)" check proves
+   the same exact PR head successfully.
+
+3. Cut over the gate. After at least one observe-mode PASS, ask me to switch
+   this project to "Enforce App check" in the dashboard. Update the GitHub
+   ruleset so the required "thwip" context is expected from the thwip GitHub
+   App, then confirm the App-owned check passes on a fresh commit before
+   removing any verifier workflow. Do not leave an unprotected interval.
+
+4. Retire duplicated remote CI. Read .github/workflows/*. List every job and
    sort it into:
      - now proven locally by thwip (the same lint/typecheck/test work) —
        candidates for removal
@@ -122,12 +140,7 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    candidate before editing or deleting anything. Removing CI is the one step
    I want to review carefully.
 
-3. Prove it. Commit the changes on a branch, then run "thwip run". It runs the
-   suites against the committed tree and attaches a signed proof to HEAD. If it
-   refuses to sign, tell me the reason it printed rather than working around
-   it. Then push and open a pull request.
-
-4. Finish. ${finish}
+5. Finish. ${finish}
 
 Rules: never move a private key anywhere outside my ~/.ssh or ~/.config/thwip;
 never skip or weaken a failing check to get a green proof; the default branch
