@@ -254,6 +254,61 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     return store.classifyCallback(attemptId, attemptRevision);
   }
 
+  /**
+   * Everything needed to answer "what is going on and why" in one call.
+   *
+   * Built because diagnosing this queue meant a state fetch, a log grep, and a
+   * guess about cooldowns and idempotency keys. One call that says what the lane
+   * holds, what each entry is waiting for, what deadlines exist and what happened
+   * recently replaces all of that.
+   */
+  async diagnose(limit = 25): Promise<{
+    snapshot: Awaited<ReturnType<BranchQueue["snapshot"]>>;
+    deadlines: Array<{ kind: string; attemptId: string; dueAt: string }>;
+    outbox: Array<{ kind: string; attemptId?: string; attempts: number }>;
+    attempts: Array<{ attemptId: string; phase: string; outcome: string | null; outcomeUnknown: boolean }>;
+    events: Array<{ sequence: number; at: string; type: string; detail: string }>;
+  }> {
+    const { store } = this.require();
+    const sql = this.ctx.storage.sql as unknown as {
+      exec<T>(q: string, ...b: unknown[]): { toArray(): T[] };
+    };
+    const state = store.state();
+    return {
+      snapshot: await this.snapshot(),
+      deadlines: sql
+        .exec<{ kind: string; attempt_id: string; due_at: string }>(
+          "SELECT kind, attempt_id, due_at FROM deadlines ORDER BY due_at",
+        )
+        .toArray()
+        .map((r) => ({ kind: r.kind, attemptId: r.attempt_id, dueAt: r.due_at })),
+      outbox: store.pendingOutbox().map((o) => ({
+        kind: o.kind,
+        ...(o.attemptId === undefined ? {} : { attemptId: o.attemptId }),
+        attempts: o.attempts,
+      })),
+      attempts: [...state.attempts.values()].map((a) => ({
+        attemptId: a.attemptId,
+        phase: a.phase,
+        outcome: a.outcome,
+        outcomeUnknown: a.outcomeUnknown,
+      })),
+      events: sql
+        .exec<{ sequence: number; at: string; type: string; body: string }>(
+          "SELECT sequence, at, type, body FROM events ORDER BY sequence DESC LIMIT ?",
+          limit,
+        )
+        .toArray()
+        .map((r) => {
+          const body = JSON.parse(r.body) as Record<string, unknown>;
+          const parts = ["entryId", "attemptId", "outcome", "primaryReason", "reason"]
+            .map((k) => (body[k] === undefined || body[k] === null ? null : `${k}=${String(body[k])}`))
+            .filter((v): v is string => v !== null);
+          return { sequence: r.sequence, at: r.at, type: r.type, detail: parts.join(" ") };
+        }),
+    };
+  }
+
   async pendingOutbox() {
     const { store } = this.require();
     return store.pendingOutbox();

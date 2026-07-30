@@ -1319,6 +1319,12 @@ app.route(
   "/",
   queueRoutes<Env>({
     async authenticate(c: { req: { raw: Request } }, env: Env) {
+      // The operator token authenticates too. Every administrative action needing a
+      // browser session was a reason to leave the terminal, and an operator fixing a
+      // stuck lane at 3am should not have to.
+      if (requireAdmin(env, c.req.raw)) {
+        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true };
+      }
       const viewer = await resolveViewer(env, c.req.raw);
       if (viewer === null) return { ok: false as const, status: 401 as const };
       if (viewer.principalId === null) return { ok: false as const, status: 403 as const };

@@ -108,7 +108,7 @@ function key(parts: readonly (string | number)[]): string {
 
 export function planQueueCommand(argv: readonly string[]): ParseResult {
   const [subcommand, ...rest] = argv;
-  if (subcommand === undefined) return usage("thwip queue <status|list|join|leave|pause|resume|…>");
+  if (subcommand === undefined) return usage("thwip queue <status|explain|list|join|leave|pause|resume|reconcile|doctor|…>");
   const flags = parseFlags(rest);
 
   switch (subcommand) {
@@ -283,6 +283,52 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
       };
     }
 
+    case "explain": {
+      // The command I wanted every time something sat in the queue and I could not
+      // tell why. One call: lane holder, per-entry blocker, deadlines, recent events.
+      const unknown = rejectUnknown(flags, ["repo", "branch", "events", "json"]);
+      if (unknown !== null) return unknown;
+      const repo = requireRepo(flags);
+      if (isPlan(repo)) return repo;
+      const events = flags.values.get("events") ?? "25";
+      if (!/^[0-9]{1,3}$/.test(events)) return usage("--events must be a small number");
+      return {
+        ok: true,
+        plan: {
+          method: "GET",
+          path: `/v1/queue/{repositoryId}/explain?ref=${encodeURIComponent(requireRef(flags))}&events=${events}`,
+          requiresAdmin: false,
+        },
+      };
+    }
+
+    case "reconcile": {
+      const unknown = rejectUnknown(flags, ["repo", "branch", "observed", "merge-sha", "reason"]);
+      if (unknown !== null) return unknown;
+      const repo = requireRepo(flags);
+      if (isPlan(repo)) return repo;
+      const reason = requireReason(flags);
+      if (isPlan(reason)) return reason;
+      const observed = flags.values.get("observed") ?? "";
+      if (!["merged", "not-merged", "merged-outside-the-turn"].includes(observed)) {
+        return usage("--observed must be merged | not-merged | merged-outside-the-turn");
+      }
+      const mergeSha = flags.values.get("merge-sha") ?? "";
+      if (observed !== "not-merged" && !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(mergeSha)) {
+        return usage("--merge-sha <oid> is required unless --observed not-merged");
+      }
+      return {
+        ok: true,
+        plan: {
+          method: "POST",
+          path: `/v1/queue/{repositoryId}/reconcile?ref=${encodeURIComponent(requireRef(flags))}`,
+          body: { observed, reason, ...(mergeSha === "" ? {} : { mergeSha }) },
+          idempotencyKey: key(["reconcile", repo, observed, mergeSha]),
+          requiresAdmin: true,
+        },
+      };
+    }
+
     case "doctor": {
       const unknown = rejectUnknown(flags, ["repo", "explain", "strict", "json"]);
       if (unknown !== null) return unknown;
@@ -301,6 +347,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
 
 /** Subcommands that change state, for the confirmation and audit surfaces. */
 export const MUTATING_SUBCOMMANDS = [
+  "reconcile",
   "join",
   "leave",
   "pause",
