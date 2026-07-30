@@ -132,6 +132,38 @@ describe("BranchQueueStore", () => {
     expect(store.generation()).toBe(1);
   });
 
+  it("does not consume a sequence for an event the reducer treats as a no-op", () => {
+    // A no-op that consumed a sequence would leave an events row ahead of
+    // lastSequence, and the next append would collide on that sequence — which is
+    // exactly how this surfaced in production, as a UNIQUE constraint failure.
+    const sql = sqlite();
+    const store = BranchQueueStore.open(sql, IDENTITY);
+    request(store, "e1", "alice", 7);
+
+    // Requesting the same entry again is a no-op in the reducer.
+    const repeat = store.append(
+      ev({
+        type: "QueueRequested",
+        entryId: "e1",
+        pullRequestNumber: 7,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "1",
+        headSha: "h".repeat(40),
+      }),
+    );
+    expect(repeat.status).toBe("duplicate");
+
+    const maxSequence = sql
+      .exec<{ m: number | null }>("SELECT MAX(sequence) AS m FROM events")
+      .toArray()[0]!.m;
+    expect(store.state().lastSequence).toBe(maxSequence);
+
+    // And the next real command still applies rather than colliding.
+    expect(
+      store.append(ev({ type: "EntryHeadChanged", entryId: "e1", headSha: "z".repeat(40) })).status,
+    ).toBe("applied");
+  });
+
   describe("eviction", () => {
     it("rehydrates to the same state after every command", () => {
       const sql = sqlite();

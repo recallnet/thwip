@@ -275,8 +275,27 @@ export class BranchQueueStore {
       throw error;
     }
 
-    // A reducer that returned the same object means the event was a no-op; it
-    // still consumes its idempotency key so a retry does not re-evaluate it.
+    // The reducer signals a no-op by returning the state it was given. Such an
+    // event must not consume a sequence: the row would exist while lastSequence
+    // stayed behind it, and the next append would collide on that sequence. The
+    // idempotency key is still recorded, so a retry does not re-evaluate it.
+    if (next === before) {
+      const metaNow = this.meta();
+      this.sql.exec(
+        "INSERT INTO inbox_dedupe (idempotency_key, sequence, result, recorded_at) VALUES (?, ?, ?, ?)",
+        event.idempotencyKey,
+        before.lastSequence,
+        "noop",
+        event.at,
+      );
+      return {
+        status: "duplicate",
+        sequence: before.lastSequence,
+        generation: metaNow.generation,
+        attemptRevision: metaNow.active_attempt_revision,
+      };
+    }
+
     const meta = this.meta();
     const generation = meta.generation + 1;
     const attemptRevision = meta.active_attempt_revision + (options.bumpAttemptRevision === true ? 1 : 0);
