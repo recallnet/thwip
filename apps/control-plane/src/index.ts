@@ -1412,9 +1412,15 @@ app.route(
       // repository with no verifier would then be told it needed an integrated run
       // that its policy never asked for.
       const raw = row.verifier === null ? null : (JSON.parse(row.verifier) as Record<string, unknown>);
+      // workflowSha may be null: that pins the workflow's path on the default
+      // branch and accepts any revision of it, which is what a repository that
+      // merges often can actually keep current.
       const verifier =
-        typeof raw?.["workflowRef"] === "string" && typeof raw["workflowSha"] === "string"
-          ? { workflowRef: raw["workflowRef"], workflowSha: raw["workflowSha"] }
+        typeof raw?.["workflowRef"] === "string"
+          ? {
+              workflowRef: raw["workflowRef"],
+              workflowSha: typeof raw["workflowSha"] === "string" ? raw["workflowSha"] : null,
+            }
           : null;
       return { policyDigest: row.digest, requiredSuites, securityProfile: row.profile, verifier };
     },
