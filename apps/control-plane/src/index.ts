@@ -1333,6 +1333,21 @@ app.route(
       const claims = await verifyGithubOidc({ env, req: c.req });
       return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
     },
+    async queueProject(env: Env, repositoryId: string, baseRef: string) {
+      const row = await env.DB.prepare(
+        "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+      )
+        .bind(repositoryId, baseRef)
+        .first<{ activation_state: string }>();
+      return row === null ? null : { activationState: row.activation_state };
+    },
+    async principalFor(env: Env, githubUserId: string) {
+      if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
+      const row = await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
+        .bind(githubUserId)
+        .first<{ id: string }>();
+      return row?.id ?? null;
+    },
     async pinnedVerifier(env: Env, repositoryId: string) {
       const row = await env.DB.prepare(
         "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",

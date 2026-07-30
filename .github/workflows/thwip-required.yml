@@ -32,3 +32,45 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: https://thwip.recall.net
         run: node packages/action/dist/index.cjs
+      # Ask Thwip Queue whether this pull request may merge now.
+      #
+      # This step is what makes the queue decide rather than merely observe. It
+      # runs from the workflow's own pinned revision, so nothing here executes
+      # code from the pull request, and the OIDC token binds the repository. In
+      # observe the endpoint always authorizes and reports what it would have
+      # said, so adoption stays reversible.
+      - name: Thwip Queue authorization
+        if: github.event_name == 'pull_request'
+        env:
+          THWIP_ENDPOINT: https://thwip.recall.net
+          REPO_ID: ${{ github.event.repository.id }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: refs/heads/${{ github.event.pull_request.base.ref }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          set -euo pipefail
+          oidc=$(curl -sSf -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$THWIP_ENDPOINT/api/github-actions" | jq -r .value)
+          body=$(jq -nc \
+            --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
+            --arg author "$AUTHOR_ID" --argjson draft "${DRAFT:-false}" \
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true}')
+          out=$(curl -sS -X POST -H "authorization: Bearer $oidc" -H "content-type: application/json" \
+            -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize")
+          echo "$out" | jq .
+          authorized=$(echo "$out" | jq -r '.authorized // false')
+          enforcing=$(echo "$out" | jq -r '.enforcing // false')
+          reason=$(echo "$out" | jq -r '.reason // "UNKNOWN"')
+          if [ "$authorized" != "true" ]; then
+            echo "::error::Thwip Queue has not authorized this pull request: $reason"
+            exit 1
+          fi
+          if [ "$enforcing" = "true" ]; then
+            echo "Thwip Queue authorized this merge: $reason"
+          else
+            echo "Thwip Queue is observing; it would have said: $reason"
+          fi
