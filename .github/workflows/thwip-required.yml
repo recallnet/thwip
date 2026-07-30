@@ -49,8 +49,6 @@ jobs:
           BASE_REF: refs/heads/${{ github.event.pull_request.base.ref }}
           AUTHOR_ID: ${{ github.event.pull_request.user.id }}
           DRAFT: ${{ github.event.pull_request.draft }}
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
         run: |
           set -euo pipefail
           oidc=$(curl -sSf -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
