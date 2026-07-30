@@ -722,11 +722,26 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
         return c.json({ error: "mergeSha required" }, 400);
       }
-      await queue.terminateAttempt({
-        idempotencyKey: `outside:${attemptId}`,
-        attemptId,
-        outcome: "ADMIN_CANCELLED",
-      });
+      // The entry leaves the queue with the attempt. Terminating the attempt alone
+      // left the entry Blocked and still scheduler-eligible, so the queue went on
+      // holding a merged pull request as live work and could have offered it a lane.
+      // Cancelled rather than Merged: the queue did not merge this and must not
+      // claim it did.
+      const entryId = (await queue.snapshot()).activeEntryId;
+      if (entryId !== null) {
+        await queue.cancel({
+          idempotencyKey: `outside:cancel:${attemptId}`,
+          entryId,
+          actorPrincipalId: who.principalId,
+          reason: body.reason.trim(),
+        });
+      } else {
+        await queue.terminateAttempt({
+          idempotencyKey: `outside:${attemptId}`,
+          attemptId,
+          outcome: "ADMIN_CANCELLED",
+        });
+      }
       const after = await queue.snapshot();
       const sequence = (after.chainHead?.sequence ?? 0) + 1;
       const transition = await queue.recordTransition({
@@ -744,6 +759,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         transition: transition.status,
         sequence,
         attemptId,
+        entryResolved: entryId === null ? "no entry held the lane" : "cancelled",
         note: "recorded as external: the queue held a turn but never pinned a candidate for this merge",
       });
     }

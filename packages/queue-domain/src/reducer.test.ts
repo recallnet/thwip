@@ -645,3 +645,118 @@ function serialize(state: BranchQueueState): string {
     return value;
   });
 }
+
+/**
+ * A blocked entry that cannot say why is worse than a wrong answer: every reader
+ * — the dashboard, `thwip queue explain`, the D1 projection — renders a null
+ * reason as though nothing were wrong. A live queue held a merged pull request in
+ * Blocked with a null reason and `schedulerEligible: true`, so the scheduler
+ * could have offered a lane to a pull request that no longer existed.
+ */
+describe("a blocked entry always names its reason", () => {
+  function throughOffer(attemptId = "a1"): QueueEvent[] {
+    return [
+      ev({
+        type: "QueueRequested",
+        entryId: "e1",
+        pullRequestNumber: 34,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "264261678",
+        headSha: "h".repeat(40),
+      }),
+      ev({
+        type: "ReadinessEvaluated",
+        entryId: "e1",
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+        secondaryReasons: [],
+      }),
+      ev({
+        type: "TurnOffered",
+        entryId: "e1",
+        attemptId,
+        offerDeadline: "2026-07-29T12:01:30.000Z",
+        decisionDigest: "sha256:dec",
+      }),
+      ev({ type: "OfferClaimed", attemptId, executionMode: "device", deviceId: "d1" }),
+    ];
+  }
+
+  it("names a reason when an attempt is terminated", () => {
+    const state = applyEvents(base(), [
+      ...throughOffer(),
+      ev({ type: "AttemptTerminated", attemptId: "a1", outcome: "ADMIN_CANCELLED" }),
+    ]);
+    const entry = state.entries.get("e1");
+    expect(entry?.state).toBe("Blocked");
+    expect(entry?.primaryReason).not.toBeNull();
+  });
+
+  it("names the outcome's own reason where one exists", () => {
+    for (const [outcome, reason] of [
+      ["CI_FAILED", "REQUIRED_CHECK_FAILED"],
+      ["MERGE_CONFLICT", "MERGE_CONFLICT"],
+      ["RECEIPT_REJECTED", "LOCAL_RECEIPT_REJECTED"],
+      ["POLICY_CHANGED", "POLICY_CHANGED"],
+      ["APP_UNINSTALLED", "APP_PERMISSION_DRIFT"],
+    ] as const) {
+      const state = applyEvents(base(), [
+        ...throughOffer(),
+        ev({ type: "AttemptTerminated", attemptId: "a1", outcome }),
+      ]);
+      expect(state.entries.get("e1")?.primaryReason).toBe(reason);
+      seq += 0;
+    }
+  });
+
+  it("names a reason when the verifier refuses the candidate", () => {
+    const state = applyEvents(base(), [
+      ...throughOffer("a2"),
+      ev({
+        type: "CandidatePrepared",
+        attemptId: "a2",
+        baseSha: "b".repeat(40),
+        headSha: "h".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTree: "t".repeat(40),
+        policyDigest: "sha256:pol",
+        runner: "dagger",
+      }),
+      ev({
+        type: "AssignmentIssued",
+        attemptId: "a2",
+        assignmentDigest: "sha256:asg",
+        executionDeadline: "2026-07-29T12:20:00.000Z",
+      }),
+      ev({ type: "ReceiptSubmitted", attemptId: "a2", receiptDigest: "sha256:rcpt" }),
+      ev({ type: "VerificationStarted", attemptId: "a2", nonce: "n1" }),
+      ev({
+        type: "VerificationCompleted",
+        attemptId: "a2",
+        nonce: "n1",
+        accepted: false,
+        verifierResultDigest: "sha256:res",
+        reasonCodes: ["SUITE_NOT_PASSED"],
+      }),
+    ]);
+    const entry = state.entries.get("e1");
+    expect(entry?.state).toBe("Blocked");
+    expect(entry?.primaryReason).not.toBeNull();
+  });
+
+  it("is an invariant violation, not merely untidy", () => {
+    const state = applyEvents(base(), [
+      ...throughOffer(),
+      ev({ type: "AttemptTerminated", attemptId: "a1", outcome: "ADMIN_CANCELLED" }),
+    ]);
+    expect(checkInvariants(state)).toEqual([]);
+
+    // Reach in and take the reason away: no sequence of events may produce this.
+    const blinded = { ...state, entries: new Map(state.entries) };
+    blinded.entries.set("e1", { ...blinded.entries.get("e1")!, primaryReason: null });
+    expect(checkInvariants(blinded)).toEqual([
+      { invariant: "BlockedEntryNamesReason", detail: "entry e1 is blocked with no reason" },
+    ]);
+  });
+});

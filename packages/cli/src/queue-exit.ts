@@ -95,6 +95,7 @@ const CLASS: Record<string, ExitCode> = {
   CONVERSATION_UNRESOLVED: EXIT.humanRequired,
   REQUIRED_CHECK_PENDING: EXIT.humanRequired,
   REQUIRED_CHECK_FAILED: EXIT.humanRequired,
+  VERIFICATION_REJECTED: EXIT.humanRequired,
   PR_DRAFT: EXIT.humanRequired,
   PR_CLOSED: EXIT.humanRequired,
   QUEUE_PAUSED: EXIT.humanRequired,

@@ -17,7 +17,8 @@ export type InvariantName =
   | "NoSecondWriteWhileOutcomeUnknown"
   | "TransitionChainContiguous"
   | "ExternalMovePauses"
-  | "AttemptDagAcyclic";
+  | "AttemptDagAcyclic"
+  | "BlockedEntryNamesReason";
 
 export interface Violation {
   readonly invariant: InvariantName;
@@ -37,6 +38,14 @@ export function checkInvariants(state: BranchQueueState): Violation[] {
   }
   if (live.length === 0 && state.activeAttemptId !== null) {
     add("OneActiveLane", `activeAttemptId ${state.activeAttemptId} is set with no live attempt`);
+  }
+
+  // A reader that is shown a blocked entry with no reason concludes nothing is
+  // wrong. Silence about a block is the one answer no caller can act on.
+  for (const entry of state.entries.values()) {
+    if (entry.state === "Blocked" && entry.primaryReason === null) {
+      add("BlockedEntryNamesReason", `entry ${entry.entryId} is blocked with no reason`);
+    }
   }
 
   for (const attempt of state.attempts.values()) {
