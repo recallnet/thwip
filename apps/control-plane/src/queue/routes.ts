@@ -157,9 +157,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     requiredSuites: readonly string[];
     securityProfile: string;
     /** Null when no verifier is pinned, which only matters to a stronger profile. */
-    verifier: { workflowRef: string; workflowSha: string } | null;
+    verifier: { workflowRef: string; workflowSha: string | null } | null;
   } | null>;
-  /** Ask the pinned verifier to run the required suites against a candidate. */
+  /**
+   * Ask the pinned verifier to run the required suites against a candidate.
+   *
+   * Returns what GitHub said. A dispatch that fails silently leaves the caller
+   * waiting for a run that will never start, and the first version of this
+   * discarded the response — so a missing App permission looked exactly like a
+   * slow verifier for thirty minutes.
+   */
   dispatchCandidateVerification(
     env: TEnv,
     repositoryId: string,
@@ -171,7 +178,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       candidateSha: string;
       candidateTreeOid: string;
     },
-  ): Promise<void>;
+  ): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   /** Queue configuration for a branch, or null when the branch has no queue. */
   queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
@@ -533,7 +540,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       suites,
       reasonCodes,
       workflowRef: pinned.workflowRef,
-      workflowSha: pinned.workflowSha,
+      // The revision this run actually came from. The pin may name no revision, and
+      // recording the pin instead of the run would erase what was really executed.
+      workflowSha: identity.workflowSha,
       runId: identity.runId,
     };
     const resultDigest = await candidateResultDigest(content);
@@ -728,7 +737,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           // the caller to come back. The caller waits rather than failing, because
           // an untested candidate is a normal early state, not a refusal.
           if (decision.code === "CANDIDATE_NOT_VERIFIED") {
-            await deps.dispatchCandidateVerification(c.env, repositoryId, {
+            const dispatched = await deps.dispatchCandidateVerification(c.env, repositoryId, {
               baseRef,
               pullRequestNumber: body.pullRequestNumber,
               attemptId,
@@ -736,6 +745,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
               candidateSha: cand.candidateSha,
               candidateTreeOid: cand.candidateTreeOid,
             });
+            if (!dispatched.ok) {
+              // Nothing will arrive, so waiting is the wrong answer. Say what
+              // GitHub refused so it can be fixed rather than waited out.
+              return c.json({
+                authorized: false,
+                enforcing: true,
+                activationState: project.activationState,
+                reason: "CANDIDATE_DISPATCH_FAILED",
+                detail: `GitHub refused the verifier dispatch (${dispatched.status}): ${dispatched.detail}`,
+                entryId,
+                operationId: null,
+              });
+            }
             return c.json({
               authorized: true,
               enforcing: project.activationState !== "observe",
