@@ -5,3 +5,4 @@ dist/
 .env
 .envrc
 .wrangler/
+packages/cli/dist-npm/
