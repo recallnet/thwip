@@ -201,3 +201,27 @@ describe("requiresIntegratedRun", () => {
     expect(requiresIntegratedRun("something-new")).toBe(true);
   });
 });
+
+describe("an unpinned verifier revision", () => {
+  const anyRevision = { ...expected, workflowSha: null };
+
+  it("accepts the pinned workflow at any revision of the default branch", async () => {
+    const later = await verdict({ workflowSha: "9".repeat(40) });
+    expect(await decideCandidate(later, anyRevision)).toMatchObject({ ok: true });
+  });
+
+  it("still refuses another workflow path", async () => {
+    const other = await verdict({ workflowRef: "recallnet/thwip/.github/workflows/evil.yml@refs/heads/main" });
+    expect(await decideCandidate(other, anyRevision)).toMatchObject({
+      code: "CANDIDATE_VERIFIER_NOT_PINNED",
+    });
+  });
+
+  it("still binds the revision into the digest, so it cannot be rewritten", async () => {
+    const original = await verdict();
+    const tampered = { ...original, workflowSha: "9".repeat(40) };
+    expect(await decideCandidate(tampered, anyRevision)).toMatchObject({
+      code: "CANDIDATE_DIGEST_MISMATCH",
+    });
+  });
+});

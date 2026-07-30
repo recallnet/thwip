@@ -157,7 +157,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     requiredSuites: readonly string[];
     securityProfile: string;
     /** Null when no verifier is pinned, which only matters to a stronger profile. */
-    verifier: { workflowRef: string; workflowSha: string } | null;
+    verifier: { workflowRef: string; workflowSha: string | null } | null;
   } | null>;
   /** Ask the pinned verifier to run the required suites against a candidate. */
   dispatchCandidateVerification(
@@ -533,7 +533,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       suites,
       reasonCodes,
       workflowRef: pinned.workflowRef,
-      workflowSha: pinned.workflowSha,
+      // The revision this run actually came from. The pin may name no revision, and
+      // recording the pin instead of the run would erase what was really executed.
+      workflowSha: identity.workflowSha,
       runId: identity.runId,
     };
     const resultDigest = await candidateResultDigest(content);
