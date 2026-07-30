@@ -94,17 +94,37 @@ jobs:
             --argjson candidate "$candidate" \
             '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
 
-          out=$(curl -sS -w '\n%{http_code}' -X POST \
-            -H "authorization: Bearer $oidc" -H "content-type: application/json" \
-            -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
-          acode=$(printf '%s' "$out" | tail -n1)
-          abody=$(printf '%s' "$out" | sed '$d')
-          echo "authorize: http $acode"
-          echo "$abody"
-          if [ "$acode" != "200" ]; then
-            echo "::error::Thwip Queue authorization endpoint returned http $acode"
-            exit 1
-          fi
+          # A refusal and an outage are different answers. The queue saying "not
+          # your turn" is about this pull request. The queue being unreachable is
+          # about us, says nothing about this pull request, and used to fail the
+          # check permanently: a quota exhaustion once stopped every merge in the
+          # repository and nothing recovered without a human re-running jobs.
+          attempt=0
+          while :; do
+            out=$(curl -sS -w '\n%{http_code}' -X POST \
+              -H "authorization: Bearer $oidc" -H "content-type: application/json" \
+              -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
+            acode=$(printf '%s' "$out" | tail -n1)
+            abody=$(printf '%s' "$out" | sed '$d')
+            echo "authorize: http $acode"
+            echo "$abody"
+            case "$acode" in
+              200) break ;;
+              429|500|502|503|504)
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 6 ]; then
+                  echo "::error::Thwip Queue is unreachable (http $acode after $attempt tries). This says nothing about this pull request; re-run this check once the queue is back."
+                  exit 1
+                fi
+                echo "queue unreachable (http $acode); retrying in $((attempt * 15))s"
+                sleep $((attempt * 15))
+                ;;
+              *)
+                echo "::error::Thwip Queue authorization endpoint returned http $acode"
+                exit 1
+                ;;
+            esac
+          done
           authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
           enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
           reason=$(printf '%s' "$abody" | jq -r '.reason // "UNKNOWN"')

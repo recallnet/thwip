@@ -19,7 +19,12 @@ for (const f of files) {
   }
 }
 
-const workerSources = files.filter((f) => f.startsWith("apps/control-plane/src/"));
+// Tests are excluded: they run under Node and are never bundled into the Worker.
+// The rule protects what ships, and widening it to test files would only push a
+// test into contortions that prove nothing about the Worker.
+const workerSources = files.filter(
+  (f) => f.startsWith("apps/control-plane/src/") && !f.endsWith(".test.ts"),
+);
 for (const f of workerSources) {
   const text = readFileSync(f, "utf8");
   if (/from "node:/.test(text)) {
