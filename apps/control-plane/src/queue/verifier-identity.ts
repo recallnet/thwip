@@ -32,17 +32,42 @@ export interface PinnedVerifier {
   readonly repositoryId: string;
   readonly repositoryOwnerId: string;
   readonly workflowRef: string;
-  readonly workflowSha: string;
+  /**
+   * The exact revision the verifier must run from, or null for any revision of
+   * `workflowRef` on the default branch.
+   *
+   * A run triggered by repository_dispatch executes the default branch's current
+   * head, so this value changes with every merge. Pinning it exactly means
+   * re-pinning after each merge, and a stale pin refuses every verdict — which
+   * fails closed, but fails constantly. Null keeps the pin that carries the
+   * weight: the workflow's path, on the default branch, which only a merge can
+   * change and which this queue's own ruleset protects.
+   */
+  readonly workflowSha: string | null;
   readonly reusableWorkflowRef: string;
-  readonly reusableWorkflowSha: string;
-  /** The event the dispatch uses; anything else did not come from us (§17.1). */
-  readonly expectedEventName: "repository_dispatch";
+  readonly reusableWorkflowSha: string | null;
+  /**
+   * The event the verifier runs on. Anything else did not come from us (§17.1).
+   *
+   * `repository_dispatch` is the control plane asking directly. `workflow_run` is
+   * the queue's own merge workflow running the verification inline; it executes the
+   * default branch's copy in the base branch's context, which is the same property
+   * that makes a dispatch safe — a pull request cannot edit either one.
+   */
+  readonly expectedEventName: "repository_dispatch" | "workflow_run";
   /** The verifier must run from the default branch, never from a pull request. */
   readonly defaultBranchRef: string;
 }
 
 export type IdentityVerdict =
-  | { readonly ok: true; readonly runId: string; readonly runAttempt: number; readonly jti: string }
+  | {
+      readonly ok: true;
+      readonly runId: string;
+      readonly runAttempt: number;
+      readonly jti: string;
+      /** The revision the run came from, recorded even when it is not pinned. */
+      readonly workflowSha: string;
+    }
   | { readonly ok: false; readonly reason: string };
 
 function str(value: unknown): string | null {
@@ -77,7 +102,7 @@ export function verifyVerifierIdentity(claims: OidcVerifierClaims, pinned: Pinne
   }
   const workflowSha = str(claims.workflow_sha);
   if (workflowSha === null) return { ok: false, reason: "token has no workflow_sha" };
-  if (workflowSha !== pinned.workflowSha) {
+  if (pinned.workflowSha !== null && workflowSha !== pinned.workflowSha) {
     return { ok: false, reason: "workflow_sha is not the pinned verifier commit" };
   }
 
@@ -91,7 +116,7 @@ export function verifyVerifierIdentity(claims: OidcVerifierClaims, pinned: Pinne
   }
   const jobWorkflowSha = str(claims.job_workflow_sha);
   if (jobWorkflowSha === null) return { ok: false, reason: "token has no job_workflow_sha" };
-  if (jobWorkflowSha !== pinned.reusableWorkflowSha) {
+  if (pinned.reusableWorkflowSha !== null && jobWorkflowSha !== pinned.reusableWorkflowSha) {
     return { ok: false, reason: "job_workflow_sha is not the pinned reusable workflow commit" };
   }
 
@@ -114,7 +139,7 @@ export function verifyVerifierIdentity(claims: OidcVerifierClaims, pinned: Pinne
   const jti = str(claims.jti);
   if (jti === null) return { ok: false, reason: "token has no jti" };
 
-  return { ok: true, runId, runAttempt: Number(runAttempt), jti };
+  return { ok: true, runId, runAttempt: Number(runAttempt), jti, workflowSha };
 }
 
 /**

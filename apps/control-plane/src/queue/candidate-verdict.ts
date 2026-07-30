@@ -45,9 +45,10 @@ export interface CandidateExpectation {
   /** The suites the active policy requires. A verdict missing one proves less. */
   readonly requiredSuites: readonly string[];
   readonly policyDigest: string;
-  /** The verifier identity the repository pinned. */
+  /** The verifier workflow the repository pinned. */
   readonly workflowRef: string;
-  readonly workflowSha: string;
+  /** The exact revision, or null for any revision of that path on the default branch. */
+  readonly workflowSha: string | null;
 }
 
 export type CandidateDecision =
@@ -121,7 +122,10 @@ export async function decideCandidate(
     };
   }
 
-  if (verdict.workflowRef !== expected.workflowRef || verdict.workflowSha !== expected.workflowSha) {
+  if (
+    verdict.workflowRef !== expected.workflowRef ||
+    (expected.workflowSha !== null && verdict.workflowSha !== expected.workflowSha)
+  ) {
     return {
       ok: false,
       code: "CANDIDATE_VERIFIER_NOT_PINNED",
