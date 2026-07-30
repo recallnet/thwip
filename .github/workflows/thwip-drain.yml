@@ -1,0 +1,80 @@
+name: thwip-drain
+
+run-name: "thwip: drain pull requests blocked by a queue outage"
+
+# Re-drive pull requests whose thwip check failed because the queue was down.
+#
+# A refusal and an outage look identical to GitHub: both are a red check that
+# stays red until someone re-runs it. So a transient queue failure stopped every
+# merge in the repository and stayed stopped, waiting for a human. That is not a
+# durable queue, it is a queue with a person standing behind it.
+#
+# This closes that. It only acts when the queue is answering again, it only
+# re-runs checks that already failed, and it leaves the decision entirely to the
+# queue: a pull request that genuinely does not hold the turn fails again, which
+# is the correct answer.
+on:
+  schedule:
+    # Off the hour on purpose. Every scheduled workflow in the world fires at :00.
+    - cron: "23,53 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
+concurrency:
+  group: thwip-drain
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    name: drain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run thwip checks the queue can now answer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THWIP_ENDPOINT: https://thwip.recall.net
+          REPO_ID: ${{ github.event.repository.id }}
+        run: |
+          set -uo pipefail
+
+          # Ask the queue whether it is healthy before touching anything. Reading
+          # the projection costs no Durable Object request, so this is safe to run
+          # every half hour forever, including while the queue is down.
+          q=$(curl -sS -w '\n%{http_code}' \
+            "$THWIP_ENDPOINT/v1/queue/$REPO_ID?ref=refs%2Fheads%2Fmain" || true)
+          code=$(printf '%s' "$q" | tail -n1)
+          if [ "$code" != "200" ] && [ "$code" != "401" ]; then
+            echo "queue is not answering (http $code); nothing to drain yet"
+            exit 0
+          fi
+
+          # A check that failed seconds ago is probably still telling the truth.
+          # Thirty minutes is long enough that a transient outage has either
+          # cleared or become something a person should look at.
+          cutoff=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
+          echo "re-running thwip checks that failed before $cutoff"
+
+          gh pr list --state open --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"' |
+          while read -r pr sha; do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
+              --jq '[.check_runs[] | select(.name == "thwip")] | first // empty')
+            [ -n "$run" ] || continue
+            [ "$(printf '%s' "$run" | jq -r '.conclusion')" = "failure" ] || continue
+
+            completed=$(printf '%s' "$run" | jq -r '.completed_at // empty')
+            if [ -n "$completed" ] && [ "$completed" \> "$cutoff" ]; then
+              echo "PR #$pr: failed at $completed, too recent to re-drive"
+              continue
+            fi
+
+            id=$(printf '%s' "$run" | jq -r '.details_url' | grep -oE '[0-9]+' | head -1)
+            [ -n "$id" ] || continue
+            echo "PR #$pr: re-running thwip (run $id)"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs" >/dev/null 2>&1 \
+              || echo "PR #$pr: could not re-run $id"
+          done
