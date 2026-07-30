@@ -142,7 +142,14 @@ export class BranchQueueStore {
   private rehydrate(): BranchQueueState {
     const meta = this.meta();
     const state = emptyState(this.queueKey, this.repositoryId, this.baseRef);
-    state.lastSequence = meta.last_sequence;
+    // Take the highest sequence actually present, not only the recorded one. An
+    // object written by an earlier build could hold an event row ahead of
+    // last_sequence, and trusting the counter would make every subsequent append
+    // collide on a primary key. Healing on read repairs it without a migration.
+    const highest = this.sql
+      .exec<{ m: number | null }>("SELECT MAX(sequence) AS m FROM events")
+      .toArray()[0]?.m;
+    state.lastSequence = Math.max(meta.last_sequence, highest ?? 0);
     state.turnSequence = BigInt(meta.turn_sequence);
     state.ordinalSequence = BigInt(meta.ordinal_sequence);
     state.paused = meta.paused === 1;
