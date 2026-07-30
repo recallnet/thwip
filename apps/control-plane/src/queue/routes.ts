@@ -313,6 +313,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorGithubUserId?: string;
       proofAccepted?: boolean;
       draft?: boolean;
+      /** The integrated candidate GitHub simulated for this pull request. */
+      candidate?: {
+        baseSha?: string;
+        candidateSha?: string;
+        candidateTreeOid?: string;
+        parentShas?: string[];
+      };
+      workReceiptDigest?: string;
     };
     const baseRef = branchRef(body.baseRef);
     if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
@@ -346,23 +354,124 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // Readiness is derived from what the verifier just established plus the
       // branch state. A missing proof is the one thing this caller knows for
       // certain, because it just verified it.
+      //
+      // The key carries the same time bucket as the tick. Keyed on the head alone,
+      // an entry that had been deferred after an unclaimed offer could never be
+      // promoted back to Ready, because the only event that promotes it would be
+      // deduplicated forever.
+      const readyBucket = Math.floor(Date.now() / 60_000);
       await queue.readiness({
-        idempotencyKey: `authorize:ready:${entryId}:${body.headSha}`,
+        idempotencyKey: `authorize:ready:${entryId}:${body.headSha}:${readyBucket}`,
         entryId,
         ready: body.proofAccepted === true && body.draft !== true,
         schedulerEligible: body.proofAccepted === true && body.draft !== true,
         primaryReason:
           body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
       });
+      // A time bucket, so a retried check re-evaluates rather than being
+      // deduplicated against a decision taken minutes ago, while a burst of
+      // parallel jobs for one head still collapses to one turn.
+      const bucket = Math.floor(Date.now() / 60_000);
       await queue.tick({
-        idempotencyKey: `authorize:tick:${entryId}:${body.headSha}`,
+        idempotencyKey: `authorize:tick:${entryId}:${body.headSha}:${bucket}`,
         decisionDigest: `sha256:${"0".repeat(64)}`,
       });
+
+      // Claim the offer on the server's behalf. Nothing else will: in this gate
+      // the required check is the consumer, so an unclaimed offer would expire
+      // after its deadline and the branch would be told to wait forever. §8.2
+      // provides exactly this — a synthetic claim that consumes the sponsor's
+      // ordinary turn once and cannot be submitted by a client.
+      const offered = await queue.snapshot();
+      if (offered.activeAttemptId !== null) {
+        const holder = offered.entries.find((e) => e.entryId === entryId);
+        if (holder?.state === "Offered") {
+          await queue.claim({
+            idempotencyKey: `authorize:claim:${offered.activeAttemptId}`,
+            attemptId: offered.activeAttemptId,
+            executionMode: "fast-reuse",
+          });
+        }
+      }
+    }
+
+    // With the lane held, walk the attempt to the point where a merge may be
+    // written. The evidence is the proof already on the head, which is the fast
+    // profile: this reuses work rather than claiming an integrated run happened.
+    let operationId: string | null = null;
+    const held = await queue.snapshot();
+    const cand = body.candidate;
+    if (
+      held.activeAttemptId !== null &&
+      cand?.baseSha !== undefined &&
+      cand.candidateSha !== undefined &&
+      cand.candidateTreeOid !== undefined
+    ) {
+      const attemptId = held.activeAttemptId;
+      const holder = held.entries.find((e) => e.entryId === entryId);
+      if (holder !== undefined && holder.state === "Active") {
+        const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
+        const prepared = await queue.candidatePrepared({
+          idempotencyKey: `authorize:candidate:${attemptId}`,
+          attemptId,
+          baseSha: cand.baseSha,
+          headSha: body.headSha,
+          candidateSha: cand.candidateSha,
+          candidateTree: cand.candidateTreeOid,
+          policyDigest: `sha256:${"0".repeat(64)}`,
+          runner: "reuse",
+        });
+        if (ok(prepared)) {
+          await queue.assign({
+            idempotencyKey: `authorize:assign:${attemptId}`,
+            attemptId,
+            assignmentDigest: `sha256:${"1".repeat(64)}`,
+          });
+          await queue.receipt({
+            idempotencyKey: `authorize:receipt:${attemptId}`,
+            attemptId,
+            receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
+          });
+          const started = await queue.startVerification({
+            idempotencyKey: `authorize:verify:${attemptId}`,
+            attemptId,
+          });
+          const nonce = "nonce" in started ? started.nonce : undefined;
+          if (nonce !== undefined) {
+            await queue.completeVerification({
+              idempotencyKey: `authorize:verdict:${attemptId}`,
+              attemptId,
+              nonce,
+              accepted: true,
+              resultDigest: `sha256:${"3".repeat(64)}`,
+            });
+            await queue.mergeIntent({
+              idempotencyKey: `authorize:intent:${attemptId}`,
+              attemptId,
+              intentDigest: `sha256:${"4".repeat(64)}`,
+            });
+            const begun = await queue.beginMergeWrite({
+              idempotencyKey: `authorize:write:${attemptId}`,
+              attemptId,
+              operationId: `merge_${attemptId}`,
+            });
+            if (begun.status === "applied" || begun.status === "already-started") {
+              operationId = `merge_${attemptId}`;
+            }
+          }
+        }
+      }
     }
 
     const snapshot = await queue.snapshot();
     const entry = snapshot.entries.find((e) => e.entryId === entryId);
-    const holdsLane = snapshot.activeAttemptId !== null && entry !== undefined && entry.state !== "Ready";
+    // Holding the lane means this entry owns the one active attempt — not merely
+    // that some attempt exists, which would authorize whoever asked while another
+    // pull request was mid-integration.
+    const holdsLane =
+      snapshot.activeAttemptId !== null &&
+      entry !== undefined &&
+      ["Offered", "Active", "Verifying", "MergeGuard", "Merging"].includes(entry.state);
     const enforcing = project.activationState === "canary" || project.activationState === "enforced";
 
     // In observe the answer is always yes, and the reason says what it would have
@@ -374,8 +483,76 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       activationState: project.activationState,
       reason: holdsLane ? "HOLDS_TURN" : (entry?.primaryReason ?? "WAITING_FOR_TURN"),
       entryId,
+      operationId,
       queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
     });
+  });
+
+  /**
+   * Report the merge the queue authorized. The write happens in CI because the App
+   * cannot yet merge, so the queue must be told what landed — and it refuses
+   * anything that is not the candidate it authorized, which is the guard that makes
+   * delegating the write safe.
+   */
+  app.post("/v1/queue/:repositoryId/merged", async (c) => {
+    const claims = await deps.verifyOidc(c, c.env);
+    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+    if (String(claims["repository_id"] ?? "") !== repositoryId) {
+      return c.json({ error: "token is for another repository" }, 403);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      baseRef?: string;
+      attemptId?: string;
+      operationId?: string;
+      mergeSha?: string;
+      mergeTree?: string;
+      parentShas?: string[];
+      transitionDigest?: string;
+      sponsorPrincipalId?: string;
+    };
+    const baseRef = branchRef(body.baseRef);
+    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    for (const [name, value] of [
+      ["attemptId", body.attemptId],
+      ["operationId", body.operationId],
+      ["mergeSha", body.mergeSha],
+      ["mergeTree", body.mergeTree],
+    ] as const) {
+      if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
+    }
+
+    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const confirmed = await queue.confirmMerge({
+      idempotencyKey: `merged:${body.attemptId}`,
+      attemptId: body.attemptId!,
+      operationId: body.operationId!,
+      mergeSha: body.mergeSha!,
+      mergeTree: body.mergeTree!,
+      parentShas: body.parentShas ?? [],
+    });
+    if (confirmed.status === "rejected") {
+      // The reducer refuses a tree that is not the candidate it authorized, so a
+      // rejection here means something other than the verified integration landed.
+      return c.json({ error: confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+    }
+
+    const snapshot = await queue.snapshot();
+    const sequence = (snapshot.chainHead?.sequence ?? 0) + 1;
+    const transition = await queue.recordTransition({
+      idempotencyKey: `transition:${body.attemptId}`,
+      kind: "verified",
+      transitionSequence: sequence,
+      priorDigest: snapshot.chainHead?.digest ?? null,
+      digest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
+      baseSha: body.mergeSha!,
+      attemptId: body.attemptId!,
+      witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
+    });
+
+    return c.json({ merged: true, confirmed: confirmed.status, transition: transition.status, sequence });
   });
 
   return app;
