@@ -465,6 +465,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const snapshot = await queue.snapshot();
     const entry = snapshot.entries.find((e) => e.entryId === entryId);
+
+    // An attempt already walked to merge-ready by an earlier caller still has an
+    // operation, and the caller that will perform the write needs its id. Without
+    // this, the second asker is told it holds the turn and given nothing to act on,
+    // so nothing ever merges.
+    if (operationId === null && snapshot.activeAttemptId !== null && entry?.state === "Merging") {
+      operationId = `merge_${snapshot.activeAttemptId}`;
+    }
+
     // Holding the lane means this entry owns the one active attempt — not merely
     // that some attempt exists, which would authorize whoever asked while another
     // pull request was mid-integration.
