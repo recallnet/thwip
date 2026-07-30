@@ -1,4 +1,4 @@
-import { recordDigest } from "@thwip/queue-protocol";
+import { canonicalRecordBytes, recordDigest } from "@thwip/queue-protocol";
 import type { CandidateSuite, CandidateVerdict } from "./store.js";
 
 /**
@@ -62,7 +62,7 @@ export type CandidateDecision =
  * verdict whose suites or outcome were edited after the fact no longer matches
  * the digest that goes into the transition chain.
  */
-export async function candidateResultDigest(input: {
+function verdictRecord(input: {
   readonly candidateTreeOid: string;
   readonly candidateSha: string;
   readonly baseSha: string;
@@ -73,8 +73,8 @@ export async function candidateResultDigest(input: {
   readonly workflowRef: string;
   readonly workflowSha: string;
   readonly runId: string;
-}): Promise<string> {
-  return recordDigest({
+}) {
+  return {
     predicate: "urn:thwip:queue:candidate-verdict:v1",
     candidateTreeOid: input.candidateTreeOid,
     candidateSha: input.candidateSha,
@@ -89,7 +89,33 @@ export async function candidateResultDigest(input: {
     workflowRef: input.workflowRef,
     workflowSha: input.workflowSha,
     runId: input.runId,
-  });
+  };
+}
+
+/**
+ * The exact bytes the digest covers.
+ *
+ * Stored evidence is named by the hash of its own content, so the bytes written
+ * to the store and the bytes hashed here have to be the same bytes. Deriving both
+ * from one record is what keeps them that way.
+ */
+export function candidateResultBytes(input: Parameters<typeof verdictRecord>[0]): Uint8Array {
+  return canonicalRecordBytes(verdictRecord(input));
+}
+
+export async function candidateResultDigest(input: {
+  readonly candidateTreeOid: string;
+  readonly candidateSha: string;
+  readonly baseSha: string;
+  readonly policyDigest: string;
+  readonly accepted: boolean;
+  readonly suites: readonly CandidateSuite[];
+  readonly reasonCodes: readonly string[];
+  readonly workflowRef: string;
+  readonly workflowSha: string;
+  readonly runId: string;
+}): Promise<string> {
+  return recordDigest(verdictRecord(input));
 }
 
 export async function decideCandidate(

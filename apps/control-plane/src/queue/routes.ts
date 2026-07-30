@@ -3,7 +3,13 @@ import { queueKey } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
-import { candidateResultDigest, decideCandidate, requiresIntegratedRun } from "./candidate-verdict.js";
+import {
+  candidateResultBytes,
+  candidateResultDigest,
+  decideCandidate,
+  requiresIntegratedRun,
+} from "./candidate-verdict.js";
+import { putEvidence, type R2Like } from "./evidence-store.js";
 import type { CandidateSuite } from "./store.js";
 
 /**
@@ -19,6 +25,8 @@ export interface QueueRouteEnv {
   readonly BRANCH_QUEUE: DurableObjectNamespace<BranchQueue>;
   readonly DB: D1Database;
   readonly PUBLIC_ORIGIN: string;
+  /** Digest-addressed evidence. Absent in environments that have no bucket. */
+  readonly EVIDENCE?: R2Bucket;
 }
 
 /** Callers supply their own idempotency key, or the route derives a stable one. */
@@ -111,6 +119,27 @@ async function project(
   }
 }
 
+/**
+ * Write evidence, reporting what happened rather than throwing.
+ *
+ * A bucket may be absent, and a storage failure must not lose a verdict the
+ * verifier already produced: the queue's decision is authoritative from the
+ * object, and the bucket exists so a reader can audit it afterwards.
+ */
+async function storeEvidence(
+  env: QueueRouteEnv,
+  input: Parameters<typeof putEvidence>[1],
+): Promise<string> {
+  if (env.EVIDENCE === undefined) return "no-bucket";
+  try {
+    const result = await putEvidence(env.EVIDENCE as unknown as R2Like, input);
+    if (result.stored) return result.deduplicated ? "already-stored" : "stored";
+    return result.reason;
+  } catch (error) {
+    return `failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`;
+  }
+}
+
 async function resolveQueue(
   env: QueueRouteEnv,
   repositoryId: string,
@@ -162,6 +191,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     policyDigest: string;
     requiredSuites: readonly string[];
     securityProfile: string;
+    /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
+    organizationId: string;
     /** Null when no verifier is pinned, which only matters to a stronger profile. */
     verifier: { workflowRef: string; workflowSha: string | null } | null;
   } | null>;
@@ -559,7 +590,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       resultDigest,
       observedAt: new Date().toISOString(),
     });
-    return c.json({ recorded: stored.status, resultDigest, candidateTreeOid }, 202);
+
+    // Persist the bytes the digest was taken over, so the digest the transition
+    // chain records resolves to something a reader can fetch and check. Without
+    // this the chain holds a hash of evidence nobody outside the object can see.
+    const evidence = await storeEvidence(c.env, {
+      organizationId: policy.organizationId,
+      repositoryId,
+      kind: "verifier-result",
+      digest: resultDigest as `sha256:${string}`,
+      bytes: candidateResultBytes(content),
+    });
+
+    return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
   });
 
   /**
