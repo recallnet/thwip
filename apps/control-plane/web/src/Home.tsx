@@ -218,17 +218,17 @@ const SEQUENCE: Array<{ step: string; asks: string; codes: string[] }> = [
 const PROFILES = [
   {
     name: "Fast",
-    body: "No lease required. The run records its own network and cache modes, and the signature makes those an assertion the signer cannot later deny.",
+    body: "No lease. The run records its own network and cache modes, signed.",
     fact: "lease.required = false",
   },
   {
     name: "Fresh",
-    body: "A lease is required, so the run has to be claimed before it happens and cannot be back-dated into a pull request.",
+    body: "A lease, claimed before the run, so it cannot be back-dated.",
     fact: "lease.required = true · 1800s",
   },
   {
     name: "Remote",
-    body: "Named suites must run on GitHub's runners. The check refuses to pass unless GitHub's own conclusion for that suite on this commit is a success.",
+    body: "Named suites run on GitHub. The check needs GitHub's own conclusion.",
     fact: "verified from check runs",
   },
 ];
@@ -284,9 +284,7 @@ export function Home({
               </a>
             </div>
             <p className="nt-note">
-              Both figures come from the record below and from GitHub's check runs on commit {RECORD.commit} of
-              this control plane. Your suites take as long as your suites take; what thwip removes is the second
-              run.
+              Both figures come from the record below, on commit {RECORD.commit} of this control plane.
             </p>
           </div>
         </section>
@@ -336,16 +334,11 @@ export function Home({
                 <dd>{RECORD.githubUserId}</dd>
               </div>
             </dl>
-            <p className="nt-note">
-              {RECORD.trailerBytes} bytes, carried as a Git trailer, so the evidence travels with the commit and
-              needs no side channel:
-            </p>
+            <p className="nt-note">{RECORD.trailerBytes} bytes, carried as a Git trailer:</p>
             <pre className="nt-raw">{RECORD.trailer}…</pre>
             <p>
-              It is a DSSE envelope over an in-toto Statement, signed with OpenSSH SSHSIG under the namespace{" "}
-              <code>thwip-ci-dsse-v1</code>. GitHub owns the binding from key to person: the verifier reads the
-              signing keys GitHub publishes for the account the proof names, so thwip keeps no identity system of
-              its own.
+              A DSSE envelope over an in-toto Statement, signed with an SSH key. GitHub owns the binding from key
+              to person, so thwip keeps no identity system of its own.
             </p>
           </div>
         </section>
@@ -357,8 +350,8 @@ export function Home({
           </div>
           <div className="nt-body">
             <p>
-              Twelve checks, in this order, against the head commit of the pull request. Each failure returns one
-              stable reason code, so a red check names the step that failed rather than a log to go read.
+              Twelve checks, in this order, against the head commit. A failure names the step, not a log to go
+              read.
             </p>
             <div className="nt-scroll">
             <table className="nt-table">
@@ -397,9 +390,8 @@ export function Home({
             </table>
             </div>
             <p className="nt-note">
-              The verifier is a pure function. Time is an input, GitHub's answers are inputs, and it makes no
-              calls of its own — so the same inputs always give the same verdict, and you can run it locally and
-              get the answer the check will give.
+              The verifier is a pure function, so <code>thwip verify</code> gives you the answer the check will
+              give.
             </p>
           </div>
         </section>
@@ -412,11 +404,8 @@ export function Home({
           <div className="nt-body">
             <h2>Choose, per suite, who has to have done the work.</h2>
             <p>
-              A proof is a named person's signed assertion that these suites passed on this tree, which buys you
-              attribution nobody can repudiate, a policy no developer can silently change, and a record any
-              teammate can reproduce. When a suite needs a third party to have executed it instead, send that one
-              to GitHub and the check requires both halves. The three profiles differ in exactly one respect
-              each: <a href="/faq">what a proof does and does not establish</a>.
+              A proof is a named person's signed assertion. When a suite needs a third party to have run it
+              instead, send that one to GitHub. <a href="/faq">What a proof establishes</a>.
             </p>
             <div className="nt-cols">
               {PROFILES.map((p) => (
@@ -428,8 +417,7 @@ export function Home({
               ))}
             </div>
             <p className="nt-note">
-              Anything that cannot run on your machine — a macOS or Windows build — belongs under{" "}
-              <code>remote:</code>, and the check requires both halves before it passes.
+              A macOS or Windows build belongs under <code>remote:</code>.
             </p>
           </div>
         </section>
@@ -440,10 +428,7 @@ export function Home({
             Field 5<b>How it fits your repository</b>
           </div>
           <div className="nt-body">
-            <p>
-              One committed file names which checks are required and which profile they run under. This is the
-              whole configuration of the repository that produced the record above:
-            </p>
+            <p>One committed file. This is the whole configuration of the repository above:</p>
             <pre className="nt-raw nt-raw--code">{`version: 4
 profile: fast
 required:
@@ -451,11 +436,9 @@ required:
   - typecheck
   - test`}</pre>
             <p>
-              Suite ids name package.json scripts by default. Projects with a Dagger module point{" "}
-              <code>pipeline.module</code> at it instead, and matrices, services, and platforms stay in that
-              module, in a real language, rather than in a dialect thwip invented. The CLI provisions its own
-              Dagger engine into a cache and checks it against the published checksum, so adopting thwip does not
-              mean adopting another global toolchain.
+              Suite ids name package.json scripts, or <code>pipeline.module</code> points at a Dagger module and
+              matrices live there. The CLI provisions its own Dagger engine, so adopting thwip is not adopting
+              another global toolchain.
             </p>
             <div className="nt-cmd">
               <span>$</span> thwip init --required &quot;lint,typecheck,test&quot;
@@ -464,9 +447,7 @@ required:
               <span>$</span> thwip run
             </div>
             <p className="nt-note">
-              Setup is a prompt you hand to your coding agent. The same text is published at{" "}
-              <a href="/install">/install</a> and printed by <code>thwip setup</code>, so the agent and the docs
-              cannot drift apart.
+              Setup is a prompt for your coding agent, at <a href="/install">/install</a>.
             </p>
           </div>
         </section>
@@ -477,7 +458,7 @@ required:
             Field 6<b>Price</b>
           </div>
           <div className="nt-body">
-            <h2>Both plans verify identically. The plan sets how much you can put through it.</h2>
+            <h2>Both plans verify identically. The plan sets the limits.</h2>
             <div className="nt-scroll">
             <table className="nt-table">
               <thead>
@@ -497,17 +478,13 @@ required:
                 </tr>
                 <tr>
                   <td>Pro</td>
-                  <td className="n">$5 / month · $50 / year</td>
+                  <td className="n">$5 / month</td>
                   <td className="n">15</td>
                   <td className="n">25</td>
                 </tr>
               </tbody>
             </table>
             </div>
-            <p className="nt-note">
-              Every profile, every reason code, and the merge-queue check are in both plans. The limits are
-              enforced by the control plane when you enable a project or add a signer.
-            </p>
             <div className="nt-actions">
               <a className="nt-btn" href="/install">
                 Set up a repository
