@@ -44,6 +44,8 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           THWIP_ENDPOINT: https://thwip.recall.net
+          # gh reads the candidate commit, so this step needs a token of its own.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_ID: ${{ github.event.repository.id }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
