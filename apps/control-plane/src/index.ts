@@ -715,6 +715,64 @@ app.post("/admin/sync", async (c) => {
   return c.json({ installations: results });
 });
 
+/**
+ * Queue doctor (plan.md §30.4). Reports what the App is actually granted and what
+ * the branch actually requires, because setup must never assume that creating a
+ * ruleset produced effective enforcement, nor that the App can publish the check
+ * the branch will require.
+ */
+app.get("/admin/queue/doctor", async (c) => {
+  if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
+  const repo = c.req.query("repo") ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return c.json({ error: "repo must be owner/name" }, 400);
+
+  const installations = await listInstallations(c.env);
+  const owner = repo.split("/")[0];
+  const installation = installations.find((i) => i.account.login.toLowerCase() === owner?.toLowerCase());
+  if (installation === undefined) return c.json({ error: `no installation for ${owner}` }, 404);
+
+  const token = await installationToken(c.env, String(installation.id));
+  const gh = async <T>(path: string): Promise<T | { error: string; status: number }> => {
+    const res = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      },
+    });
+    if (!res.ok) return { error: await res.text(), status: res.status };
+    return (await res.json()) as T;
+  };
+
+  // The App's own view of its installation, which is the authoritative list of
+  // granted permissions.
+  const self = await gh<{ permissions?: Record<string, string> }>("/installation/repositories?per_page=1");
+  const rulesets = await gh<Array<{ id: number; name: string; enforcement: string }>>(
+    `/repos/${repo}/rulesets`,
+  );
+
+  const required: Record<string, string> = {
+    checks: "write",
+    contents: "write",
+    pull_requests: "write",
+    statuses: "write",
+  };
+  const granted = (installation as unknown as { permissions?: Record<string, string> }).permissions ?? {};
+  const missing = Object.entries(required).filter(([scope, level]) => granted[scope] !== level);
+
+  return c.json({
+    repo,
+    installationId: String(installation.id),
+    grantedPermissions: granted,
+    requiredPermissions: required,
+    missingPermissions: Object.fromEntries(missing),
+    canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
+    canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    rulesets: Array.isArray(rulesets) ? rulesets : rulesets,
+    repositoriesVisible: "error" in self ? self : "ok",
+  });
+});
+
 // Resolve a repository's GitHub numeric ids from its full name. The
 // projection already holds every installed repository, so no GitHub call.
 app.get("/v1/resolve-repo", async (c) => {

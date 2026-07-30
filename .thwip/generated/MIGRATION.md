@@ -21,6 +21,34 @@ safe:                  false  -- because removing merge_queue is intentional her
 `safe: false` is the generator refusing to hide that it drops a rule. Removing
 `merge_queue` is the point of this migration; every other removal would be a bug.
 
+## The two integration ids are not interchangeable
+
+```
+thwip          integration_id 15368     GitHub Actions (the existing proof check)
+Thwip / Merge  integration_id 4419870   the Thwip App
+```
+
+The first generated payload pinned both to 15368, which would have let **any**
+GitHub Actions workflow in this repository satisfy the merge gate — exactly the
+hole the verifier identity pin exists to close, reintroduced one layer lower. It
+was caught by running `queue doctor` against the live installation rather than
+trusting the value already in the ruleset. Check this pair before applying.
+
+## Verified state of the installation
+
+`GET /admin/queue/doctor?repo=recallnet/thwip` on 2026-07-29 reports installation
+`149708815` holding only:
+
+```
+members: read, contents: read, metadata: read
+```
+
+So today the App **cannot** publish a check and **cannot** merge. Applying the
+policy in this state would leave `main` requiring `Thwip / Merge` from an App that
+is not permitted to publish it, and nothing would merge again until the permission
+was granted. Re-run the doctor after granting; `canPublishMergeCheck` and `canMerge`
+must both be true before step 2.
+
 ## Prerequisites that need a human
 
 1. **App permissions.** GitHub App `4419870` needs `Checks: write`,
