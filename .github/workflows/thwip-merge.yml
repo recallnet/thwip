@@ -94,13 +94,13 @@ jobs:
             echo "queue did not authorize a merge: $(printf '%s' "$abody" | jq -r .reason)"; exit 0
           fi
 
+          # printf, so the trailer's blank line never appears literally in YAML.
+          msg=$(printf 'Integrated by Thwip Queue.\n\nthwip-queue-operation: %s\n' "$op")
           resp=$(curl -sS -w '\n%{http_code}' -X PUT \
             -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \
             -H "content-type: application/json" \
             -d "$(jq -nc --arg sha "$HEAD_SHA" --arg title "Merge pull request #$PR (Thwip Queue)" \
-                  --arg msg "Integrated by Thwip Queue.
-
-thwip-queue-operation: $op" '{sha:$sha, merge_method:"merge", commit_title:$title, commit_message:$msg}')" \
+                  --arg msg "$msg" '{sha:$sha, merge_method:"merge", commit_title:$title, commit_message:$msg}')" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
           mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
           echo "merge: http $mcode"
