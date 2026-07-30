@@ -321,6 +321,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         parentShas?: string[];
       };
       workReceiptDigest?: string;
+      /**
+       * Walk the held attempt to the point a merge may be written. Only the caller
+       * that is about to write asks for this: preparing earlier starts the
+       * merge-confirmation clock while nothing is writing, and the deadline then
+       * turns a perfectly good turn into a reconciliation.
+       */
+      prepare?: boolean;
     };
     const baseRef = branchRef(body.baseRef);
     if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
@@ -402,6 +409,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const held = await queue.snapshot();
     const cand = body.candidate;
     if (
+      body.prepare === true &&
       held.activeAttemptId !== null &&
       cand?.baseSha !== undefined &&
       cand.candidateSha !== undefined &&

@@ -75,7 +75,7 @@ jobs:
 
           body=$(jq -nc --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
             --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" --argjson candidate "$candidate" \
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate, prepare:true}')
 
           out=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
             -H "content-type: application/json" -d "$body" \
