@@ -77,12 +77,28 @@ jobs:
             --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" --argjson candidate "$candidate" \
             '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate, prepare:true}')
 
-          out=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
-            -H "content-type: application/json" -d "$body" \
-            "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
-          code=$(printf '%s' "$out" | tail -n1); abody=$(printf '%s' "$out" | sed '$d')
-          echo "authorize: http $code"; echo "$abody"
-          [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
+          # The queue will not certify a merge until the required suites have run
+          # against the integrated candidate, and the first ask is what starts that
+          # run. So keep asking while it says the candidate is being verified: this
+          # is the wait for the integration to be tested, not a retry of a failure.
+          deadline=$(( $(date +%s) + 1800 ))
+          while :; do
+            out=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
+              -H "content-type: application/json" -d "$body" \
+              "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
+            code=$(printf '%s' "$out" | tail -n1); abody=$(printf '%s' "$out" | sed '$d')
+            echo "authorize: http $code"; echo "$abody"
+            [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
+
+            cand_state=$(printf '%s' "$abody" | jq -r '.candidate // empty')
+            [ "$cand_state" = "verification-requested" ] || break
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::the candidate was still unverified after 30 minutes"
+              exit 1
+            fi
+            sleep "$(printf '%s' "$abody" | jq -r '.retryAfterSeconds // 20')"
+          done
 
           authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
           enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
