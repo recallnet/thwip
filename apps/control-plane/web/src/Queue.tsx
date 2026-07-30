@@ -155,10 +155,32 @@ export function QueuePanel({
 
   useEffect(() => {
     load();
-    // Readiness changes on GitHub events we do not see from here, so the view
-    // refreshes rather than pretending its first read stays true.
-    const timer = setInterval(load, 10_000);
-    return () => clearInterval(timer);
+    // Readiness changes on GitHub events this page never sees, so it refreshes
+    // rather than pretending its first read stays true. Thirty seconds, and only
+    // while the tab is in front: at ten seconds a forgotten background tab was
+    // enough to spend a month of Durable Object requests on nobody reading it.
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (timer === null && document.visibilityState === "visible") timer = setInterval(load, 30_000);
+    };
+    const stop = () => {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        load();
+        start();
+      } else {
+        stop();
+      }
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load]);
 
   if (error !== null) {
