@@ -428,7 +428,10 @@ function Overview() {
         <p style={{ fontFamily: "var(--gp-mono, monospace)", fontSize: "0.82rem" }}>
           git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
         </p>
-        <p className="gp-panel__meta">The merge queue merges once the proof on the head commit verifies.</p>
+        <p className="gp-panel__meta">
+          The queue verifies the proof on your head commit, and under a profile stronger than fast it also runs
+          the required suites against the merge commit before it merges.
+        </p>
       </Panel>
     </>
   );

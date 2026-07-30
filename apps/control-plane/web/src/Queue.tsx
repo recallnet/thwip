@@ -24,6 +24,19 @@ export interface QueueEntryView {
   readonly schedulerEligible: boolean;
   readonly fairnessOrdinal: string;
   readonly cooldownUntil: string | null;
+  readonly lastAttemptId: string | null;
+}
+
+/** One recorded move of the protected branch. */
+export interface QueueTransitionView {
+  readonly transitionSequence: number;
+  readonly kind: string;
+  readonly digest: string;
+  readonly priorDigest: string | null;
+  readonly baseSha: string;
+  readonly attemptId: string | null;
+  readonly witnessPrincipalIds: readonly string[];
+  readonly recordedAt: string | null;
 }
 
 export interface QueueSnapshot {
@@ -35,7 +48,34 @@ export interface QueueSnapshot {
   readonly baseSha: string | null;
   readonly activeAttemptId: string | null;
   readonly chainHead: { readonly sequence: number; readonly digest: string } | null;
+  readonly transitions?: readonly QueueTransitionView[];
   readonly entries: readonly QueueEntryView[];
+}
+
+/**
+ * What a transition means, in the words a reader needs.
+ *
+ * The queue's own vocabulary leaked into the dashboard: a merge history read
+ * "Transition 13 · sha256:003fbf43ede765da… · base 003fbf43ede7", which says
+ * nothing about which pull request landed or when.
+ */
+const TRANSITION_KIND: Record<string, string> = {
+  verified: "Merged by the queue",
+  override: "Merged with an override",
+  external: "Moved outside the queue",
+  genesis: "Queue opened here",
+};
+
+function whenText(iso: string | null): string {
+  if (iso === null) return "time not recorded";
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "time not recorded";
+  const minutes = Math.floor((Date.now() - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(at).toLocaleDateString();
 }
 
 /**
@@ -151,6 +191,15 @@ export function QueuePanel({
   const ready = snapshot.entries.filter((e) => e.state === "Ready" && e.schedulerEligible);
   const waiting = snapshot.entries.filter((e) => !ready.includes(e) && e.state !== "Merged" && e.state !== "Cancelled");
   const projected = new Map(ready.map((e, i) => [e.entryId, i + 1]));
+  // Newest first: a reader wants the last thing that landed, not the first.
+  const history = [...(snapshot.transitions ?? [])].sort(
+    (a, b) => b.transitionSequence - a.transitionSequence,
+  );
+  const prForAttempt = new Map(
+    snapshot.entries
+      .filter((e) => e.lastAttemptId !== null)
+      .map((e) => [e.lastAttemptId as string, e.pullRequestNumber]),
+  );
 
   return (
     <div className="gp-panel">
@@ -159,7 +208,7 @@ export function QueuePanel({
           Queue · {repositoryName} · {baseRef.replace(/^refs\/heads\//, "")}
         </h3>
         <span className="gp-panel__meta">
-          {snapshot.activeAttemptId === null ? "lane idle" : "integrating"} · generation {snapshot.generation}
+          {snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
         </span>
       </div>
       <div className="gp-panel__body">
@@ -250,11 +299,60 @@ export function QueuePanel({
           </>
         )}
 
-        {snapshot.chainHead !== null && (
-          <p className="gp-panel__meta">
-            Transition {snapshot.chainHead.sequence} · <code>{snapshot.chainHead.digest.slice(0, 23)}…</code>
-            {snapshot.baseSha === null ? "" : ` · base ${snapshot.baseSha.slice(0, 12)}`}
-          </p>
+        {history.length > 0 && (
+          <>
+            <p className="gp-panel__meta">
+              How this branch has moved. Every row is a signed record; the queue merged the ones it verified.
+            </p>
+            <table className="gp-data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Pull request</th>
+                  <th>What happened</th>
+                  <th>Commit</th>
+                  <th>When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((t) => {
+                  const pr = t.attemptId === null ? undefined : prForAttempt.get(t.attemptId);
+                  return (
+                    <tr key={t.transitionSequence}>
+                      <td className="gp-mono">{t.transitionSequence}</td>
+                      <td>
+                        {pr === undefined ? (
+                          <span className="gp-panel__meta">—</span>
+                        ) : (
+                          <a
+                            href={`https://github.com/${repositoryName}/pull/${pr}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            #{pr}
+                          </a>
+                        )}
+                      </td>
+                      <td className={t.kind === "verified" ? "gp-pass" : undefined}>
+                        {TRANSITION_KIND[t.kind] ?? t.kind}
+                      </td>
+                      <td>
+                        <a
+                          className="gp-mono"
+                          href={`https://github.com/${repositoryName}/commit/${t.baseSha}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {t.baseSha.slice(0, 8)}
+                        </a>
+                      </td>
+                      <td className="gp-panel__meta">{whenText(t.recordedAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
     </div>
