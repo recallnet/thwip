@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { candidateResultDigest, decideCandidate, requiresIntegratedRun } from "./candidate-verdict.js";
+import {
+  candidateResultBytes,
+  candidateResultDigest,
+  decideCandidate,
+  requiresIntegratedRun,
+} from "./candidate-verdict.js";
 import type { CandidateVerdict } from "./store.js";
 
 const TREE = "4".repeat(40);
@@ -223,5 +228,45 @@ describe("an unpinned verifier revision", () => {
     expect(await decideCandidate(tampered, anyRevision)).toMatchObject({
       code: "CANDIDATE_DIGEST_MISMATCH",
     });
+  });
+});
+
+/**
+ * Evidence is named by the hash of its own content, so a reader can check what
+ * they fetched without trusting the store. That only holds if the bytes written
+ * are the bytes the digest was taken over.
+ */
+describe("candidateResultBytes", () => {
+  async function sha256(bytes: Uint8Array): Promise<string> {
+    const h = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+    return `sha256:${[...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  it("hashes to the digest the chain records", async () => {
+    const v = await verdict();
+    expect(await sha256(candidateResultBytes(v))).toBe(v.resultDigest);
+  });
+
+  it("hashes to the digest for a refusal too", async () => {
+    const v = await verdict({ accepted: false, reasonCodes: ["SUITE_NOT_PASSED"] });
+    expect(await sha256(candidateResultBytes(v))).toBe(v.resultDigest);
+  });
+
+  it("round-trips as JSON a reader can parse", async () => {
+    const v = await verdict();
+    const parsed = JSON.parse(new TextDecoder().decode(candidateResultBytes(v)));
+    expect(parsed).toMatchObject({
+      predicate: "urn:thwip:queue:candidate-verdict:v1",
+      candidateTreeOid: TREE,
+      accepted: true,
+    });
+    expect(parsed.suites.map((s: { name: string }) => s.name)).toEqual(["lint", "test", "typecheck"]);
+  });
+
+  it("gives different bytes for a different tree", async () => {
+    const v = await verdict();
+    expect(candidateResultBytes({ ...v, candidateTreeOid: "9".repeat(40) })).not.toEqual(
+      candidateResultBytes(v),
+    );
   });
 });

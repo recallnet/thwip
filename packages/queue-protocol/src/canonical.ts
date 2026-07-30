@@ -1,4 +1,4 @@
-import { bytesDigest, canonicalDigest, dssePae, utf8Encode, type Sha256 } from "@thwip/protocol";
+import { bytesDigest, canonicalDigest, canonicalJson, dssePae, utf8Encode, type Sha256 } from "@thwip/protocol";
 
 /**
  * Canonicalization and digest rules for queue evidence.
@@ -45,6 +45,11 @@ export async function envelopeDigest(envelopeBytes: Uint8Array): Promise<Sha256>
 /** Bytes to sign for a queue record, domain-separated by predicate type. */
 export function queueSigningBytes(predicateType: QueuePredicateType, payload: Uint8Array): Uint8Array {
   return dssePae(predicateType, payload);
+}
+
+/** The exact bytes `recordDigest` hashes, for callers that must store them. */
+export function canonicalRecordBytes(value: unknown): Uint8Array {
+  return utf8Encode(canonicalJson(value));
 }
 
 /** Canonical payload bytes for a record about to be signed. */
