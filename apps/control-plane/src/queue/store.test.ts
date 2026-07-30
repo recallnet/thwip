@@ -164,6 +164,22 @@ describe("BranchQueueStore", () => {
     ).toBe("applied");
   });
 
+  it("heals a stored sequence counter that has fallen behind the event log", () => {
+    // What an object written by an earlier build can look like. Trusting the
+    // counter would make every later append collide on the primary key.
+    const sql = sqlite();
+    const store = BranchQueueStore.open(sql, IDENTITY);
+    request(store, "e1", "alice", 7);
+    const real = store.state().lastSequence;
+    sql.exec("UPDATE queue_meta SET last_sequence = ? WHERE id = 1", real - 1);
+
+    const reopened = BranchQueueStore.open(sql, IDENTITY);
+    expect(reopened.state().lastSequence).toBe(real);
+    expect(
+      reopened.append(ev({ type: "EntryHeadChanged", entryId: "e1", headSha: "z".repeat(40) })).status,
+    ).toBe("applied");
+  });
+
   describe("eviction", () => {
     it("rehydrates to the same state after every command", () => {
       const sql = sqlite();
