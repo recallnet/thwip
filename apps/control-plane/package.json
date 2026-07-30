@@ -7,7 +7,8 @@
     "build": "node ../../scripts/generate-prompt-docs.mjs && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "deploy:staging": "wrangler deploy --env staging",
-    "dev": "wrangler dev --env staging"
+    "dev": "wrangler dev --env staging",
+    "test:workers": "vitest run --config vitest.workers.config.ts"
   },
   "dependencies": {
     "@andrewxhill/graphics-press-css": "^4.7.2",
@@ -20,7 +21,10 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "stripe": "^22.3.2",
-    "@thwip/prompts": "workspace:*"
+    "@thwip/prompts": "workspace:*",
+    "@thwip/queue-domain": "workspace:*",
+    "@thwip/queue-protocol": "workspace:*",
+    "@thwip/protocol": "workspace:*"
   },
   "devDependencies": {
     "@better-auth/cli": "^1.4.21",

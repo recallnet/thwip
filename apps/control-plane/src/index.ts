@@ -3,6 +3,8 @@ import { CompactSign, SignJWT, createRemoteJWKSet, importJWK, jwtVerify, type JW
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import { queueRoutes } from "./queue/routes.js";
+import { queueKey as queueKeyOf } from "@thwip/queue-domain";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -714,6 +716,93 @@ app.post("/admin/sync", async (c) => {
   return c.json({ installations: results });
 });
 
+/**
+ * Queue doctor (plan.md §30.4). Reports what the App is actually granted and what
+ * the branch actually requires, because setup must never assume that creating a
+ * ruleset produced effective enforcement, nor that the App can publish the check
+ * the branch will require.
+ */
+/**
+ * The same diagnostic, reachable by a repository administrator with their normal
+ * session. A person who can change the ruleset needs to be able to see whether the
+ * App can actually publish the check it would require; making that operator-only
+ * would mean the people doing the setup cannot check their own work.
+ */
+/**
+ * Who counts as an administrator for queue operations.
+ *
+ * GitHub's projections use `owner` for the people who created or own the
+ * organization and `admin` for org administrators, and both can change rulesets.
+ * Checking only for `admin` locked out owners — the people most likely to be
+ * running setup in the first place.
+ */
+function isOrgAdmin(role: string | null): boolean {
+  return role === "admin" || role === "owner";
+}
+
+async function queueDoctor(env: Env, repo: string): Promise<Response> {
+  const installations = await listInstallations(env);
+  const owner = repo.split("/")[0];
+  const installation = installations.find((i) => i.account.login.toLowerCase() === owner?.toLowerCase());
+  if (installation === undefined) return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
+
+  const token = await installationToken(env, String(installation.id));
+  const gh = async <T>(path: string): Promise<T | { error: string; status: number }> => {
+    const res = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      },
+    });
+    if (!res.ok) return { error: await res.text(), status: res.status };
+    return (await res.json()) as T;
+  };
+
+  const rulesets = await gh<Array<{ id: number; name: string; enforcement: string }>>(
+    `/repos/${repo}/rulesets`,
+  );
+  const required: Record<string, string> = {
+    checks: "write",
+    contents: "write",
+    pull_requests: "write",
+    statuses: "write",
+  };
+  const granted = (installation as unknown as { permissions?: Record<string, string> }).permissions ?? {};
+  const missing = Object.entries(required).filter(([scope, level]) => granted[scope] !== level);
+
+  return Response.json({
+    repo,
+    installationId: String(installation.id),
+    grantedPermissions: granted,
+    requiredPermissions: required,
+    missingPermissions: Object.fromEntries(missing),
+    canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
+    canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    rulesets,
+  });
+}
+
+app.get("/admin/queue/doctor", async (c) => {
+  if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
+  const repo = c.req.query("repo") ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return c.json({ error: "repo must be owner/name" }, 400);
+  return queueDoctor(c.env, repo);
+});
+
+app.get("/v1/queue/:repositoryId/doctor", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (viewer === null) return c.json({ error: "unauthorized" }, 401);
+  if (!isOrgAdmin(viewer.githubOrgRole)) return c.json({ error: "repository admin required" }, 403);
+  const repositoryId = c.req.param("repositoryId");
+  if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "invalid repository id" }, 400);
+  const row = await c.env.DB.prepare("SELECT github_name FROM projects WHERE github_repository_id = ?")
+    .bind(repositoryId)
+    .first<{ github_name: string }>();
+  if (row === null) return c.json({ error: "unknown repository" }, 404);
+  return queueDoctor(c.env, row.github_name);
+});
+
 // Resolve a repository's GitHub numeric ids from its full name. The
 // projection already holds every installed repository, so no GitHub call.
 app.get("/v1/resolve-repo", async (c) => {
@@ -984,6 +1073,94 @@ app.post("/v1/verification-observations", async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Turn a pull_request webhook into a queue entry and a readiness evaluation.
+ *
+ * This is why no workflow needs to enqueue anything: the control plane learns
+ * about a pull request from GitHub directly, so the queue cannot be bypassed by
+ * someone not running a command, and there is no token in CI that can enqueue on
+ * a developer's behalf.
+ *
+ * It is deliberately tolerant. A repository with no queue configured, or an event
+ * for a branch the queue does not manage, is ignored rather than treated as an
+ * error — most repositories in an installation are not queue projects.
+ */
+async function queueFromPullRequest(env: Env, payload: {
+  action?: string;
+  pull_request?: {
+    number?: number;
+    draft?: boolean;
+    state?: string;
+    base?: { ref?: string; repo?: { id?: number } };
+    head?: { sha?: string };
+    user?: { id?: number; login?: string; type?: string };
+  };
+}): Promise<{ handled: boolean; detail: string }> {
+  const pr = payload.pull_request;
+  const repositoryId = pr?.base?.repo?.id;
+  const baseRef = pr?.base?.ref;
+  const number = pr?.number;
+  const headSha = pr?.head?.sha;
+  if (repositoryId == null || baseRef == null || number == null || headSha == null) {
+    return { handled: false, detail: "not a pull request event we can place" };
+  }
+
+  const ref = `refs/heads/${baseRef}`;
+  const project = await env.DB.prepare(
+    "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+  )
+    .bind(String(repositoryId), ref)
+    .first<{ activation_state: string }>();
+  if (project === null) return { handled: false, detail: "no queue configured for this branch" };
+
+  // The sponsor is the pull request's author, resolved through the projection so a
+  // fairness share belongs to a person rather than to a login string.
+  const authorId = pr?.user?.id;
+  const principal =
+    authorId == null
+      ? null
+      : await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
+          .bind(String(authorId))
+          .first<{ id: string }>();
+  if (principal === null) return { handled: false, detail: "author has no activated principal" };
+
+  const key = await queueKeyOf(String(repositoryId), ref);
+  const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key));
+  await stub.bind({ queueKey: key, repositoryId: String(repositoryId), baseRef: ref });
+
+  const entryId = `entry_${repositoryId}_${number}`;
+  if (payload.action === "closed") {
+    await stub.cancel({
+      idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+      entryId,
+      actorPrincipalId: "github",
+      reason: "the pull request was closed",
+    });
+    return { handled: true, detail: "entry cancelled" };
+  }
+
+  await stub.request({
+    idempotencyKey: `webhook:request:${entryId}`,
+    entryId,
+    pullRequestNumber: number,
+    sponsorPrincipalId: principal.id,
+    sponsorGithubUserId: String(authorId),
+    headSha,
+  });
+
+  // Readiness is re-derived from what GitHub just told us plus what it already
+  // said; the event alone never decides it.
+  await stub.readiness({
+    idempotencyKey: `webhook:ready:${entryId}:${headSha}:${payload.action ?? "sync"}`,
+    entryId,
+    ready: pr?.draft !== true && pr?.state === "open",
+    schedulerEligible: false,
+    primaryReason: pr?.draft === true ? "PR_DRAFT" : pr?.state !== "open" ? "PR_CLOSED" : "AGENT_OFFLINE",
+  });
+
+  return { handled: true, detail: `placed in ${project.activation_state}` };
+}
+
 // --- GitHub webhooks -------------------------------------------------------
 
 app.post("/api/github/webhooks", async (c) => {
@@ -1010,8 +1187,20 @@ app.post("/api/github/webhooks", async (c) => {
   } catch {
     /* hint only */
   }
+  // Queue placement happens inline rather than through the projection queue: the
+  // Durable Object is the authority and a delayed entry would mean a pull request
+  // sits outside the queue for as long as the backlog is deep.
+  let queued = { handled: false, detail: "not a queue event" };
+  if (event === "pull_request") {
+    try {
+      queued = await queueFromPullRequest(c.env, JSON.parse(new TextDecoder().decode(raw)) as never);
+    } catch (error) {
+      queued = { handled: false, detail: error instanceof Error ? error.message : "queue placement failed" };
+    }
+  }
+
   await c.env.SYNC_QUEUE.send({ provider: "github", delivery, event, installationId });
-  return c.json({ ok: true });
+  return c.json({ ok: true, queued });
 });
 
 // --- Stripe webhooks (entitlement mirror; Better Auth has its own route) ---
@@ -1121,6 +1310,55 @@ app.get("/admin/github/manifest/callback", async (c) => {
 
 // --- Static assets (marketing site + dashboard SPA) ------------------------
 
+/* ---------- Thwip Queue ---------- */
+
+/* The queue's own routes. Authorization reuses the GitHub projection: a viewer
+   is a queue participant through their principal, and repository admin comes
+   from the synced org role. */
+app.route(
+  "/",
+  queueRoutes<Env>({
+    async authenticate(c: { req: { raw: Request } }, env: Env) {
+      const viewer = await resolveViewer(env, c.req.raw);
+      if (viewer === null) return { ok: false as const, status: 401 as const };
+      if (viewer.principalId === null) return { ok: false as const, status: 403 as const };
+      return {
+        ok: true as const,
+        principalId: viewer.principalId,
+        githubUserId: viewer.githubUserId,
+        isAdmin: isOrgAdmin(viewer.githubOrgRole),
+      };
+    },
+    async verifyOidc(c: { req: { raw: Request } }, env: Env) {
+      const claims = await verifyGithubOidc({ env, req: c.req });
+      return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
+    },
+    async queueProject(env: Env, repositoryId: string, baseRef: string) {
+      const row = await env.DB.prepare(
+        "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+      )
+        .bind(repositoryId, baseRef)
+        .first<{ activation_state: string }>();
+      return row === null ? null : { activationState: row.activation_state };
+    },
+    async principalFor(env: Env, githubUserId: string) {
+      if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
+      const row = await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
+        .bind(githubUserId)
+        .first<{ id: string }>();
+      return row?.id ?? null;
+    },
+    async pinnedVerifier(env: Env, repositoryId: string) {
+      const row = await env.DB.prepare(
+        "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",
+      )
+        .bind(repositoryId)
+        .first<{ verifier_json: string }>();
+      return row === null ? null : (JSON.parse(row.verifier_json) as never);
+    },
+  }) as never,
+);
+
 app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default {
@@ -1154,3 +1392,9 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+/* The Durable Object and Workflow classes the wrangler bindings name. They live
+   in ./queue and are re-exported here because Cloudflare resolves a binding's
+   class_name against the Worker's own exports. */
+export { BranchQueue } from "./queue/BranchQueue.js";
+export { IntegrationTurnWorkflow } from "./queue/IntegrationTurnWorkflow.js";
