@@ -213,6 +213,33 @@ export class BranchQueueStore {
     return { status: "applied" };
   }
 
+  /**
+   * Claim the right to ask a verifier to run against this candidate.
+   *
+   * True only for the caller that should dispatch. A claim goes stale so a run
+   * that died without reporting does not wedge the candidate forever, and the
+   * clock restarts from each fresh claim.
+   */
+  claimCandidateDispatch(candidateTreeOid: string, at: string, staleAfterMs: number): boolean {
+    const row = this.sql
+      .exec<{ dispatched_at: string }>(
+        "SELECT dispatched_at FROM candidate_dispatches WHERE candidate_tree_oid = ?",
+        candidateTreeOid,
+      )
+      .toArray()[0];
+    if (row !== undefined) {
+      const age = Date.parse(at) - Date.parse(row.dispatched_at);
+      if (Number.isFinite(age) && age < staleAfterMs) return false;
+    }
+    this.sql.exec(
+      `INSERT INTO candidate_dispatches (candidate_tree_oid, dispatched_at) VALUES (?, ?)
+       ON CONFLICT (candidate_tree_oid) DO UPDATE SET dispatched_at = excluded.dispatched_at`,
+      candidateTreeOid,
+      at,
+    );
+    return true;
+  }
+
   candidateVerdict(candidateTreeOid: string): CandidateVerdict | null {
     const row = this.sql
       .exec<{

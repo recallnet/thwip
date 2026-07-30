@@ -37,6 +37,12 @@ function decimal(value: string | undefined): string | null {
  * query value does survive, and it must still name a branch: a queue over a tag
  * or an arbitrary ref is not a protected resource.
  */
+/**
+ * How long a dispatched verifier may stay silent before another is asked for. A
+ * run that dies without reporting must not wedge its candidate forever.
+ */
+const CANDIDATE_DISPATCH_STALE_MS = 15 * 60_000;
+
 function branchRef(value: string | undefined): string | null {
   if (value === undefined) return null;
   if (!value.startsWith("refs/heads/") || value.length <= "refs/heads/".length) return null;
@@ -737,14 +743,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           // the caller to come back. The caller waits rather than failing, because
           // an untested candidate is a normal early state, not a refusal.
           if (decision.code === "CANDIDATE_NOT_VERIFIED") {
-            const dispatched = await deps.dispatchCandidateVerification(c.env, repositoryId, {
-              baseRef,
-              pullRequestNumber: body.pullRequestNumber,
-              attemptId,
-              baseSha: cand.baseSha,
-              candidateSha: cand.candidateSha,
-              candidateTreeOid: cand.candidateTreeOid,
-            });
+            // Only the first asker dispatches. The caller polls this endpoint while
+            // it waits, and dispatching on every poll once cost one candidate four
+            // full CI runs.
+            const mine = await queue.claimCandidateDispatch(
+              cand.candidateTreeOid,
+              new Date().toISOString(),
+              CANDIDATE_DISPATCH_STALE_MS,
+            );
+            const dispatched = mine
+              ? await deps.dispatchCandidateVerification(c.env, repositoryId, {
+                  baseRef,
+                  pullRequestNumber: body.pullRequestNumber,
+                  attemptId,
+                  baseSha: cand.baseSha,
+                  candidateSha: cand.candidateSha,
+                  candidateTreeOid: cand.candidateTreeOid,
+                })
+              : ({ ok: true } as const);
             if (!dispatched.ok) {
               // Nothing will arrive, so waiting is the wrong answer. Say what
               // GitHub refused so it can be fixed rather than waited out.

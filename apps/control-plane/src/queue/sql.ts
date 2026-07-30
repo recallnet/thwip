@@ -183,6 +183,18 @@ export const SCHEMA: readonly string[] = [
      observed_at TEXT NOT NULL
    )`,
 
+  /**
+   * When a verifier was last asked to run against a candidate tree.
+   *
+   * The merge gate asks whether a verdict exists on a poll, and without this it
+   * dispatched a fresh verifier every time the answer was no. One candidate once
+   * cost four full CI runs, three of them wasted.
+   */
+  `CREATE TABLE IF NOT EXISTS candidate_dispatches (
+     candidate_tree_oid TEXT PRIMARY KEY,
+     dispatched_at TEXT NOT NULL
+   )`,
+
   `CREATE INDEX IF NOT EXISTS deadlines_due ON deadlines (due_at)`,
   `CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (acknowledged, outbox_id)`,
   `CREATE INDEX IF NOT EXISTS entries_state ON entries (state, scheduler_eligible)`,

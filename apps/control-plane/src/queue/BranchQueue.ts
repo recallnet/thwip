@@ -264,6 +264,11 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     return this.require().store.recordCandidateVerdict(verdict);
   }
 
+  /** True only for the caller that should ask a verifier to run. */
+  async claimCandidateDispatch(candidateTreeOid: string, at: string, staleAfterMs: number) {
+    return this.require().store.claimCandidateDispatch(candidateTreeOid, at, staleAfterMs);
+  }
+
   async candidateVerdict(candidateTreeOid: string): Promise<CandidateVerdict | null> {
     return this.require().store.candidateVerdict(candidateTreeOid);
   }
