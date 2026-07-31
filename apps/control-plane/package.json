@@ -22,6 +22,7 @@
     "react-dom": "^19.2.8",
     "stripe": "^22.3.2",
     "@thwip/prompts": "workspace:*",
+    "@thwip/policy": "workspace:*",
     "@thwip/queue-domain": "workspace:*",
     "@thwip/queue-protocol": "workspace:*",
     "@thwip/protocol": "workspace:*"
