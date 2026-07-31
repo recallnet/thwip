@@ -987,6 +987,28 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const principalId = await deps.principalFor(c.env, String(body.authorGithubUserId ?? ""));
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
 
+    // The queue has nobody to give the turn to, so say so on the check.
+    //
+    // Without an activated principal there is no entry, so nothing moves and the
+    // turn check is never published. That is survivable while the check is
+    // advisory and a wedge once it is required: a required check that never
+    // arrives blocks the merge forever with nothing on the page explaining why.
+    // This one is a failure rather than a wait, because it will not resolve on
+    // its own.
+    if (principalId === null && deps.publishTurnCheck !== undefined) {
+      try {
+        await deps.publishTurnCheck(c.env, repositoryId, {
+          entryId,
+          pullRequestNumber: body.pullRequestNumber,
+          headSha: body.headSha,
+          state: "unplaceable",
+          waiting: 0,
+        });
+      } catch {
+        /* the check may lag; the answer below is unaffected */
+      }
+    }
+
     // Answered from the queue itself, never from the projection.
     //
     // There used to be a fast path here that declined from the projection so a

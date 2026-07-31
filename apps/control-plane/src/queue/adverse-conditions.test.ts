@@ -509,6 +509,19 @@ describe("the check that says whose turn it is", () => {
     expect(published).toEqual([]);
   });
 
+  /**
+   * This check is required, so a pull request that gets none can never merge and
+   * has nothing on the page saying why. The queue publishes a failure instead,
+   * because an author with no activated principal is a real problem that will not
+   * resolve on its own.
+   */
+  it("says so when it cannot place a pull request at all", async () => {
+    const e = env();
+    const app = routes({ principalFor: async () => null });
+    await authorize(app, e, 59);
+    expect(published.map((u) => u.state)).toContain("unplaceable");
+  });
+
   it("keeps the queue working when publishing fails", async () => {
     const e = env();
     const app = routes({
