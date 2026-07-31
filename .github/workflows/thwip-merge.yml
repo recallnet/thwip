@@ -24,6 +24,19 @@ on:
   repository_dispatch:
     types: [thwip-queue-turn]
 
+# One merge run per pull request, not one per trigger. The drain re-runs every
+# blocked check at once, and each of those fires a merge run; without this the
+# same pull request gets several, all asking the queue the same question and each
+# waiting up to thirty minutes on the same verdict.
+#
+# Keyed per pull request rather than globally, so two different pull requests
+# still make progress at the same time. The queue decides which of them may
+# merge; this only stops us asking twice about one of them.
+concurrency:
+  group: >-
+    thwip-merge-${{ github.event.client_payload.pullRequestNumber || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   pull-requests: read
