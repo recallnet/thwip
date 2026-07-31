@@ -165,14 +165,35 @@ describe("queueSetupPrompt", () => {
 
   it("is explicit about what only the owner can do", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/App permissions need granting/);
-    expect(prompt).toMatch(/select the Thwip App as the expected source/);
-    expect(prompt).toMatch(/cannot source-pin a new check context in one step/);
+    expect(prompt).toMatch(/grant the thwip App "checks: write"/);
+    expect(prompt).toMatch(/add "thwip" and "thwip \/ turn" to the branch ruleset/);
+    // GitHub can only pin a context to its source after that source has
+    // published it once, so the order is part of the instruction.
+    expect(prompt).toMatch(/after\n *that source has published the check once/);
   });
 
-  it("forbids activating before the canary test, and says what goes wrong", () => {
+  /**
+   * The prompt may only name checks that something publishes. It used to name
+   * "Thwip / Merge", from a path that was never built, so an agent following it
+   * would have required a check nothing could ever satisfy.
+   */
+  it("names the checks that exist and no others", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toContain("thwip / turn");
+    expect(prompt).not.toContain("Thwip / Merge");
+  });
+
+  it("only tells the agent to run commands the CLI has", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    for (const missing of ["thwip queue setup", "thwip queue repair", "--watch"]) {
+      expect(prompt, missing).not.toContain(missing);
+    }
+    expect(prompt).toContain("thwip queue doctor");
+  });
+
+  it("asks for proof before the checks are made required", () => {
     expect(queueSetupPrompt("recallnet/thwip")).toMatch(
-      /requiring\n *a check nothing can publish/,
+      /required check that nothing publishes blocks\n *every merge/,
     );
   });
 
