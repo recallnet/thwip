@@ -76,7 +76,9 @@ candidate when the turn arrives, and asks GitHub to merge it.
   action. Do not attempt to satisfy a human requirement yourself.
 - If integrated CI fails, inspect the preserved worktree, fix the feature branch,
   and rerun \`thwip ship --wait --json-events\`.
-- If Thwip reports a conflict, run \`thwip queue repair --pr <number>\`.
+- If Thwip reports a conflict, rebase the feature branch yourself and rerun
+  \`thwip ship\`. A rebase moves the tree out from under the proof, so it has to
+  be signed again; \`ship\` notices and does it.
 - Treat any invariant, signature, ruleset, or permission failure as blocking and
   report it. These are not conditions to retry around.
 - Work is complete only after \`queue.merge_confirmed\`, or after clearly
@@ -86,8 +88,8 @@ candidate when the turn arrives, and asks GitHub to merge it.
 
 \`\`\`sh
 thwip queue status --pr <number>      # where this pull request stands
-thwip queue status --watch            # a read-only stream; claims nothing
 thwip queue list                      # projected order for ${branch}
+thwip queue explain                   # what the queue is doing and why
 \`\`\`
 
 Projected order changes after every review and check. There is no permanent
@@ -156,28 +158,36 @@ click something in GitHub that you cannot.
 
 2. Run "thwip queue doctor --json" and show me the whole output.
 
-3. Run "thwip queue setup" and show me every proposed change before applying any
-   of it. Preserve all unrelated rules and instructions: a generated ruleset that
-   drops an existing required check is a bug, and the diff will say so.
+3. Tell me which two checks have to be required on the protected branch, and why
+   they are two rather than one:
+
+   - "thwip" says the proof is good for this exact tree. It is a fact about the
+     commit and does not change while the commit does not.
+   - "thwip / turn" says it is this pull request's turn to merge. The queue
+     publishes it itself the moment it offers the lane, and it sits in progress
+     rather than failing while a pull request waits — a required check that has
+     failed goes on refusing the merge after the queue has authorized it.
 
 4. Ensure THWIP.md states the exact shipping, repair, and no-manual-merge rules,
    and add only the bounded pointer to existing agent instruction files. Do not
    rewrite instructions someone else authored.
 
 5. Open a setup pull request. The proposed configuration must not judge itself:
-   it merges under the repository's existing controls, before either queue
-   ruleset is active.
+   it merges under the repository's existing controls, before the queue's checks
+   are required.
 
-6. Tell me what I have to do myself:
-   - which App permissions need granting, and that it raises a consent prompt;
-   - the generated "gh api" commands, which I will run;
-   - that GitHub cannot source-pin a new check context in one step, so I have to
-     select the Thwip App as the expected source for "Thwip / Merge" after the
-     App has published it once.
+6. Tell me what I have to do myself, because you cannot:
+   - grant the thwip App "checks: write", which raises a consent prompt;
+   - add "thwip" and "thwip / turn" to the branch ruleset as required checks.
+     Preserve all unrelated rules and required checks: a ruleset that drops one
+     somebody else added is a broken branch, not a tidier one;
+   - pin each to the source that publishes it, which GitHub can only do after
+     that source has published the check once.
 
-7. Do not activate an enforcing policy until the canary negative test has proven
-   the source pin. Activating an unverified pin is how a branch ends up requiring
-   a check nothing can publish, and nothing merges after that.
+7. Prove it before enforcing it. Push a pull request and confirm both checks
+   appear and go green on it. A required check that nothing publishes blocks
+   every merge on the branch, and that is the failure this order exists to
+   avoid.
 
 Report: files changed, App permissions required, ruleset commands, doctor
 results, and any conflicting auto-merge system you found.`;
