@@ -1,3 +1,17 @@
+## The two required checks
+
+`thwip` says the proof is good for this exact tree. `thwip / turn` says it is
+this pull request's turn to merge.
+
+The first is a fact about the commit and holds until the commit changes. The
+second moves every time the queue offers the lane to somebody else, so while a
+pull request waits its turn check sits in progress rather than failing. Waiting
+is not a failure, and a failed required check goes on refusing the merge after
+the queue has authorized it.
+
+The queue publishes the turn check itself when it offers the lane. Nothing needs
+re-running.
+
 
 ## Candidate verification
 

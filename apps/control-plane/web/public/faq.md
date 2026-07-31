@@ -120,6 +120,25 @@ Every evaluation produces a service-signed audit record containing the exact
 subject, base, policy, verifier version, signer outcomes, and GitHub check-run
 id. A rerun creates another record instead of overwriting history.
 
+## Why are there two required checks?
+
+They answer different questions and change at different times.
+
+`thwip` says the proof is good for this exact tree. That is a fact about the
+commit, and it stays true until the commit changes.
+
+`thwip / turn` says it is this pull request's turn to merge. Only one pull
+request holds the lane at a time, so this one moves whenever the queue offers
+the turn to somebody else.
+
+While a pull request is waiting, its turn check sits in progress rather than
+failing. Waiting is not a failure, and a required check that has failed keeps
+refusing the merge until something re-runs it — which is how a queue ends up
+offering a turn to a pull request that cannot take it.
+
+Nothing has to be re-run for the turn check to go green. The queue publishes it
+the moment it offers the lane.
+
 ## What data does the control plane hold?
 
 Organization and permission projections from GitHub, enrolled public keys,
