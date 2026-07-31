@@ -54,6 +54,12 @@ const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/he
 const STORES = [
   { name: "BranchQueueStore", make: () => BranchQueueStore.open(sqlite(), IDENTITY) },
   { name: "SnapshotQueueStore", make: () => SnapshotQueueStore.open(cellOf(), IDENTITY) },
+  {
+    // Compaction turned up as far as it goes. A command that needed history the
+    // queue had dropped would fail here and nowhere else.
+    name: "SnapshotQueueStore (compacted hard)",
+    make: () => SnapshotQueueStore.open(cellOf(), IDENTITY, { terminalEntries: 1, transitions: 1 }),
+  },
 ];
 
 let makeStore: () => QueueStateStore = STORES[0]!.make;

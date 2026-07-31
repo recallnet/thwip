@@ -137,7 +137,27 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
     );
   }
 
+  // Only the links this table has not already got.
+  //
+  // The chain is append-only and immutable, so re-offering the older links wrote
+  // rows that could only ever conflict and do nothing. It also made the write
+  // cost of a merge grow with the length of the chain, which is the one number
+  // here that never stops rising. One read replaces all of it.
+  //
+  // Scoped to the epoch: a rebaseline starts the chain again from sequence one,
+  // and a high-water mark taken across epochs would discard every link of the new
+  // chain until it passed the length of the old one.
+  const highest = await db
+    .prepare(
+      `SELECT MAX(transition_sequence) AS seq FROM queue_transitions_index
+        WHERE github_repository_id = ? AND base_ref = ? AND queue_epoch = ?`,
+    )
+    .bind(message.repositoryId, message.baseRef, message.queueEpoch)
+    .first<{ seq: number | null }>();
+  const projectedThrough = highest?.seq ?? 0;
+
   for (const transition of message.transitions) {
+    if (transition.transitionSequence <= projectedThrough) continue;
     // Transitions are immutable once recorded, so a conflict means we have already
     // seen this one and there is nothing to change.
     statements.push(
