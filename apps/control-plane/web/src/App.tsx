@@ -453,6 +453,18 @@ function StartUsingThwip() {
   );
 }
 
+/** "2h ago" beats an ISO instant for a reader scanning a list. */
+function relativeTime(iso: string): string {
+  const at = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
+  if (!Number.isFinite(at)) return iso;
+  const minutes = Math.floor((Date.now() - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(at).toLocaleDateString();
+}
+
 function Overview() {
   const { data, error } = useFetch<{
     plan: string;
@@ -464,26 +476,93 @@ function Overview() {
     teams: number;
     activeKeys: number;
   }>("/v1/dashboard/summary");
+  const ops = useFetch<{
+    observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
+  }>("/v1/dashboard/operations");
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  const items: Array<[string, string]> = [
-    ["enabled projects", `${data.enabledProjects}/${data.limits.projects}`],
-    ["active users", `${data.activatedUsers}/${data.limits.users}`],
-    ["github members", String(data.members)],
-    ["github teams", String(data.teams)],
-    ["signing keys", String(data.activeKeys)],
-    ["plan", data.plan],
-  ];
+
+  // Six equal numbers and no next step is what this was. Two of them are limits
+  // that decide what you can do next, and the rest are counts nobody acts on, so
+  // the limits lead and link to where they change.
+  const atProjectLimit = data.enabledProjects >= data.limits.projects;
+  const atUserLimit = data.activatedUsers >= data.limits.users;
+  const recent = (ops.data?.observations ?? []).slice(0, 8);
+
   return (
     <>
       <div className="metric-strip">
-        {items.map(([label, value]) => (
-          <div className="metric-strip__item" key={label}>
-            <span className="metric-strip__label">{label}</span>
-            <span className="metric-strip__value">{value}</span>
-          </div>
-        ))}
+        <a className="metric-strip__item" href="/dashboard/billing" title="Projects you may verify on this plan">
+          <span className="metric-strip__label">enabled projects</span>
+          <span className={`metric-strip__value${atProjectLimit ? " bad" : ""}`}>
+            {data.enabledProjects}/{data.limits.projects}
+          </span>
+        </a>
+        <a className="metric-strip__item" href="/dashboard/billing" title="People who may sign proofs on this plan">
+          <span className="metric-strip__label">signers</span>
+          <span className={`metric-strip__value${atUserLimit ? " bad" : ""}`}>
+            {data.activatedUsers}/{data.limits.users}
+          </span>
+        </a>
+        <a className="metric-strip__item" href="/dashboard/billing">
+          <span className="metric-strip__label">plan</span>
+          <span className="metric-strip__value">{data.plan}</span>
+        </a>
       </div>
+
+      {(atProjectLimit || atUserLimit) && (
+        <Panel title="You are at your plan limit">
+          <p>
+            {atProjectLimit ? "Every project slot is in use. " : ""}
+            {atUserLimit ? "Every signer seat is in use. " : ""}
+            Enabling another needs a larger plan, or disabling one you no longer verify.
+          </p>
+          <p>
+            <a className="gp-btn gp-btn--sm" href="/dashboard/billing">
+              See plans
+            </a>
+          </p>
+        </Panel>
+      )}
+
+      <Panel title="Latest verifications">
+        {recent.length === 0 ? (
+          <p className="gp-panel__meta">
+            Nothing verified yet. Run <code>thwip run</code> on a commit and push it.
+          </p>
+        ) : (
+          <table className="gp-data-table">
+            <thead>
+              <tr>
+                <th>Repository</th>
+                <th>Commit</th>
+                <th>Result</th>
+                <th>When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((o, i) => (
+                <tr key={i}>
+                  <td>{o.github_name}</td>
+                  <td>
+                    <a
+                      className="gp-mono"
+                      href={`https://github.com/${o.github_name}/commit/${o.head_sha}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {o.head_sha.slice(0, 8)}
+                    </a>
+                  </td>
+                  <td className={o.outcome === "PASS" ? "ok" : "bad"}>{o.outcome}</td>
+                  <td className="gp-panel__meta">{relativeTime(o.observed_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+
       <StartUsingThwip />
       <Panel title="Ship a change">
         <p style={{ fontFamily: "var(--gp-mono, monospace)", fontSize: "0.82rem" }}>
@@ -591,8 +670,13 @@ function Projects({ me }: { me: Me }) {
                   Set up
                 </a>{" "}
                 <button
-                  className="gp-btn gp-btn--sm"
+                  className={`gp-btn gp-btn--sm${p.enabled ? " gp-btn--quiet" : ""}`}
                   disabled={busy === p.id}
+                  title={
+                    p.enabled
+                      ? "Stop verifying this repository. The check stops gating merges."
+                      : "Start verifying this repository. Uses one of your plan's project slots."
+                  }
                   onClick={() => void act(p, p.enabled ? "disable" : "enable")}
                 >
                   {p.enabled ? "Disable" : "Enable"}

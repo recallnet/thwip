@@ -140,6 +140,20 @@ textarea {
 .gp-btn--sm { padding: 7px 12px; font-size: 10px; }
 .gp-btn[disabled] { opacity: 0.4; cursor: default; }
 
+/* An action that takes something away should not look as inviting as the one
+   that gives it. Enable and Disable sat in the same slot as identical filled
+   buttons, so turning a project off read as the obvious next step. */
+.gp-btn--quiet {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--rule);
+}
+.gp-btn--quiet:hover {
+  background: transparent;
+  color: var(--fail);
+  border-color: var(--fail);
+}
+
 /* ---------- chips: a stamped label ---------- */
 
 .gp-chip {
