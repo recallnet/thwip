@@ -51,6 +51,7 @@ export const TRANSITION_KINDS = [
    * matching.
    */
   "reused-proof-merge",
+  "candidate-verified-merge",
   "override-merge",
   "external-transition",
   "genesis",
@@ -126,6 +127,31 @@ export interface ReusedProofMergeFacts {
   readonly checkRunId: string;
 }
 
+/**
+ * A merge where the queue had the integrated candidate run before allowing it.
+ *
+ * Distinct from `verified-merge`, which additionally binds an assignment and an
+ * integration receipt. The managed verifier is dispatched rather than assigned,
+ * and produces a result rather than a receipt, so those two do not exist here
+ * and are refused rather than filled in. What it does bind is the verifier's own
+ * result, which is the thing a reuse merge cannot claim.
+ */
+export interface CandidateVerifiedMergeFacts {
+  readonly attemptId: string;
+  readonly mergeIntentDigest: Sha256;
+  readonly pullRequestNumber: number;
+  readonly headSha: string;
+  readonly candidateSha: string;
+  readonly candidateTreeOid: string;
+  readonly mergeMethod: MergeMethod;
+  readonly workReceiptDigest: Sha256;
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly verifierResultDigest: Sha256;
+  readonly checkRunId: string;
+}
+
 export interface OverrideMergeFacts {
   readonly attemptId: string;
   readonly mergeIntentDigest: Sha256;
@@ -165,6 +191,10 @@ export type TransitionRecordV1 =
       readonly kind: "reused-proof-merge";
       readonly reusedProof: ReusedProofMergeFacts;
     })
+  | (TransitionRecordBaseV1 & {
+      readonly kind: "candidate-verified-merge";
+      readonly candidateVerified: CandidateVerifiedMergeFacts;
+    })
   | (TransitionRecordBaseV1 & { readonly kind: "override-merge"; readonly override: OverrideMergeFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "external-transition"; readonly external: ExternalFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "genesis"; readonly genesis: GenesisFacts });
@@ -185,6 +215,7 @@ const BASE_KEYS = [
 const FACTS_KEY: Record<TransitionRecordKind, string> = {
   "verified-merge": "verifiedMerge",
   "reused-proof-merge": "reusedProof",
+  "candidate-verified-merge": "candidateVerified",
   "override-merge": "override",
   "external-transition": "external",
   genesis: "genesis",
@@ -421,6 +452,39 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
           ...base.value,
           kind: kind.value,
           reusedProof: facts.value as unknown as ReusedProofMergeFacts,
+        },
+      };
+    }
+
+    case "candidate-verified-merge": {
+      // The verifier's result, which is what makes this stronger than a reuse.
+      // Still no assignment and no integration receipt: the verifier is
+      // dispatched, not assigned, and it returns a result rather than a receipt.
+      const facts = parseMergeFacts(v[factsKey], "transition.candidateVerified", [
+        "policyDigest",
+        "pipelineDigest",
+        "requiredSuitesDigest",
+        "verifierResultDigest",
+        "checkRunId",
+      ]);
+      if (!facts.ok) return facts;
+      const raw = v[factsKey] as Record<string, unknown>;
+      for (const key of ["policyDigest", "pipelineDigest", "requiredSuitesDigest", "verifierResultDigest"]) {
+        const digest = sha256(raw[key], `transition.candidateVerified.${key}`);
+        if (!digest.ok) return digest;
+        facts.value[key] = digest.value;
+      }
+      const runId = decimalId(raw["checkRunId"], "transition.candidateVerified.checkRunId");
+      if (!runId.ok) return runId;
+      facts.value["checkRunId"] = runId.value;
+      const consistency = checkMergeConsistency(base.value, facts.value);
+      if (!consistency.ok) return consistency;
+      return {
+        ok: true,
+        value: {
+          ...base.value,
+          kind: "candidate-verified-merge",
+          candidateVerified: facts.value as unknown as CandidateVerifiedMergeFacts,
         },
       };
     }

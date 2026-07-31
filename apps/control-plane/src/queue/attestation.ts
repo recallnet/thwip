@@ -27,8 +27,14 @@ export interface ReuseEvidence {
   readonly policyDigest: Sha256;
   readonly pipelineDigest: Sha256;
   readonly requiredSuitesDigest: Sha256;
-  /** The App's proof check that verified this head. */
+  /** The check run that verified the proof on this head. */
   readonly proofCheckRunId: string;
+  /**
+   * The verifier's result, where the queue had the integrated candidate run.
+   * Absent under a profile that asks for nothing beyond the head's own proof,
+   * and its presence is what decides which claim the records make.
+   */
+  readonly verifierResultDigest?: Sha256;
 }
 
 /**
@@ -43,6 +49,7 @@ export async function reuseEvidenceFor(
   workReceiptDigest: Sha256,
   policy: { policyDigest: string; pipelineDigest: string | null; requiredSuites: readonly string[] } | null,
   proofCheckRunId: string | null,
+  verifierResultDigest: string | null,
 ): Promise<ReuseEvidence | { missing: string }> {
   if (policy === null) return { missing: "the repository has no active policy" };
   if (policy.pipelineDigest === null) return { missing: "the active policy names no pipeline" };
@@ -55,6 +62,7 @@ export async function reuseEvidenceFor(
     pipelineDigest: policy.pipelineDigest as Sha256,
     requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
     proofCheckRunId,
+    ...(verifierResultDigest === null ? {} : { verifierResultDigest: verifierResultDigest as Sha256 }),
   };
 }
 
@@ -91,13 +99,23 @@ export async function signReusedIntent(input: {
     commitTitle: mergeCommitTitle(input.pullRequestNumber),
     commitMessage: mergeCommitMessage(input.operationId),
     createdAt: input.createdAt,
-    evidence: {
-      kind: "reused",
-      workReceiptDigest: input.evidence.workReceiptDigest,
-      pipelineDigest: input.evidence.pipelineDigest,
-      requiredSuitesDigest: input.evidence.requiredSuitesDigest,
-      proofCheckRunId: input.evidence.proofCheckRunId,
-    },
+    evidence:
+      input.evidence.verifierResultDigest === undefined
+        ? {
+            kind: "reused",
+            workReceiptDigest: input.evidence.workReceiptDigest,
+            pipelineDigest: input.evidence.pipelineDigest,
+            requiredSuitesDigest: input.evidence.requiredSuitesDigest,
+            proofCheckRunId: input.evidence.proofCheckRunId,
+          }
+        : {
+            kind: "candidate-verified",
+            workReceiptDigest: input.evidence.workReceiptDigest,
+            pipelineDigest: input.evidence.pipelineDigest,
+            requiredSuitesDigest: input.evidence.requiredSuitesDigest,
+            verifierResultDigest: input.evidence.verifierResultDigest,
+            proofCheckRunId: input.evidence.proofCheckRunId,
+          },
   });
   return signMergeIntent(doc, input.signer);
 }
@@ -130,6 +148,9 @@ export async function signReusedRecord(input: {
     policyDigest: input.evidence.policyDigest,
     pipelineDigest: input.evidence.pipelineDigest,
     requiredSuitesDigest: input.evidence.requiredSuitesDigest,
+    ...(input.evidence.verifierResultDigest === undefined
+      ? {}
+      : { verifierResultDigest: input.evidence.verifierResultDigest }),
     checkRunId: input.evidence.proofCheckRunId,
   });
   return signTransitionRecord(doc, input.signer);

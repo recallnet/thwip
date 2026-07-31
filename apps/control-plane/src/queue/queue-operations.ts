@@ -344,6 +344,8 @@ export function confirmOnly(
     headSha: string | null;
     receiptDigest: string | null;
     intentDigest: string | null;
+    /** Present where a verifier ran, which decides what the record may claim. */
+    verifierResultDigest: string | null;
     entryId: string;
   } | null;
   chainHead: { sequence: number; digest: string } | null;
@@ -370,6 +372,7 @@ export function confirmOnly(
             headSha: found.headSha,
             receiptDigest: found.receiptDigest,
             intentDigest: found.intentDigest,
+            verifierResultDigest: found.verifierResultDigest,
             entryId: found.entryId,
           },
     chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
