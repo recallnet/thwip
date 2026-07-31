@@ -115,4 +115,36 @@ describe("verifying a chain", () => {
     const findings = await verifyChain([old], { verifySignature: async () => false, epochStartsAt: 2 });
     expect(findings.map((f) => f.code)).toEqual(["PRE_ATTESTATION"]);
   });
+
+  it("reports a break that follows a pre-attestation link", async () => {
+    const old: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "" };
+    const five = await link(5, D("0"));
+    const findings = await verifyChain([old, five], { verifySignature: async () => true, epochStartsAt: 1 });
+    expect(findings.map((f) => f.code)).toContain("BROKEN_LINK");
+  });
+
+  it("reports a break that follows a link that could not be read", async () => {
+    const junk: ChainLink = {
+      digest: await envelopeDigest(canonicalBytes("{}")),
+      bytes: canonicalBytes("{}"),
+      jws: "signature",
+    };
+    const two = await link(2, D("0"));
+    const findings = await verifyChain([junk, two], signedOk);
+    expect(findings.map((f) => f.code)).toContain("BROKEN_LINK");
+  });
+
+  it("reports a missing record for an empty link inside the attested range", async () => {
+    const gone: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "", sequence: 47 };
+    const findings = await verifyChain([gone], { verifySignature: async () => true, epochStartsAt: 42 });
+    expect(findings.map((f) => f.code)).toEqual(["MISSING_RECORD"]);
+  });
+
+  it("does not invent a gap across a link whose position is unknown", async () => {
+    const old: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "" };
+    const nine = await link(9, D("a"));
+    const findings = await verifyChain([old, nine], { verifySignature: async () => true, epochStartsAt: 1 });
+    expect(findings.map((f) => f.code)).not.toContain("SEQUENCE_GAP");
+    expect(findings.map((f) => f.code)).not.toContain("BROKEN_LINK");
+  });
 });
