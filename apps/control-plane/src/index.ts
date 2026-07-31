@@ -1716,7 +1716,15 @@ app.route(
       const token = await installationToken(env, project.installation_id);
 
       const said =
-        update.state === "holds"
+        update.state === "unplaceable"
+          ? {
+              status: "completed" as const,
+              conclusion: "failure" as const,
+              title: "Thwip Queue cannot place this pull request",
+              summary:
+                "The author has no activated thwip principal, so the queue has nobody to give the turn to. Activating the author, or having somebody who is activated sponsor the pull request, is what unblocks this. It will not resolve on its own.",
+            }
+          : update.state === "holds"
           ? {
               status: "completed" as const,
               conclusion: "success" as const,
