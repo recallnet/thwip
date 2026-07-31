@@ -32,6 +32,10 @@ const REPO = "1315419165";
 const REF = "refs/heads/main";
 const TREE = "t".repeat(40);
 
+/** A commit message carrying a readable proof, as a shipped head does. */
+const PROVEN =
+  "feat: something\n\nthwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5RdmRqRWlmUT09Iiwic2lnbmF0dXJlcyI6W3sia2V5aWQiOiJTSEEyNTY6ayIsInNpZyI6IkFBQUEifV19\n";
+
 const published: TurnCheckUpdate[] = [];
 
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
@@ -48,7 +52,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: TREE, parentShas: ["p".repeat(40)] }),
+    commitFacts: async () => ({ treeOid: TREE, parentShas: ["p".repeat(40)], message: PROVEN }),
     ...over,
   });
 }
@@ -558,5 +562,61 @@ describe("the check that says whose turn it is", () => {
     });
     expect((await authorize(app, e, 59)).reason).toBe("HOLDS_TURN");
     expect((await authorize(app, e, 61)).reason).toBe("WAITING_FOR_TURN");
+  });
+});
+
+/**
+ * The merge record has to cite the proof the developer signed. Binding a
+ * constant there, which is what this did, made every downstream claim about
+ * "what was checked" empty — so a head with no readable proof stops the merge
+ * rather than falling back to one.
+ */
+describe("the work receipt behind a merge", () => {
+  const candidate = {
+    baseSha: "b".repeat(40),
+    candidateSha: "c".repeat(40),
+    candidateTreeOid: TREE,
+    parentShas: ["p".repeat(40)],
+  };
+
+  it("prepares the merge when the head carries a readable proof", async () => {
+    const e = env();
+    const app = routes();
+    const holder = await authorize(app, e, 59, { prepare: true, candidate });
+    expect(holder.operationId).not.toBeNull();
+  });
+
+  it("refuses to prepare a merge for a head with no proof", async () => {
+    const e = env();
+    const app = routes({
+      commitFacts: async () => ({ treeOid: TREE, parentShas: ["p".repeat(40)], message: "no proof here" }),
+    });
+    const holder = await authorize(app, e, 59, { prepare: true, candidate });
+    expect(holder).toMatchObject({ authorized: false, reason: "WORK_RECEIPT_UNREADABLE" });
+    expect(holder.operationId).toBeNull();
+  });
+
+  it("refuses when the proof cannot be read, rather than citing a placeholder", async () => {
+    const e = env();
+    const app = routes({
+      commitFacts: async () => ({
+        treeOid: TREE,
+        parentShas: ["p".repeat(40)],
+        message: "x\n\nthwip-proof: v1.not-base64\n",
+      }),
+    });
+    expect(await authorize(app, e, 59, { prepare: true, candidate })).toMatchObject({
+      authorized: false,
+      reason: "WORK_RECEIPT_UNREADABLE",
+    });
+  });
+
+  it("refuses when the commit cannot be read at all", async () => {
+    const e = env();
+    const app = routes({ commitFacts: async () => null });
+    expect(await authorize(app, e, 59, { prepare: true, candidate })).toMatchObject({
+      authorized: false,
+      reason: "WORK_RECEIPT_UNREADABLE",
+    });
   });
 });
