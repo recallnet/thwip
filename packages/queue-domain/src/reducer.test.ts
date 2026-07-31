@@ -617,6 +617,90 @@ describe("reducer", () => {
       expect(state.entries.get("e1")!.state).toBe("Active");
     });
 
+    /**
+     * A reuse attempt is never assigned to anyone. The queue dispatches no
+     * runner and issues no assignment, so demanding one before the receipt
+     * forced the caller to invent a digest and put it in the state — which is
+     * how `sha256:1111…` reached a record that reads as evidence.
+     */
+    it("takes a receipt for a reuse attempt that was never assigned", () => {
+      let state = applyEvents(base(), happyPath().slice(0, 3));
+      state = applyEvent(state, ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "fast-reuse" }));
+      state = applyEvent(
+        state,
+        ev({
+          type: "CandidatePrepared",
+          attemptId: "a1",
+          baseSha: "b".repeat(40),
+          headSha: "h".repeat(40),
+          candidateSha: "c".repeat(40),
+          candidateTree: "t".repeat(40),
+          policyDigest: "sha256:pol",
+          runner: "reuse",
+        }),
+      );
+      state = applyEvent(state, ev({ type: "ReceiptSubmitted", attemptId: "a1", receiptDigest: "sha256:rcpt" }));
+      const attempt = state.attempts.get("a1")!;
+      expect(attempt.receiptDigest).toBe("sha256:rcpt");
+      // Absent, rather than filled in with something that names nothing.
+      expect(attempt.assignmentDigest).toBeNull();
+    });
+
+    /**
+     * The gate still has to hold where an assignment is real. A device attempt
+     * runs because the queue told it to, and a receipt arriving before that
+     * instruction means the two are not about the same work.
+     */
+    it("still refuses a receipt for a device attempt with no assignment", () => {
+      let state = applyEvents(base(), happyPath().slice(0, 4));
+      expect(() =>
+        applyEvent(state, ev({ type: "ReceiptSubmitted", attemptId: "a1", receiptDigest: "sha256:rcpt" })),
+      ).toThrow(/assignment/i);
+    });
+
+    /**
+     * Under reuse nothing ran, so there is no verifier result to name. The walk
+     * used to pass `sha256:3333…` here and the attempt stored it as though a
+     * verifier had spoken.
+     */
+    it("accepts a reuse attempt with no verifier result", () => {
+      let state = applyEvents(base(), happyPath().slice(0, 3));
+      state = applyEvent(state, ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "fast-reuse" }));
+      state = applyEvent(
+        state,
+        ev({
+          type: "CandidatePrepared",
+          attemptId: "a1",
+          baseSha: "b".repeat(40),
+          headSha: "h".repeat(40),
+          candidateSha: "c".repeat(40),
+          candidateTree: "t".repeat(40),
+          policyDigest: "sha256:pol",
+          runner: "reuse",
+        }),
+      );
+      state = applyEvent(state, ev({ type: "ReceiptSubmitted", attemptId: "a1", receiptDigest: "sha256:rcpt" }));
+      state = applyEvent(state, ev({ type: "VerificationStarted", attemptId: "a1", nonce: "n1" }));
+      state = applyEvent(
+        state,
+        ev({ type: "VerificationCompleted", attemptId: "a1", nonce: "n1", accepted: true, resultDigest: null }),
+      );
+      const attempt = state.attempts.get("a1")!;
+      expect(attempt.phase).toBe("VERIFIED");
+      expect(attempt.verifierResultDigest).toBeNull();
+    });
+
+    /** The other half: where a verifier did run, its result is the acceptance. */
+    it("refuses to accept a device attempt with no verifier result", () => {
+      const state = applyEvents(base(), happyPath().slice(0, 9));
+      expect(() =>
+        applyEvent(
+          state,
+          ev({ type: "VerificationCompleted", attemptId: "a1", nonce: "n1", accepted: true, resultDigest: null }),
+        ),
+      ).toThrow(/result/i);
+    });
+
     it("requires a device id for a device claim", () => {
       const state = applyEvents(base(), happyPath().slice(0, 3));
       expect(() => applyEvent(state, ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device" }))).toThrow(

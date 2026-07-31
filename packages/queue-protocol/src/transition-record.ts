@@ -120,7 +120,6 @@ export interface ReusedProofMergeFacts {
   readonly candidateTreeOid: string;
   readonly mergeMethod: MergeMethod;
   readonly workReceiptDigest: Sha256;
-  readonly assignmentDigest: Sha256;
   readonly policyDigest: Sha256;
   readonly pipelineDigest: Sha256;
   readonly requiredSuitesDigest: Sha256;
@@ -322,7 +321,6 @@ function parseMergeFacts(
     "candidateTreeOid",
     "mergeMethod",
     "workReceiptDigest",
-    "assignmentDigest",
   ];
   const shape = exactKeys(v, label, [...common, ...extraKeys]);
   if (!shape.ok) return shape;
@@ -331,7 +329,7 @@ function parseMergeFacts(
   const attemptId = opaqueId(v["attemptId"], `${label}.attemptId`);
   if (!attemptId.ok) return attemptId;
   out["attemptId"] = attemptId.value;
-  for (const key of ["mergeIntentDigest", "workReceiptDigest", "assignmentDigest"]) {
+  for (const key of ["mergeIntentDigest", "workReceiptDigest"]) {
     const digest = sha256(v[key], `${label}.${key}`);
     if (!digest.ok) return digest;
     out[key] = digest.value;
@@ -367,6 +365,7 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
   switch (kind.value) {
     case "verified-merge": {
       const facts = parseMergeFacts(v[factsKey], "transition.verifiedMerge", [
+        "assignmentDigest",
         "integrationEvidenceDigest",
         "verifierResultDigest",
         "checkRunId",
@@ -374,7 +373,7 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
       ]);
       if (!facts.ok) return facts;
       const raw = v[factsKey] as Record<string, unknown>;
-      for (const key of ["integrationEvidenceDigest", "verifierResultDigest"]) {
+      for (const key of ["assignmentDigest", "integrationEvidenceDigest", "verifierResultDigest"]) {
         const digest = sha256(raw[key], `transition.verifiedMerge.${key}`);
         if (!digest.ok) return digest;
         facts.value[key] = digest.value;
@@ -395,7 +394,9 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
 
     case "reused-proof-merge": {
       // No verifier result and no integration evidence, because there was no
-      // integrated run. What it carries is the equivalence the reuse rests on.
+      // integrated run — and no assignment either, because nothing was dispatched
+      // and no runner was ever told to do anything. What it carries instead is the
+      // equivalence the reuse rests on.
       const facts = parseMergeFacts(v[factsKey], "transition.reusedProof", [
         "policyDigest",
         "pipelineDigest",
@@ -426,12 +427,16 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
 
     case "override-merge": {
       const facts = parseMergeFacts(v[factsKey], "transition.override", [
+        "assignmentDigest",
         "liveGuardDigest",
         "candidateCheckRunId",
         "authorization",
       ]);
       if (!facts.ok) return facts;
       const raw = v[factsKey] as Record<string, unknown>;
+      const assignment = sha256(raw["assignmentDigest"], "transition.override.assignmentDigest");
+      if (!assignment.ok) return assignment;
+      facts.value["assignmentDigest"] = assignment.value;
       const guard = sha256(raw["liveGuardDigest"], "transition.override.liveGuardDigest");
       if (!guard.ok) return guard;
       facts.value["liveGuardDigest"] = guard.value;

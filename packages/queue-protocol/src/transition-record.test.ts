@@ -370,7 +370,6 @@ describe("reused-proof-merge", () => {
       candidateTreeOid: TREE,
       mergeMethod: "merge",
       workReceiptDigest: D("2"),
-      assignmentDigest: D("3"),
       policyDigest: D("6"),
       pipelineDigest: D("7"),
       requiredSuitesDigest: D("8"),
@@ -410,8 +409,21 @@ describe("reused-proof-merge", () => {
     expect(parseTransitionRecord(lying)).toMatchObject({ ok: false });
   });
 
+  /**
+   * An assignment is the queue telling a runner to run something. Under reuse it
+   * tells no one anything — nothing is dispatched and no runner exists — so an
+   * assignment digest here could only ever be invented. The field was carried
+   * over from the verified merge it was modelled on, and a reader who saw it
+   * would reasonably believe work had been assigned.
+   */
+  it("refuses to carry an assignment, because nothing was assigned", () => {
+    const lying = reused();
+    (lying["reusedProof"] as Record<string, unknown>)["assignmentDigest"] = D("3");
+    expect(parseTransitionRecord(lying)).toMatchObject({ ok: false });
+  });
+
   it("still requires everything a merge record has to say", () => {
-    for (const missing of ["attemptId", "workReceiptDigest", "assignmentDigest", "policyDigest"]) {
+    for (const missing of ["attemptId", "workReceiptDigest", "policyDigest"]) {
       const short = reused();
       delete (short["reusedProof"] as Record<string, unknown>)[missing];
       expect(parseTransitionRecord(short), missing).toMatchObject({ ok: false });

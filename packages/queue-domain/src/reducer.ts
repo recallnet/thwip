@@ -464,7 +464,15 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
     case "ReceiptSubmitted": {
       const attempt = requireLive(requireAttempt(state, event.attemptId));
-      if (attempt.assignmentDigest === null) fail("no assignment for this attempt");
+      // An assignment is the queue telling a runner to run something. A reuse
+      // attempt is never told anything — the server claims its own offer and the
+      // evidence is the proof already on the head — so there is nothing to have
+      // been assigned. Demanding one here forced the caller to invent a digest
+      // and store it, which is how a value naming nothing reached a signed
+      // record. Everywhere a runner really was dispatched, the gate still holds.
+      if (attempt.executionMode !== "fast-reuse" && attempt.assignmentDigest === null) {
+        fail("no assignment for this attempt");
+      }
       advancePhase(attempt, "RECEIPT_SUBMITTED");
       attempt.receiptDigest = event.receiptDigest;
       setEntryState(requireEntry(state, attempt.entryId), "Verifying");
@@ -490,6 +498,13 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
         terminate(state, attempt, "VERIFICATION_FAILED");
         blockEntry(requireEntry(state, attempt.entryId), "VERIFICATION_REJECTED");
         break;
+      }
+      // Only a reuse attempt may be accepted without a result. Anywhere a
+      // verifier really ran, its result is the whole basis of the acceptance,
+      // and letting it be absent would leave nothing to distinguish a checked
+      // candidate from an unchecked one.
+      if (event.resultDigest === null && attempt.executionMode !== "fast-reuse") {
+        fail("a verified attempt requires the verifier's result");
       }
       attempt.verifierResultDigest = event.resultDigest;
       advancePhase(attempt, "VERIFIED");
