@@ -50,6 +50,9 @@ importers:
       '@thwip/queue-protocol':
         specifier: workspace:*
         version: link:../../packages/queue-protocol
+      '@thwip/verifier':
+        specifier: workspace:*
+        version: link:../../packages/verifier
       better-auth:
         specifier: ^1.6.25
         version: 1.6.25(@cloudflare/workers-types@4.20260702.1)(@prisma/client@5.22.0)(better-sqlite3@13.0.1)(drizzle-orm@0.41.0(@cloudflare/workers-types@4.20260702.1)(@prisma/client@5.22.0)(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(better-sqlite3@12.11.1)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@3.2.7(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.9.0))

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { CompactSign, SignJWT, createRemoteJWKSet, importJWK, jwtVerify, type JWK } from "jose";
+import { SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
@@ -11,7 +11,18 @@ import {
   type PolicyPush,
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
+import { serviceKey, signPayload } from "./service-signing.js";
+import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
+import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
+import {
+  appProofTaskFromWebhook,
+  processAppProof,
+  reconcileInstallationProofChecks,
+  reconcileProjectProofChecks,
+  requestForRerequest,
+  type AppProofTask,
+} from "./app-proof-verification.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -26,18 +37,6 @@ const PLAN_LIMITS: Record<string, { projects: number; users: number }> = {
   pro: { projects: 15, users: 25 },
 };
 
-async function serviceKey(env: Env) {
-  const jwk = JSON.parse(env.THWIP_SERVICE_SIGNING_PRIVATE_JWK) as JWK;
-  return { key: await importJWK(jwk, "ES256"), kid: jwk.kid ?? "thwip-svc-1" };
-}
-
-async function signPayload(env: Env, payload: unknown, typ: string): Promise<string> {
-  const { key, kid } = await serviceKey(env);
-  return new CompactSign(te.encode(JSON.stringify(payload)))
-    .setProtectedHeader({ alg: "ES256", kid, typ })
-    .sign(key);
-}
-
 function requireAdmin(env: Env, req: Request): boolean {
   const auth = req.headers.get("authorization") ?? "";
   return env.THWIP_ADMIN_TOKEN.length > 0 && auth === `Bearer ${env.THWIP_ADMIN_TOKEN}`;
@@ -51,6 +50,31 @@ function randomId(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   return `${prefix}_${hex}`;
+}
+
+async function reconcileProofsForGithubUser(env: Env, githubUserId: string): Promise<void> {
+  const projects = await env.DB.prepare(
+    `SELECT DISTINCT p.github_repository_id, o.installation_id
+       FROM repository_grants g
+       JOIN projects p ON p.id = g.project_id
+       JOIN organizations o ON o.id = p.organization_id
+      WHERE g.github_user_id = ? AND p.enabled = 1 AND o.installation_id IS NOT NULL`,
+  )
+    .bind(githubUserId)
+    .all<{ github_repository_id: string; installation_id: string }>();
+  await Promise.all(
+    projects.results.map((project) =>
+      env.SYNC_QUEUE.send({
+        provider: "dashboard",
+        delivery: randomId("key-revoked"),
+        event: "proof_reconcile",
+        installationId: project.installation_id,
+        policyPush: null,
+        appProofTask: null,
+        reconcileProofRepositoryId: project.github_repository_id,
+      }),
+    ),
+  );
 }
 
 async function hmacSha256Hex(secret: string, data: ArrayBuffer | Uint8Array): Promise<string> {
@@ -178,6 +202,7 @@ app.get("/api/auth/callback/github", async (c, next) => {
   try {
     await syncInstallation(c.env, installationId);
     await reconcileInstallationPolicies(c.env, installationId);
+    await reconcileInstallationProofChecks(c.env, installationId);
   } catch {
     /* the scheduled reconciliation will pick it up */
   }
@@ -291,21 +316,83 @@ app.get("/v1/dashboard/summary", async (c) => {
   });
 });
 
+app.get("/v1/dashboard/proof-defaults", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const row = await c.env.DB.prepare(
+    "SELECT proof_defaults_json FROM organizations WHERE id = ?",
+  )
+    .bind(viewer.organizationId)
+    .first<{ proof_defaults_json: string | null }>();
+  if (row === null) return c.json({ error: "organization not found" }, 404);
+  return c.json({
+    defaults: row.proof_defaults_json === null ? null : (JSON.parse(row.proof_defaults_json) as unknown),
+  });
+});
+
+app.put("/v1/dashboard/proof-defaults", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  if (viewer.githubOrgRole !== "owner") return c.json({ error: "github organization owner required" }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as { defaults?: unknown };
+  if (body.defaults === undefined) return c.json({ error: "defaults is required" }, 400);
+  let defaults: ThwipYaml | null;
+  try {
+    defaults = body.defaults === null ? null : parseThwipYaml(JSON.stringify(body.defaults));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error), code: "INVALID_DEFAULTS" }, 400);
+  }
+  await c.env.DB.prepare("UPDATE organizations SET proof_defaults_json = ? WHERE id = ?")
+    .bind(defaults === null ? null : JSON.stringify(defaults), viewer.organizationId)
+    .run();
+  const organization = await c.env.DB.prepare(
+    "SELECT installation_id FROM organizations WHERE id = ?",
+  )
+    .bind(viewer.organizationId)
+    .first<{ installation_id: string | null }>();
+  if (organization?.installation_id) {
+    await c.env.SYNC_QUEUE.send({
+      provider: "dashboard",
+      delivery: randomId("defaults"),
+      event: "policy_reconcile",
+      installationId: organization.installation_id,
+      policyPush: null,
+      appProofTask: null,
+      reconcileProofRepositoryId: null,
+    });
+  }
+  return c.json({ defaults });
+});
+
 app.get("/v1/dashboard/projects", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const rows = await c.env.DB.prepare(
     `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
+            p.proof_check_mode,
             CASE
               WHEN p.enabled = 0 THEN 'disabled'
-              WHEN p.active_policy_digest IS NULL THEN 'awaiting_first_merge'
+              WHEN p.active_policy_digest IS NULL THEN 'awaiting_policy'
               ELSE 'active'
             END AS activation_state,
             b.version AS policy_version,
             json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
+            b.config_source AS config_source,
             (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
-            (SELECT outcome FROM verification_observations o WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1) AS last_outcome,
-            (SELECT observed_at FROM verification_observations o WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1) AS last_observed_at
+            COALESCE(
+              (SELECT outcome FROM proof_verifications v
+                WHERE v.project_id = p.id AND v.status = 'completed'
+                ORDER BY completed_at DESC LIMIT 1),
+              (SELECT outcome FROM verification_observations o
+                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
+            ) AS last_outcome,
+            COALESCE(
+              (SELECT completed_at FROM proof_verifications v
+                WHERE v.project_id = p.id AND v.status = 'completed'
+                ORDER BY completed_at DESC LIMIT 1),
+              (SELECT observed_at FROM verification_observations o
+                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
+            ) AS last_observed_at
      FROM projects p LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
      WHERE p.organization_id = ? ORDER BY p.github_name`,
   )
@@ -367,20 +454,101 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
   if (viewer.githubOrgRole !== "owner" && grant?.permission !== "admin") {
     return c.json({ error: "repository admin (per GitHub) required" }, 403);
   }
+  const project = await c.env.DB.prepare(
+    `SELECT p.github_repository_id, o.installation_id
+       FROM projects p JOIN organizations o ON o.id = p.organization_id
+      WHERE p.id = ? AND p.organization_id = ?`,
+  )
+    .bind(projectId, viewer.organizationId)
+    .first<{ github_repository_id: string; installation_id: string | null }>();
   await c.env.DB.prepare("UPDATE projects SET enabled = 0 WHERE id = ? AND organization_id = ?")
     .bind(projectId, viewer.organizationId)
     .run();
+  if (project?.installation_id) {
+    await c.env.SYNC_QUEUE.send({
+      provider: "dashboard",
+      delivery: randomId("disable"),
+      event: "proof_reconcile",
+      installationId: project.installation_id,
+      policyPush: null,
+      appProofTask: null,
+      reconcileProofRepositoryId: project.github_repository_id,
+    });
+  }
   return c.json({ enabled: false });
 });
 
 app.post("/v1/dashboard/projects/:id/profile", async (c) => {
-  // The security profile is policy material: it lives in the repository's
-  // thwip.yaml and changes only through a reviewed policy activation. The
-  // dashboard displays it; it cannot edit it out from under the file.
   return c.json(
-    { error: "the security profile is set in thwip.yaml and changes with a policy activation", code: "MANAGED_IN_REPO" },
+    {
+      error:
+        "the security profile comes from organization defaults and any active thwip.yaml override; change that effective configuration instead",
+      code: "MANAGED_IN_EFFECTIVE_CONFIG",
+    },
     409,
   );
+});
+
+app.post("/v1/dashboard/projects/:id/proof-mode", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const projectId = c.req.param("id");
+  const grant = await c.env.DB.prepare(
+    "SELECT permission FROM repository_grants WHERE project_id = ? AND github_user_id = ? AND active = 1",
+  )
+    .bind(projectId, viewer.githubUserId)
+    .first<{ permission: string }>();
+  if (viewer.githubOrgRole !== "owner" && grant?.permission !== "admin") {
+    return c.json({ error: "repository admin (per GitHub) required" }, 403);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
+  if (body.mode !== "observe" && body.mode !== "enforced") {
+    return c.json({ error: "mode must be observe or enforced" }, 400);
+  }
+  const project = await c.env.DB.prepare(
+    `SELECT p.github_repository_id, p.enabled, o.installation_id
+       FROM projects p JOIN organizations o ON o.id = p.organization_id
+      WHERE p.id = ? AND p.organization_id = ?`,
+  )
+    .bind(projectId, viewer.organizationId)
+    .first<{ github_repository_id: string; enabled: number; installation_id: string | null }>();
+  if (project === null) return c.json({ error: "project not found" }, 404);
+  if (project.enabled !== 1) return c.json({ error: "enable the project before changing proof mode" }, 409);
+  if (body.mode === "enforced") {
+    const observed = await c.env.DB.prepare(
+      `SELECT id FROM proof_verifications
+        WHERE project_id = ? AND mode = 'observe' AND outcome = 'PASS' AND status = 'completed'
+          AND policy_digest = (SELECT active_policy_digest FROM projects WHERE id = ?)
+          AND julianday(completed_at) > julianday('now', '-7 days')
+        ORDER BY completed_at DESC LIMIT 1`,
+    )
+      .bind(projectId, projectId)
+      .first<{ id: string }>();
+    if (observed === null) {
+      return c.json(
+        {
+          error: "a recent passing observe-mode App check under the active policy is required before enforcement",
+          code: "OBSERVE_PASS_REQUIRED",
+        },
+        409,
+      );
+    }
+  }
+  await c.env.DB.prepare("UPDATE projects SET proof_check_mode = ? WHERE id = ? AND organization_id = ?")
+    .bind(body.mode, projectId, viewer.organizationId)
+    .run();
+  if (project.installation_id !== null) {
+    await c.env.SYNC_QUEUE.send({
+      provider: "dashboard",
+      delivery: randomId("proof-mode"),
+      event: "proof_reconcile",
+      installationId: project.installation_id,
+      policyPush: null,
+      appProofTask: null,
+      reconcileProofRepositoryId: project.github_repository_id,
+    });
+  }
+  return c.json({ mode: body.mode });
 });
 
 // --- Dashboard: people, teams, devices ------------------------------------
@@ -523,12 +691,15 @@ app.post("/v1/dashboard/devices/:keyId/revoke", async (c) => {
   if (key.github_user_id !== viewer.githubUserId) {
     return c.json({ error: "you can only deny your own keys" }, 403);
   }
-  await c.env.DB.prepare(
-    "UPDATE device_keys SET revoked_at = ?, revoked_reason = ? WHERE key_id = ? AND revoked_at IS NULL",
+  const revoked = await c.env.DB.prepare(
+    `UPDATE device_keys SET revoked_at = ?, revoked_reason = ?
+      WHERE key_id = ? AND revoked_at IS NULL
+      RETURNING github_user_id`,
   )
     .bind(nowIso(), `revoked by ${viewer.githubUserId}`, keyId)
-    .run();
-  return c.json({ revoked: true });
+    .first<{ github_user_id: string }>();
+  if (revoked !== null) await reconcileProofsForGithubUser(c.env, revoked.github_user_id);
+  return c.json({ revoked: revoked !== null });
 });
 
 // --- Dashboard: policy, billing, operations --------------------------------
@@ -580,11 +751,19 @@ app.get("/v1/dashboard/operations", async (c) => {
     "SELECT provider, delivery_id, event, received_at FROM webhook_deliveries ORDER BY received_at DESC LIMIT 25",
   ).all();
   const observations = await c.env.DB.prepare(
-    `SELECT o.head_sha, o.outcome, o.run_id, o.observed_at, p.github_name
-     FROM verification_observations o JOIN projects p ON p.id = o.project_id
-     WHERE p.organization_id = ? ORDER BY o.observed_at DESC LIMIT 25`,
+    `SELECT github_name, head_sha, outcome, observed_at
+       FROM (
+         SELECT p.github_name, v.subject_sha AS head_sha, v.outcome, v.completed_at AS observed_at
+           FROM proof_verifications v JOIN projects p ON p.id = v.project_id
+          WHERE p.organization_id = ? AND v.status = 'completed'
+         UNION ALL
+         SELECT p.github_name, o.head_sha, o.outcome, o.observed_at
+           FROM verification_observations o JOIN projects p ON p.id = o.project_id
+          WHERE p.organization_id = ?
+       )
+      ORDER BY observed_at DESC LIMIT 25`,
   )
-    .bind(viewer.organizationId)
+    .bind(viewer.organizationId, viewer.organizationId)
     .all();
   return c.json({ deliveries: deliveries.results, observations: observations.results });
 });
@@ -598,7 +777,9 @@ app.post("/v1/dashboard/sync", async (c) => {
     .first<{ installation_id: string | null }>();
   if (!org?.installation_id) return c.json({ error: "no installation linked" }, 400);
   const counts = await syncInstallation(c.env, org.installation_id);
-  return c.json({ synced: counts });
+  const policies = await reconcileInstallationPolicies(c.env, org.installation_id);
+  const proofChecks = await reconcileInstallationProofChecks(c.env, org.installation_id);
+  return c.json({ synced: counts, policies, proofChecks });
 });
 
 // --- Device enrollment -----------------------------------------------------
@@ -674,12 +855,15 @@ app.post("/v1/devices", async (c) => {
 app.post("/v1/devices/:keyId/revoke", async (c) => {
   if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
   const { reason } = (await c.req.json().catch(() => ({}))) as { reason?: string };
-  const r = await c.env.DB.prepare(
-    "UPDATE device_keys SET revoked_at = ?, revoked_reason = ? WHERE key_id = ? AND revoked_at IS NULL",
+  const revoked = await c.env.DB.prepare(
+    `UPDATE device_keys SET revoked_at = ?, revoked_reason = ?
+      WHERE key_id = ? AND revoked_at IS NULL
+      RETURNING github_user_id`,
   )
     .bind(nowIso(), reason ?? "revoked", c.req.param("keyId"))
-    .run();
-  return c.json({ revoked: (r.meta.changes ?? 0) > 0 });
+    .first<{ github_user_id: string }>();
+  if (revoked !== null) await reconcileProofsForGithubUser(c.env, revoked.github_user_id);
+  return c.json({ revoked: revoked !== null });
 });
 
 // --- Admin bootstrap / sync ------------------------------------------------
@@ -741,7 +925,8 @@ app.post("/admin/sync", async (c) => {
     const installationId = String(inst.id);
     const projection = await syncInstallation(c.env, installationId);
     const policies = await reconcileInstallationPolicies(c.env, installationId);
-    results[inst.account.login] = { projection, policies };
+    const proofChecks = await reconcileInstallationProofChecks(c.env, installationId);
+    results[inst.account.login] = { projection, policies, proofChecks };
   }
   return c.json({ installations: results });
 });
@@ -850,6 +1035,43 @@ app.get("/v1/resolve-repo", async (c) => {
   return c.json({ ownerId: row.github_org_id, repositoryId: row.github_repository_id });
 });
 
+app.get("/v1/project-config/defaults", async (c) => {
+  const identity = await enrollmentIdentity(c);
+  if (!identity) return c.json({ error: "unauthorized" }, 401);
+  const repositoryId = c.req.query("repositoryId") ?? "";
+  if (!/^[0-9]+$/.test(repositoryId)) return c.json({ error: "repositoryId invalid" }, 400);
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, p.active_policy_digest, o.proof_defaults_json,
+            b.config_source
+       FROM projects p
+       JOIN organizations o ON o.id = p.organization_id
+       LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
+      WHERE p.github_repository_id = ?`,
+  )
+    .bind(repositoryId)
+    .first<{
+      id: string;
+      active_policy_digest: string | null;
+      proof_defaults_json: string | null;
+      config_source: string | null;
+    }>();
+  if (project === null) return c.json({ error: "repository not installed for thwip" }, 404);
+  if (identity.kind === "user") {
+    const grant = await c.env.DB.prepare(
+      "SELECT 1 AS allowed FROM repository_grants WHERE project_id = ? AND github_user_id = ? AND active = 1",
+    )
+      .bind(project.id, identity.githubUserId)
+      .first<{ allowed: number }>();
+    if (grant === null) return c.json({ error: "repository access required" }, 403);
+  }
+  return c.json({
+    defaults:
+      project.proof_defaults_json === null ? null : (JSON.parse(project.proof_defaults_json) as unknown),
+    activePolicyDigest: project.active_policy_digest,
+    activeConfigSource: project.config_source,
+  });
+});
+
 // --- Run leases ------------------------------------------------------------
 
 app.post("/v1/run-leases", async (c) => {
@@ -930,179 +1152,31 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
   if (String(claims.repository_id) !== body.repositoryId) {
     return c.json({ error: "repository not authorized by OIDC token" }, 403);
   }
-
-  const project = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled,
-            p.active_policy_digest, o.github_org_id
-     FROM projects p JOIN organizations o ON o.id = p.organization_id
-     WHERE p.github_repository_id = ?`,
-  )
-    .bind(body.repositoryId)
-    .first<{
-      id: string;
-      github_repository_id: string;
-      github_name: string;
-      default_branch: string;
-      enabled: number;
-      active_policy_digest: string | null;
-      github_org_id: string;
-    }>();
-  if (project === null) {
-    return c.json({ error: "project is not imported", code: projectPolicyState(null).code }, 404);
-  }
-  const policyState = projectPolicyState(project);
-  if (policyState.kind === "disabled") {
-    return c.json({ error: "project is disabled", code: policyState.code }, 403);
-  }
-  if (policyState.kind === "bootstrap_pending") {
-    return c.json({
-      state: "bootstrap_pending",
-      code: policyState.code,
-      repositoryId: project!.github_repository_id,
-      repository: project!.github_name,
-      defaultBranch: project!.default_branch,
+  try {
+    const resolution = await resolveVerificationBundle(c.env, {
+      repositoryId: body.repositoryId,
+      ...(body.signerGithubUserId !== undefined ? { signerGithubUserId: body.signerGithubUserId } : {}),
+      ...(body.keyFingerprint !== undefined ? { keyFingerprint: body.keyFingerprint } : {}),
     });
-  }
-
-  const policyRow = await c.env.DB.prepare(
-    "SELECT digest, version, canonical_json, status FROM policy_bundles WHERE digest = ?",
-  )
-    .bind(policyState.digest)
-    .first<{ digest: string; version: number; canonical_json: string; status: string }>();
-  if (!policyRow || policyRow.status !== "active") {
-    return c.json({ error: "active policy record is unavailable", code: "ACTIVE_POLICY_UNAVAILABLE" }, 500);
-  }
-
-  const grace = await c.env.DB.prepare(
-    "SELECT digest FROM policy_bundles WHERE project_id = ? AND status = 'retired' AND activated_at > datetime('now','-1 day')",
-  )
-    .bind(project.id)
-    .all<{ digest: string }>();
-
-  const grants = await c.env.DB.prepare(
-    "SELECT github_user_id, github_login, permission, active, synced_at FROM repository_grants WHERE project_id = ?",
-  )
-    .bind(project.id)
-    .all<{ github_user_id: string; github_login: string; permission: string; active: number; synced_at: string }>();
-
-  const refreshed: Array<{ githubUserId: string; permission: string; active: boolean }> = [];
-  for (const g of grants.results) {
-    const ageMs = Date.now() - Date.parse(g.synced_at + (g.synced_at.endsWith("Z") ? "" : "Z"));
-    if (c.env.GITHUB_SYNC_TOKEN && ageMs > 60_000) {
-      try {
-        const res = await fetch(
-          `https://api.github.com/repos/${project.github_name}/collaborators/${g.github_login}/permission`,
-          {
-            headers: {
-              authorization: `Bearer ${c.env.GITHUB_SYNC_TOKEN}`,
-              accept: "application/vnd.github+json",
-              "user-agent": "thwip-control-plane",
-            },
-          },
-        );
-        if (res.ok) {
-          const data = (await res.json()) as { permission: string; role_name?: string };
-          const perm = data.role_name ?? data.permission;
-          await c.env.DB.prepare(
-            "UPDATE repository_grants SET permission = ?, active = 1, synced_at = ? WHERE project_id = ? AND github_user_id = ?",
-          )
-            .bind(perm, nowIso(), project.id, g.github_user_id)
-            .run();
-          refreshed.push({ githubUserId: g.github_user_id, permission: perm, active: true });
-          continue;
-        }
-        if (res.status === 404) {
-          await c.env.DB.prepare(
-            "UPDATE repository_grants SET active = 0, synced_at = ? WHERE project_id = ? AND github_user_id = ?",
-          )
-            .bind(nowIso(), project.id, g.github_user_id)
-            .run();
-          refreshed.push({ githubUserId: g.github_user_id, permission: "none", active: false });
-          continue;
-        }
-        return c.json({ error: "grant refresh failed" }, 503);
-      } catch {
-        return c.json({ error: "grant refresh failed" }, 503);
-      }
-    }
-    refreshed.push({ githubUserId: g.github_user_id, permission: g.permission, active: g.active === 1 });
-  }
-
-  // Signing keys come from GitHub, which owns the key-to-identity binding.
-  // thwip contributes only a deny list, for revoking a key inside the
-  // organization faster than GitHub's own removal can propagate.
-  const signerUserId = body.signerGithubUserId;
-  const signerRow = signerUserId
-    ? await c.env.DB.prepare("SELECT github_login FROM repository_grants WHERE project_id = ? AND github_user_id = ?")
-        .bind(project.id, signerUserId)
-        .first<{ github_login: string }>()
-    : null;
-  const githubKeys: Array<{
-    keyId: string;
-    githubUserId: string;
-    algorithm: string;
-    publicKey: string;
-    revokedAt: string | null;
-  }> = [];
-  if (signerRow && signerUserId) {
-    let token: string | undefined = c.env.GITHUB_SYNC_TOKEN;
-    try {
-      const org = await c.env.DB.prepare("SELECT installation_id FROM organizations WHERE github_org_id = ?")
-        .bind(project.github_org_id)
-        .first<{ installation_id: string | null }>();
-      if (org?.installation_id) token = await installationToken(c.env, org.installation_id);
-    } catch {
-      /* fall back to the sync token or an unauthenticated read */
-    }
-    let listed: Awaited<ReturnType<typeof githubSigningKeys>>;
-    try {
-      listed = await githubSigningKeys(token, signerRow.github_login);
-    } catch {
-      return c.json({ error: "cannot read signer signing keys from GitHub" }, 503);
-    }
-    const denied = await c.env.DB.prepare(
-      "SELECT fingerprint, revoked_at FROM device_keys WHERE github_user_id = ? AND revoked_at IS NOT NULL",
-    )
-      .bind(signerUserId)
-      .all<{ fingerprint: string; revoked_at: string }>();
-    const denyList = new Map(denied.results.map((d) => [d.fingerprint, d.revoked_at]));
-    for (const k of listed) {
-      const fingerprint = await sha256Fingerprint(k.publicKey);
-      githubKeys.push({
-        keyId: fingerprint,
-        githubUserId: signerUserId,
-        algorithm: k.publicKey.split(/\s+/)[0] ?? "unknown",
-        publicKey: k.publicKey,
-        revokedAt: denyList.get(fingerprint) ?? null,
+    if (resolution.kind === "bootstrap_pending") {
+      return c.json({
+        state: resolution.kind,
+        code: resolution.code,
+        repositoryId: body.repositoryId,
+        repository: resolution.repository,
+        defaultBranch: resolution.defaultBranch,
       });
-      // Remember the key so a proof stays explainable after GitHub removal.
-      await c.env.DB.prepare(
-        `INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label, source)
-         VALUES (?, ?, ?, ?, ?, ?, 'github') ON CONFLICT(key_id) DO NOTHING`,
-      )
-        .bind(fingerprint, signerUserId, k.publicKey.split(/\s+/)[0] ?? "unknown", k.publicKey, fingerprint, k.title)
-        .run()
-        .catch(() => undefined);
     }
+    return c.json({
+      state: "active",
+      bundle: await signPayload(c.env, resolution.bundle, "thwip-bundle+jws"),
+    });
+  } catch (error) {
+    if (error instanceof VerificationBundleError) {
+      return c.json({ error: error.message, code: error.code }, error.status);
+    }
+    throw error;
   }
-
-  const now = new Date();
-  const bundle = {
-    schemaVersion: "1",
-    projectId: project.id,
-    repositoryId: project.github_repository_id,
-    ownerId: project.github_org_id,
-    activePolicyDigest: policyRow.digest,
-    gracePolicyDigests: grace.results.map((g) => g.digest),
-    policy: JSON.parse(policyRow.canonical_json) as unknown,
-    keys: githubKeys,
-    grants: refreshed,
-    leaseIssuerJwks: [],
-    issuedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-  };
-  const jws = await signPayload(c.env, bundle, "thwip-bundle+jws");
-  return c.json({ state: "active", bundle: jws });
 });
 
 app.post("/v1/verification-observations", async (c) => {
@@ -1121,6 +1195,67 @@ app.post("/v1/verification-observations", async (c) => {
     .bind(project.id, body.headSha, body.outcome, body.runId ?? null)
     .run();
   return c.json({ ok: true });
+});
+
+app.get("/v1/proof-verifications/:id", async (c) => {
+  const identity = await enrollmentIdentity(c);
+  if (!identity) return c.json({ error: "unauthorized" }, 401);
+  const row = await c.env.DB.prepare(
+    `SELECT v.id, v.project_id, v.event, v.subject_sha, v.base_ref, v.policy_digest,
+            v.verifier_version, v.mode, v.status, v.outcome, v.detail, v.check_name,
+            v.check_run_id, v.audit_jws, v.started_at, v.completed_at, p.github_name
+       FROM proof_verifications v JOIN projects p ON p.id = v.project_id
+      WHERE v.id = ?`,
+  )
+    .bind(c.req.param("id"))
+    .first<{
+      id: string;
+      project_id: string;
+      event: string;
+      subject_sha: string;
+      base_ref: string;
+      policy_digest: string | null;
+      verifier_version: string;
+      mode: string;
+      status: string;
+      outcome: string | null;
+      detail: string | null;
+      check_name: string;
+      check_run_id: string | null;
+      audit_jws: string | null;
+      started_at: string;
+      completed_at: string | null;
+      github_name: string;
+    }>();
+  if (row === null) return c.json({ error: "verification not found" }, 404);
+  if (identity.kind === "user") {
+    const grant = await c.env.DB.prepare(
+      "SELECT 1 AS allowed FROM repository_grants WHERE project_id = ? AND github_user_id = ? AND active = 1",
+    )
+      .bind(row.project_id, identity.githubUserId)
+      .first<{ allowed: number }>();
+    if (grant === null) return c.json({ error: "repository access required" }, 403);
+  }
+  return c.json({
+    verification: {
+      id: row.id,
+      repository: row.github_name,
+      event: row.event,
+      subjectSha: row.subject_sha,
+      baseRef: row.base_ref,
+      policyDigest: row.policy_digest,
+      verifierVersion: row.verifier_version,
+      mode: row.mode,
+      status: row.status,
+      outcome: row.outcome,
+      detail: row.detail,
+      checkName: row.check_name,
+      checkRunId: row.check_run_id,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    },
+    auditJws: row.audit_jws,
+  });
 });
 
 /**
@@ -1242,13 +1377,14 @@ app.post("/api/github/webhooks", async (c) => {
     duplicate = true;
   }
   let installationId: string | null = null;
-  let payload: GithubPolicyWebhookPayload = {};
+  let payload: GithubPolicyWebhookPayload & { repository?: { id?: number; default_branch?: string } } = {};
   try {
     payload = JSON.parse(new TextDecoder().decode(raw)) as typeof payload;
     installationId = payload.installation?.id != null ? String(payload.installation.id) : null;
   } catch {
     /* hint only */
   }
+  if (duplicate) return c.json({ ok: true, duplicate: true, queued: { handled: false, detail: "duplicate delivery" } });
   // Queue placement happens inline rather than through the projection queue: the
   // Durable Object is the authority and a delayed entry would mean a pull request
   // sits outside the queue for as long as the backlog is deep.
@@ -1262,7 +1398,22 @@ app.post("/api/github/webhooks", async (c) => {
   }
 
   const policyPush = policyPushFromGithubWebhook(event, payload);
-  await c.env.SYNC_QUEUE.send({ provider: "github", delivery, event, installationId, policyPush });
+  const appProofTask = appProofTaskFromWebhook(event, payload as never);
+  const reconcileProofRepositoryId =
+    event === "push" &&
+    payload.repository?.id != null &&
+    payload.ref === `refs/heads/${payload.repository.default_branch ?? ""}`
+      ? String(payload.repository.id)
+      : null;
+  await c.env.SYNC_QUEUE.send({
+    provider: "github",
+    delivery,
+    event,
+    installationId,
+    policyPush,
+    appProofTask,
+    reconcileProofRepositoryId,
+  });
   return c.json({ ok: true, duplicate, queued });
 });
 
@@ -1337,13 +1488,25 @@ app.get("/admin/github/manifest", async (c) => {
     request_oauth_on_install: true,
     public: false,
     default_permissions: {
+      checks: "write",
       contents: "read",
       emails: "read",
       members: "read",
       metadata: "read",
       pull_requests: "read",
     },
-    default_events: ["member", "membership", "organization", "pull_request", "push", "repository", "team"],
+    default_events: [
+      "check_run",
+      "check_suite",
+      "member",
+      "membership",
+      "merge_group",
+      "organization",
+      "pull_request",
+      "push",
+      "repository",
+      "team",
+    ],
   };
   return c.html(
     `<!doctype html><meta charset="utf-8"><title>Register thwip GitHub App</title>
@@ -1586,18 +1749,33 @@ export default {
         event?: string;
         installationId?: string | null;
         policyPush?: PolicyPush | null;
+        appProofTask?: AppProofTask | null;
+        reconcileProofRepositoryId?: string | null;
       };
       const inst = body?.installationId;
       try {
         if (inst && !synced.has(inst)) {
           await syncInstallation(env, inst);
           synced.add(inst);
+          if (["member", "membership", "organization", "repository", "team"].includes(body.event ?? "")) {
+            await reconcileInstallationProofChecks(env, inst);
+          }
         }
         if (body.policyPush != null) {
           await activatePolicyFromDefaultBranchPush(env, body.policyPush);
         }
         if (body.event === "policy_reconcile" && inst) {
           await reconcileInstallationPolicies(env, inst);
+          await reconcileInstallationProofChecks(env, inst);
+        }
+        if (body.reconcileProofRepositoryId) {
+          await reconcileProjectProofChecks(env, body.reconcileProofRepositoryId);
+        }
+        if (body.appProofTask?.kind === "verify") {
+          await processAppProof(env, body.appProofTask.request);
+        } else if (body.appProofTask?.kind === "rerequest") {
+          const request = await requestForRerequest(env, body.appProofTask.verificationId);
+          if (request !== null) await processAppProof(env, request);
         }
         msg.ack();
       } catch {
@@ -1613,6 +1791,7 @@ export default {
       try {
         await syncInstallation(env, o.installation_id);
         await reconcileInstallationPolicies(env, o.installation_id);
+        await reconcileInstallationProofChecks(env, o.installation_id);
       } catch {
         /* retried next run */
       }

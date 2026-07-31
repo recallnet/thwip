@@ -1,4 +1,9 @@
-import { deriveProjectConfigFromText, type RepositorySnapshot } from "@thwip/policy";
+import {
+  deriveEffectiveProjectConfig,
+  parseThwipYaml,
+  type RepositorySnapshot,
+  type ThwipYaml,
+} from "@thwip/policy";
 import { canonicalJson } from "@thwip/protocol";
 import { installationToken } from "./github-app.js";
 import type { Env } from "./env.js";
@@ -161,6 +166,7 @@ interface ActivationProject {
   active_policy_digest: string | null;
   github_org_id: string;
   installation_id: string | null;
+  proof_defaults_json: string | null;
 }
 
 export interface PolicyActivationDependencies {
@@ -203,7 +209,7 @@ export async function activatePolicyFromDefaultBranchPush(
   }
   const project = await env.DB.prepare(
     `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
-            o.github_org_id, o.installation_id
+            o.github_org_id, o.installation_id, o.proof_defaults_json
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.github_repository_id = ?`,
   )
@@ -223,12 +229,26 @@ export async function activatePolicyFromDefaultBranchPush(
   }
 
   const snapshot = await dependencies.loadSnapshot(token, project.github_name, push.after);
-  if (!(await snapshot.hasFile("thwip.yaml"))) {
-    return { status: "ignored", reason: "default branch has no thwip.yaml" };
+  const repositoryYaml = (await snapshot.hasFile("thwip.yaml"))
+    ? td.decode(await snapshot.readFile("thwip.yaml"))
+    : null;
+  let globalDefaults: ThwipYaml | null = null;
+  if (project.proof_defaults_json !== null) {
+    try {
+      globalDefaults = parseThwipYaml(project.proof_defaults_json);
+    } catch (error) {
+      return {
+        status: "failed",
+        reason: `organization defaults are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
   }
-  const yamlText = td.decode(await snapshot.readFile("thwip.yaml"));
-  const derived = await deriveProjectConfigFromText(
-    yamlText,
+  if (repositoryYaml === null && globalDefaults === null) {
+    return { status: "ignored", reason: "default branch has no thwip.yaml and no organization defaults" };
+  }
+  const derived = await deriveEffectiveProjectConfig(
+    globalDefaults,
+    repositoryYaml,
     { ownerId: project.github_org_id, repositoryId: project.github_repository_id },
     snapshot,
   );
@@ -253,8 +273,8 @@ export async function activatePolicyFromDefaultBranchPush(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO policy_bundles
-         (digest, project_id, version, canonical_json, status, activated_at, source_ref, source_sha)
-       VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+         (digest, project_id, version, canonical_json, status, activated_at, source_ref, source_sha, config_source)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
        ON CONFLICT(digest) DO UPDATE SET
          project_id = excluded.project_id,
          version = excluded.version,
@@ -265,7 +285,8 @@ export async function activatePolicyFromDefaultBranchPush(
            ELSE excluded.activated_at
          END,
          source_ref = excluded.source_ref,
-         source_sha = excluded.source_sha`,
+         source_sha = excluded.source_sha,
+         config_source = excluded.config_source`,
     ).bind(
       derived.policyDigest,
       project.id,
@@ -274,6 +295,7 @@ export async function activatePolicyFromDefaultBranchPush(
       activatedAt,
       defaultRef,
       push.after,
+      derived.configSource,
     ),
     env.DB.prepare(
       "UPDATE policy_bundles SET status = 'retired' WHERE project_id = ? AND digest != ? AND status = 'active'",
