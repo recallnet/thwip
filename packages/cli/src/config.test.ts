@@ -54,7 +54,7 @@ describe("effective CLI configuration", () => {
   it("applies repository fields over organization defaults", async () => {
     const cwd = await repository({
       "package-lock.json": "{}",
-      "thwip.yaml": "version: 2\nprofile: audited\nrequired: [test]\npolicy:\n  allow_author_as_signer: false\n",
+      "thwip.yaml": "version: 2\nprofile: remote\nrequired: [test]\npolicy:\n  allow_author_as_signer: false\n",
     });
     vi.stubGlobal(
       "fetch",
@@ -76,7 +76,7 @@ describe("effective CLI configuration", () => {
     expect(config.configSource).toBe("repository-override");
     expect(config.policy).toMatchObject({
       version: 2,
-      securityProfile: "audited",
+      securityProfile: "remote",
       minimumPermission: "maintain",
       allowAuthorAsSigner: false,
       pipeline: { requiredSuites: ["test"] },
