@@ -5,6 +5,21 @@ signed, taken over the exact bytes the commit carries. A head whose proof cannot
 be read does not merge, because a merge record that cites nothing is worse than
 no record.
 
+## What a chain link is
+
+Each merge adds a link to the branch's chain. A link is the digest of a record
+the queue signed, and `GET /v1/queue/records/:digest` returns the exact bytes it
+signed, so you can check a merge instead of taking the dashboard's word for it.
+
+A record says which kind of merge it was, and the kinds are not interchangeable.
+A merge the queue had verified against the integrated candidate cites that
+verifier's result. A merge accepted on the head's own proof cites no verifier
+result at all, because none ran. Neither cites an assignment, because the queue
+dispatches its verifier rather than assigning work to it.
+
+If the queue cannot read one of the things a record cites, it refuses the merge
+rather than signing a record with a gap in it.
+
 ## The two required checks
 
 `thwip` says the proof is good for this exact tree. `thwip / turn` says it is
