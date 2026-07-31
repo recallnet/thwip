@@ -3,7 +3,7 @@
 Git-native CI proofs for agent-run pipelines.
 
 Run the approved CI pipeline locally, attach a signed proof to the
-commit, and let a ruleset-protected GitHub check verify it in seconds.
+commit, and let the ruleset-protected thwip GitHub App verify it in seconds.
 The merge queue on this repository merges any internal PR automatically
 once its exact head commit carries a valid thwip proof.
 
@@ -16,16 +16,18 @@ use thwip.
 - Design: `plan.md`
 - Deviations from the plan taken for the v1 vertical slice: `DEVIATIONS.md`
 
-## First policy activation
+## Effective policy and first activation
 
-An enabled repository with no active policy reports `BOOTSTRAP_PENDING` as a
-successful, explicit onboarding check. That result does not approve the
-candidate policy or its proof; it only avoids deadlocking the native merge
-queue before a policy exists. After the onboarding pull request lands, the
-control plane derives the policy from the exact current default-branch tree,
-stores its canonical bundle and digest, and activates it. Later policy changes
-remain governed by the existing active policy until their protected merge
-lands.
+Repositories inherit organization proof defaults from the dashboard. An
+optional `thwip.yaml` on the active default branch overrides those defaults;
+candidate pull-request YAML never governs or approves its own proof. A global
+policy can activate immediately when a project is enabled. Without either
+source the App reports the missing policy explicitly and fails closed.
+
+Projects begin with the distinct `thwip / proof (observe)` App check. After a
+recent PASS under the active policy, an administrator can enforce the
+App-owned `thwip` check and pin that expected App in the repository ruleset
+before removing the previous verifier workflow.
 
 ## Contributing (this repo eats its own dogfood)
 

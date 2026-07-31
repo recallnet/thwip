@@ -53,8 +53,15 @@ const te = new TextEncoder();
 /** Pinned unless a project names its own. */
 export const DEFAULT_DAGGER_VERSION = "0.21.8";
 
-export function parseThwipYaml(text: string): ThwipYaml {
-  const y = parseYaml(text) as ThwipYaml;
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} is not a mapping`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function validatedThwipYaml(value: unknown): ThwipYaml {
+  const y = record(value, "thwip.yaml") as unknown as ThwipYaml;
   if (typeof y !== "object" || y === null) throw new Error("thwip.yaml is not a mapping");
   if (!Number.isInteger(y.version) || y.version < 1) {
     throw new Error("thwip.yaml: version must be a positive integer");
@@ -104,7 +111,83 @@ export function parseThwipYaml(text: string): ThwipYaml {
       }
     }
   }
+  if (y.policy !== undefined) {
+    const policy = record(y.policy, "thwip.yaml: 'policy'");
+    const minimumPermission = policy["minimum_permission"];
+    if (
+      minimumPermission !== undefined &&
+      !["triage", "write", "maintain", "admin"].includes(String(minimumPermission))
+    ) {
+      throw new Error("thwip.yaml: policy.minimum_permission must be triage | write | maintain | admin");
+    }
+    const allowAuthor = policy["allow_author_as_signer"];
+    if (allowAuthor !== undefined && typeof allowAuthor !== "boolean") {
+      throw new Error("thwip.yaml: policy.allow_author_as_signer must be boolean");
+    }
+    const algorithms = policy["allowed_key_algorithms"];
+    if (
+      algorithms !== undefined &&
+      (!Array.isArray(algorithms) ||
+        algorithms.length === 0 ||
+        algorithms.some((algorithm) => typeof algorithm !== "string" || algorithm.length === 0))
+    ) {
+      throw new Error("thwip.yaml: policy.allowed_key_algorithms must be a non-empty list of strings");
+    }
+    const maxAge = policy["proof_max_age_seconds"];
+    if (maxAge !== undefined && (!Number.isInteger(maxAge) || (maxAge as number) <= 0)) {
+      throw new Error("thwip.yaml: policy.proof_max_age_seconds must be a positive integer");
+    }
+  }
   return y;
+}
+
+export function parseThwipYaml(text: string): ThwipYaml {
+  return validatedThwipYaml(parseYaml(text));
+}
+
+function optionalSection(
+  defaults: unknown,
+  overrideDocument: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!(key in overrideDocument)) {
+    return defaults === undefined ? undefined : record(defaults, `global defaults: '${key}'`);
+  }
+  const override = overrideDocument[key];
+  if (override === null) return undefined;
+  return {
+    ...(defaults === undefined ? {} : record(defaults, `global defaults: '${key}'`)),
+    ...record(override, `thwip.yaml: '${key}'`),
+  };
+}
+
+/**
+ * Resolve remotely managed organization defaults with an optional repository
+ * override. Arrays replace arrays; mapping sections merge by field; an
+ * explicit null clears an optional mapping. The fully resolved document is
+ * validated by the same parser as a repository-owned configuration.
+ */
+export function resolveThwipYaml(
+  globalDefaults: ThwipYaml | null,
+  repositoryYamlText: string | null,
+): { config: ThwipYaml; source: "global" | "repository-override" } {
+  if (repositoryYamlText === null) {
+    if (globalDefaults === null) throw new Error("no thwip.yaml or organization defaults are configured");
+    return { config: validatedThwipYaml(globalDefaults), source: "global" };
+  }
+
+  const override = record(parseYaml(repositoryYamlText), "thwip.yaml");
+  const defaults = globalDefaults === null ? {} : (globalDefaults as unknown as Record<string, unknown>);
+  const merged: Record<string, unknown> = { ...defaults, ...override };
+  for (const key of ["pipeline", "suites", "policy"] as const) {
+    const section = optionalSection(defaults[key], override, key);
+    if (section === undefined) delete merged[key];
+    else merged[key] = section;
+  }
+  return {
+    config: validatedThwipYaml(merged),
+    source: "repository-override",
+  };
 }
 
 function normalizeRepositoryPath(path: string): string {
@@ -252,4 +335,17 @@ export async function deriveProjectConfigFromText(
   snapshot: RepositorySnapshot,
 ): Promise<ProjectConfig> {
   return deriveProjectConfig(parseThwipYaml(yamlText), ids, snapshot);
+}
+
+export async function deriveEffectiveProjectConfig(
+  globalDefaults: ThwipYaml | null,
+  repositoryYamlText: string | null,
+  ids: { ownerId: string; repositoryId: string },
+  snapshot: RepositorySnapshot,
+): Promise<ProjectConfig & { configSource: "global" | "repository-override" }> {
+  const resolved = resolveThwipYaml(globalDefaults, repositoryYamlText);
+  return {
+    ...(await deriveProjectConfig(resolved.config, ids, snapshot)),
+    configSource: resolved.source,
+  };
 }

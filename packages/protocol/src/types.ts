@@ -130,6 +130,32 @@ export interface VerificationBundleV1 {
   expiresAt: IsoDateTime;
 }
 
+/** Service-signed audit evidence for one App-native proof check. */
+export interface ProofVerificationAuditV1 {
+  schemaVersion: "1";
+  verificationId: string;
+  repositoryId: DecimalId;
+  repository: string;
+  event: "pull_request" | "merge_group";
+  subjectSha: GitOid;
+  baseRef: string;
+  policyDigest: Sha256 | null;
+  policyVersion: number | null;
+  configSource: "global" | "repository-override" | "unavailable";
+  verifierVersion: string;
+  mode: "observe" | "enforced";
+  outcome: string;
+  detail?: string;
+  targets: Array<{
+    headSha: GitOid;
+    treeOid: GitOid;
+    outcome: string;
+    signerKeyId?: string;
+  }>;
+  checkRunId: DecimalId;
+  evaluatedAt: IsoDateTime;
+}
+
 export const REASON_CODES = [
   "PASS",
   "PROOF_MISSING",

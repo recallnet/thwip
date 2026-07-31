@@ -1,11 +1,11 @@
 import {
-  deriveProjectConfig,
+  deriveEffectiveProjectConfig,
   parseThwipYaml,
   type ProjectConfig,
   type RepositorySnapshot,
   type ThwipYaml,
 } from "@thwip/policy";
-import { git, gitBytes, showFileAtHead } from "./git.js";
+import { git, gitBytes } from "./git.js";
 
 export {
   DEFAULT_DAGGER_VERSION,
@@ -91,17 +91,47 @@ export async function deriveConfig(
   cwd: string,
   ids: { ownerId: string; repositoryId: string },
 ): Promise<ProjectConfig> {
-  return deriveProjectConfig(y, ids, new GitHeadSnapshot(cwd));
+  return deriveEffectiveProjectConfig(null, JSON.stringify(y), ids, new GitHeadSnapshot(cwd));
 }
 
-/** Load configuration from the committed tree (HEAD), never the worktree. */
+async function organizationDefaults(
+  endpoint: string,
+  authHeader: string | null,
+  repositoryId: string,
+): Promise<ThwipYaml | null> {
+  if (authHeader === null) return null;
+  const response = await fetch(
+    `${endpoint}/v1/project-config/defaults?repositoryId=${encodeURIComponent(repositoryId)}`,
+    { headers: { authorization: authHeader } },
+  );
+  // A newly upgraded CLI can still run against a control plane that has not
+  // deployed organization defaults yet. A complete thwip.yaml remains enough
+  // to derive the same effective policy during that rolling upgrade.
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`cannot resolve organization defaults (${response.status}): ${await response.text()}`);
+  }
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return null;
+  const body = (await response.json()) as { defaults?: unknown };
+  if (body.defaults === null || body.defaults === undefined) return null;
+  return parseThwipYaml(JSON.stringify(body.defaults));
+}
+
+/**
+ * Load effective configuration from the committed tree (HEAD), never the
+ * worktree. Organization defaults supply YAML-free repositories; when
+ * thwip.yaml exists its fields override those defaults.
+ */
 export async function loadProjectConfigAtHead(
   cwd: string,
   endpoint: string,
   authHeader: string | null,
-): Promise<ProjectConfig> {
-  const text = await showFileAtHead(cwd, "thwip.yaml");
-  const y = parseThwipYaml(text);
+): Promise<ProjectConfig & { configSource: "global" | "repository-override" }> {
+  const snapshot = new GitHeadSnapshot(cwd);
   const ids = await resolveRepositoryIds(cwd, endpoint, authHeader);
-  return deriveConfig(y, cwd, ids);
+  const repositoryYaml = (await snapshot.hasFile("thwip.yaml"))
+    ? new TextDecoder().decode(await snapshot.readFile("thwip.yaml"))
+    : null;
+  const defaults = await organizationDefaults(endpoint, authHeader, ids.repositoryId);
+  return deriveEffectiveProjectConfig(defaults, repositoryYaml, ids, snapshot);
 }

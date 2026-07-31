@@ -320,6 +320,7 @@ async function cmdPolicyDigest(): Promise<number> {
         version: project.policy.version,
         profile: project.policy.securityProfile,
         requiredSuites: project.policy.pipeline.requiredSuites,
+        configSource: project.configSource,
       },
       null,
       2,
