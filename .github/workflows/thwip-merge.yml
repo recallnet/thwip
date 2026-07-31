@@ -27,6 +27,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # To read the candidate verdict the verifier published on this head, rather
+  # than asking the control plane for it.
+  checks: read
   id-token: write
 
 jobs:
@@ -104,24 +107,31 @@ jobs:
           echo "authorize: http $code"; echo "$abody"
           [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
 
-          # Then wait on the read-only endpoint. Polling authorization woke the
-          # Durable Object every twenty seconds, and that object has a hard daily
-          # request cap, so a pull request waiting for its suites to run was the
-          # most expensive thing in the system. This reads one D1 row and touches
-          # no object at all.
+          # Then watch the pull request, not us.
+          #
+          # This used to poll the control plane every twenty seconds to learn
+          # whether the candidate had been verified. That is asking us for
+          # something GitHub already holds: the verifier publishes its result as a
+          # check run on this head. Waiting now costs the control plane nothing,
+          # and the thing being waited on is visible to anyone looking at the pull
+          # request rather than only to us.
           if [ "$(printf '%s' "$abody" | jq -r '.candidate // empty')" = "verification-requested" ]; then
-            tree=$(printf '%s' "$candidate" | jq -r '.candidateTreeOid')
             deadline=$(( $(date +%s) + 1800 ))
             while :; do
               sleep 20
-              v=$(curl -sS -H "authorization: Bearer $(oidc)" \
-                "$THWIP_ENDPOINT/v1/queue/$REPO_ID/candidate?ref=$(jq -rn --arg r "$BASE_REF" '$r|@uri')&tree=$tree" || true)
-              if [ "$(printf '%s' "$v" | jq -r '.verified // false')" = "true" ]; then
-                echo "candidate verified: $(printf '%s' "$v" | jq -r '.accepted')"
-                break
+              verdict=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
+                --jq '[.check_runs[] | select(.name == "thwip / candidate")] | first // empty' || true)
+              if [ -n "$verdict" ]; then
+                conclusion=$(printf '%s' "$verdict" | jq -r '.conclusion // empty')
+                echo "candidate check: $conclusion"
+                if [ "$conclusion" = "success" ]; then break; fi
+                if [ -n "$conclusion" ]; then
+                  echo "::notice::the candidate did not pass; the queue will refuse this turn"
+                  break
+                fi
               fi
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::the candidate was still unverified after 30 minutes"
+                echo "::error::no candidate verdict on this head after 30 minutes"
                 exit 1
               fi
             done
