@@ -8,7 +8,6 @@ import {
   type D1Like,
   type ProjectionMessage,
 } from "./projection.js";
-import { declineFromProjection, type ProjectedQueue } from "./fast-decline.js";
 import { adoptChain, readProjectedChain } from "./adopt-chain.js";
 import {
   admit,
@@ -919,39 +918,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const principalId = await deps.principalFor(c.env, String(body.authorGithubUserId ?? ""));
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
 
-    // Try to answer from the projection first. It may only ever decline, never
-    // authorize, so this cannot let two pull requests merge at once. In a queue of
-    // N, N-1 are waiting, and every one of those answers here for the price of a
-    // D1 row read instead of a Durable Object request.
+    // Answered from the queue itself, never from the projection.
     //
-    // The merge writer always escalates: preparing a merge is a decision, and
-    // decisions belong to the object.
-    if (body.prepare !== true) {
-      const projected = (await readProjectedQueue(
-        c.env.DB as unknown as D1Like,
-        repositoryId,
-        baseRef,
-      )) as ProjectedQueue | null;
-      const declined = declineFromProjection(projected, {
-        entryId,
-        headSha: body.headSha,
-        now: Date.now(),
-      });
-      if (declined.decline) {
-        const enforcing = project.activationState === "canary" || project.activationState === "enforced";
-        return c.json({
-          authorized: !enforcing,
-          enforcing,
-          activationState: project.activationState,
-          reason: declined.reason,
-          entryId,
-          operationId: null,
-          queuePosition: declined.queuePosition,
-          source: "projection",
-        });
-      }
-    }
-
+    // There used to be a fast path here that declined from the projection so a
+    // waiting pull request never woke the Durable Object, because a Durable Object
+    // request was the expensive thing. The authority is a D1 row now, and reading
+    // it costs one row read against a budget this account uses two percent of, so
+    // the fast path was reading more rows than the thing it was avoiding.
+    //
+    // It was also wrong in a way its own reasoning missed. A stale decline was
+    // supposed to be safe because it only costs a pull request one more round. But
+    // this endpoint is a required check, and a declined check goes red and stays
+    // red. GitHub then refuses the merge on the red check even after the queue has
+    // authorized it, and the queue re-offers the same turn to a pull request that
+    // can never take it. That is not one more round; that is the lane wedged on a
+    // pull request that holds it. It happened, to pull request 59, while the
+    // projection was a few hundred milliseconds behind.
+    //
+    // Writes are what a waiting pull request should avoid, and it still does: the
+    // compare-and-swap does not write when the commands changed nothing.
     const db = c.env.DB as unknown as D1Like;
 
     // Captured after validation: TypeScript discards the narrowing inside a

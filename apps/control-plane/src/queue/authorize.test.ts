@@ -16,10 +16,12 @@ import { queueRoutes, type QueueRouteEnv } from "./routes.js";
  */
 
 const open: Array<{ close(): void }> = [];
+let raw: Database.Database;
 
 function env(): QueueRouteEnv {
   const db = new Database(":memory:");
   open.push(db);
+  raw = db;
   const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
   for (const file of readdirSync(dir).sort()) {
     if (!file.endsWith(".sql")) continue;
@@ -83,6 +85,22 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
     ...over,
   });
+}
+
+/**
+ * Make the projection credit the lane to somebody who does not hold it, and
+ * insist it actually changed something so the test cannot pass by describing a
+ * projection that was never written.
+ */
+function lie(): void {
+  const marks = raw
+    .prepare("UPDATE queue_projection_marks SET active_attempt_id = 'att_somebody_else'")
+    .run();
+  const entries = raw
+    .prepare("UPDATE queue_entries_index SET last_attempt_id = 'att_somebody_else' WHERE pull_request_number = 61")
+    .run();
+  expect(marks.changes).toBeGreaterThan(0);
+  expect(entries.changes).toBeGreaterThan(0);
 }
 
 interface Verdict {
@@ -209,6 +227,28 @@ describe("the merge gate", () => {
     expect(removed.status).toBe(200);
 
     expect((await authorize(routes, e, 61)).reason).toBe("HOLDS_TURN");
+  });
+
+  /**
+   * There used to be a fast path that declined from the projection. A stale
+   * decline was reasoned to be safe because it only cost a pull request one more
+   * round, but this endpoint is a required check: a declined check goes red and
+   * stays red, GitHub then refuses the merge on the red check even once the queue
+   * has authorized, and the queue re-offers a turn to a pull request that can
+   * never take it. The lane wedged on its own holder.
+   */
+  it("answers from the queue even when the projection says otherwise", async () => {
+    const e = env();
+    const routes = app();
+    const first = await authorize(routes, e, 59);
+    expect(first.reason).toBe("HOLDS_TURN");
+    expect((await authorize(routes, e, 61)).reason).toBe("WAITING_FOR_TURN");
+
+    // A projection that has fallen behind and credits the lane to somebody else.
+    lie();
+
+    expect((await authorize(routes, e, 59)).reason).toBe("HOLDS_TURN");
+    expect((await authorize(routes, e, 61)).reason).toBe("WAITING_FOR_TURN");
   });
 
   it("reads back what it decided", async () => {
