@@ -62,6 +62,15 @@ const IMPLEMENTATIONS = [
     backing: () => cellOf() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore => SnapshotQueueStore.open(b as SnapshotCell, id),
   },
+  {
+    // The same store with compaction turned up as far as it goes, so anything the
+    // queue still needs after history is dropped has to be something compaction
+    // keeps. If dropping history changed a decision, it would change one here.
+    name: "SnapshotQueueStore (compacted hard)",
+    backing: () => cellOf() as never,
+    open: (b: never, id: typeof IDENTITY): AnyStore =>
+      SnapshotQueueStore.open(b as SnapshotCell, id, { terminalEntries: 1, transitions: 1 }),
+  },
 ];
 
 let n = 0;

@@ -1,12 +1,15 @@
 import {
   applyEvent,
   assertInvariants,
+  compactState,
   decodeState,
+  DEFAULT_COMPACTION,
   emptyState,
   encodeState,
   QueueRuleViolation,
   selectNext,
   type BranchQueueState,
+  type CompactionLimits,
   type EligibleEntry,
   type QueueEvent,
 } from "@thwip/queue-domain";
@@ -157,6 +160,7 @@ export class SnapshotQueueStore {
     readonly queueKey: string,
     readonly repositoryId: string,
     readonly baseRef: string,
+    private readonly compaction: CompactionLimits = DEFAULT_COMPACTION,
   ) {
     const held = cell.read();
     this.doc = held === null ? emptyDocument({ queueKey, repositoryId, baseRef }) : (JSON.parse(held) as Document);
@@ -165,11 +169,18 @@ export class SnapshotQueueStore {
   static open(
     cell: SnapshotCell,
     identity: { queueKey: string; repositoryId: string; baseRef: string },
+    compaction: CompactionLimits = DEFAULT_COMPACTION,
   ): SnapshotQueueStore {
     // Opening writes nothing. A queue nobody has used yet has no document, and
     // creating one on every read would turn each poll of an idle repository into
     // a write.
-    return new SnapshotQueueStore(cell, identity.queueKey, identity.repositoryId, identity.baseRef);
+    return new SnapshotQueueStore(
+      cell,
+      identity.queueKey,
+      identity.repositoryId,
+      identity.baseRef,
+      compaction,
+    );
   }
 
   private flush(): void {
@@ -280,6 +291,12 @@ export class SnapshotQueueStore {
     if (this.doc.events.length > EVENT_TAIL) this.doc.events = this.doc.events.slice(-EVENT_TAIL);
     this.remember({ key: event.idempotencyKey, sequence, result: "applied", at: event.at });
 
+    // Drop what no live decision can reach, before it is written.
+    //
+    // Entries, attempts and the chain were all append-only, so this document grew
+    // with the repository's whole merge history and was read and written whole on
+    // every request. The projection keeps the history; this keeps what is live.
+    compactState(next, this.compaction);
     this.doc.state = encodeState(next);
     for (const transition of next.transitions) {
       const key = String(transition.transitionSequence);
