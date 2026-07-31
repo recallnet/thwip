@@ -164,6 +164,20 @@ jobs:
 
       # Only once npm has it. A tag naming a version that was never published is
       # a lie the next run has to work around.
+      # Only a tag. Nothing is pushed to the branch.
+      #
+      # This used to commit the version bump to main, which a protected branch
+      # cannot accept: a direct push carries no status checks, so GitHub rejects
+      # it for the checks it is missing. The publish had already happened by
+      # then, so npm moved and the tag did not — and because the next version was
+      # derived from the file that never got committed, the pipeline computed an
+      # already-published version and skipped, for good. It shipped nothing for a
+      # day while reporting success.
+      #
+      # A tag is not covered by a branch rule, and the registry is the record of
+      # what exists. The version in packages/cli/package.json is a floor the
+      # release counts from if it is ever ahead of the registry; the build sets
+      # the published version itself.
       - name: Record the release
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:
@@ -174,11 +188,6 @@ jobs:
           GIT_COMMITTER_EMAIL: noreply@recall.network
         run: |
           set -euo pipefail
-          git add packages/cli/package.json
-          # Named as thwip's own, so the queue does not read its own release as
-          # somebody merging around it and pause itself after every publish.
-          git commit -m "$(printf 'release: @recallnet/thwip v%s\n\nthwip-automated: release\n' "$V")"
           git tag -a "v$V" -m "thwip $V"
-          git push origin "HEAD:${{ github.ref_name }}"
           git push origin "v$V"
           echo "published and tagged v$V" >> "$GITHUB_STEP_SUMMARY"
