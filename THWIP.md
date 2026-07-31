@@ -53,7 +53,7 @@ describes work done before the branch was integrated, which is what `fast` says
 and all it says.
 
 `remote` runs the required suites in GitHub Actions against the merge candidate
-and merges on that verdict.
+and merges on that verdict. It costs a CI run per merge; `fast` costs none.
 
 `fresh` and `audited` are described elsewhere as issuing an assignment and
 requiring an integration receipt signed on the machine that ran the suites.
