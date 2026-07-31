@@ -1803,4 +1803,3 @@ export default {
    in ./queue and are re-exported here because Cloudflare resolves a binding's
    class_name against the Worker's own exports. */
 export { BranchQueue } from "./queue/BranchQueue.js";
-export { IntegrationTurnWorkflow } from "./queue/IntegrationTurnWorkflow.js";
