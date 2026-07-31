@@ -378,15 +378,19 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
    * it takes carries a deadline-derived idempotency key, so a second delivery
    * changes nothing.
    */
+  /**
+   * Stop, and do not ask to be woken again.
+   *
+   * The queue's authority is in D1 now, and deadlines are handled by whatever
+   * touches the queue next. Anything this object did on a timer would be acting
+   * on state nothing reads, and every wake is billed against a daily cap that
+   * two separate spins have already exhausted for a whole day at a time.
+   *
+   * The stored state is left alone. It is the only copy of what the queue knew
+   * before the move, and deleting it to tidy up would throw away the only thing
+   * a later comparison could be made against.
+   */
   override async alarm(): Promise<void> {
-    const parts = this.store === null ? null : this.require();
-    if (parts === null) return;
-    const before = parts.store.generation();
-    parts.commands.runAlarm();
-    // An alarm that changed nothing is the shape of a spin. One is ordinary; a
-    // run of them is the object waking itself forever over a deadline that
-    // handling never clears.
-    this.idleAlarms = parts.store.generation() === before ? this.idleAlarms + 1 : 0;
-    await this.rescheduleAlarm(parts.store);
+    await this.ctx.storage.deleteAlarm();
   }
 }
