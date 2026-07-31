@@ -541,7 +541,17 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const attempt = requireLive(requireAttempt(state, event.attemptId));
       if (!attempt.outcomeUnknown) fail("outcome was not in doubt");
       terminate(state, attempt, "CONFIRMED_NOT_MERGED");
-      setEntryState(requireEntry(state, attempt.entryId), "Ready");
+      const refused = requireEntry(state, attempt.entryId);
+      // Deferred with a cooldown, not straight back to Ready.
+      //
+      // The turn is spent: something refused this merge, and whatever it was is
+      // usually still true a second later. Returning the entry to Ready handed
+      // the lane straight back to the pull request that had just failed to take
+      // it, so the queue could refuse the same merge over and over while
+      // everything behind it waited. The place in line is kept, as it is for an
+      // offer nobody claimed (§6.2 invariant 12).
+      refused.cooldownUntil = event.cooldownUntil;
+      setEntryState(refused, "Deferred");
       break;
     }
 

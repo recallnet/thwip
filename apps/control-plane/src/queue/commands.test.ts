@@ -54,6 +54,12 @@ const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/he
 const STORES = [
   { name: "BranchQueueStore", make: () => BranchQueueStore.open(sqlite(), IDENTITY) },
   { name: "SnapshotQueueStore", make: () => SnapshotQueueStore.open(cellOf(), IDENTITY) },
+  {
+    // Compaction turned up as far as it goes. A command that needed history the
+    // queue had dropped would fail here and nowhere else.
+    name: "SnapshotQueueStore (compacted hard)",
+    make: () => SnapshotQueueStore.open(cellOf(), IDENTITY, { terminalEntries: 1, transitions: 1 }),
+  },
 ];
 
 let makeStore: () => QueueStateStore = STORES[0]!.make;
@@ -407,7 +413,10 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("CONFIRMED_NOT_MERGED");
       expect(store.mergeOperation("op-x")).toMatchObject({ outcome: "CONFIRMED_NOT_MERGED" });
-      expect(store.state().entries.get("e1")!.state).toBe("Ready");
+      // Deferred with a cooldown, so the lane goes to somebody else before this
+      // pull request tries again.
+      expect(store.state().entries.get("e1")!.state).toBe("Deferred");
+      expect(store.state().entries.get("e1")!.cooldownUntil).not.toBeNull();
       expect(checkInvariants(store.state())).toEqual([]);
     });
   });

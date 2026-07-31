@@ -4,3 +4,4 @@ export * from "./reducer.js";
 export * from "./scheduler.js";
 export * from "./invariants.js";
 export * from "./serialize.js";
+export * from "./compact.js";

@@ -66,14 +66,30 @@ export function checkInvariants(state: BranchQueueState): Violation[] {
     }
   }
 
+  // Contiguous within whatever the state is holding, rather than anchored at
+  // sequence 1.
+  //
+  // The property worth having is that the links join and no sequence is skipped.
+  // Requiring the array to begin at 1 also required it to hold every transition
+  // ever recorded, which made the state grow with the repository's whole merge
+  // history and be read and written whole on every request. The full chain lives
+  // in the projection, which is append-only; this holds a window of it.
+  //
+  // The first entry in the window has a prior digest naming a transition that is
+  // no longer resident, so it cannot be checked against anything here. That is a
+  // window boundary, not a broken link.
+  const first = state.transitions[0];
   for (let i = 0; i < state.transitions.length; i += 1) {
     const transition = state.transitions[i]!;
     const prior = i === 0 ? null : state.transitions[i - 1]!;
-    if (transition.transitionSequence !== i + 1) {
+    if (transition.transitionSequence !== first!.transitionSequence + i) {
       add("TransitionChainContiguous", `transition ${i} has sequence ${transition.transitionSequence}`);
     }
-    if ((prior?.digest ?? null) !== transition.priorDigest) {
+    if (prior !== null && prior.digest !== transition.priorDigest) {
       add("TransitionChainContiguous", `transition ${transition.transitionSequence} does not link its prior`);
+    }
+    if (i === 0 && transition.transitionSequence === 1 && transition.priorDigest !== null) {
+      add("TransitionChainContiguous", "the first transition ever recorded has a prior digest");
     }
   }
 

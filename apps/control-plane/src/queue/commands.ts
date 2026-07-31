@@ -448,7 +448,13 @@ export class QueueCommands {
   confirmNotMerged(input: { idempotencyKey: string; attemptId: string; operationId: string }): CommandResult {
     const now = this.clock.now();
     const result = this.store.append(
-      { idempotencyKey: input.idempotencyKey, at: now, type: "MergeConfirmedNotMerged", attemptId: input.attemptId },
+      {
+        idempotencyKey: input.idempotencyKey,
+        at: now,
+        type: "MergeConfirmedNotMerged",
+        attemptId: input.attemptId,
+        cooldownUntil: plusSeconds(now, this.timings.noClaimCooldownSeconds),
+      },
       {
         clearDeadlines: [
           { kind: "merge-confirm", attemptId: input.attemptId },
