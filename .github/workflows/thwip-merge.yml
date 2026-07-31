@@ -169,7 +169,8 @@ jobs:
             # prevent.
             #
             # So ask GitHub what became of the pull request instead of reading it
-            # off the response to our own call.
+            # off the response to our own call. Both racing runs then report the
+            # same merge under the same idempotency key, which is harmless.
             state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
               --jq '{merged:(.merged // false), sha:(.merge_commit_sha // "")}' 2>/dev/null || echo '{}')
             if [ "$(printf '%s' "$state" | jq -r '.merged // false')" = "true" ]; then
