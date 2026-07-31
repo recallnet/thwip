@@ -19,9 +19,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  # To publish the verdict as a check run on the pull request head. Whoever is
-  # waiting reads it from GitHub instead of polling the control plane.
-  checks: write
 
 jobs:
   verify:
@@ -152,36 +149,14 @@ jobs:
             exit 1
           fi
 
-      # Publish the verdict on the pull request head, where GitHub already tells
-      # everyone who is watching.
+      # The verdict is published on the pull request head by the App, from the
+      # report above, not from here.
       #
-      # The merge workflow used to poll the control plane every twenty seconds to
-      # learn this, which is asking us for something GitHub holds. It watches this
-      # check run now, so waiting costs us nothing at all.
-      - name: Publish the verdict as a check on the pull request
-        if: always() && steps.candidate.outputs.skip == '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.client_payload.pullRequestNumber }}
-          ACCEPTED: ${{ steps.suites.outputs.accepted }}
-          SUITES: ${{ steps.suites.outputs.suites }}
-          CANDIDATE_TREE: ${{ github.event.client_payload.candidateTreeOid }}
-        run: |
-          set -uo pipefail
-          head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
-          accepted="${ACCEPTED:-false}"
-          summary=$(printf '%s' "${SUITES:-[]}" | jq -r '
-            map("- `\(.name)`: \(.outcome) in \(.durationMs/1000 | .*10 | round / 10)s") | join("\n")')
-          gh api -X POST "repos/$GITHUB_REPOSITORY/check-runs" \
-            -f name='thwip / candidate' \
-            -f head_sha="$head" \
-            -f status=completed \
-            -f conclusion="$([ "$accepted" = "true" ] && echo success || echo failure)" \
-            -f output[title]="Required suites against the integrated candidate" \
-            -f output[summary]="Ran against merge tree \`$CANDIDATE_TREE\`, not the pull request head.
-
-          $summary" >/dev/null && echo "published thwip / candidate on $head"
-
+      # This step used to do it and could not: it asks GitHub for `checks: write`,
+      # which the repository's default workflow permission does not grant, so every
+      # passing verification ended as a failed run. The App already holds the
+      # permission and already publishes the other two checks, and it has the
+      # verdict before this job ends.
       # The job's own conclusion still reflects whether the candidate passed, so a
       # failure is visible in the Actions list and not only inside the queue.
       - name: Fail when a required suite failed
