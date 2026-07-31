@@ -621,9 +621,23 @@ export class QueueCommands {
           break;
         case "readiness":
           results.push({ status: "noop", detail: "readiness refresh is scheduled outside the object" });
-          this.store.clearDeadline("readiness", deadline.attemptId);
           break;
       }
+
+      // Clear it whatever the command decided.
+      //
+      // Only the readiness case did this; the others trusted the command to clear
+      // the deadline as a side effect of changing state. When the command is a
+      // no-op, which it is for an attempt that is already terminal, the row
+      // survived. It stayed due, earliestDeadline kept returning a time in the
+      // past, and the alarm rescheduled to that past time and fired again
+      // immediately.
+      //
+      // A wake loop that writes no events, so nothing in the state showed it: the
+      // generation sat still at 360 while the object burned an entire day of its
+      // request budget in a few hours. Clearing unconditionally is what makes the
+      // alarm terminate.
+      this.store.clearDeadline(deadline.kind, deadline.attemptId);
     }
 
     // Freeing the lane is only half of it. Expiring an offer or terminating an
