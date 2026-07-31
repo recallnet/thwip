@@ -22,11 +22,11 @@ afterEach(() => {
  */
 describe("the verification summary", () => {
   it("says a clean chain holds", () => {
-    expect(summarize(42, [])).toContain("42 links verified");
+    expect(summarize(42, 42, [])).toContain("42 links verified");
   });
 
   it("separates pre-attestation history from real problems", () => {
-    const text = summarize(3, [
+    const text = summarize(3, 2, [
       { code: "PRE_ATTESTATION", sequence: null, digest: "sha256:a", detail: "written before signed records" },
     ]);
     expect(text).toContain("1 link predates signed records");
@@ -34,7 +34,7 @@ describe("the verification summary", () => {
   });
 
   it("names a broken link and fails", () => {
-    const text = summarize(2, [
+    const text = summarize(2, 2, [
       { code: "BROKEN_LINK", sequence: 7, digest: "sha256:b", detail: "names the wrong predecessor" },
     ]);
     expect(text).toMatch(/BROKEN_LINK/);
@@ -42,10 +42,22 @@ describe("the verification summary", () => {
   });
 
   it("reports a gap as a merge that landed without a record", () => {
-    const text = summarize(2, [
+    const text = summarize(2, 2, [
       { code: "SEQUENCE_GAP", sequence: 48, digest: "sha256:c", detail: "a merge landed without a record" },
     ]);
     expect(text).toContain("landed without a record");
+  });
+
+  /**
+   * The bug this closes: a chain where `epochStartsAt` skipped every
+   * signature check produced zero findings and a bare "N links verified" —
+   * indistinguishable from a chain that was actually checked.
+   */
+  it("never prints a bare 'links verified' when fewer signatures were checked than links", () => {
+    const text = summarize(42, 0, []);
+    expect(text).not.toMatch(/^42 links verified\.?$/m);
+    expect(text).toContain("42 links");
+    expect(text).toContain("0 of 42 signatures checked");
   });
 });
 
@@ -182,6 +194,38 @@ describe("cmdVerifyChain keys outage", () => {
 
     expect(code).toBe(EXIT.unavailable);
   });
+
+  /**
+   * A key set that parses as JSON but is not usable (junk `keys` entries with
+   * none of the members their `kty` needs) is the same "nothing to check
+   * against" fact as an empty key set, one step narrower. Before this, it made
+   * `compactVerify` throw on every link, and the catch in `verifySignature`
+   * reported every one of them `BAD_SIGNATURE` — the same false accusation
+   * the empty/outage case exists to prevent.
+   */
+  it("exits unavailable, not BAD_SIGNATURE, when the key set parses but is not usable", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) return Response.json({ keys: [{ kty: "EC" }] });
+        return Response.json({
+          epochStartsAt: 1,
+          links: [{ digest: "sha256:a", sequence: 1, record: "{}", jws: "not-a-real-signature" }],
+        });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+
+    expect(code).toBe(EXIT.unavailable);
+    expect(writes.join("")).not.toMatch(/BAD_SIGNATURE/);
+    vi.restoreAllMocks();
+  });
 });
 
 /**
@@ -227,9 +271,19 @@ describe("parseKeySet", () => {
     expect(parseKeySet({ keys: [] })).toBeNull();
   });
 
-  it("accepts a non-empty key array", () => {
-    const body = { keys: [{ kty: "EC" }] };
+  it("accepts a key array with a usable key", () => {
+    const body = { keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] };
     expect(parseKeySet(body)).toEqual(body);
+  });
+
+  /**
+   * `{kty:"EC"}` alone parses as JSON and passes a shape check that only asks
+   * "is this a non-empty array", but it has none of the members `compactVerify`
+   * needs to actually verify anything. Left unchecked, this reads exactly like
+   * a keys outage — but one step narrower, because the fetch itself succeeded.
+   */
+  it("rejects a key set whose keys are present but not usable", () => {
+    expect(parseKeySet({ keys: [{ kty: "EC" }] })).toBeNull();
   });
 });
 
@@ -303,6 +357,86 @@ describe("cmdVerifyChain --epoch pinning", () => {
     expect(code).toBe(EXIT.evidenceRejected);
     expect(writes.join("")).toMatch(/BAD_SIGNATURE/);
     expect(writes.join("")).toMatch(/epoch: 1 \(pinned\)/);
+    vi.restoreAllMocks();
+  });
+});
+
+/**
+ * The residual: with no `--epoch` given, the server's `epochStartsAt` is
+ * still trusted. A server claiming it starts absurdly far in the future makes
+ * every readable link skip its signature check, and — because no finding
+ * fires for a skip — the run must still not print anything a reader would
+ * take for a clean pass. The `epoch:` line above the summary is the only
+ * other clue, and it must not contradict a summary claiming success.
+ */
+describe("cmdVerifyChain with no --epoch, server claims a huge epochStartsAt", () => {
+  it("does not print output a reader would take as a clean verification", async () => {
+    const record = {
+      schemaVersion: "1",
+      kind: "reused-proof-merge",
+      repositoryId: "123",
+      baseRef: "refs/heads/main",
+      queueEpoch: 1,
+      transitionSequence: 1,
+      previousTransitionDigest: null,
+      before: { baseSha: null, treeOid: null },
+      after: {
+        baseSha: "3".repeat(40),
+        treeOid: "4".repeat(40),
+        parentOids: ["3".repeat(40)],
+        parentCount: 1,
+        parentOidsDigest: `sha256:${"7".repeat(64)}`,
+        parentsComplete: true,
+      },
+      observedAt: "2026-07-31T12:00:00Z",
+      reusedProof: {
+        attemptId: "att-1",
+        mergeIntentDigest: `sha256:${"1".repeat(64)}`,
+        pullRequestNumber: 1,
+        headSha: "2".repeat(40),
+        candidateSha: "3".repeat(40),
+        candidateTreeOid: "4".repeat(40),
+        mergeMethod: "squash",
+        workReceiptDigest: `sha256:${"2".repeat(64)}`,
+        policyDigest: `sha256:${"6".repeat(64)}`,
+        pipelineDigest: `sha256:${"8".repeat(64)}`,
+        requiredSuitesDigest: `sha256:${"9".repeat(64)}`,
+        checkRunId: "778899",
+      },
+    };
+    const { canonicalBytes, envelopeDigest } = await import("@thwip/queue-protocol");
+    const bytes = canonicalBytes(JSON.stringify(record));
+    const digest = await envelopeDigest(bytes);
+
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) {
+          return Response.json({ keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] });
+        }
+        return Response.json({
+          epochStartsAt: 999_999_999,
+          links: [{ digest, record: new TextDecoder().decode(bytes), jws: "not-a-real-signature", sequence: 1 }],
+        });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+    const output = writes.join("");
+
+    // The bug: no --epoch means the huge server value is trusted, the link's
+    // signature is never checked, no finding fires, and the exit code alone
+    // reads as success.
+    expect(code).toBe(EXIT.ok);
+    // What must not happen: a bare "1 links verified." that a reader would
+    // take as "the signature checked out."
+    expect(output).not.toMatch(/^1 links verified\.?$/m);
+    expect(output).toMatch(/0 of 1 signatures checked/);
     vi.restoreAllMocks();
   });
 });
