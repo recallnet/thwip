@@ -1,5 +1,13 @@
 name: thwip
 
+# Whether the proof is good for this exact tree, and nothing else.
+#
+# Whose turn it is used to be answered here too, which meant one check carrying
+# two answers that change on different clocks. It went red for every pull request
+# that was merely waiting, and a failed required check goes on refusing the merge
+# after the queue has authorized it. The queue publishes `thwip / turn` itself
+# now, the moment it offers the lane.
+
 run-name: >-
   thwip: verify proof ${{ github.event_name == 'merge_group'
     && format('for merge group {0}', github.event.merge_group.head_sha)
@@ -11,10 +19,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   checks: write
-  # Reading the pull request and the candidate commit GitHub simulated for it.
-  pull-requests: read
 
 jobs:
   thwip:
@@ -31,116 +36,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: https://thwip.recall.net
-      # Ask Thwip Queue whether this pull request may merge now.
-      #
-      # This step is what makes the queue decide rather than merely observe. It
-      # runs from the workflow's own pinned revision, so nothing here executes
-      # code from the pull request, and the OIDC token binds the repository. In
-      # observe the endpoint always authorizes and reports what it would have
-      # said, so adoption stays reversible.
-      - name: Thwip Queue authorization
-        id: queue
-        if: github.event_name == 'pull_request'
-        env:
-          THWIP_ENDPOINT: https://thwip.recall.net
-          # gh reads the candidate commit, so this step needs a token of its own.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO_ID: ${{ github.event.repository.id }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: refs/heads/${{ github.event.pull_request.base.ref }}
-          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
-          DRAFT: ${{ github.event.pull_request.draft }}
-        run: |
-          set -uo pipefail
-          # Fetch the OIDC token, reporting what came back rather than letting jq
-          # fail on an unexpected body. The token itself is never printed.
-          raw=$(curl -sS -w '\n%{http_code}' \
-            -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${THWIP_ENDPOINT}/api/github-actions" || true)
-          code=$(printf '%s' "$raw" | tail -n1)
-          payload=$(printf '%s' "$raw" | sed '$d')
-          echo "oidc token request: http $code, ${#payload} bytes"
-          if [ "$code" != "200" ]; then
-            echo "::error::could not obtain an OIDC token (http $code)"
-            exit 1
-          fi
-          oidc=$(printf '%s' "$payload" | jq -r '.value // empty')
-          if [ -z "$oidc" ]; then
-            echo "::error::OIDC response carried no token"
-            exit 1
-          fi
-
-          # The candidate GitHub simulated for this pull request. The queue pins
-          # these objects, and it will refuse to confirm a merge whose tree is not
-          # the one it authorized.
-          cand=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
-            --jq '{baseSha:.base.sha, mergeCommitSha:.merge_commit_sha}')
-          merge_sha=$(printf '%s' "$cand" | jq -r '.mergeCommitSha // empty')
-          base_sha=$(printf '%s' "$cand" | jq -r '.baseSha')
-          candidate='null'
-          if [ -n "$merge_sha" ]; then
-            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" \
-              --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
-            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \
-              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \
-              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \
-              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
-          fi
-
-          body=$(jq -nc \
-            --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
-            --arg author "$AUTHOR_ID" --argjson draft "${DRAFT:-false}" \
-            --argjson candidate "$candidate" \
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
-
-          # A refusal and an outage are different answers. The queue saying "not
-          # your turn" is about this pull request. The queue being unreachable is
-          # about us, says nothing about this pull request, and used to fail the
-          # check permanently: a quota exhaustion once stopped every merge in the
-          # repository and nothing recovered without a human re-running jobs.
-          attempt=0
-          while :; do
-            out=$(curl -sS -w '\n%{http_code}' -X POST \
-              -H "authorization: Bearer $oidc" -H "content-type: application/json" \
-              -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
-            acode=$(printf '%s' "$out" | tail -n1)
-            abody=$(printf '%s' "$out" | sed '$d')
-            echo "authorize: http $acode"
-            echo "$abody"
-            case "$acode" in
-              200) break ;;
-              429|500|502|503|504)
-                attempt=$((attempt + 1))
-                if [ "$attempt" -ge 6 ]; then
-                  echo "::error::Thwip Queue is unreachable (http $acode after $attempt tries). This says nothing about this pull request; re-run this check once the queue is back."
-                  exit 1
-                fi
-                echo "queue unreachable (http $acode); retrying in $((attempt * 15))s"
-                sleep $((attempt * 15))
-                ;;
-              *)
-                echo "::error::Thwip Queue authorization endpoint returned http $acode"
-                exit 1
-                ;;
-            esac
-          done
-          authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
-          enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
-          reason=$(printf '%s' "$abody" | jq -r '.reason // "UNKNOWN"')
-          if [ "$authorized" != "true" ]; then
-            echo "::error::Thwip Queue has not authorized this pull request: $reason"
-            exit 1
-          fi
-          if [ "$enforcing" = "true" ]; then
-            echo "Thwip Queue authorized this merge: $reason"
-          else
-            echo "Thwip Queue is observing; it would have said: $reason"
-          fi
-
-          {
-            echo "authorized=$authorized"
-            echo "enforcing=$enforcing"
-            echo "operation_id=$(printf '%s' "$abody" | jq -r '.operationId // empty')"
-            echo "oidc_ok=1"
-          } >> "$GITHUB_OUTPUT"
