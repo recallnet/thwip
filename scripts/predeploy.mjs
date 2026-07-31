@@ -11,6 +11,12 @@
  * Being level with origin/main does not make a branch safe to deploy. Every open
  * branch carrying deployed work is invisible to that check, so this also names
  * what a non-main deploy is about to drop.
+ *
+ * The third mistake is not a git one and is why `deploy:staging` builds first.
+ * A deploy bundles each package's built output, not its source, so a package
+ * left unbuilt ships the previous version of itself. That put a worker live
+ * whose protocol did not know a record kind the same commit had added, and the
+ * queue — correctly — refused to sign anything and stopped merging.
  */
 import { execFileSync } from "node:child_process";
 
