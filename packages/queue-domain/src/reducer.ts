@@ -68,6 +68,14 @@ export interface Attempt {
   receiptDigest: string | null;
   verificationNonce: string | null;
   intentDigest: string | null;
+  /**
+   * What the verifier said, kept so the transition record can cite it.
+   *
+   * The verdict arrived and was thrown away, so the chain had nothing to bind to
+   * and its links became the merge commit id with a `sha256:` prefix — a log
+   * rather than an attestation.
+   */
+  verifierResultDigest: string | null;
   offerDeadline: string;
   executionDeadline: string | null;
   graceUntil: string | null;
@@ -356,6 +364,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
         receiptDigest: null,
         verificationNonce: null,
         intentDigest: null,
+        verifierResultDigest: null,
         offerDeadline: event.offerDeadline,
         executionDeadline: null,
         graceUntil: null,
@@ -482,6 +491,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
         blockEntry(requireEntry(state, attempt.entryId), "VERIFICATION_REJECTED");
         break;
       }
+      attempt.verifierResultDigest = event.resultDigest;
       advancePhase(attempt, "VERIFIED");
       setEntryState(requireEntry(state, attempt.entryId), "MergeGuard");
       break;
