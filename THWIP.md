@@ -1,3 +1,10 @@
+## What a merge record cites
+
+The queue records the digest of the proof on the pull request head — the one you
+signed, taken over the exact bytes the commit carries. A head whose proof cannot
+be read does not merge, because a merge record that cites nothing is worse than
+no record.
+
 ## The two required checks
 
 `thwip` says the proof is good for this exact tree. `thwip / turn` says it is
