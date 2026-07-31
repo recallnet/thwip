@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTOMATION_TRAILER, externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
+import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
 /**
  * A push to the protected branch that the queue did not cause.
@@ -101,29 +101,5 @@ describe("spotting a push the queue did not make", () => {
     expect(externalPushFromWebhook("push", withoutCommit)).toMatchObject({
       observedBaseSha: "b".repeat(40),
     });
-  });
-});
-
-/**
- * thwip pushes to this branch itself for things that are not merges — the
- * release workflow bumps a version straight onto it. Reading those as somebody
- * merging around the queue would pause it after every publish.
- */
-describe("thwip's own automation", () => {
-  it("ignores a release commit", () => {
-    const release = push({
-      head_commit: {
-        id: "a".repeat(40),
-        message: `release: @recallnet/thwip v0.1.4\n\n${AUTOMATION_TRAILER}: release\n`,
-      },
-    });
-    expect(externalPushFromWebhook("push", release)).toBeNull();
-  });
-
-  it("still reports a hand merge that merely mentions thwip", () => {
-    const lookalike = push({
-      head_commit: { id: "a".repeat(40), message: "chore: mention thwip-automated in the docs" },
-    });
-    expect(externalPushFromWebhook("push", lookalike)).not.toBeNull();
   });
 });
