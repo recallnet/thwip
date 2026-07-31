@@ -97,8 +97,16 @@ export interface OverrideMergeEvidence {
   readonly candidateCheckRunId: string;
 }
 
+export interface ReusedMergeEvidence {
+  readonly workReceiptDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly proofCheckRunId: string;
+}
+
 export type MergeIntentV1 =
   | (MergeIntentBaseV1 & { readonly kind: "verified"; readonly evidence: VerifiedMergeEvidence })
+  | (MergeIntentBaseV1 & { readonly kind: "reused"; readonly evidence: ReusedMergeEvidence })
   | (MergeIntentBaseV1 & {
       readonly kind: "override";
       readonly evidence: OverrideMergeEvidence;
@@ -139,6 +147,22 @@ const OVERRIDE_EVIDENCE_KEYS = [
   "assignmentDigest",
   "liveGuardDigest",
   "candidateCheckRunId",
+] as const;
+
+/**
+ * What a reuse rests on: the proof the developer signed, the pipeline and suites
+ * it had to satisfy, and the check run that verified it.
+ *
+ * No assignment and no verifier result, because nothing was dispatched and
+ * nothing ran against the integrated candidate. Those are the two claims a
+ * verified intent makes, and this kind exists so a merge under a profile that
+ * makes neither cannot be signed as though it did.
+ */
+const REUSED_EVIDENCE_KEYS = [
+  "workReceiptDigest",
+  "pipelineDigest",
+  "requiredSuitesDigest",
+  "proofCheckRunId",
 ] as const;
 
 /** The commit title is embedded, so it needs a bound like any other signed text. */
@@ -277,7 +301,7 @@ function parseOverrideAuthorization(v: unknown): ParseResult<OverrideAuthorizati
 export function parseMergeIntent(v: unknown): ParseResult<MergeIntentV1> {
   if (!isRecord(v)) return fail("mergeIntent must be an object");
 
-  const kind = literal(v["kind"], "mergeIntent.kind", ["verified", "override"] as const);
+  const kind = literal(v["kind"], "mergeIntent.kind", ["verified", "reused", "override"] as const);
   if (!kind.ok) return kind;
 
   const allowed = kind.value === "override" ? [...BASE_KEYS, "override"] : BASE_KEYS;
@@ -304,6 +328,18 @@ export function parseMergeIntent(v: unknown): ParseResult<MergeIntentV1> {
     });
   }
 
+  if (kind.value === "reused") {
+    const evidenceShape = exactKeys(evidence, "mergeIntent.evidence", REUSED_EVIDENCE_KEYS);
+    if (!evidenceShape.ok) return evidenceShape;
+    const digests = readDigests(evidence, REUSED_EVIDENCE_KEYS);
+    if (!digests.ok) return digests;
+    return ok({
+      ...base.value,
+      kind: "reused",
+      evidence: digests.value as unknown as ReusedMergeEvidence,
+    });
+  }
+
   const evidenceShape = exactKeys(evidence, "mergeIntent.evidence", OVERRIDE_EVIDENCE_KEYS);
   if (!evidenceShape.ok) return evidenceShape;
   const digests = readDigests(evidence, OVERRIDE_EVIDENCE_KEYS);
@@ -325,7 +361,7 @@ function readDigests(
 ): ParseResult<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const key of keys) {
-    if (key === "candidateCheckRunId") {
+    if (key === "candidateCheckRunId" || key === "proofCheckRunId") {
       const id = decimalId(evidence[key], `mergeIntent.evidence.${key}`);
       if (!id.ok) return id;
       out[key] = id.value;

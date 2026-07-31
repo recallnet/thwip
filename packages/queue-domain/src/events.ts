@@ -108,7 +108,12 @@ export type QueueEvent = EventEnvelope &
         readonly attemptId: string;
         readonly nonce: string;
         readonly accepted: boolean;
-        readonly resultDigest: string;
+        /**
+         * Null when nothing ran to produce one. A reuse attempt is accepted on
+         * the proof already carried by the head, and no verifier result exists
+         * to name; a digest supplied here would have to be invented.
+         */
+        readonly resultDigest: string | null;
       }
     | { readonly type: "MergeIntentCreated"; readonly attemptId: string; readonly intentDigest: string }
     | { readonly type: "MergeRequested"; readonly attemptId: string }
