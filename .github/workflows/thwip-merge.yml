@@ -120,42 +120,16 @@ jobs:
           echo "authorize: http $code"; echo "$abody"
           [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
 
-          # Then watch the pull request, not us.
+          # No waiting. If the candidate has not been verified yet, that ask has
+          # just started the verification, and the queue calls this workflow back
+          # once the verdict lands. Every run does one thing and exits.
           #
-          # This used to poll the control plane every twenty seconds to learn
-          # whether the candidate had been verified. That is asking us for
-          # something GitHub already holds: the verifier publishes its result as a
-          # check run on this head. Waiting now costs the control plane nothing,
-          # and the thing being waited on is visible to anyone looking at the pull
-          # request rather than only to us.
+          # Waiting here was the orchestrator's job done in the wrong place: six
+          # pull requests each sat in a loop asking who was next, when the one
+          # thing that knows is the queue.
           if [ "$(printf '%s' "$abody" | jq -r '.candidate // empty')" = "verification-requested" ]; then
-            deadline=$(( $(date +%s) + 1800 ))
-            while :; do
-              sleep 20
-              verdict=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
-                --jq '[.check_runs[] | select(.name == "thwip / candidate")] | first // empty' || true)
-              if [ -n "$verdict" ]; then
-                conclusion=$(printf '%s' "$verdict" | jq -r '.conclusion // empty')
-                echo "candidate check: $conclusion"
-                if [ "$conclusion" = "success" ]; then break; fi
-                if [ -n "$conclusion" ]; then
-                  echo "::notice::the candidate did not pass; the queue will refuse this turn"
-                  break
-                fi
-              fi
-              if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::no candidate verdict on this head after 30 minutes"
-                exit 1
-              fi
-            done
-
-            # Now that a verdict exists, ask the queue once more for the decision.
-            out=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
-              -H "content-type: application/json" -d "$body" \
-              "$THWIP_ENDPOINT/v1/queue/$REPO_ID/authorize" || true)
-            code=$(printf '%s' "$out" | tail -n1); abody=$(printf '%s' "$out" | sed '$d')
-            echo "authorize: http $code"; echo "$abody"
-            [ "$code" = "200" ] || { echo "::error::authorize returned $code"; exit 1; }
+            echo "candidate verification started; the queue will call back when it lands"
+            exit 0
           fi
 
           authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
