@@ -61,6 +61,7 @@ function parseFlags(argv: readonly string[]): Flags {
 }
 
 function rejectUnknown(flags: Flags, allowed: readonly string[]): ParseResult | null {
+  if (flags.bare.length > 0) return usage(`unexpected argument ${flags.bare[0]}`);
   for (const key of flags.values.keys()) {
     if (!allowed.includes(key)) return usage(`unknown flag --${key}`);
   }
