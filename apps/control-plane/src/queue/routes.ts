@@ -744,8 +744,17 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof tree !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) {
       return c.json({ error: "tree must be a lowercase hex object id" }, 400);
     }
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    // Either identity. The merge workflow polls this with an Actions OIDC token,
+    // the same one it authorizes with; a person or the CLI arrives with a session
+    // or an operator token. Accepting only the latter meant the workflow got a 401
+    // on every poll, never saw its verdict, and spun until its deadline while the
+    // verdict sat here accepted.
+    const claims = await deps.verifyOidc(c, c.env);
+    const fromWorkflow = claims !== null && String(claims["repository_id"] ?? "") === repositoryId;
+    if (!fromWorkflow) {
+      const who = await deps.authenticate(c, c.env);
+      if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    }
 
     const verdict = await readCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, tree);
     if (verdict === null) return c.json({ verified: false, candidateTreeOid: tree });
