@@ -19,7 +19,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { turnCheckUpdates, type TurnCheckUpdate } from "./turn-check.js";
+import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
@@ -995,15 +995,17 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // arrives blocks the merge forever with nothing on the page explaining why.
     // This one is a failure rather than a wait, because it will not resolve on
     // its own.
+    //
+    // Said on every ask rather than on a change, because there is no entry to
+    // compare against. The publisher reads what the commit already says and stays
+    // quiet when it is the same, so this does not accumulate.
     if (principalId === null && deps.publishTurnCheck !== undefined) {
       try {
-        await deps.publishTurnCheck(c.env, repositoryId, {
-          entryId,
-          pullRequestNumber: body.pullRequestNumber,
-          headSha: body.headSha,
-          state: "unplaceable",
-          waiting: 0,
-        });
+        await deps.publishTurnCheck(
+          c.env,
+          repositoryId,
+          unplaceableUpdate({ entryId, pullRequestNumber: body.pullRequestNumber, headSha: body.headSha }),
+        );
       } catch {
         /* the check may lag; the answer below is unaffected */
       }
@@ -1562,38 +1564,3 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   return app;
 }
 
-/**
- * Webhook fan-out (plan.md §42.3). GitHub tells us the world changed; the queue
- * decides what that means. Readiness is re-derived rather than inferred from the
- * event, because an event says what happened and readiness is a conjunction of
- * many current facts.
- */
-export interface WebhookOutcome {
-  readonly handled: boolean;
-  readonly action: "readiness" | "external-transition" | "ignored";
-  readonly detail?: string;
-}
-
-export function classifyWebhook(event: string, payload: Record<string, unknown>): WebhookOutcome {
-  switch (event) {
-    case "pull_request":
-    case "pull_request_review":
-    case "pull_request_review_thread":
-    case "check_suite":
-    case "check_run":
-    case "status":
-      return { handled: true, action: "readiness" };
-    case "push": {
-      const ref = payload["ref"];
-      // A push to the protected branch that the queue did not cause is external
-      // movement, which pauses the lane until an administrator rebaselines.
-      return typeof ref === "string" && ref.startsWith("refs/heads/")
-        ? { handled: true, action: "external-transition", detail: ref }
-        : { handled: false, action: "ignored", detail: "not a branch push" };
-    }
-    case "repository_ruleset":
-      return { handled: true, action: "readiness", detail: "ruleset drift" };
-    default:
-      return { handled: false, action: "ignored", detail: `unhandled event ${event}` };
-  }
-}
