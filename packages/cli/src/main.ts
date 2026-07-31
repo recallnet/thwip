@@ -638,39 +638,61 @@ async function cmdQueue(argv: string[]): Promise<number> {
 }
 
 /**
+ * Resolve `owner/name` to a numeric GitHub repository id via GitHub's own
+ * public API. No thwip session, no credentials: anyone can look up a public
+ * repository id this way, which is what an outside auditor is.
+ */
+async function resolveRepositoryIdFromGithub(repo: string): Promise<string | null> {
+  const res = await fetch(`https://api.github.com/repos/${repo}`, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
+  });
+  if (!res.ok) return null;
+  const { id } = (await res.json()) as { id: number };
+  return String(id);
+}
+
+/**
  * Fetch a branch's chain and the keys thwip publishes, then verify it. The
- * chain and keys endpoints are open — no session is required to read them —
- * but resolving `owner/name` to a repository id goes through the same
- * `/v1/resolve-repo` lookup `thwip queue` uses, so that still needs a session.
+ * chain and keys endpoints are deliberately public, so that a person with no
+ * thwip account can check thwip's claims for themselves — that only works if
+ * this command itself never needs to sign in. The id lookup goes through
+ * GitHub's public API instead of thwip's own (authenticated) resolver, unlike
+ * `thwip queue`, which mutates state and legitimately needs an identity.
  */
 async function cmdVerifyChain(argv: string[]): Promise<number> {
   const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
   const repo = flag(argv, "--repo") ?? "";
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    process.stderr.write("usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n");
+  const repositoryIdFlag = flag(argv, "--repository-id");
+  if (repositoryIdFlag === undefined && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+    process.stderr.write(
+      "usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n" +
+        "       thwip verify-chain --repository-id ID [--branch BRANCH]\n",
+    );
     return EXIT.usage;
   }
   const branch = flag(argv, "--branch") ?? "main";
 
-  const auth = await apiAuthHeader();
-  if (auth === null) {
-    process.stderr.write("not signed in: run `thwip login`\n");
-    return EXIT.authRequired;
-  }
-  const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+  const repositoryId = repositoryIdFlag ?? (await resolveRepositoryIdFromGithub(repo));
   if (repositoryId === null) {
-    process.stderr.write(`cannot resolve ${repo}\n`);
+    process.stderr.write(`cannot resolve ${repo} (pass --repository-id to skip GitHub lookup)\n`);
     return EXIT.setupInvalid;
   }
   const ref = encodeURIComponent(`refs/heads/${branch}`);
 
-  const [chainRes, keysRes] = await Promise.all([
-    fetch(`${endpoint}/v1/queue/${repositoryId}/chain?ref=${ref}`),
-    fetch(`${endpoint}/.well-known/thwip-keys`),
-  ]);
+  let chainRes: Response;
+  let keysRes: Response;
+  try {
+    [chainRes, keysRes] = await Promise.all([
+      fetch(`${endpoint}/v1/queue/${repositoryId}/chain?ref=${ref}`),
+      fetch(`${endpoint}/.well-known/thwip-keys`),
+    ]);
+  } catch {
+    process.stderr.write("could not reach thwip\n");
+    return EXIT.unavailable;
+  }
   if (!chainRes.ok) {
     process.stderr.write(`could not read the chain (${chainRes.status})\n`);
-    return EXIT.unavailable;
+    return exitForStatus(chainRes.status);
   }
   const chain = (await chainRes.json()) as ChainResponse;
   const jwks = (await keysRes.json()) as JSONWebKeySet;
@@ -678,6 +700,17 @@ async function cmdVerifyChain(argv: string[]): Promise<number> {
   const { verified, findings } = await verifyPublishedChain(chain, jwks);
   process.stdout.write(summarize(verified, findings) + "\n");
   return findings.some((f) => f.code !== "PRE_ATTESTATION") ? EXIT.evidenceRejected : EXIT.ok;
+}
+
+/**
+ * A 4xx means the request itself is wrong (bad ref, unknown repository) and
+ * retrying changes nothing; a 429 is a rate limit; a 5xx is the transient
+ * class. See queue-exit.ts for the documented meaning of each.
+ */
+function exitForStatus(status: number): number {
+  if (status === 429) return EXIT.rateLimited;
+  if (status >= 400 && status < 500) return EXIT.setupInvalid;
+  return EXIT.unavailable;
 }
 
 async function dispatchCli(invocation: CommandInvocation): Promise<number> {
