@@ -20,6 +20,15 @@ dispatches its verifier rather than assigning work to it.
 If the queue cannot read one of the things a record cites, it refuses the merge
 rather than signing a record with a gap in it.
 
+## The three checks you will see
+
+`thwip` and `thwip / turn` are required and decide whether a merge happens.
+`thwip / candidate` is not required: it reports what the required suites did
+against the integrated candidate, which is a different tree from your head.
+
+All three are published by the thwip App, so what you see on a pull request is
+what the queue used to decide.
+
 ## The two required checks
 
 `thwip` says the proof is good for this exact tree. `thwip / turn` says it is
