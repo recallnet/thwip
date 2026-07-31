@@ -1154,14 +1154,30 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       ["Offered", "Active", "Verifying", "MergeGuard", "Merging"].includes(entry.state);
     const enforcing = project.activationState === "canary" || project.activationState === "enforced";
 
+    // A paused queue authorizes nobody, including whoever already holds the lane.
+    //
+    // Pause stopped new turns being offered but said nothing about the turn in
+    // flight, so an operator pausing because the base had moved outside the queue
+    // would still have watched the current holder merge onto a base nobody had
+    // checked. Pausing is the thing an operator reaches for when they want
+    // merging to stop, so it stops merging.
+    const halted = snapshot.paused || snapshot.rebaselineRequired;
+    const holdsUsableTurn = holdsLane && !halted;
+
     // In observe the answer is always yes, and the reason says what it would have
     // been. That is what makes adoption reversible.
-    const authorized = enforcing ? holdsLane : true;
+    const authorized = enforcing ? holdsUsableTurn : true;
     return c.json({
       authorized,
       enforcing,
       activationState: project.activationState,
-      reason: holdsLane ? "HOLDS_TURN" : (entry?.primaryReason ?? "WAITING_FOR_TURN"),
+      reason: halted
+        ? snapshot.rebaselineRequired
+          ? "REBASELINE_REQUIRED"
+          : "QUEUE_PAUSED"
+        : holdsLane
+          ? "HOLDS_TURN"
+          : (entry?.primaryReason ?? "WAITING_FOR_TURN"),
       entryId,
       operationId,
       queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
