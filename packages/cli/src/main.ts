@@ -19,6 +19,7 @@ import {
   requireCleanTree,
   showFileAtHead,
 } from "./git.js";
+import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
@@ -238,6 +239,17 @@ async function cmdVerifyLocal(): Promise<number> {
     return 1;
   }
   process.stdout.write(JSON.stringify(parsed.value.predicate, null, 2) + "\n");
+
+  // Parsing is not the question. A proof binds one tree, and a rebase leaves the
+  // proof behind on a commit whose tree has moved, so reporting "it parses" for
+  // one of those would be true and useless.
+  const state = headProofState(message, await currentTree(cwd));
+  if (state === "stale") {
+    process.stderr.write(
+      "[thwip] PROOF_STALE this proof names a different tree, which is what a rebase leaves behind; run thwip ship to sign again\n",
+    );
+    return 1;
+  }
   process.stderr.write(`[thwip] proof parses; signer key ${carrier.envelope.signatures[0]!.keyid}\n`);
   return 0;
 }
@@ -489,7 +501,18 @@ async function cmdShip(argv: string[]): Promise<number> {
     },
   };
 
-  headProof = (await cmdVerifyLocal()) === 0 ? "accepted" : "missing";
+  // Compared against the tree, not merely looked for.
+  //
+  // A rebase keeps the commit message, so the proof outlives the tree it
+  // describes. Treating the trailer's presence as proof enough let this skip
+  // signing and push a commit the required check then rejected with
+  // SUBJECT_TREE_MISMATCH, which costs a full trip through CI to find out.
+  headProof = headProofState(await headMessage(cwd), await currentTree(cwd));
+  if (headProof === "stale") {
+    process.stderr.write(
+      "[thwip] this commit carries a proof for a different tree, which is what a rebase leaves behind; signing again\n",
+    );
+  }
 
   const detach = installInterruptHandler(ports, (t) => process.stdout.write(t + "\n"), { jsonEvents });
   try {
