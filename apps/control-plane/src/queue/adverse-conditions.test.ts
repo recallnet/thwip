@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import type { TurnCheckUpdate } from "./turn-check.js";
 
 /**
  * The queue under the conditions that actually broke it.
@@ -62,8 +63,14 @@ const REPO = "1315419165";
 const REF = "refs/heads/main";
 const TREE = "t".repeat(40);
 
+const published: TurnCheckUpdate[] = [];
+
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
+  published.length = 0;
   return queueRoutes({
+    publishTurnCheck: async (_e, _r, update) => {
+      published.push(update);
+    },
     authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
     verifyOidc: async () => ({ repository_id: REPO }),
     pinnedVerifier: async () => null,
@@ -204,12 +211,13 @@ describe("GitHub refuses the merge", () => {
     );
     expect(refused.status).toBe(200);
 
+    // Nothing merged, and the failed turn is over.
     const snapshot = await liveState(app, e);
     expect(stateOf(snapshot, 59)).not.toBe("Merged");
-    expect(snapshot.activeAttemptId).toBeNull();
+    expect(stateOf(snapshot, 59)).toBe("Deferred");
   });
 
-  it("lets the next pull request take the lane afterwards", async () => {
+  it("hands the lane to somebody else rather than back to the pull request that failed", async () => {
     const e = env();
     const app = routes();
     // 59 takes the lane, 61 waits behind it.
@@ -236,13 +244,12 @@ describe("GitHub refuses the merge", () => {
       e,
     );
 
+    // Whatever refused that merge is usually still true a second later, so 59 is
+    // deferred and the queue offers the turn to 61 instead of spinning on 59.
     const after = await liveState(app, e);
-    expect(after.activeAttemptId).toBeNull();
-    // And the queue can go on: somebody still waiting gets offered the turn.
-    const next = await Promise.all([59, 61].map((pr) => authorize(app, e, pr)));
-    expect(next.filter((v) => v.reason === "HOLDS_TURN")).toHaveLength(1);
+    expect(stateOf(after, 59)).toBe("Deferred");
+    expect(stateOf(after, 61)).toBe("Offered");
   });
-});
 
 describe("a merge that is not the one the queue authorized", () => {
   it("is refused rather than recorded", async () => {
@@ -431,5 +438,84 @@ describe("the queue keeps its footing over a long run", () => {
     // And it still behaves: one lane, to one pull request.
     const verdicts = await Promise.all([200, 201, 202].map((pr) => authorize(app, e, pr)));
     expect(verdicts.filter((v) => v.reason === "HOLDS_TURN")).toHaveLength(1);
+  });
+});
+
+describe("the check that says whose turn it is", () => {
+  it("goes green for the holder and stays running for everyone else", async () => {
+    const e = env();
+    const app = routes();
+
+    const first = await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    await authorize(app, e, 65);
+
+    const holder = published.filter((u) => u.state === "holds");
+    expect(holder).toHaveLength(1);
+    expect(`entry_${REPO}_${holder[0]!.pullRequestNumber}`).toBe(first.entryId);
+    // Nobody is told they failed for waiting, which is what used to leave a red
+    // check that went on refusing the merge after the queue said yes.
+    expect(published.filter((u) => u.state === "waiting").length).toBeGreaterThan(0);
+  });
+
+  it("follows the lane when it moves, without a workflow re-run", async () => {
+    const e = env();
+    const app = routes();
+    const first = await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    published.length = 0;
+
+    await app.request(
+      `/v1/queue/${REPO}/entries/${first.entryId}?ref=${encodeURIComponent(REF)}&reason=closed`,
+      { method: "DELETE" },
+      e,
+    );
+
+    // The lane moved to 61 and its check was published by the queue itself.
+    expect(published.filter((u) => u.state === "holds").map((u) => u.pullRequestNumber)).toEqual([61]);
+  });
+
+  it("tells everyone the queue has halted", async () => {
+    const e = env();
+    const app = routes();
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    published.length = 0;
+
+    await app.request(
+      `/v1/queue/${REPO}/pause?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "the base moved outside the queue" }),
+      },
+      e,
+    );
+
+    expect(published.length).toBeGreaterThan(0);
+    expect(published.every((u) => u.state === "halted")).toBe(true);
+  });
+
+  it("says nothing when nothing moved, rather than one call per entry per ask", async () => {
+    const e = env();
+    const app = routes();
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    published.length = 0;
+
+    await authorize(app, e, 61);
+    await authorize(app, e, 61);
+    expect(published).toEqual([]);
+  });
+
+  it("keeps the queue working when publishing fails", async () => {
+    const e = env();
+    const app = routes({
+      publishTurnCheck: async () => {
+        throw new Error("GitHub is having a moment");
+      },
+    });
+    expect((await authorize(app, e, 59)).reason).toBe("HOLDS_TURN");
+    expect((await authorize(app, e, 61)).reason).toBe("WAITING_FOR_TURN");
   });
 });

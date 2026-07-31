@@ -413,7 +413,10 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("CONFIRMED_NOT_MERGED");
       expect(store.mergeOperation("op-x")).toMatchObject({ outcome: "CONFIRMED_NOT_MERGED" });
-      expect(store.state().entries.get("e1")!.state).toBe("Ready");
+      // Deferred with a cooldown, so the lane goes to somebody else before this
+      // pull request tries again.
+      expect(store.state().entries.get("e1")!.state).toBe("Deferred");
+      expect(store.state().entries.get("e1")!.cooldownUntil).not.toBeNull();
       expect(checkInvariants(store.state())).toEqual([]);
     });
   });

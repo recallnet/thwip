@@ -19,6 +19,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
+import { turnCheckUpdates, type TurnCheckUpdate } from "./turn-check.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
@@ -193,9 +194,15 @@ export async function runOnQueue<T>(
   repositoryId: string,
   baseRef: string,
   decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+  publish?: (update: TurnCheckUpdate) => Promise<void>,
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
+  let before: QueueSnapshot | null = null;
   const out = await withQueueState(db, repositoryId, baseRef, (store) => {
+    // Read before the commands run, so what changed can be worked out afterwards
+    // rather than guessed at. Re-read on every retry, because the state this
+    // attempt started from is the only honest baseline for what it changed.
+    before = buildSnapshot(store);
     const commands = commandsFor(store);
     // Whatever is already due, before anything else.
     //
@@ -206,12 +213,43 @@ export async function runOnQueue<T>(
     // document is loaded already, so catching up costs nothing.
     commands.runAlarm();
     const result = decide({ store, commands });
+
+    // If whatever just happened left the lane free, offer it before answering.
+    //
+    // Freeing the lane and offering it were separate, so a command that ended a
+    // turn — a cancel, a merge, an expiry — left the queue idle with pull
+    // requests waiting until something external happened to poke it. That is how
+    // a repository sat with a free lane and four ready entries and merged
+    // nothing. A queue should cause the next turn, not wait to be asked for it.
+    //
+    // Cheap to do unconditionally: the scheduler refuses while a lane is busy or
+    // the queue is paused, and a tick that offers nothing writes no event.
+    if (store.state().activeAttemptId === null) {
+      commands.tick({
+        idempotencyKey: `settle:${store.generation()}`,
+        decisionDigest: `sha256:${"0".repeat(64)}`,
+      });
+    }
     return { result, snapshot: buildSnapshot(store) };
   });
   try {
     await projectQueueState(db, projectionMessageFrom(repositoryId, baseRef, out.snapshot));
   } catch {
     /* the projection may lag; the command already succeeded */
+  }
+
+  // After the write, never inside it. Publishing is a call to GitHub, and holding
+  // a compare-and-swap open across the network is how a queue starts losing races
+  // it should have won. Failing to publish is survivable: the check stays as it
+  // was and the next command that moves the lane publishes again.
+  if (publish !== undefined) {
+    for (const update of turnCheckUpdates(before, out.snapshot)) {
+      try {
+        await publish(update);
+      } catch {
+        /* the check may lag; the queue has already decided */
+      }
+    }
   }
   return out;
 }
@@ -337,6 +375,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
   driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
+  /**
+   * Publish whose turn it is, as a check GitHub can require.
+   *
+   * Separate from the proof check because the two answers change on different
+   * clocks, and because a required check that goes red for merely waiting keeps
+   * refusing the merge after the queue has said yes.
+   */
+  publishTurnCheck?(env: TEnv, repositoryId: string, update: TurnCheckUpdate): Promise<void>;
   /** Read a commit's tree and parents from GitHub, for confirming from facts. */
   commitFacts(
     env: TEnv,
@@ -345,6 +391,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   ): Promise<{ treeOid: string; parentShas: string[] } | null>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
+
+  /**
+   * Every mutating route, with the turn check wired in.
+   *
+   * Bound here rather than passed at each call site so no route can quietly skip
+   * publishing: the lane moving without the check following it is the failure
+   * that made the queue rotate turns nobody could take.
+   */
+  const onQueue = <T,>(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+    decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+  ) =>
+    runOnQueue(env, repositoryId, baseRef, decide, (update) =>
+      deps.publishTurnCheck === undefined
+        ? Promise.resolve()
+        : deps.publishTurnCheck(env, repositoryId, update),
+    );
 
   // One place where a thrown error becomes a named one.
   app.onError((error, c) => {
@@ -464,7 +529,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
     const headSha = body.headSha;
     const pullRequestNumber = body.pullRequestNumber;
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.requestQueue({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `request:${entryId}`),
         entryId,
@@ -488,7 +553,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
     const entryId = c.req.param("entryId");
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.cancel({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `cancel:${entryId}`),
         entryId,
@@ -512,7 +577,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const key = idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`);
-    const { result, snapshot } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.tick({
         idempotencyKey: key,
         decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -537,7 +602,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "a pause requires a reason" }, 400);
     }
     const reason = body.reason;
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.pause({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `pause:${crypto.randomUUID()}`),
         actorPrincipalId: who.principalId,
@@ -557,7 +622,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     // A refusal here means a rebaseline is still required after external movement.
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.resume({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `resume:${crypto.randomUUID()}`),
         actorPrincipalId: who.principalId,
@@ -580,7 +645,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "baseSha required" }, 400);
     }
     const baseSha = body.baseSha;
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.rebaseline({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `rebaseline:${baseSha}`),
         actorPrincipalId: who.principalId,
@@ -636,7 +701,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Classified and applied in the same transaction. Split across two, the
     // attempt can move in between and the verdict lands against a revision that
     // was current when it was checked and is not when it is written.
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
       // A result for an older attempt is stale and harmless; one for the current
       // attempt at a stale revision is a conflict and must not be applied.
       if (typeof attemptRevision === "number") {
@@ -948,7 +1013,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // against the stored document. This was a Durable Object round trip, which
     // is the one resource with a daily cliff; it is now a row read and, only when
     // something actually changed, a row write.
-    const { snapshot: held } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
+    const { snapshot: held } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
       principalId === null
         ? buildSnapshot(store)
         : admit(commands, store, {
@@ -1100,7 +1165,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         const candidateSha = cand.candidateSha;
         const candidateTree = cand.candidateTreeOid;
 
-        const { result: walked } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+        const { result: walked } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
           // Checked again inside the transaction. Consulting the verifier took
           // network time, and the lane can move while that happens; walking an
           // attempt that no longer holds it would prepare a merge for a pull
@@ -1205,7 +1270,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const chain = await readProjectedChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
-    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
       adoptChain(commands, store, chain),
     );
     return c.json({ ...result, available: chain.length }, result.adopted === 0 && chain.length > 0 ? 409 : 200);
@@ -1258,7 +1323,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // Confirmation and its transition together, with the chain head read inside
       // the transaction rather than from a snapshot fetched before the network
       // call to GitHub.
-      const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+      const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
         confirmAndRecord(commands, store, {
           attemptId,
           operationId: `merge_${attemptId}`,
@@ -1291,7 +1356,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         return c.json({ error: "mergeSha required" }, 400);
       }
       const mergeSha = body.mergeSha;
-      const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
         // The entry leaves the queue with the attempt. Terminating the attempt
         // alone left the entry Blocked and still scheduler-eligible, so the queue
         // went on holding a merged pull request as live work and could have
@@ -1340,7 +1405,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: 'observed must be "merged", "not-merged", or "merged-outside-the-turn"' }, 400);
     }
 
-    const { result: resolved } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.confirmNotMerged({
         idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
         attemptId,
@@ -1385,7 +1450,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const attemptId = body.attemptId;
     const operationId = body.operationId;
-    const { result: resolved } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
       // An outcome already in doubt has to be declared unknown before it can be
       // resolved, which is the reducer refusing to skip reconciliation.
       commands.mergeOutcomeUnknown({
@@ -1449,7 +1514,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       transitionDigest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
       witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
     };
-    const { result, snapshot } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
       confirmAndRecord(commands, store, confirmation),
     );
 
