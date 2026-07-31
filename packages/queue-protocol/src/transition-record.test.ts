@@ -349,3 +349,82 @@ describe("parseTransitionRecord", () => {
     expect(parseTransitionRecord(long)).toMatchObject({ ok: false });
   });
 });
+
+/**
+ * A merge under a profile that asks for nothing beyond the proof already on the
+ * head. It is its own kind rather than a verified merge with a field left out,
+ * because a verified merge claims something ran against the integrated candidate
+ * and here nothing did. A reader auditing the chain afterwards has no other way
+ * to tell those two apart.
+ */
+describe("reused-proof-merge", () => {
+  const reused = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...baseFields(),
+    kind: "reused-proof-merge",
+    reusedProof: {
+      attemptId: "att-1",
+      mergeIntentDigest: D("1"),
+      pullRequestNumber: 42,
+      headSha: HEAD,
+      candidateSha: CANDIDATE,
+      candidateTreeOid: TREE,
+      mergeMethod: "merge",
+      workReceiptDigest: D("2"),
+      assignmentDigest: D("3"),
+      policyDigest: D("6"),
+      pipelineDigest: D("7"),
+      requiredSuitesDigest: D("8"),
+      checkRunId: "778899",
+      ...((over["reusedProof"] as Record<string, unknown>) ?? {}),
+    },
+  });
+
+  it("accepts a merge that reused the head's proof", () => {
+    expect(parseTransitionRecord(reused())).toMatchObject({ ok: true });
+  });
+
+  it("binds what makes the reuse legitimate", () => {
+    const parsed = parseTransitionRecord(reused());
+    if (!parsed.ok) throw new Error(parsed.detail);
+    if (parsed.value.kind !== "reused-proof-merge") throw new Error("wrong kind");
+    expect(parsed.value.reusedProof.policyDigest).toBe(D("6"));
+    expect(parsed.value.reusedProof.pipelineDigest).toBe(D("7"));
+    expect(parsed.value.reusedProof.requiredSuitesDigest).toBe(D("8"));
+    expect(parsed.value.reusedProof.workReceiptDigest).toBe(D("2"));
+  });
+
+  /**
+   * The point of the kind. Claiming a verifier result on a merge where no
+   * verifier ran is the falsehood this exists to make unrepresentable, so the
+   * schema refuses the field rather than ignoring it.
+   */
+  it("refuses to carry a verifier result, because none was produced", () => {
+    const lying = reused();
+    (lying["reusedProof"] as Record<string, unknown>)["verifierResultDigest"] = D("5");
+    expect(parseTransitionRecord(lying)).toMatchObject({ ok: false });
+  });
+
+  it("refuses to carry integration evidence either", () => {
+    const lying = reused();
+    (lying["reusedProof"] as Record<string, unknown>)["integrationEvidenceDigest"] = D("4");
+    expect(parseTransitionRecord(lying)).toMatchObject({ ok: false });
+  });
+
+  it("still requires everything a merge record has to say", () => {
+    for (const missing of ["attemptId", "workReceiptDigest", "assignmentDigest", "policyDigest"]) {
+      const short = reused();
+      delete (short["reusedProof"] as Record<string, unknown>)[missing];
+      expect(parseTransitionRecord(short), missing).toMatchObject({ ok: false });
+    }
+  });
+
+  it("refuses a digest that is not one", () => {
+    const bad = reused({ reusedProof: { pipelineDigest: "not-a-digest" } });
+    expect(parseTransitionRecord(bad)).toMatchObject({ ok: false });
+  });
+
+  it("holds the same after/candidate consistency a verified merge does", () => {
+    const inconsistent = reused({ reusedProof: { candidateSha: "9".repeat(40) } });
+    expect(parseTransitionRecord(inconsistent)).toMatchObject({ ok: false });
+  });
+});

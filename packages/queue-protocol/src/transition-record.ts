@@ -34,6 +34,23 @@ import { MERGE_METHODS, OVERRIDE_OMISSIONS, SECURITY_PROFILES, type MergeMethod 
 
 export const TRANSITION_KINDS = [
   "verified-merge",
+  /**
+   * A merge whose evidence is the signed proof already on the head, because the
+   * policy asked for nothing more.
+   *
+   * It is a separate kind rather than a `verified-merge` with a field left out,
+   * and that is the whole point: a verified merge claims something ran against
+   * the integrated candidate, and under this profile nothing did. Recording one
+   * as the other would be a false claim however well it were signed, and a
+   * reader auditing the chain has no way to tell the difference after the fact.
+   *
+   * What it binds instead is why reusing the head's proof is legitimate here:
+   * the policy it was accepted under, the pipeline it describes, and the suites
+   * that policy required. If any of those differ from what the merge was
+   * judged against, the reuse does not hold and the record says so by not
+   * matching.
+   */
+  "reused-proof-merge",
   "override-merge",
   "external-transition",
   "genesis",
@@ -85,6 +102,31 @@ export interface VerifiedMergeFacts {
   readonly actionRunId: string;
 }
 
+/**
+ * A merge whose evidence is the proof already on the head.
+ *
+ * There is no verifier result and no integration evidence here, and that is
+ * deliberate: nothing ran against the integrated candidate, so there is nothing
+ * honest to put in those fields. What stands in their place is the equivalence
+ * the reuse rests on — the policy the proof was accepted under, the pipeline it
+ * describes, and the suites that policy required.
+ */
+export interface ReusedProofMergeFacts {
+  readonly attemptId: string;
+  readonly mergeIntentDigest: Sha256;
+  readonly pullRequestNumber: number;
+  readonly headSha: string;
+  readonly candidateSha: string;
+  readonly candidateTreeOid: string;
+  readonly mergeMethod: MergeMethod;
+  readonly workReceiptDigest: Sha256;
+  readonly assignmentDigest: Sha256;
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly checkRunId: string;
+}
+
 export interface OverrideMergeFacts {
   readonly attemptId: string;
   readonly mergeIntentDigest: Sha256;
@@ -120,6 +162,10 @@ export interface GenesisFacts {
 
 export type TransitionRecordV1 =
   | (TransitionRecordBaseV1 & { readonly kind: "verified-merge"; readonly verifiedMerge: VerifiedMergeFacts })
+  | (TransitionRecordBaseV1 & {
+      readonly kind: "reused-proof-merge";
+      readonly reusedProof: ReusedProofMergeFacts;
+    })
   | (TransitionRecordBaseV1 & { readonly kind: "override-merge"; readonly override: OverrideMergeFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "external-transition"; readonly external: ExternalFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "genesis"; readonly genesis: GenesisFacts });
@@ -139,6 +185,7 @@ const BASE_KEYS = [
 
 const FACTS_KEY: Record<TransitionRecordKind, string> = {
   "verified-merge": "verifiedMerge",
+  "reused-proof-merge": "reusedProof",
   "override-merge": "override",
   "external-transition": "external",
   genesis: "genesis",
@@ -344,6 +391,37 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
         kind: "verified-merge",
         verifiedMerge: facts.value as unknown as VerifiedMergeFacts,
       });
+    }
+
+    case "reused-proof-merge": {
+      // No verifier result and no integration evidence, because there was no
+      // integrated run. What it carries is the equivalence the reuse rests on.
+      const facts = parseMergeFacts(v[factsKey], "transition.reusedProof", [
+        "policyDigest",
+        "pipelineDigest",
+        "requiredSuitesDigest",
+        "checkRunId",
+      ]);
+      if (!facts.ok) return facts;
+      const raw = v[factsKey] as Record<string, unknown>;
+      for (const key of ["policyDigest", "pipelineDigest", "requiredSuitesDigest"]) {
+        const digest = sha256(raw[key], `transition.reusedProof.${key}`);
+        if (!digest.ok) return digest;
+        facts.value[key] = digest.value;
+      }
+      const runId = decimalId(raw["checkRunId"], "transition.reusedProof.checkRunId");
+      if (!runId.ok) return runId;
+      facts.value["checkRunId"] = runId.value;
+      const consistency = checkMergeConsistency(base.value, facts.value);
+      if (!consistency.ok) return consistency;
+      return {
+        ok: true,
+        value: {
+          ...base.value,
+          kind: kind.value,
+          reusedProof: facts.value as unknown as ReusedProofMergeFacts,
+        },
+      };
     }
 
     case "override-merge": {
