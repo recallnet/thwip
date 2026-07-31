@@ -1,6 +1,6 @@
 import type { AttemptOutcome, BlockingReason, ExecutionMode } from "@thwip/queue-domain";
 import { isSyntheticExecutionMode } from "@thwip/queue-domain";
-import type { AppendResult, BranchQueueStore, Deadline } from "./store.js";
+import type { AppendResult, Deadline, QueueStateStore } from "./store.js";
 
 /**
  * The commands a branch queue accepts (plan.md §39).
@@ -73,7 +73,7 @@ export type CommandResult = AppendResult | { readonly status: "noop"; readonly d
 
 export class QueueCommands {
   constructor(
-    private readonly store: BranchQueueStore,
+    private readonly store: QueueStateStore,
     private readonly clock: QueueClock,
     private readonly ids: QueueIds,
     private readonly timings: QueueTimings = DEFAULT_TIMINGS,
