@@ -42,14 +42,16 @@ describe("adopting an existing chain", () => {
     const chain = chainOf(21);
     expect(adoptChain(commandsFor(s), s, chain)).toEqual({ adopted: 21 });
 
+    // The document holds a window of the chain rather than all of it — the whole
+    // chain lives in the projection — so what matters here is that every link was
+    // accepted, that the window's links still join, and that the head is the last
+    // one adopted so the next merge continues from it.
     const transitions = s.state().transitions;
-    expect(transitions).toHaveLength(21);
-    expect(transitions.map((t) => t.transitionSequence)).toEqual(chain.map((l) => l.transition_sequence));
+    expect(transitions.at(-1)!.transitionSequence).toBe(21);
     for (let i = 1; i < transitions.length; i += 1) {
       expect(transitions[i]!.priorDigest).toBe(transitions[i - 1]!.digest);
+      expect(transitions[i]!.transitionSequence).toBe(transitions[i - 1]!.transitionSequence + 1);
     }
-    // And the next merge continues the chain rather than restarting it.
-    expect(transitions.at(-1)!.transitionSequence).toBe(21);
   });
 
   it("survives an eviction, because it was written and not only remembered", () => {

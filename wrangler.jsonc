@@ -22,13 +22,6 @@
       "migrations": [
         { "tag": "v1-branch-queue", "new_sqlite_classes": ["BranchQueue"] }
       ],
-      "workflows": [
-        {
-          "name": "thwip-integration-turn-staging",
-          "binding": "QUEUE_TURN",
-          "class_name": "IntegrationTurnWorkflow"
-        }
-      ],
       "r2_buckets": [
         {
           "binding": "EVIDENCE",
