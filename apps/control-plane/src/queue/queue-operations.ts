@@ -170,6 +170,23 @@ export function admit(commands: QueueCommands, store: QueueStateStore, input: Ad
     sponsorGithubUserId: input.sponsorGithubUserId,
     headSha: input.headSha,
   });
+
+  // Record the commit if it has moved.
+  //
+  // Joining the queue is keyed by the entry, so a pull request that is already in
+  // it stays at whatever commit it joined with — for as long as it is open. That
+  // was survivable while nothing read the entry's commit, and is not now: the
+  // turn check is published against it, so a stale one puts the check on an old
+  // commit and leaves the current head with none. A required check that never
+  // arrives blocks the merge forever.
+  const existing = store.state().entries.get(input.entryId);
+  if (existing !== undefined && existing.headSha !== input.headSha) {
+    commands.entryHeadChanged({
+      idempotencyKey: `authorize:head:${input.entryId}:${input.headSha}`,
+      entryId: input.entryId,
+      headSha: input.headSha,
+    });
+  }
   commands.evaluateReadiness({
     idempotencyKey: `authorize:ready:${input.entryId}:${input.headSha}:${input.readinessBucket}`,
     entryId: input.entryId,

@@ -79,6 +79,26 @@ export class QueueCommands {
     private readonly timings: QueueTimings = DEFAULT_TIMINGS,
   ) {}
 
+  /**
+   * The pull request moved to a new commit.
+   *
+   * Its place in line is untouched: pushing is how a contributor answers review,
+   * and losing the queue position for it would make the queue punish the thing it
+   * is meant to encourage.
+   */
+  entryHeadChanged(input: { idempotencyKey: string; entryId: string; headSha: string }): CommandResult {
+    return this.store.append(
+      {
+        idempotencyKey: input.idempotencyKey,
+        at: this.clock.now(),
+        type: "EntryHeadChanged",
+        entryId: input.entryId,
+        headSha: input.headSha,
+      },
+      { bumpAttemptRevision: true },
+    );
+  }
+
   /** A durable request, accepted before reviews finish (plan.md §7.1). */
   requestQueue(input: {
     idempotencyKey: string;

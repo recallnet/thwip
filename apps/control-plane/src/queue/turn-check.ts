@@ -19,12 +19,19 @@ import type { QueueSnapshot } from "./queue-operations.js";
  * So waiting is reported as still running. That blocks the merge, which is the
  * point, without claiming anything failed and without leaving a red check behind
  * that somebody has to clear.
+ *
+ * `unplaceable` is the exception, and it exists because this check is required.
+ * A pull request the queue cannot place — an author with no activated principal,
+ * say — would otherwise get no check at all, and a required check that never
+ * arrives blocks the merge forever with nothing on the page to explain it. That
+ * one is reported as a failure, because it is one, and because it will not
+ * resolve on its own.
  */
 
 /** The check GitHub requires for the turn, alongside `thwip` for the proof. */
 export const TURN_CHECK = "thwip / turn";
 
-export type TurnState = "holds" | "waiting" | "halted";
+export type TurnState = "holds" | "waiting" | "halted" | "unplaceable";
 
 /** Entry states in which a pull request owns the lane. */
 const HOLDING = new Set(["Offered", "Active", "Verifying", "MergeGuard", "Merging"]);

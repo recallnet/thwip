@@ -1,5 +1,13 @@
 name: thwip
 
+# Whether the proof is good for this exact tree, and nothing else.
+#
+# Whose turn it is used to be answered here too, which meant one check carrying
+# two answers that change on different clocks. It went red for every pull request
+# that was merely waiting, and a failed required check goes on refusing the merge
+# after the queue has authorized it. The queue publishes `thwip / turn` itself
+# now, the moment it offers the lane.
+
 run-name: >-
   thwip: verify proof ${{ github.event_name == 'merge_group'
     && format('for merge group {0}', github.event.merge_group.head_sha)
@@ -11,6 +19,8 @@ on:
 
 permissions:
   contents: read
+  # The proof verifier authenticates to the control plane with an OIDC token, so
+  # this is the action's own requirement rather than the queue step's.
   id-token: write
   checks: write
   # Reading the pull request and the candidate commit GitHub simulated for it.
@@ -31,7 +41,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: https://thwip.recall.net
-      # Ask Thwip Queue whether this pull request may merge now.
+      # Place this pull request in the queue, and tell it what the proof said.
+      #
+      # This is what enrols the entry, derives its readiness from the proof, and
+      # moves the lane on. It does not decide this check: whose turn it is is
+      # published by the queue as `thwip / turn`.
       #
       # This step is what makes the queue decide rather than merely observe. It
       # runs from the workflow's own pinned revision, so nothing here executes
@@ -41,6 +55,11 @@ jobs:
       - name: Thwip Queue authorization
         id: queue
         if: github.event_name == 'pull_request'
+        # Nothing this step does decides this check. If the queue is unreachable,
+        # the pull request is not enrolled and `thwip / turn` never goes green, so
+        # the merge is blocked by the check that is actually about the turn —
+        # visibly, and without claiming the proof was bad.
+        continue-on-error: true
         env:
           THWIP_ENDPOINT: https://thwip.recall.net
           # gh reads the candidate commit, so this step needs a token of its own.
@@ -125,22 +144,14 @@ jobs:
                 ;;
             esac
           done
-          authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
-          enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
-          reason=$(printf '%s' "$abody" | jq -r '.reason // "UNKNOWN"')
-          if [ "$authorized" != "true" ]; then
-            echo "::error::Thwip Queue has not authorized this pull request: $reason"
-            exit 1
-          fi
-          if [ "$enforcing" = "true" ]; then
-            echo "Thwip Queue authorized this merge: $reason"
-          else
-            echo "Thwip Queue is observing; it would have said: $reason"
-          fi
-
-          {
-            echo "authorized=$authorized"
-            echo "enforcing=$enforcing"
-            echo "operation_id=$(printf '%s' "$abody" | jq -r '.operationId // empty')"
-            echo "oidc_ok=1"
-          } >> "$GITHUB_OUTPUT"
+          # Reported, never fatal.
+          #
+          # Whose turn it is belongs to `thwip / turn`, which the queue publishes
+          # itself. Failing this check for "not your turn" is what made a required
+          # check go red for merely waiting, and a failed required check goes on
+          # refusing the merge after the queue has authorized it.
+          #
+          # The call stays because it is what places the pull request in the
+          # queue, derives its readiness from the proof, and moves the lane on.
+          # Only the exit code moved.
+          echo "Thwip Queue says: $(printf '%s' "$abody" | jq -r '.reason // "UNKNOWN"')"
