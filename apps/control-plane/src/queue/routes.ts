@@ -937,6 +937,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           });
 
     let operationId: string | null = null;
+    // The object hands back its state with every batched call, so the route never
+    // has to ask again. That trailing read was a whole object request per
+    // authorization, spent re-fetching what had just been returned.
+    let latest = held;
     const cand = body.candidate;
     if (
       body.prepare === true &&
@@ -1076,10 +1080,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           operationId: `merge_${attemptId}`,
         });
         operationId = walked.operationId;
+        latest = walked.snapshot;
       }
     }
 
-    const snapshot = await queue.snapshot();
+    const snapshot = latest;
     const entry = snapshot.entries.find((e) => e.entryId === entryId);
 
     // A check's authorize moves the lane as much as a tick does: admit enqueues,
@@ -1342,36 +1347,33 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
     }
 
+    // One object call. This was four, two of which only asked the object for the
+    // chain head it already holds.
     const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const confirmed = await queue.confirmMerge({
-      idempotencyKey: `merged:${body.attemptId}`,
+    const result = await queue.confirmAndRecord({
       attemptId: body.attemptId!,
       operationId: body.operationId!,
       mergeSha: body.mergeSha!,
       mergeTree: body.mergeTree!,
       parentShas: body.parentShas ?? [],
-    });
-    if (confirmed.status === "rejected") {
-      // The reducer refuses a tree that is not the candidate it authorized, so a
-      // rejection here means something other than the verified integration landed.
-      return c.json({ error: confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
-    }
-
-    const snapshot = await queue.snapshot();
-    const sequence = (snapshot.chainHead?.sequence ?? 0) + 1;
-    const transition = await queue.recordTransition({
-      idempotencyKey: `transition:${body.attemptId}`,
-      kind: "verified",
-      transitionSequence: sequence,
-      priorDigest: snapshot.chainHead?.digest ?? null,
-      digest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
-      baseSha: body.mergeSha!,
-      attemptId: body.attemptId!,
+      transitionDigest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
       witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
     });
 
-    await project(c.env, repositoryId, baseRef, queue);
-    return c.json({ merged: true, confirmed: confirmed.status, transition: transition.status, sequence });
+    if (result.confirmed.status === "rejected") {
+      // The reducer refuses a tree that is not the candidate it authorized, so a
+      // rejection here means something other than the verified integration landed.
+      return c.json({ error: result.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+    }
+
+    await project(c.env, repositoryId, baseRef, queue, result.snapshot);
+    await driveLane(c.env, deps, repositoryId, result.snapshot);
+    return c.json({
+      merged: true,
+      confirmed: result.confirmed.status,
+      transition: result.transition?.status ?? "skipped",
+      sequence: result.sequence,
+    });
   });
 
   return app;
