@@ -16,6 +16,23 @@ run-name: "thwip: release from ${{ github.sha }}"
 on:
   push:
     branches: [main]
+    # Only what ends up inside the published bundle.
+    #
+    # This ran on every push to main and cut a release from any commit that
+    # looked releasable, so a change to the Worker published a new CLI that was
+    # byte-identical to the last one. Two versions went out inside a minute that
+    # way. The bundler inlines these packages and nothing else, so a change
+    # outside them cannot alter what npm receives.
+    paths:
+      - "packages/cli/**"
+      - "packages/policy/**"
+      - "packages/protocol/**"
+      - "packages/sshsig/**"
+      - "packages/verifier/**"
+      - "packages/prompts/**"
+      - "packages/queue-domain/**"
+      - "scripts/build-npm.mjs"
+      - ".github/workflows/thwip-release.yml"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -55,8 +72,14 @@ jobs:
           range=${last:+$last..HEAD}
           echo "since ${last:-the beginning}"
 
-          subjects=$(git log --format='%s' ${range:-HEAD})
-          bodies=$(git log --format='%B' ${range:-HEAD})
+          # Only commits that touched the bundle. A fix to the Worker is not a fix
+          # to the CLI, and letting it decide the CLI's version makes the number
+          # describe something the reader did not install.
+          paths=(packages/cli packages/policy packages/protocol packages/sshsig \
+                 packages/verifier packages/prompts packages/queue-domain \
+                 scripts/build-npm.mjs)
+          subjects=$(git log --format='%s' ${range:-HEAD} -- "${paths[@]}")
+          bodies=$(git log --format='%B' ${range:-HEAD} -- "${paths[@]}")
 
           # A breaking change is either the ! marker or the footer. Both are
           # conventional, and accepting only one would ship a major change as a
@@ -73,7 +96,7 @@ jobs:
           echo "bump=$bump"
 
           if [ "$bump" = "none" ]; then
-            echo "nothing releasable since ${last:-the beginning}" >> "$GITHUB_STEP_SUMMARY"
+            echo "nothing in the published bundle changed since ${last:-the beginning}" >> "$GITHUB_STEP_SUMMARY"
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
