@@ -1,4 +1,5 @@
-import type { QueueCommands } from "./commands.js";
+import { QueueCommands, type QueueTimings } from "./commands.js";
+import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
 
 /**
@@ -11,6 +12,27 @@ import type { QueueStateStore, TransitionRow } from "./store.js";
  * copies of "may this pull request merge" is the one duplication this product
  * cannot afford.
  */
+
+/**
+ * The command layer over a store, built the same way wherever it runs.
+ *
+ * The clock and the identifier source are injected because the tests drive whole
+ * turns deterministically, and a queue whose fairness depends on wall-clock time
+ * cannot be tested any other way.
+ */
+export function commandsFor(store: QueueStateStore, timings?: QueueTimings): QueueCommands {
+  return new QueueCommands(
+    store,
+    { now: () => new Date().toISOString() },
+    {
+      attemptId: () => `att_${crypto.randomUUID()}`,
+      operationId: () => `op_${crypto.randomUUID()}`,
+      nonce: () => crypto.randomUUID(),
+      claimToken: () => crypto.randomUUID(),
+    },
+    timings,
+  );
+}
 
 export interface QueueSnapshot {
   generation: number;
@@ -74,6 +96,48 @@ export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
         lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
         headSha: entry.headSha,
       })),
+  };
+}
+
+export interface QueueDiagnosis {
+  snapshot: QueueSnapshot;
+  deadlines: Array<{ kind: string; attemptId: string; dueAt: string }>;
+  outbox: Array<{ kind: string; attemptId?: string; attempts: number }>;
+  attempts: Array<{ attemptId: string; phase: string; outcome: string | null; outcomeUnknown: boolean }>;
+  events: Array<{ sequence: number; at: string; type: string; detail: string }>;
+}
+
+/**
+ * Everything needed to answer "what is going on and why" in one call.
+ *
+ * Built because diagnosing this queue meant a state fetch, a log grep, and a
+ * guess about cooldowns and idempotency keys.
+ */
+export function diagnose(store: SnapshotQueueStore, limit = 25): QueueDiagnosis {
+  const state = store.state();
+  return {
+    snapshot: buildSnapshot(store),
+    // Everything, not only what is due: a deadline in the future is often the
+    // answer to "why is nothing happening".
+    deadlines: [...store.dueDeadlines("9999-12-31T23:59:59Z")],
+    outbox: store.pendingOutbox().map((o) => ({
+      kind: o.kind,
+      ...(o.attemptId === undefined ? {} : { attemptId: o.attemptId }),
+      attempts: o.attempts,
+    })),
+    attempts: [...state.attempts.values()].map((a) => ({
+      attemptId: a.attemptId,
+      phase: a.phase,
+      outcome: a.outcome,
+      outcomeUnknown: a.outcomeUnknown,
+    })),
+    events: store.recentEvents(limit).map((row) => {
+      const body = row.body as Record<string, unknown>;
+      const parts = ["entryId", "attemptId", "outcome", "primaryReason", "reason"]
+        .map((k) => (body[k] === undefined || body[k] === null ? null : `${k}=${String(body[k])}`))
+        .filter((v): v is string => v !== null);
+      return { sequence: row.sequence, at: row.at, type: row.type, detail: parts.join(" ") };
+    }),
   };
 }
 
