@@ -626,6 +626,23 @@ export class QueueCommands {
       }
     }
 
+    // Freeing the lane is only half of it. Expiring an offer or terminating an
+    // attempt leaves the lane open, and nothing here used to offer it to the next
+    // entry, so the queue waited for some external call to tick it. In steady
+    // state a pull request's check does that. When every check has already run,
+    // nothing does, and the queue idles forever with a free lane and entries
+    // sitting Ready.
+    //
+    // That is exactly how a repository stayed stuck after an outage: the lane was
+    // free, four entries were ready and eligible, and no turn was ever offered.
+    if (due.length > 0 && this.store.state().activeAttemptId === null) {
+      const offered = this.tick({
+        idempotencyKey: `alarm:tick:${this.clock.now()}`,
+        decisionDigest: `sha256:${"0".repeat(64)}`,
+      });
+      results.push(offered);
+    }
+
     return { handled: due, results, nextAlarm: this.store.earliestDeadline() };
   }
 }

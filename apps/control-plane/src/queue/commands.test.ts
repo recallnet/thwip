@@ -200,6 +200,39 @@ describe("QueueCommands", () => {
       expect(store.state().activeAttemptId).toBeNull();
     });
 
+    it("offers the freed lane to the next entry, rather than waiting to be asked", () => {
+      // A repository sat stuck for hours exactly here: an offer expired, the lane
+      // went free, four entries were Ready and eligible, and no turn was ever
+      // offered because nothing ticked the scheduler again. In steady state an
+      // incoming check does that. When every check has already run, nothing does.
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      ready(commands, "e2", "bob", 8);
+      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      const firstHolder = store.state().activeAttemptId;
+      expect(firstHolder).not.toBeNull();
+
+      clock.advance(120);
+      commands.runAlarm();
+
+      const after = store.state();
+      expect(after.activeAttemptId).not.toBeNull();
+      expect(after.activeAttemptId).not.toBe(firstHolder);
+      expect(checkInvariants(after)).toEqual([]);
+    });
+
+    it("does not offer a lane that is still held", () => {
+      const { store, commands, clock } = harness();
+      ready(commands, "e1", "alice", 7);
+      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      const attemptId = store.state().activeAttemptId!;
+      commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
+
+      clock.advance(30);
+      commands.runAlarm();
+      expect(store.state().activeAttemptId).toBe(attemptId);
+    });
+
     it("is idempotent when delivered twice", () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
