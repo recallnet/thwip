@@ -19,7 +19,12 @@ on:
 
 permissions:
   contents: read
+  # The proof verifier authenticates to the control plane with an OIDC token, so
+  # this is the action's own requirement rather than the queue step's.
+  id-token: write
   checks: write
+  # Reading the pull request and the candidate commit GitHub simulated for it.
+  pull-requests: read
 
 jobs:
   thwip:
