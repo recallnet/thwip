@@ -40,6 +40,17 @@ export const TURN_CHECK = "thwip / turn";
  */
 export const PROOF_CHECK = "thwip";
 
+/**
+ * The verdict on the integrated candidate, published on the pull request head.
+ *
+ * Published by the App rather than by the verifier workflow. The workflow asked
+ * GitHub for `checks: write` and was refused, because this repository's default
+ * workflow permission is read-only, so every passing verification finished as a
+ * failed run. The App already holds the permission and already publishes the
+ * other two checks, and the verdict reaches it before the workflow ends anyway.
+ */
+export const CANDIDATE_CHECK = "thwip / candidate";
+
 export type TurnState = "holds" | "waiting" | "halted" | "unplaceable";
 
 /** Entry states in which a pull request owns the lane. */
