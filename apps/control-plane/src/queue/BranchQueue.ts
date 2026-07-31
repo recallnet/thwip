@@ -5,6 +5,7 @@ import { DEFAULT_TIMINGS, QueueCommands, type QueueTimings } from "./commands.js
 import {
   admit,
   buildSnapshot,
+  commandsFor,
   confirmAndRecord,
   walkToMergeReady,
   type AdmitInput,
@@ -62,17 +63,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     if (this.store !== null) return;
     const sql = this.ctx.storage.sql as unknown as SqlLike;
     this.store = BranchQueueStore.open(sql, identity);
-    this.commands = new QueueCommands(
-      this.store,
-      { now: () => new Date().toISOString() },
-      {
-        attemptId: () => `att_${crypto.randomUUID()}`,
-        operationId: () => `op_${crypto.randomUUID()}`,
-        nonce: () => crypto.randomUUID(),
-        claimToken: () => crypto.randomUUID(),
-      },
-      this.timings,
-    );
+    this.commands = commandsFor(this.store, this.timings);
   }
 
   private require(): { store: BranchQueueStore; commands: QueueCommands } {

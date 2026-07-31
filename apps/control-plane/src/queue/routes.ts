@@ -9,6 +9,19 @@ import {
   type ProjectionMessage,
 } from "./projection.js";
 import { declineFromProjection, type ProjectedQueue } from "./fast-decline.js";
+import { adoptChain, readProjectedChain } from "./adopt-chain.js";
+import {
+  admit,
+  buildSnapshot,
+  commandsFor,
+  confirmAndRecord,
+  diagnose,
+  walkToMergeReady,
+  type QueueSnapshot,
+} from "./queue-operations.js";
+import { loadQueueState, withQueueState } from "./queue-state.js";
+import type { SnapshotQueueStore } from "./snapshot-store.js";
+import type { QueueCommands } from "./commands.js";
 import {
   candidateResultBytes,
   candidateResultDigest,
@@ -70,18 +83,16 @@ function branchRef(value: string | undefined): string | null {
 }
 
 /**
- * Mirror the object's state into D1 after a mutation.
+ * Shape a snapshot into the message the projection tables expect.
  *
- * The projection exists so organization-wide reads and exports do not have to touch
- * every Durable Object, and it was written and tested but never called — which meant
- * the tables stayed empty and the only way to see queue state was the object itself.
- * Failure here is deliberately swallowed: D1 lagging is expected, and a projection
- * error must never fail the command that already succeeded.
+ * The projection exists so organization-wide reads and exports do not have to load
+ * every queue document, and so a check that is only going to be told to wait can be
+ * answered from a row read.
  */
 export function projectionMessageFrom(
   repositoryId: string,
   baseRef: string,
-  snapshot: Awaited<ReturnType<BranchQueue["snapshot"]>>,
+  snapshot: QueueSnapshot,
 ): ProjectionMessage {
   return {
     repositoryId,
@@ -122,25 +133,6 @@ export function projectionMessageFrom(
   };
 }
 
-async function project(
-  env: QueueRouteEnv,
-  repositoryId: string,
-  baseRef: string,
-  queue: BranchQueue,
-  /** Reuse a snapshot the caller already read, rather than reading it twice. */
-  known?: Awaited<ReturnType<BranchQueue["snapshot"]>>,
-): Promise<void> {
-  try {
-    const snapshot = known ?? (await queue.snapshot());
-    await projectQueueState(
-      env.DB as unknown as D1Like,
-      projectionMessageFrom(repositoryId, baseRef, snapshot),
-    );
-  } catch {
-    /* the projection may lag; the command already succeeded */
-  }
-}
-
 /**
  * Write evidence, reporting what happened rather than throwing.
  *
@@ -178,7 +170,7 @@ async function driveLane(
   env: QueueRouteEnv,
   deps: { driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void> },
   repositoryId: string,
-  snapshot: Awaited<ReturnType<BranchQueue["snapshot"]>>,
+  snapshot: QueueSnapshot,
 ): Promise<void> {
   const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
   if (holder === undefined) return;
@@ -189,19 +181,41 @@ async function driveLane(
   }
 }
 
-async function resolveQueue(
+/**
+ * Run commands against the queue and mirror the result into the projection.
+ *
+ * Every mutating route goes through here, which is what keeps a single answer to
+ * "who holds the lane". The compare-and-swap inside makes concurrent routes
+ * safe; the projection write afterwards is what the dashboard and the fast
+ * decline path read, and a stale one only ever costs a pull request a round.
+ */
+async function runOnQueue<T>(
   env: QueueRouteEnv,
   repositoryId: string,
   baseRef: string,
-  options: { create?: boolean } = {},
-): Promise<BranchQueue> {
-  const key = await queueKey(repositoryId, baseRef);
-  const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key)) as unknown as BranchQueue;
-  // Binding on every call was a whole round trip to tell the object something it
-  // had already written to its own disk. It reopens itself now, so only the path
-  // that creates a queue needs to say what it is.
-  if (options.create === true) await stub.bind({ queueKey: key, repositoryId, baseRef });
-  return stub;
+  decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+): Promise<{ result: T; snapshot: QueueSnapshot }> {
+  const db = env.DB as unknown as D1Like;
+  const out = await withQueueState(db, repositoryId, baseRef, (store) => {
+    const result = decide({ store, commands: commandsFor(store) });
+    return { result, snapshot: buildSnapshot(store) };
+  });
+  try {
+    await projectQueueState(db, projectionMessageFrom(repositoryId, baseRef, out.snapshot));
+  } catch {
+    /* the projection may lag; the command already succeeded */
+  }
+  return out;
+}
+
+/** Read the queue without writing anything. */
+async function readQueue(
+  env: QueueRouteEnv,
+  repositoryId: string,
+  baseRef: string,
+): Promise<{ store: SnapshotQueueStore; snapshot: QueueSnapshot }> {
+  const loaded = await loadQueueState(env.DB as unknown as D1Like, repositoryId, baseRef);
+  return { store: loaded.store, snapshot: buildSnapshot(loaded.store) };
 }
 
 /**
@@ -342,8 +356,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const report = await queue.diagnose(Number(c.req.query("events") ?? 25));
+    const { store } = await readQueue(c.env, repositoryId, baseRef);
+    const report = diagnose(store, Number(c.req.query("events") ?? 25));
 
     // Say why each entry is not schedulable, rather than leaving the reader to work
     // it out from a state name and a timestamp.
@@ -385,20 +399,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // `?live=1` still reads the object, for the cases where being a few seconds
     // stale is the wrong answer: an operator checking after a manual repair.
     if (c.req.query("live") === "1") {
-      const queue = await resolveQueue(c.env, repositoryId, baseRef);
-      return c.json({ ...(await queue.snapshot()), source: "object" });
+      const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+      return c.json({ ...snapshot, source: "queue" });
     }
     const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef);
     if (projected !== null) return c.json(projected);
 
-    // Nothing projected yet, which is not the same as no queue. Read the object
-    // once and fill the projection from it, so this costs one wake rather than
-    // one per read forever. Without this, a migration that resets the marks would
-    // send every read back to the object until somebody happened to merge.
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const snapshot = await queue.snapshot();
-    await project(c.env, repositoryId, baseRef, queue);
-    return c.json({ ...snapshot, source: "object" });
+    // Nothing projected yet, which is not the same as no queue. Read the
+    // authoritative document and fill the projection from it, so a migration that
+    // reset the marks does not leave every read doing this forever.
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    try {
+      await projectQueueState(
+        c.env.DB as unknown as D1Like,
+        projectionMessageFrom(repositoryId, baseRef, snapshot),
+      );
+    } catch {
+      /* the projection may lag; the read already has its answer */
+    }
+    return c.json({ ...snapshot, source: "queue" });
   });
 
   /**
@@ -434,17 +453,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "only an administrator may sponsor on another principal's behalf" }, 403);
     }
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
-    const result = await queue.request({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `request:${entryId}`),
-      entryId,
-      pullRequestNumber: body.pullRequestNumber,
-      sponsorPrincipalId,
-      sponsorGithubUserId,
-      headSha: body.headSha,
-    });
-    await project(c.env, repositoryId, baseRef, queue);
+    const headSha = body.headSha;
+    const pullRequestNumber = body.pullRequestNumber;
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.requestQueue({
+        idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `request:${entryId}`),
+        entryId,
+        pullRequestNumber,
+        sponsorPrincipalId,
+        sponsorGithubUserId,
+        headSha,
+      }),
+    );
     return c.json({ entryId, result }, result.status === "rejected" ? 409 : 202);
   });
 
@@ -458,14 +479,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.cancel({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `cancel:${c.req.param("entryId")}`),
-      entryId: c.req.param("entryId"),
-      actorPrincipalId: who.principalId,
-      reason,
-    });
-    await project(c.env, repositoryId, baseRef, queue);
+    const entryId = c.req.param("entryId");
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.cancel({
+        idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `cancel:${entryId}`),
+        entryId,
+        actorPrincipalId: who.principalId,
+        reason,
+      }),
+    );
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -481,14 +503,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.tick({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`),
-      decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    });
-    const after = await queue.snapshot();
-    await project(c.env, repositoryId, baseRef, queue, after);
-    await driveLane(c.env, deps, repositoryId, after);
+    const key = idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`);
+    const { result, snapshot } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.tick({
+        idempotencyKey: key,
+        decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      }),
+    );
+    await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result });
   });
 
@@ -506,12 +528,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof body.reason !== "string" || body.reason.trim() === "") {
       return c.json({ error: "a pause requires a reason" }, 400);
     }
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.pause({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `pause:${crypto.randomUUID()}`),
-      actorPrincipalId: who.principalId,
-      reason: body.reason,
-    });
+    const reason = body.reason;
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.pause({
+        idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `pause:${crypto.randomUUID()}`),
+        actorPrincipalId: who.principalId,
+        reason,
+      }),
+    );
     return c.json({ result });
   });
 
@@ -524,13 +548,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.resume({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `resume:${crypto.randomUUID()}`),
-      actorPrincipalId: who.principalId,
-    });
     // A refusal here means a rebaseline is still required after external movement.
-    await project(c.env, repositoryId, baseRef, queue);
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.resume({
+        idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `resume:${crypto.randomUUID()}`),
+        actorPrincipalId: who.principalId,
+      }),
+    );
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -547,12 +571,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof body.baseSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.baseSha)) {
       return c.json({ error: "baseSha required" }, 400);
     }
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.rebaseline({
-      idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `rebaseline:${body.baseSha}`),
-      actorPrincipalId: who.principalId,
-      baseSha: body.baseSha,
-    });
+    const baseSha = body.baseSha;
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.rebaseline({
+        idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `rebaseline:${baseSha}`),
+        actorPrincipalId: who.principalId,
+        baseSha,
+      }),
+    );
     return c.json({ result });
   });
 
@@ -590,22 +616,29 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const identity = verifyVerifierIdentity(claims, pinned);
     if (!identity.ok) return c.json({ error: identity.reason, code: "VERIFIER_NOT_PINNED" }, 403);
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    // A result for an older attempt is stale and harmless; one for the current
-    // attempt at a stale revision is a conflict and must not be applied.
-    if (typeof body.attemptRevision === "number") {
-      const standing = await queue.classifyCallback(body.attemptId, body.attemptRevision);
-      if (standing !== "current") return c.json({ error: standing, code: standing }, 409);
-    }
-
-    const result = await queue.completeVerification({
+    const verdict = {
       idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `verdict:${body.attemptId}:${identity.jti}`),
       attemptId: body.attemptId,
       nonce: body.nonce,
       accepted: body.accepted,
       resultDigest: body.resultDigest,
+    };
+    const attemptRevision = body.attemptRevision;
+
+    // Classified and applied in the same transaction. Split across two, the
+    // attempt can move in between and the verdict lands against a revision that
+    // was current when it was checked and is not when it is written.
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+      // A result for an older attempt is stale and harmless; one for the current
+      // attempt at a stale revision is a conflict and must not be applied.
+      if (typeof attemptRevision === "number") {
+        const standing = store.classifyCallback(verdict.attemptId, attemptRevision);
+        if (standing !== "current") return { stale: standing } as const;
+      }
+      return { applied: commands.completeVerification(verdict) } as const;
     });
-    return c.json({ result }, result.status === "rejected" ? 409 : 202);
+    if ("stale" in result) return c.json({ error: result.stale, code: result.stale }, 409);
+    return c.json({ result: result.applied }, result.applied.status === "rejected" ? 409 : 202);
   });
 
 
@@ -906,19 +939,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       }
     }
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
+    const db = c.env.DB as unknown as D1Like;
 
     // Captured after validation: TypeScript discards the narrowing inside a
     // closure, and re-checking would be checking the same thing twice.
     const pullRequestNumber = body.pullRequestNumber;
     const headSha = body.headSha;
 
-    // One call, not six. The object serializes anyway, so a round trip per step
-    // bought nothing and every one was a billed request.
-    const held =
+    // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
+    // against the stored document. This was a Durable Object round trip, which
+    // is the one resource with a daily cliff; it is now a row read and, only when
+    // something actually changed, a row write.
+    const held = await withQueueState(db, repositoryId, baseRef, (store) =>
       principalId === null
-        ? await queue.snapshot()
-        : await queue.admit({
+        ? buildSnapshot(store)
+        : admit(commandsFor(store), store, {
             entryId,
             pullRequestNumber,
             sponsorPrincipalId: principalId,
@@ -934,12 +969,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             readinessBucket: Math.floor(Date.now() / 60_000),
             tickBucket: Math.floor(Date.now() / 60_000),
             decisionDigest: `sha256:${"0".repeat(64)}`,
-          });
+          }),
+    );
 
     let operationId: string | null = null;
-    // The object hands back its state with every batched call, so the route never
-    // has to ask again. That trailing read was a whole object request per
-    // authorization, spent re-fetching what had just been returned.
     let latest = held;
     const cand = body.candidate;
     if (
@@ -1063,21 +1096,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       }
 
       if (holder !== undefined && holder.state === "Active") {
-        // One call, not seven. Each step is still its own event in the log and the
-        // reducer still refuses any it considers out of order.
-        const walked = await queue.walkToMergeReady({
-          attemptId,
-          baseSha: cand.baseSha,
-          headSha,
-          candidateSha: cand.candidateSha,
-          candidateTree: cand.candidateTreeOid,
-          policyDigest: candidatePolicyDigest,
-          runner: needsIntegratedRun ? "verified-candidate" : "reuse",
-          assignmentDigest: `sha256:${"1".repeat(64)}`,
-          receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
-          verifierResultDigest: verifiedResultDigest,
-          intentDigest: `sha256:${"4".repeat(64)}`,
-          operationId: `merge_${attemptId}`,
+        // Hoisted out of the closure: narrowing a property survives a const
+        // binding but not a function boundary.
+        const baseSha = cand.baseSha;
+        const candidateSha = cand.candidateSha;
+        const candidateTree = cand.candidateTreeOid;
+
+        const walked = await withQueueState(db, repositoryId, baseRef, (store) => {
+          // Checked again inside the transaction. Consulting the verifier took
+          // network time, and the lane can move while that happens; walking an
+          // attempt that no longer holds it would prepare a merge for a pull
+          // request whose turn had already ended.
+          if (store.state().activeAttemptId !== attemptId) {
+            return { operationId: null, snapshot: buildSnapshot(store) };
+          }
+          return walkToMergeReady(commandsFor(store), store, {
+            attemptId,
+            baseSha,
+            headSha,
+            candidateSha,
+            candidateTree,
+            policyDigest: candidatePolicyDigest,
+            runner: needsIntegratedRun ? "verified-candidate" : "reuse",
+            assignmentDigest: `sha256:${"1".repeat(64)}`,
+            receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
+            verifierResultDigest: verifiedResultDigest,
+            intentDigest: `sha256:${"4".repeat(64)}`,
+            operationId: `merge_${attemptId}`,
+          });
         });
         operationId = walked.operationId;
         latest = walked.snapshot;
@@ -1125,6 +1171,33 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
+   * Carry the recorded transition chain into the queue document.
+   *
+   * Needed once per queue, when the authority moved from the Durable Object to
+   * D1 with the object unreachable. Entries rebuild themselves because every
+   * pull request asks the gate again; the chain cannot, and a queue that started
+   * a fresh one would record its next merge as the first link ever.
+   *
+   * Idempotent by refusal: it will not adopt on top of a chain that already has
+   * links, and it stops at the first break rather than leaving a hole.
+   */
+  app.post("/v1/queue/:repositoryId/adopt-chain", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const chain = await readProjectedChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+      adoptChain(commands, store, chain),
+    );
+    return c.json({ ...result, available: chain.length }, result.adopted === 0 && chain.length > 0 ? 409 : 200);
+  });
+
+  /**
    * Operator reconciliation (plan.md §30.4, §68.1).
    *
    * An attempt whose merge outcome is unknown holds the lane until something
@@ -1152,10 +1225,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "a reason of at least 8 characters is required" }, 400);
     }
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const snapshot = await queue.snapshot();
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
     const attemptId = snapshot.activeAttemptId;
     if (attemptId === null) return c.json({ error: "no attempt holds the lane" }, 409);
+    const reason = body.reason.trim();
 
     if (body.observed === "merged") {
       // Confirmed from the commit itself, never from the operator's word. The
@@ -1164,40 +1237,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
         return c.json({ error: "mergeSha required to confirm a merge" }, 400);
       }
-      const facts = await deps.commitFacts(c.env, repositoryId, body.mergeSha);
+      const mergeSha = body.mergeSha;
+      const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
       if (facts === null) return c.json({ error: "could not read that commit" }, 404);
 
-      const confirmed = await queue.confirmMerge({
-        idempotencyKey: `reconcile:merged:${attemptId}`,
-        attemptId,
-        operationId: `merge_${attemptId}`,
-        mergeSha: body.mergeSha,
-        mergeTree: facts.treeOid,
-        parentShas: facts.parentShas,
-      });
-      if (confirmed.status === "rejected") {
-        return c.json({ error: confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+      // Confirmation and its transition together, with the chain head read inside
+      // the transaction rather than from a snapshot fetched before the network
+      // call to GitHub.
+      const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+        confirmAndRecord(commands, store, {
+          attemptId,
+          operationId: `merge_${attemptId}`,
+          mergeSha,
+          mergeTree: facts.treeOid,
+          parentShas: facts.parentShas,
+          transitionDigest: `sha256:${mergeSha.padEnd(64, "0").slice(0, 64)}`,
+          witnessPrincipalIds: [who.principalId],
+        }),
+      );
+      if (result.confirmed.status === "rejected") {
+        return c.json({ error: result.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
       }
-
-      const after = await queue.snapshot();
-      const sequence = (after.chainHead?.sequence ?? 0) + 1;
-      const transition = await queue.recordTransition({
-        idempotencyKey: `reconcile:transition:${attemptId}`,
-        kind: "verified",
-        transitionSequence: sequence,
-        priorDigest: after.chainHead?.digest ?? null,
-        digest: `sha256:${body.mergeSha.padEnd(64, "0").slice(0, 64)}`,
-        baseSha: body.mergeSha,
-        attemptId,
-        witnessPrincipalIds: [who.principalId],
-      });
       return c.json({
-        resolved: confirmed.status,
-        transition: transition.status,
-        sequence,
+        resolved: result.confirmed.status,
+        transition: result.transition?.status ?? "skipped",
+        sequence: result.sequence,
         attemptId,
         actor: who.principalId,
-        reason: body.reason.trim(),
+        reason,
       });
     }
 
@@ -1209,44 +1276,48 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
         return c.json({ error: "mergeSha required" }, 400);
       }
-      // The entry leaves the queue with the attempt. Terminating the attempt alone
-      // left the entry Blocked and still scheduler-eligible, so the queue went on
-      // holding a merged pull request as live work and could have offered it a lane.
-      // Cancelled rather than Merged: the queue did not merge this and must not
-      // claim it did.
-      const entryId = (await queue.snapshot()).activeEntryId;
-      if (entryId !== null) {
-        await queue.cancel({
-          idempotencyKey: `outside:cancel:${attemptId}`,
-          entryId,
-          actorPrincipalId: who.principalId,
-          reason: body.reason.trim(),
+      const mergeSha = body.mergeSha;
+      const { result } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+        // The entry leaves the queue with the attempt. Terminating the attempt
+        // alone left the entry Blocked and still scheduler-eligible, so the queue
+        // went on holding a merged pull request as live work and could have
+        // offered it a lane. Cancelled rather than Merged: the queue did not merge
+        // this and must not claim it did.
+        const entryId = buildSnapshot(store).activeEntryId;
+        if (entryId !== null) {
+          commands.cancel({
+            idempotencyKey: `outside:cancel:${attemptId}`,
+            entryId,
+            actorPrincipalId: who.principalId,
+            reason,
+          });
+        } else {
+          commands.terminateAttempt({
+            idempotencyKey: `outside:${attemptId}`,
+            attemptId,
+            outcome: "ADMIN_CANCELLED",
+          });
+        }
+        const head = store.state().transitions.at(-1);
+        const sequence = (head?.transitionSequence ?? 0) + 1;
+        const transition = commands.recordTransition({
+          idempotencyKey: `outside:transition:${attemptId}`,
+          kind: "external",
+          transitionSequence: sequence,
+          priorDigest: head?.digest ?? null,
+          digest: `sha256:${mergeSha.padEnd(64, "0").slice(0, 64)}`,
+          baseSha: mergeSha,
+          attemptId: null,
+          witnessPrincipalIds: [],
         });
-      } else {
-        await queue.terminateAttempt({
-          idempotencyKey: `outside:${attemptId}`,
-          attemptId,
-          outcome: "ADMIN_CANCELLED",
-        });
-      }
-      const after = await queue.snapshot();
-      const sequence = (after.chainHead?.sequence ?? 0) + 1;
-      const transition = await queue.recordTransition({
-        idempotencyKey: `outside:transition:${attemptId}`,
-        kind: "external",
-        transitionSequence: sequence,
-        priorDigest: after.chainHead?.digest ?? null,
-        digest: `sha256:${body.mergeSha.padEnd(64, "0").slice(0, 64)}`,
-        baseSha: body.mergeSha,
-        attemptId: null,
-        witnessPrincipalIds: [],
+        return { entryId, sequence, transition };
       });
       return c.json({
         resolved: "external",
-        transition: transition.status,
-        sequence,
+        transition: result.transition.status,
+        sequence: result.sequence,
         attemptId,
-        entryResolved: entryId === null ? "no entry held the lane" : "cancelled",
+        entryResolved: result.entryId === null ? "no entry held the lane" : "cancelled",
         note: "recorded as external: the queue held a turn but never pinned a candidate for this merge",
       });
     }
@@ -1255,16 +1326,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: 'observed must be "merged", "not-merged", or "merged-outside-the-turn"' }, 400);
     }
 
-    const resolved = await queue.confirmNotMerged({
-      idempotencyKey: `reconcile:${attemptId}:${body.reason.trim().slice(0, 32)}`,
-      attemptId,
-      operationId: `merge_${attemptId}`,
-    });
+    const { result: resolved } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+      commands.confirmNotMerged({
+        idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
+        attemptId,
+        operationId: `merge_${attemptId}`,
+      }),
+    );
     return c.json({
       resolved: resolved.status,
       attemptId,
       actor: who.principalId,
-      reason: body.reason.trim(),
+      reason,
     });
   });
 
@@ -1296,17 +1369,20 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "attemptId and operationId required" }, 400);
     }
 
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    // An outcome already in doubt has to be declared unknown before it can be
-    // resolved, which is the reducer refusing to skip reconciliation.
-    await queue.mergeOutcomeUnknown({
-      idempotencyKey: `not-merged:unknown:${body.attemptId}`,
-      attemptId: body.attemptId,
-    });
-    const resolved = await queue.confirmNotMerged({
-      idempotencyKey: `not-merged:${body.attemptId}`,
-      attemptId: body.attemptId,
-      operationId: body.operationId,
+    const attemptId = body.attemptId;
+    const operationId = body.operationId;
+    const { result: resolved } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+      // An outcome already in doubt has to be declared unknown before it can be
+      // resolved, which is the reducer refusing to skip reconciliation.
+      commands.mergeOutcomeUnknown({
+        idempotencyKey: `not-merged:unknown:${attemptId}`,
+        attemptId,
+      });
+      return commands.confirmNotMerged({
+        idempotencyKey: `not-merged:${attemptId}`,
+        attemptId,
+        operationId,
+      });
     });
     return c.json({ resolved: resolved.status, detail: body.detail ?? null });
   });
@@ -1347,10 +1423,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
     }
 
-    // One object call. This was four, two of which only asked the object for the
-    // chain head it already holds.
-    const queue = await resolveQueue(c.env, repositoryId, baseRef);
-    const result = await queue.confirmAndRecord({
+    // Confirming the merge and recording the transition it produced, in one
+    // compare-and-swap. The chain head is derived inside, so nothing here can
+    // race the queue over its own chain.
+    const confirmation = {
       attemptId: body.attemptId!,
       operationId: body.operationId!,
       mergeSha: body.mergeSha!,
@@ -1358,7 +1434,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       parentShas: body.parentShas ?? [],
       transitionDigest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
       witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
-    });
+    };
+    const { result, snapshot } = await runOnQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
+      confirmAndRecord(commands, store, confirmation),
+    );
 
     if (result.confirmed.status === "rejected") {
       // The reducer refuses a tree that is not the candidate it authorized, so a
@@ -1366,8 +1445,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: result.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
     }
 
-    await project(c.env, repositoryId, baseRef, queue, result.snapshot);
-    await driveLane(c.env, deps, repositoryId, result.snapshot);
+    await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({
       merged: true,
       confirmed: result.confirmed.status,

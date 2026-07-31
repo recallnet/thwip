@@ -1,0 +1,243 @@
+import Database from "better-sqlite3";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+
+/**
+ * The merge gate, end to end, over the storage it actually uses.
+ *
+ * This could not be written while the queue lived in a Durable Object, because a
+ * route needed a namespace no test could provide, so the one property the product
+ * exists to guarantee was only ever checked on staging. It needs D1 now, and D1 is
+ * SQLite, so the question "can two pull requests be told they hold the lane at
+ * once" can finally be asked in a unit test.
+ */
+
+const open: Array<{ close(): void }> = [];
+
+function env(): QueueRouteEnv {
+  const db = new Database(":memory:");
+  open.push(db);
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
+  for (const file of readdirSync(dir).sort()) {
+    if (!file.endsWith(".sql")) continue;
+    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
+      const sql = statement
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("--"))
+        .join("\n")
+        .trim();
+      if (sql.length === 0) continue;
+      try {
+        db.exec(sql);
+      } catch {
+        /* migrations that alter tables this test does not use */
+      }
+    }
+  }
+
+  const prepare = (query: string) => ({
+    bind: (...values: unknown[]) => ({
+      run: async () => {
+        const info = db.prepare(query).run(...(values as never[]));
+        return { meta: { changes: info.changes } };
+      },
+      first: async <T,>() => (db.prepare(query).get(...(values as never[])) ?? null) as T | null,
+      all: async <T,>() => ({ results: db.prepare(query).all(...(values as never[])) as T[] }),
+    }),
+  });
+  const d1 = {
+    prepare,
+    batch: async (statements: Array<{ run(): Promise<unknown> }>) => {
+      for (const s of statements) await s.run();
+    },
+  };
+  return { DB: d1, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
+}
+
+afterEach(() => {
+  while (open.length > 0) open.pop()!.close();
+});
+
+const REPO = "1315419165";
+const REF = "refs/heads/main";
+
+/** Every pull request is sponsored by a different principal, so fairness applies. */
+const driven: number[] = [];
+
+function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
+  driven.length = 0;
+  return queueRoutes({
+    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
+    verifyOidc: async () => ({ repository_id: REPO }),
+    pinnedVerifier: async () => null,
+    activePolicy: async () => null,
+    dispatchCandidateVerification: async () => ({ ok: true }),
+    queueProject: async () => ({ activationState: "enforced" }),
+    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
+    driveTurn: async (_e, _r, pullRequestNumber) => {
+      driven.push(pullRequestNumber);
+    },
+    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
+    ...over,
+  });
+}
+
+interface Verdict {
+  authorized: boolean;
+  reason: string;
+  entryId: string;
+  operationId: string | null;
+}
+
+async function authorize(
+  routes: ReturnType<typeof app>,
+  e: QueueRouteEnv,
+  pullRequestNumber: number,
+  over: Record<string, unknown> = {},
+): Promise<Verdict> {
+  const response = await routes.request(
+    `/v1/queue/${REPO}/authorize`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pullRequestNumber,
+        headSha: String(pullRequestNumber).padStart(40, "a"),
+        baseRef: REF,
+        authorGithubUserId: String(pullRequestNumber),
+        proofAccepted: true,
+        draft: false,
+        ...over,
+      }),
+    },
+    e,
+  );
+  return (await response.json()) as Verdict;
+}
+
+describe("the merge gate", () => {
+  it("gives the lane to exactly one pull request", async () => {
+    const e = env();
+    const routes = app();
+
+    const first = await authorize(routes, e, 59);
+    const second = await authorize(routes, e, 61);
+    const third = await authorize(routes, e, 65);
+
+    const holders = [first, second, third].filter((v) => v.reason === "HOLDS_TURN");
+    expect(holders).toHaveLength(1);
+    expect(holders[0]!.authorized).toBe(true);
+
+    for (const waiting of [first, second, third].filter((v) => v.reason !== "HOLDS_TURN")) {
+      expect(waiting.authorized).toBe(false);
+      expect(waiting.reason).toBe("WAITING_FOR_TURN");
+    }
+  });
+
+  it("keeps giving the same answer while nothing changes", async () => {
+    const e = env();
+    const routes = app();
+    const first = await authorize(routes, e, 59);
+    await authorize(routes, e, 61);
+
+    for (let i = 0; i < 4; i += 1) {
+      expect((await authorize(routes, e, 59)).reason).toBe(first.reason);
+      expect((await authorize(routes, e, 61)).reason).toBe("WAITING_FOR_TURN");
+    }
+  });
+
+  it("asks GitHub to run the merge for whoever holds the lane", async () => {
+    const e = env();
+    const routes = app();
+    const first = await authorize(routes, e, 59);
+    expect(first.reason).toBe("HOLDS_TURN");
+    expect(driven).toContain(59);
+  });
+
+  it("refuses a pull request whose proof was not accepted", async () => {
+    const e = env();
+    const routes = app();
+    const verdict = await authorize(routes, e, 59, { proofAccepted: false });
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toBe("LOCAL_RECEIPT_MISSING");
+  });
+
+  it("refuses a draft", async () => {
+    const e = env();
+    const routes = app();
+    const verdict = await authorize(routes, e, 59, { draft: true });
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toBe("PR_DRAFT");
+  });
+
+  it("says yes to everyone on a branch with no queue, rather than failing the check", async () => {
+    const e = env();
+    const routes = app({ queueProject: async () => null });
+    const verdict = await authorize(routes, e, 59);
+    expect(verdict).toMatchObject({ authorized: true, reason: "QUEUE_NOT_CONFIGURED" });
+  });
+
+  it("observes without enforcing", async () => {
+    const e = env();
+    const routes = app({ queueProject: async () => ({ activationState: "observe" }) });
+    await authorize(routes, e, 59);
+    // The second pull request is told what would have happened and let through
+    // anyway, which is what makes adoption reversible.
+    const second = await authorize(routes, e, 61);
+    expect(second).toMatchObject({ authorized: true, reason: "WAITING_FOR_TURN" });
+  });
+
+  it("passes the lane on once the holder has merged", async () => {
+    const e = env();
+    const routes = app();
+
+    const first = await authorize(routes, e, 59);
+    const second = await authorize(routes, e, 61);
+    expect(first.reason).toBe("HOLDS_TURN");
+    expect(second.reason).toBe("WAITING_FOR_TURN");
+
+    // The holder leaves the queue, as a merge would take it out.
+    const held = first.entryId;
+    const removed = await routes.request(
+      `/v1/queue/${REPO}/entries/${held}?ref=${encodeURIComponent(REF)}&reason=merged`,
+      { method: "DELETE" },
+      e,
+    );
+    expect(removed.status).toBe(200);
+
+    expect((await authorize(routes, e, 61)).reason).toBe("HOLDS_TURN");
+  });
+
+  it("reads back what it decided", async () => {
+    const e = env();
+    const routes = app();
+    await authorize(routes, e, 59);
+
+    const response = await routes.request(`/v1/queue/${REPO}?ref=${encodeURIComponent(REF)}&live=1`, {}, e);
+    const state = (await response.json()) as {
+      activeAttemptId: string | null;
+      entries: Array<{ pullRequestNumber: number; state: string }>;
+    };
+    expect(state.activeAttemptId).not.toBeNull();
+    expect(state.entries.find((entry) => entry.pullRequestNumber === 59)?.state).toBe("Active");
+  });
+
+  it("pauses the whole queue when an operator says so", async () => {
+    const e = env();
+    const routes = app();
+    await routes.request(
+      `/v1/queue/${REPO}/pause?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "investigating a bad merge" }),
+      },
+      e,
+    );
+    const verdict = await authorize(routes, e, 59);
+    expect(verdict.authorized).toBe(false);
+  });
+});
