@@ -61,6 +61,10 @@ export interface QueueSnapshot {
  */
 const TRANSITION_KIND: Record<string, string> = {
   verified: "Merged by the queue",
+  // A merge accepted on the proof already carried by the head, where the policy
+  // asked for nothing more. Named apart from a verified merge because the two
+  // make different claims about what was checked.
+  reused: "Merged on the head's own proof",
   override: "Merged with an override",
   external: "Moved outside the queue",
   genesis: "Queue opened here",
@@ -333,6 +337,7 @@ export function QueuePanel({
                   <th>Pull request</th>
                   <th>What happened</th>
                   <th>Commit</th>
+                  <th>Record</th>
                   <th>When</th>
                 </tr>
               </thead>
@@ -366,6 +371,22 @@ export function QueuePanel({
                           rel="noreferrer"
                         >
                           {t.baseSha.slice(0, 8)}
+                        </a>
+                      </td>
+                      <td>
+                        {/*
+                          The record behind the link. A link used to be the merge
+                          commit dressed up as a digest, so there was nothing to
+                          open; now it names signed bytes anyone can read.
+                        */}
+                        <a
+                          className="gp-mono"
+                          href={`/v1/queue/records/${t.digest}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="The signed record this link names"
+                        >
+                          {t.digest.replace(/^sha256:/, "").slice(0, 8)}
                         </a>
                       </td>
                       <td className="gp-panel__meta">{whenText(t.recordedAt)}</td>

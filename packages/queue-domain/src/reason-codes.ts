@@ -134,7 +134,13 @@ export const RECONCILING_RESOLUTIONS = [
 export type ReconcilingResolution = (typeof RECONCILING_RESOLUTIONS)[number];
 
 /** How a transition entered the canonical chain (plan.md §21.8, §24). */
-export const TRANSITION_KINDS = ["genesis", "verified", "override", "external"] as const;
+/**
+ * `reused` is a merge that rested on the proof already carried by the head. It
+ * is distinct from `verified` because a verified transition claims something ran
+ * against the integrated candidate, and under that profile nothing did. A reader
+ * auditing the chain has no other way to tell the two apart.
+ */
+export const TRANSITION_KINDS = ["genesis", "verified", "reused", "override", "external"] as const;
 
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
 

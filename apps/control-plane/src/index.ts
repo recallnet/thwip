@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
+import { CompactSign, SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
@@ -14,7 +14,7 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
-import { TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
+import { PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
@@ -1669,8 +1669,14 @@ app.route(
         }>();
       if (row === null) return null;
 
-      const bundle = JSON.parse(row.bundle) as { pipeline?: { requiredSuites?: string[] } };
+      const bundle = JSON.parse(row.bundle) as {
+        pipeline?: { requiredSuites?: string[]; digest?: string };
+      };
       const requiredSuites = bundle.pipeline?.requiredSuites ?? [];
+      // The pipeline the proof had to satisfy. A reuse record binds it, because
+      // it is half of what makes reusing that proof legitimate; the policy could
+      // otherwise change underneath a merge and the record would not show it.
+      const pipelineDigest = bundle.pipeline?.digest ?? null;
       // The verifier pin is reported separately from the policy. Folding a missing
       // pin into "no policy" would throw away the security profile, and a fast
       // repository with no verifier would then be told it needed an integrated run
@@ -1688,6 +1694,7 @@ app.route(
           : null;
       return {
         policyDigest: row.digest,
+        pipelineDigest,
         requiredSuites,
         securityProfile: row.profile,
         organizationId: row.org,
@@ -1790,6 +1797,43 @@ app.route(
         return;
       }
       await call("/check-runs", { method: "POST", body });
+    },
+    /**
+     * The App's proof check that verified this head.
+     *
+     * Read from what the App recorded rather than from GitHub: the row is the
+     * App's own account of the evaluation it ran, and it is the thing a reuse
+     * record cites. Only an accepted verification counts — citing a check that
+     * refused the proof would make the record say the opposite of what happened.
+     */
+    async proofCheckRunId(env: Env, repositoryId: string, headSha: string) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const res = await fetch(
+        `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        },
+      );
+      if (!res.ok) return null;
+      const body = (await res.json()) as { check_runs?: Array<{ id?: number; conclusion?: string }> };
+      // Only a check that passed. Citing one that refused the proof would make
+      // the record say the opposite of what happened.
+      const run = body.check_runs?.find((r) => r.conclusion === "success");
+      return run?.id === undefined ? null : String(run.id);
+    },
+    async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
+      const { key, kid } = await serviceKey(env);
+      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
     },
     async dispatchCandidateVerification(
       env: Env,

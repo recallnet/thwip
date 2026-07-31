@@ -70,9 +70,90 @@ function override(profile: keyof typeof OVERRIDE_OMISSIONS = "fresh", over: Reco
   };
 }
 
+/**
+ * The intent for a merge that rests on the proof already carried by the head.
+ *
+ * It exists for the same reason the reused-proof transition record does: a
+ * verified intent claims a verifier ran against the integrated candidate, and
+ * under this profile none did. Signing a verified intent anyway would put that
+ * claim under the queue's own signature.
+ */
+function reused(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const { evidence: _drop, ...rest } = verified();
+  return {
+    ...rest,
+    kind: "reused",
+    evidence: {
+      workReceiptDigest: D("1"),
+      pipelineDigest: D("6"),
+      requiredSuitesDigest: D("7"),
+      proofCheckRunId: "88991122",
+    },
+    ...over,
+  };
+}
+
 describe("parseMergeIntent", () => {
   it("accepts a well-formed verified intent", () => {
     expect(parseMergeIntent(verified())).toMatchObject({ ok: true });
+  });
+
+  describe("a merge that reused the head's proof", () => {
+    it("accepts a well-formed reused intent", () => {
+      expect(parseMergeIntent(reused())).toMatchObject({ ok: true });
+    });
+
+    it("binds the proof and the equivalence the reuse rests on", () => {
+      const parsed = parseMergeIntent(reused());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "reused") throw new Error("wrong kind");
+      expect(parsed.value.evidence.workReceiptDigest).toBe(D("1"));
+      expect(parsed.value.evidence.pipelineDigest).toBe(D("6"));
+      expect(parsed.value.evidence.requiredSuitesDigest).toBe(D("7"));
+      expect(parsed.value.evidence.proofCheckRunId).toBe("88991122");
+    });
+
+    it("refuses a verifier result, because nothing ran to produce one", () => {
+      const lying = reused({
+        evidence: {
+          workReceiptDigest: D("1"),
+          pipelineDigest: D("6"),
+          requiredSuitesDigest: D("7"),
+          proofCheckRunId: "88991122",
+          verifierResultDigest: D("9"),
+        },
+      });
+      expect(parseMergeIntent(lying)).toMatchObject({ ok: false });
+    });
+
+    /** Nothing was dispatched, so there is no assignment to name. */
+    it("refuses an assignment, because nothing was assigned", () => {
+      const lying = reused({
+        evidence: {
+          workReceiptDigest: D("1"),
+          assignmentDigest: D("2"),
+          pipelineDigest: D("6"),
+          requiredSuitesDigest: D("7"),
+          proofCheckRunId: "88991122",
+        },
+      });
+      expect(parseMergeIntent(lying)).toMatchObject({ ok: false });
+    });
+
+    it("refuses an override authorization", () => {
+      const smuggled = reused({
+        override: { actorGithubId: "1", reason: "x", omission: { profile: "fast", omittedControls: [] } },
+      });
+      expect(parseMergeIntent(smuggled)).toMatchObject({ ok: false });
+    });
+
+    it("still holds the candidate to the thing being merged", () => {
+      const inconsistent = reused({ git: git({ candidateSha: "9".repeat(40) }), mergeMethod: "merge" });
+      const parsed = parseMergeIntent(inconsistent);
+      // Whatever the base rules say about candidate consistency, the reused kind
+      // is subject to them exactly as the verified kind is.
+      expect(parsed.ok).toBe(parseMergeIntent(verified({ git: git({ candidateSha: "9".repeat(40) }) })).ok);
+    });
   });
 
   it("accepts a well-formed override for every profile", () => {
