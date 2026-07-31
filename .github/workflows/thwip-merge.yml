@@ -43,8 +43,6 @@ permissions:
   # To read the candidate verdict the verifier published on this head, rather
   # than asking the control plane for it.
   checks: read
-  # To re-run the required check once this pull request has the turn. See below.
-  actions: write
   id-token: write
 
 jobs:
@@ -142,35 +140,6 @@ jobs:
           fi
           if [ "$authorized" != "true" ] || [ -z "$op" ]; then
             echo "queue did not authorize a merge: $(printf '%s' "$abody" | jq -r .reason)"; exit 0
-          fi
-
-          # The required check has to be green before GitHub will merge, and it
-          # goes red for every pull request that asks while somebody else has the
-          # turn. So the holder usually arrives here carrying a red check from
-          # back when it was waiting, and GitHub answers 405.
-          #
-          # Merging anyway and reporting the refusal released the lane, which
-          # offered the turn to the next pull request, which arrived with its own
-          # stale red check. The queue rotated the lane between pull requests that
-          # each had the turn for a moment and none of which could take it.
-          #
-          # So the check is re-run first and this exits holding the turn. The
-          # fresh run asks the queue, is told it holds the lane, goes green, and
-          # triggers this workflow again through workflow_run. Nothing here loops:
-          # one re-run per invocation, and a check that keeps failing is bounded
-          # by the turn's own execution deadline.
-          concl=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
-            --jq '[.check_runs[] | select(.name == "thwip")][0].conclusion // empty' || true)
-          if [ -n "$concl" ] && [ "$concl" != "success" ]; then
-            run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name == "thwip")][0].details_url // empty' \
-              | sed 's#.*/runs/\([0-9]*\)/.*#\1#')
-            if [ -n "$run" ]; then
-              echo "required check is $concl from an earlier turn; re-running $run and keeping the lane"
-              gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/rerun-failed-jobs" >/dev/null 2>&1 \
-                || gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/rerun" >/dev/null 2>&1 || true
-              exit 0
-            fi
           fi
 
           # printf, so the trailer's blank line never appears literally in YAML.
