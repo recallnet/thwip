@@ -27,6 +27,7 @@ import { planQueueCommand } from "./queue-commands.js";
 import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "./ship-io.js";
 import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
+import { executeCli, type CommandInvocation } from "./cli-args.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -381,55 +382,6 @@ async function cmdInit(argv: string[]): Promise<number> {
   return 0;
 }
 
-const HELP = `thwip — verified local CI (https://thwip.recall.net)
-
-Run CI where the code lives, sign a proof of the exact Git tree, and let a
-protected GitHub check verify it. Configuration lives in thwip.yaml.
-
-USAGE
-  thwip <command> [options]
-
-COMMANDS
-  login                     Sign in via device code. Prints a URL to click
-                            (works over SSH; the browser opens on the
-                            human's machine, code is prefilled).
-  ship [--wait]            Run the suites, sign a proof, push, open or update
-       [--no-queue]        the pull request, and take a fair queue turn.
-       [--json-events]     --wait follows it through to the merge; Ctrl-C
-                           detaches safely and keeps your place in line.
-  queue explain            Why the queue is doing what it is doing: lane holder,
-                           what each entry waits on, deadlines, recent events.
-  queue <status|list|join|leave|pause|resume|rebaseline|eject|bypass
-         |reconcile|doctor>
-                           Read or operate the branch queue. Mutations need
-                           --reason; bypass needs --confirm owner/name#pr.
-  init --required "a,b,.."  Write thwip.yaml for this repository. Suite ids
-       [--profile fast]     name package.json scripts; profile is one of
-       [--sign-commits]     fast | fresh | audited | remote (see /faq).
-                            --sign-commits also makes git sign commits with
-                            the enrolled thwip key.
-  keys status               Show which key would sign here and whether GitHub
-                            lists it as a signing key for your account.
-  setup                     Print the agent prompt for preparing a machine
-                            (install, sign in, register a signing key).
-  run [--base origin/main]  Run the approved suites against the committed
-                            tree and attach a signed proof to HEAD.
-                            Refuses dirty trees; exit 1 and no proof if any
-                            suite fails or the tree changes mid-run.
-  verify [--json]           Parse and print the proof on HEAD.
-  policy digest             Print the policy/pipeline digests for HEAD.
-
-EXAMPLES
-  thwip login
-  thwip keys enroll --public-key ~/.config/thwip/keys/laptop.pub --label laptop
-  thwip init --required "lint,typecheck,test"
-  thwip run && git push
-
-EXIT CODES
-  0 success · 1 failure (reason printed to stderr; verification reasons use
-  stable codes such as PROOF_MISSING or SUBJECT_TREE_MISMATCH)
-`;
-
 /**
  * `thwip ship`. The loop and every decision it makes are tested in ship.ts and
  * ship-io.ts; this supplies only the ports that touch git, gh, and the queue.
@@ -653,29 +605,36 @@ async function cmdQueue(argv: string[]): Promise<number> {
   return res.ok ? 0 : res.status === 403 ? EXIT.permission : EXIT.unavailable;
 }
 
+async function dispatchCli(invocation: CommandInvocation): Promise<number> {
+  switch (invocation.command) {
+    case "run":
+      return cmdRun([...invocation.argv]);
+    case "ship":
+      return cmdShip([...invocation.argv]);
+    case "queue":
+      return cmdQueue([...invocation.argv]);
+    case "login":
+      return cmdLogin([...invocation.argv]);
+    case "init":
+      return cmdInit([...invocation.argv]);
+    case "verify":
+      return cmdVerifyLocal();
+    case "keys-status":
+      return cmdKeysStatus();
+    case "setup":
+      process.stdout.write(developerSetupPrompt() + "\n");
+      return 0;
+    case "policy-digest":
+      return cmdPolicyDigest();
+  }
+}
+
 async function main(): Promise<void> {
-  const [, , cmd, sub, ...rest] = process.argv;
-  let code = 1;
-  if (cmd === "run") code = await cmdRun([sub ?? "", ...rest]);
-  else if (cmd === "ship") code = await cmdShip([sub ?? "", ...rest].filter((a) => a !== ""));
-  else if (cmd === "queue") code = await cmdQueue([sub ?? "", ...rest].filter((a) => a !== ""));
-  else if (cmd === "login") code = await cmdLogin([sub ?? "", ...rest]);
-  else if (cmd === "init") code = await cmdInit([sub ?? "", ...rest]);
-  else if (cmd === "--help" || cmd === "-h" || cmd === "help" || cmd === undefined) {
-    process.stdout.write(HELP);
-    code = 0;
-  }
-  else if (cmd === "verify") code = await cmdVerifyLocal();
-  else if (cmd === "keys" && (sub === "status" || sub === undefined)) code = await cmdKeysStatus();
-  else if (cmd === "setup") {
-    // Printed for agents: the human-guided machine setup, verbatim.
-    process.stdout.write(developerSetupPrompt() + "\n");
-    code = 0;
-  }
-  else if (cmd === "policy" && sub === "digest") code = await cmdPolicyDigest();
-  else {
-    process.stderr.write("usage: thwip <login|ship|queue|run|verify|policy digest|keys status> [options]\n");
-  }
+  const code = await executeCli(process.argv.slice(2), {
+    dispatch: dispatchCli,
+    stdout: (text) => process.stdout.write(text),
+    stderr: (text) => process.stderr.write(text),
+  });
   process.exit(code);
 }
 
