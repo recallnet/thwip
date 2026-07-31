@@ -73,10 +73,12 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH] [--epoch N]\n` +
     `       thwip verify-chain --repository-id ID [--branch BRANCH] [--epoch N]\n\n` +
     `Fetch a branch's merge chain and thwip's published keys, then verify it.\n` +
-    `No thwip account is required. --repo is resolved through GitHub's public\n` +
-    `API; pass --repository-id instead for a private repository or when GitHub\n` +
-    `is rate limiting. --epoch pins where signature checking starts instead of\n` +
-    `trusting the value the server reports.\n`,
+    `No thwip account is required for a repository whose chain is published.\n` +
+    `A chain that is not published returns 401 and cannot be read this way,\n` +
+    `with or without --repository-id. --repo is resolved through GitHub's\n` +
+    `public API; pass --repository-id instead when GitHub is rate limiting.\n` +
+    `--epoch pins where signature checking starts instead of trusting the\n` +
+    `value the server reports.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,
   setup: `Usage: thwip setup\n\nPrint the human-guided machine setup prompt.\n`,

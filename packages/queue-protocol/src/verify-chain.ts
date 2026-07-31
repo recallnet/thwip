@@ -62,11 +62,27 @@ export interface ChainVerifierPorts {
   subject?: { readonly repositoryId: string; readonly baseRef: string };
 }
 
+/**
+ * What `verifyChain` learned about a chain: the findings, and how many
+ * signatures were actually checked. `signaturesChecked` exists because
+ * `epochStartsAt` decides which links get their signature checked at all —
+ * an untrusted, too-large `epochStartsAt` makes every readable link skip
+ * verification, and that skip produces no finding on its own. A caller that
+ * only looked at `findings` being empty would report a clean chain having
+ * checked nothing. Returning the count forces every caller to say what it
+ * actually checked, not just what it failed to complain about.
+ */
+export interface ChainVerification {
+  readonly findings: readonly ChainFinding[];
+  readonly signaturesChecked: number;
+}
+
 export async function verifyChain(
   links: readonly ChainLink[],
   ports: ChainVerifierPorts,
-): Promise<readonly ChainFinding[]> {
+): Promise<ChainVerification> {
   const findings: ChainFinding[] = [];
+  let signaturesChecked = 0;
   let previous: { digest: string; sequence: number | null } | null = null;
 
   for (const link of links) {
@@ -95,6 +111,7 @@ export async function verifyChain(
 
     const parsed = await inspect(link, ports);
     findings.push(...parsed.findings);
+    if (parsed.signatureChecked) signaturesChecked++;
 
     if (previous !== null && parsed.readable) {
       if (parsed.previousDigest !== previous.digest) {
@@ -117,13 +134,19 @@ export async function verifyChain(
     previous = { digest: link.digest, sequence: parsed.sequence };
   }
 
-  return findings;
+  return { findings, signaturesChecked };
 }
 
 async function inspect(
   link: ChainLink,
   ports: ChainVerifierPorts,
-): Promise<{ readable: boolean; sequence: number | null; previousDigest: string | null; findings: ChainFinding[] }> {
+): Promise<{
+  readable: boolean;
+  sequence: number | null;
+  previousDigest: string | null;
+  signatureChecked: boolean;
+  findings: ChainFinding[];
+}> {
   const findings: ChainFinding[] = [];
   const actual = await envelopeDigest(link.bytes);
   if (actual !== link.digest) {
@@ -140,13 +163,13 @@ async function inspect(
     value = JSON.parse(new TextDecoder().decode(link.bytes));
   } catch {
     findings.push({ code: "UNPARSEABLE", sequence: null, digest: link.digest, detail: "not JSON" });
-    return { readable: false, sequence: null, previousDigest: null, findings };
+    return { readable: false, sequence: null, previousDigest: null, signatureChecked: false, findings };
   }
 
   const record = parseTransitionRecord(value);
   if (!record.ok) {
     findings.push({ code: "UNPARSEABLE", sequence: null, digest: link.digest, detail: record.detail });
-    return { readable: false, sequence: null, previousDigest: null, findings };
+    return { readable: false, sequence: null, previousDigest: null, signatureChecked: false, findings };
   }
 
   if (
@@ -161,7 +184,9 @@ async function inspect(
     });
   }
 
+  let signatureChecked = false;
   if (record.value.transitionSequence >= ports.epochStartsAt) {
+    signatureChecked = true;
     const signed = await ports.verifySignature(link.jws, link.bytes);
     if (!signed) {
       findings.push({
@@ -177,6 +202,7 @@ async function inspect(
     readable: true,
     sequence: record.value.transitionSequence,
     previousDigest: record.value.previousTransitionDigest,
+    signatureChecked,
     findings,
   };
 }
