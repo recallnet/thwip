@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { publicJwkFrom } from "./service-keys.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { publicJwkFrom, recordActiveKey, verificationKeys } from "./service-keys.js";
+import { testD1 } from "../test/d1.js";
+import type { D1Like } from "./queue/projection.js";
 
 /**
  * A signature nobody else can check is decoration. This turns the private key
@@ -32,5 +34,44 @@ describe("the public half of the signing key", () => {
   it("refuses a key with no id, because a verifier selects by id", () => {
     const { kid: _drop, ...anonymous } = privateJwk;
     expect(() => publicJwkFrom(anonymous)).toThrow(/kid/i);
+  });
+});
+
+describe("the keys a reader can verify with", () => {
+  const open: Array<{ close(): void }> = [];
+  afterEach(() => {
+    while (open.length > 0) open.pop()!.close();
+  });
+  function db(): D1Like {
+    const t = testD1();
+    open.push(t);
+    return t.db as unknown as D1Like;
+  }
+
+  const key = (kid: string) => ({ kty: "EC", crv: "P-256", x: "a", y: "b", d: "secret", kid });
+
+  it("publishes the active key", async () => {
+    const store = db();
+    await recordActiveKey(store, key("thwip-svc-1"));
+    const keys = await verificationKeys(store);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatchObject({ kid: "thwip-svc-1", use: "sig" });
+    expect(keys[0]).not.toHaveProperty("d");
+  });
+
+  it("records the same key twice without duplicating it", async () => {
+    const store = db();
+    await recordActiveKey(store, key("thwip-svc-1"));
+    await recordActiveKey(store, key("thwip-svc-1"));
+    expect(await verificationKeys(store)).toHaveLength(1);
+  });
+
+  /** The point of the table: a rotation must not orphan what the old key signed. */
+  it("keeps a retired key alongside the new one", async () => {
+    const store = db();
+    await recordActiveKey(store, key("thwip-svc-1"));
+    await recordActiveKey(store, key("thwip-svc-2"));
+    const kids = (await verificationKeys(store)).map((k) => k.kid).sort();
+    expect(kids).toEqual(["thwip-svc-1", "thwip-svc-2"]);
   });
 });

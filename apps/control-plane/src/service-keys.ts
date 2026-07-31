@@ -1,4 +1,5 @@
 import type { JWK } from "jose";
+import type { D1Like } from "./queue/projection.js";
 
 /**
  * The public half of a signing key, for anyone verifying a record.
@@ -17,4 +18,25 @@ export function publicJwkFrom(jwk: JWK): JWK {
   }
   const { d: _private, ...rest } = jwk as JWK & { d?: string };
   return { ...rest, use: "sig", alg: "ES256" };
+}
+
+/**
+ * Remember the key the service is signing with.
+ *
+ * Called on the paths that sign, so a key that has ever produced a signature is
+ * always publishable. Writing on conflict does nothing: the row is the public
+ * half and it never changes for a given id.
+ */
+export async function recordActiveKey(db: D1Like, jwk: JWK): Promise<void> {
+  const pub = publicJwkFrom(jwk);
+  await db
+    .prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?) ON CONFLICT(kid) DO NOTHING")
+    .bind(pub.kid, JSON.stringify(pub))
+    .run();
+}
+
+/** Every key a reader may need, active and retired alike. */
+export async function verificationKeys(db: D1Like): Promise<JWK[]> {
+  const rows = await db.prepare("SELECT public_jwk FROM service_keys ORDER BY created_at").bind().all<{ public_jwk: string }>();
+  return rows.results.map((r) => JSON.parse(r.public_jwk) as JWK);
 }
