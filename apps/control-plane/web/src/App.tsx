@@ -583,6 +583,7 @@ interface ProjectRow {
   github_name: string;
   default_branch: string;
   enabled: number;
+  activation_state: "disabled" | "awaiting_first_merge" | "active";
   active_policy_digest: string | null;
   policy_version: number | null;
   policy_profile: string | null;
@@ -647,7 +648,15 @@ function Projects({ me }: { me: Me }) {
                   <a href={`/dashboard/projects/${p.id}/access`}>{p.collaborators} with access</a> · {p.default_branch}
                 </div>
               </td>
-              <td>{p.enabled ? <span className="gp-chip is-active">enabled</span> : <span className="gp-chip">imported</span>}</td>
+              <td>
+                {p.activation_state === "active" ? (
+                  <span className="gp-chip is-active">enabled · active</span>
+                ) : p.activation_state === "awaiting_first_merge" ? (
+                  <span className="gp-chip is-active">enabled · awaiting first merge</span>
+                ) : (
+                  <span className="gp-chip">imported · disabled</span>
+                )}
+              </td>
               <td title={p.active_policy_digest ?? undefined}>
                 {p.policy_version ? (
                   <>
@@ -655,12 +664,22 @@ function Projects({ me }: { me: Me }) {
                     <div className="gp-panel__meta">from thwip.yaml</div>
                   </>
                 ) : (
-                  <span className="gp-panel__meta">none activated</span>
+                  <span className="gp-panel__meta">
+                    {p.activation_state === "awaiting_first_merge"
+                      ? `activates from canonical ${p.default_branch}`
+                      : "none activated"}
+                  </span>
                 )}
               </td>
               <td>
                 {p.last_outcome ? (
-                  <span className={p.last_outcome === "PASS" ? "ok" : "bad"}>{p.last_outcome}</span>
+                  <span
+                    className={
+                      p.last_outcome === "PASS" ? "ok" : p.last_outcome === "BOOTSTRAP_PENDING" ? undefined : "bad"
+                    }
+                  >
+                    {p.last_outcome}
+                  </span>
                 ) : (
                   <span className="gp-panel__meta">—</span>
                 )}

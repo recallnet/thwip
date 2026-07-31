@@ -16,6 +16,17 @@ use thwip.
 - Design: `plan.md`
 - Deviations from the plan taken for the v1 vertical slice: `DEVIATIONS.md`
 
+## First policy activation
+
+An enabled repository with no active policy reports `BOOTSTRAP_PENDING` as a
+successful, explicit onboarding check. That result does not approve the
+candidate policy or its proof; it only avoids deadlocking the native merge
+queue before a policy exists. After the onboarding pull request lands, the
+control plane derives the policy from the exact current default-branch tree,
+stores its canonical bundle and digest, and activates it. Later policy changes
+remain governed by the existing active policy until their protected merge
+lands.
+
 ## Contributing (this repo eats its own dogfood)
 
 ```sh

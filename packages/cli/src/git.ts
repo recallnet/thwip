@@ -8,6 +8,16 @@ export async function git(args: string[], cwd: string): Promise<string> {
   return stdout.trimEnd();
 }
 
+/** Read exact bytes from git, for content-addressed policy material. */
+export async function gitBytes(args: string[], cwd: string): Promise<Uint8Array> {
+  const result = (await execFileP("git", args, {
+    cwd,
+    maxBuffer: 64 * 1024 * 1024,
+    encoding: "buffer",
+  })) as unknown as { stdout: Buffer };
+  return new Uint8Array(result.stdout);
+}
+
 export interface GitSubject {
   headSha: string;
   treeOid: string;
