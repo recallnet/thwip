@@ -20,6 +20,7 @@ import {
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
+import { workReceiptDigestFrom } from "./work-receipt.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
@@ -388,7 +389,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     sha: string,
-  ): Promise<{ treeOid: string; parentShas: string[] } | null>;
+  ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
 
@@ -1187,6 +1188,32 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       }
 
       if (holder !== undefined && holder.state === "Active") {
+        // The proof the developer signed, by its own digest.
+        //
+        // This was `sha256:2222…2222`, a constant, so everything downstream that
+        // cited a work receipt cited nothing. The proof is on the head commit and
+        // the required check has already verified it, so the evidence exists; it
+        // was never carried this far.
+        //
+        // No digest means no receipt, and the merge stops. Falling back to a
+        // placeholder is how an empty claim ends up inside a record that reads as
+        // evidence, and this is the path that record is built from.
+        const head = await deps.commitFacts(c.env, repositoryId, headSha);
+        const workReceiptDigest =
+          head?.message === undefined ? null : await workReceiptDigestFrom(head.message);
+        if (workReceiptDigest === null) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: "WORK_RECEIPT_UNREADABLE",
+            detail:
+              "the head commit carries no readable thwip proof, so there is nothing for the merge record to cite",
+            entryId,
+            operationId: null,
+          });
+        }
+
         // Hoisted out of the closure: narrowing a property survives a const
         // binding but not a function boundary.
         const baseSha = cand.baseSha;
@@ -1210,7 +1237,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             policyDigest: candidatePolicyDigest,
             runner: needsIntegratedRun ? "verified-candidate" : "reuse",
             assignmentDigest: `sha256:${"1".repeat(64)}`,
-            receiptDigest: body.workReceiptDigest ?? `sha256:${"2".repeat(64)}`,
+            receiptDigest: workReceiptDigest,
             verifierResultDigest: verifiedResultDigest,
             intentDigest: `sha256:${"4".repeat(64)}`,
             operationId: `merge_${attemptId}`,

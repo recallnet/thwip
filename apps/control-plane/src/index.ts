@@ -1620,10 +1620,18 @@ app.route(
         },
       });
       if (!res.ok) return null;
-      const commit = (await res.json()) as { tree?: { sha?: string }; parents?: Array<{ sha?: string }> };
+      const commit = (await res.json()) as {
+        tree?: { sha?: string };
+        parents?: Array<{ sha?: string }>;
+        message?: string;
+      };
       const treeOid = commit.tree?.sha;
       if (typeof treeOid !== "string") return null;
       return {
+        // The message carries the proof trailer, which is where the work receipt
+        // digest comes from. Reading it here costs nothing extra: the commit has
+        // already been fetched.
+        message: typeof commit.message === "string" ? commit.message : "",
         treeOid,
         parentShas: (commit.parents ?? []).map((p) => p.sha).filter((v): v is string => typeof v === "string"),
       };
