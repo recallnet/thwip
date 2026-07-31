@@ -446,9 +446,17 @@ describe("reducer", () => {
     it("resolves an unknown outcome to a confirmed non-merge", () => {
       let state = applyEvents(base(), happyPath().slice(0, 12));
       state = applyEvent(state, ev({ type: "MergeOutcomeUnknown", attemptId: "a1" }));
-      state = applyEvent(state, ev({ type: "MergeConfirmedNotMerged", attemptId: "a1" }));
+      state = applyEvent(
+        state,
+        ev({ type: "MergeConfirmedNotMerged", attemptId: "a1", cooldownUntil: "2026-07-29T12:30:00Z" }),
+      );
       expect(state.attempts.get("a1")!.outcome).toBe("CONFIRMED_NOT_MERGED");
-      expect(state.entries.get("e1")!.state).toBe("Ready");
+      // Deferred rather than Ready: whatever refused this merge is usually still
+      // true a second later, so handing the lane straight back would let the queue
+      // refuse the same merge over and over while everything behind it waited. The
+      // place in line is kept.
+      expect(state.entries.get("e1")!.state).toBe("Deferred");
+      expect(state.entries.get("e1")!.cooldownUntil).toBe("2026-07-29T12:30:00Z");
       expect(state.activeAttemptId).toBeNull();
     });
 

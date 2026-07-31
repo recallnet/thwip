@@ -120,7 +120,12 @@ export type QueueEvent = EventEnvelope &
         readonly mergeTree: string;
         readonly parentShas: readonly string[];
       }
-    | { readonly type: "MergeConfirmedNotMerged"; readonly attemptId: string }
+    | {
+        readonly type: "MergeConfirmedNotMerged";
+        readonly attemptId: string;
+        /** The turn is spent even though nothing merged; the place in line is not. */
+        readonly cooldownUntil: string;
+      }
     | {
         readonly type: "AttemptTerminated";
         readonly attemptId: string;

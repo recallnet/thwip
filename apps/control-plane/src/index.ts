@@ -14,6 +14,7 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
+import { TURN_CHECK, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
 import {
   appProofTaskFromWebhook,
@@ -1693,6 +1694,65 @@ app.route(
         body: JSON.stringify({
           event_type: "thwip-queue-turn",
           client_payload: { pullRequestNumber },
+        }),
+      });
+    },
+    /**
+     * Publish whose turn it is, as a check GitHub can require.
+     *
+     * Waiting is reported as still running rather than failed. A required check
+     * that has failed goes on refusing the merge until something re-runs it, so
+     * reporting "not your turn" as a failure meant GitHub kept refusing after the
+     * queue had authorized, and the queue offered the same turn to a pull request
+     * that could not take it.
+     */
+    async publishTurnCheck(env: Env, repositoryId: string, update: TurnCheckUpdate) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return;
+      const token = await installationToken(env, project.installation_id);
+
+      const said =
+        update.state === "holds"
+          ? {
+              status: "completed" as const,
+              conclusion: "success" as const,
+              title: "It is this pull request's turn",
+              summary:
+                "Thwip Queue has offered this pull request the lane. The merge may proceed while it holds it.",
+            }
+          : update.state === "halted"
+            ? {
+                status: "in_progress" as const,
+                title: "The queue is paused",
+                summary:
+                  "Thwip Queue is not offering turns. An administrator paused it, or the base branch moved outside the queue and a rebaseline is pending.",
+              }
+            : {
+                status: "in_progress" as const,
+                title: `Waiting for a turn, behind ${update.waiting - 1} other pull request${update.waiting === 2 ? "" : "s"}`,
+                summary:
+                  "Thwip Queue merges one pull request at a time onto this branch. This check completes when it is this pull request's turn; nothing is wrong with it.",
+              };
+
+      await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "thwip-control-plane",
+        },
+        body: JSON.stringify({
+          name: TURN_CHECK,
+          head_sha: update.headSha,
+          status: said.status,
+          ...("conclusion" in said ? { conclusion: said.conclusion } : {}),
+          details_url: `${env.PUBLIC_ORIGIN}/projects`,
+          output: { title: said.title, summary: said.summary },
         }),
       });
     },
