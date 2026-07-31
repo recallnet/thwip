@@ -12,6 +12,8 @@ import {
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
+import { readActivePolicy } from "./active-policy.js";
+import type { D1Like } from "./queue/projection.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
 import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
@@ -1651,55 +1653,7 @@ app.route(
      * the suite list a verdict is judged against is the one the project activated.
      */
     async activePolicy(env: Env, repositoryId: string) {
-      const row = await env.DB.prepare(
-        `SELECT p.active_policy_digest AS digest, p.security_profile AS profile,
-                p.organization_id AS org, b.canonical_json AS bundle, q.verifier_json AS verifier
-           FROM projects p
-           JOIN policy_bundles b ON b.digest = p.active_policy_digest
-           LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
-          WHERE p.github_repository_id = ?`,
-      )
-        .bind(repositoryId)
-        .first<{
-          digest: string;
-          profile: string;
-          org: string;
-          bundle: string;
-          verifier: string | null;
-        }>();
-      if (row === null) return null;
-
-      const bundle = JSON.parse(row.bundle) as {
-        pipeline?: { requiredSuites?: string[]; digest?: string };
-      };
-      const requiredSuites = bundle.pipeline?.requiredSuites ?? [];
-      // The pipeline the proof had to satisfy. A reuse record binds it, because
-      // it is half of what makes reusing that proof legitimate; the policy could
-      // otherwise change underneath a merge and the record would not show it.
-      const pipelineDigest = bundle.pipeline?.digest ?? null;
-      // The verifier pin is reported separately from the policy. Folding a missing
-      // pin into "no policy" would throw away the security profile, and a fast
-      // repository with no verifier would then be told it needed an integrated run
-      // that its policy never asked for.
-      const raw = row.verifier === null ? null : (JSON.parse(row.verifier) as Record<string, unknown>);
-      // workflowSha may be null: that pins the workflow's path on the default
-      // branch and accepts any revision of it, which is what a repository that
-      // merges often can actually keep current.
-      const verifier =
-        typeof raw?.["workflowRef"] === "string"
-          ? {
-              workflowRef: raw["workflowRef"],
-              workflowSha: typeof raw["workflowSha"] === "string" ? raw["workflowSha"] : null,
-            }
-          : null;
-      return {
-        policyDigest: row.digest,
-        pipelineDigest,
-        requiredSuites,
-        securityProfile: row.profile,
-        organizationId: row.org,
-        verifier,
-      };
+      return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
     },
     /**
      * Ask GitHub to run the merge workflow for a pull request the queue offered.
@@ -1728,6 +1682,43 @@ app.route(
           client_payload: { pullRequestNumber },
         }),
       });
+    },
+    /**
+     * The App's proof check that verified this head.
+     *
+     * Read from what the App recorded rather than from GitHub: the row is the
+     * App's own account of the evaluation it ran, and it is the thing a reuse
+     * record cites. Only an accepted verification counts — citing a check that
+     * refused the proof would make the record say the opposite of what happened.
+     */
+    async proofCheckRunId(env: Env, repositoryId: string, headSha: string) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const res = await fetch(
+        `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        },
+      );
+      if (!res.ok) return null;
+      const body = (await res.json()) as { check_runs?: Array<{ id?: number; conclusion?: string }> };
+      // Only a check that passed. Citing one that refused the proof would make
+      // the record say the opposite of what happened.
+      const run = body.check_runs?.find((r) => r.conclusion === "success");
+      return run?.id === undefined ? null : String(run.id);
+    },
+    async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
+      const { key, kid } = await serviceKey(env);
+      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
     },
     /**
      * Publish whose turn it is, as a check GitHub can require.
@@ -1797,43 +1788,6 @@ app.route(
         return;
       }
       await call("/check-runs", { method: "POST", body });
-    },
-    /**
-     * The App's proof check that verified this head.
-     *
-     * Read from what the App recorded rather than from GitHub: the row is the
-     * App's own account of the evaluation it ran, and it is the thing a reuse
-     * record cites. Only an accepted verification counts — citing a check that
-     * refused the proof would make the record say the opposite of what happened.
-     */
-    async proofCheckRunId(env: Env, repositoryId: string, headSha: string) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const res = await fetch(
-        `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
-        },
-      );
-      if (!res.ok) return null;
-      const body = (await res.json()) as { check_runs?: Array<{ id?: number; conclusion?: string }> };
-      // Only a check that passed. Citing one that refused the proof would make
-      // the record say the opposite of what happened.
-      const run = body.check_runs?.find((r) => r.conclusion === "success");
-      return run?.id === undefined ? null : String(run.id);
-    },
-    async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
-      const { key, kid } = await serviceKey(env);
-      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
     },
     /**
      * The candidate verdict, as a check on the pull request head.
