@@ -1,8 +1,5 @@
-import Database from "better-sqlite3";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 
 /**
@@ -17,45 +14,13 @@ import { queueRoutes, type QueueRouteEnv } from "./routes.js";
  */
 
 const open: Array<{ close(): void }> = [];
-let raw: Database.Database;
+let raw: import("better-sqlite3").Database;
 
 function env(): QueueRouteEnv {
-  const db = new Database(":memory:");
-  open.push(db);
-  raw = db;
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
-  for (const file of readdirSync(dir).sort()) {
-    if (!file.endsWith(".sql")) continue;
-    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
-      const sql = statement
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("--"))
-        .join("\n")
-        .trim();
-      if (sql.length === 0) continue;
-      try {
-        db.exec(sql);
-      } catch {
-        /* migrations altering tables this test does not use */
-      }
-    }
-  }
-  const d1 = {
-    prepare: (query: string) => ({
-      bind: (...values: unknown[]) => ({
-        run: async () => {
-          const info = db.prepare(query).run(...(values as never[]));
-          return { meta: { changes: info.changes } };
-        },
-        first: async <T,>() => (db.prepare(query).get(...(values as never[])) ?? null) as T | null,
-        all: async <T,>() => ({ results: db.prepare(query).all(...(values as never[])) as T[] }),
-      }),
-    }),
-    batch: async (statements: Array<{ run(): Promise<unknown> }>) => {
-      for (const s of statements) await s.run();
-    },
-  };
-  return { DB: d1, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
+  const t = testD1();
+  open.push(t);
+  raw = t.raw;
+  return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
 afterEach(() => {

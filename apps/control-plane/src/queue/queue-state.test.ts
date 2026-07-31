@@ -1,8 +1,5 @@
-import Database from "better-sqlite3";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
@@ -19,27 +16,9 @@ import type { SubmittedEvent } from "./store.js";
 const open: Array<{ close(): void }> = [];
 
 function d1(): D1Like {
-  const db = new Database(":memory:");
-  open.push(db);
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
-  db.exec(readFileSync(join(dir, "0011_queue_state_in_d1.sql"), "utf8"));
-
-  return {
-    prepare: (query: string) => ({
-      bind: (...values: unknown[]) => ({
-        async run() {
-          const info = db.prepare(query).run(...(values as never[]));
-          return { meta: { changes: info.changes } };
-        },
-        async first<T>() {
-          return (db.prepare(query).get(...(values as never[])) ?? null) as T | null;
-        },
-        async all<T>() {
-          return { results: db.prepare(query).all(...(values as never[])) as T[] };
-        },
-      }),
-    }),
-  } as unknown as D1Like;
+  const t = testD1();
+  open.push(t);
+  return t.db;
 }
 
 afterEach(() => {
