@@ -1,0 +1,42 @@
+import type { JWK } from "jose";
+import type { D1Like } from "./queue/projection.js";
+
+/**
+ * The public half of a signing key, for anyone verifying a record.
+ *
+ * Every signed record the queue produces carries a JWS, and until this existed
+ * the only party able to check one was the party that made it. A signature only
+ * its author can verify proves nothing to a reader.
+ *
+ * The private scalar is dropped explicitly rather than by picking fields off a
+ * spread, because a future key type with a different private field would
+ * otherwise be published whole.
+ */
+export function publicJwkFrom(jwk: JWK): JWK {
+  if (typeof jwk.kid !== "string" || jwk.kid.length === 0) {
+    throw new Error("a signing key needs a kid; verifiers select the key by id");
+  }
+  const { d: _private, ...rest } = jwk;
+  return { ...rest, use: "sig", alg: "ES256" };
+}
+
+/**
+ * Remember the key the service is signing with.
+ *
+ * Called on the paths that sign, so a key that has ever produced a signature is
+ * always publishable. Writing on conflict does nothing: the row is the public
+ * half and it never changes for a given id.
+ */
+export async function recordActiveKey(db: D1Like, jwk: JWK): Promise<void> {
+  const pub = publicJwkFrom(jwk);
+  await db
+    .prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?) ON CONFLICT(kid) DO NOTHING")
+    .bind(pub.kid, JSON.stringify(pub))
+    .run();
+}
+
+/** Every key a reader may need, active and retired alike. */
+export async function verificationKeys(db: D1Like): Promise<JWK[]> {
+  const rows = await db.prepare("SELECT public_jwk FROM service_keys ORDER BY created_at").bind().all<{ public_jwk: string }>();
+  return rows.results.map((r) => JSON.parse(r.public_jwk) as JWK);
+}

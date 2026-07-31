@@ -29,6 +29,8 @@ import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "
 import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 import { executeCli, type CommandInvocation } from "./cli-args.js";
+import { cmdVerifyChain } from "./verify-chain.js";
+import { flag } from "./cli-flags.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -74,12 +76,6 @@ async function resolveGithubIdentity(config: CliConfig): Promise<{ login: string
     "cannot determine your GitHub identity; sign in with 'gh auth login' or set githubLogin in ~/.config/thwip/config.json",
   );
 }
-
-function flag(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(name);
-  return i >= 0 ? argv[i + 1] : undefined;
-}
-
 
 /**
  * The key must be one GitHub already lists as a signing key for this user —
@@ -585,6 +581,16 @@ async function run(cmd: string, args: string[], cwd: string): Promise<string> {
   return stdout;
 }
 
+/** Resolve `owner/name` to the numeric GitHub repository id thwip tracks. */
+async function resolveRepositoryId(endpoint: string, auth: string, repo: string): Promise<string | null> {
+  const resolved = await fetch(endpoint + "/v1/resolve-repo?name=" + encodeURIComponent(repo), {
+    headers: { authorization: auth },
+  });
+  if (!resolved.ok) return null;
+  const { repositoryId } = (await resolved.json()) as { repositoryId: string };
+  return repositoryId;
+}
+
 /** `thwip queue …`. Parsing, authority, and confirmations live in queue-commands.ts. */
 async function cmdQueue(argv: string[]): Promise<number> {
   const parsed = planQueueCommand(argv);
@@ -602,15 +608,11 @@ async function cmdQueue(argv: string[]): Promise<number> {
   const repo = flag(argv, "--repo") ?? "";
   let path = parsed.plan.path;
   if (path.includes("{repositoryId}")) {
-    const resolved = await fetch(
-      endpoint + "/v1/resolve-repo?name=" + encodeURIComponent(repo),
-      { headers: { authorization: auth } },
-    );
-    if (!resolved.ok) {
-      process.stderr.write(`cannot resolve ${repo}: ${resolved.status}\n`);
+    const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+    if (repositoryId === null) {
+      process.stderr.write(`cannot resolve ${repo}\n`);
       return EXIT.setupInvalid;
     }
-    const { repositoryId } = (await resolved.json()) as { repositoryId: string };
     path = path.replaceAll("{repositoryId}", repositoryId);
   }
 
@@ -643,6 +645,8 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
       return cmdInit([...invocation.argv]);
     case "verify":
       return cmdVerifyLocal();
+    case "verify-chain":
+      return cmdVerifyChain([...invocation.argv]);
     case "keys-status":
       return cmdKeysStatus();
     case "setup":

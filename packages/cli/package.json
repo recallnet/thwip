@@ -22,7 +22,9 @@
     "@thwip/verifier": "workspace:*",
     "yaml": "^2.9.0",
     "@thwip/prompts": "workspace:*",
-    "@thwip/queue-domain": "workspace:*"
+    "@thwip/queue-domain": "workspace:*",
+    "@thwip/queue-protocol": "workspace:*",
+    "jose": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

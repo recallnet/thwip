@@ -2,7 +2,7 @@ import { parseMergeIntent, parseTransitionRecord, envelopeDigest } from "@thwip/
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { readAttestation, signReusedIntent, signReusedRecord, storeAttestation } from "./attestation.js";
+import { readAttestation, readChain, signReusedIntent, signReusedRecord, storeAttestation } from "./attestation.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -277,5 +277,36 @@ describe("keeping the signed bytes", () => {
     await storeAttestation(store, row);
     await storeAttestation(store, row);
     expect(await readAttestation(store, signed.digest)).not.toBeNull();
+  });
+
+  it("hands back a whole branch's records in chain order", async () => {
+    const store = db();
+    const first = await record(D("f"));
+    await storeAttestation(store, {
+      digest: first.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: first.bytes,
+      jws: first.jws,
+    });
+    await storeAttestation(store, {
+      digest: D("e"),
+      kind: "merge-intent",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: null,
+      attemptId: "att-1",
+      bytes: new TextEncoder().encode("{}"),
+      jws: "j",
+    });
+
+    const chain = await readChain(store, "1315419165", "refs/heads/main");
+    // Intents are cited by records; they are not links, so they are not returned.
+    expect(chain).toHaveLength(1);
+    expect(chain[0]?.digest).toBe(first.digest);
+    expect(new TextDecoder().decode(chain[0]!.bytes)).toBe(new TextDecoder().decode(first.bytes));
   });
 });

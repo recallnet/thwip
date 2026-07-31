@@ -24,6 +24,7 @@ import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./tur
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
   readAttestation,
+  readChain,
   reuseEvidenceFor,
   signReusedIntent,
   signReusedRecord,
@@ -1950,6 +1951,42 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const found = await readAttestation(c.env.DB as unknown as D1Like, digest);
     if (found === null) return c.json({ error: "no record with that digest" }, 404);
     return c.json(found);
+  });
+
+  /**
+   * A branch's whole chain, with the bytes each link was signed over.
+   *
+   * Open only when the project has said so. A chain names pull request
+   * numbers, head and base SHAs, tree oids, actor GitHub ids and free-text
+   * override reasons — public for a public repository, and nobody else's
+   * business for a private one. A caller cannot make it public just by
+   * knowing the numeric repository id, so a private project is served the
+   * same way every other authenticated queue route is: the caller has to be
+   * a member.
+   */
+  app.get("/v1/queue/:repositoryId/chain", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+
+    const project = await c.env.DB.prepare(
+      "SELECT attested_from_sequence AS epoch, chain_public AS chainPublic FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
+    )
+      .bind(repositoryId, baseRef)
+      .first<{ epoch: number; chainPublic: number }>();
+    if (project === null) return c.json({ error: "no queue for that branch" }, 404);
+
+    if (project.chainPublic !== 1) {
+      const who = await deps.authenticate(c, c.env);
+      if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    }
+
+    const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    const decoder = new TextDecoder();
+    return c.json({
+      epochStartsAt: project.epoch,
+      links: links.map((l) => ({ digest: l.digest, sequence: l.sequence, record: decoder.decode(l.bytes), jws: l.jws })),
+    });
   });
 
   return app;

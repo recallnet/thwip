@@ -12,6 +12,7 @@ import {
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
+import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import type { D1Like } from "./queue/projection.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
@@ -220,6 +221,24 @@ app.get("/health", async (c) => {
   const payload = { service: "thwip", env: c.env.THWIP_ENV, buildSha: c.env.BUILD_SHA, now: nowIso() };
   const jws = await signPayload(c.env, payload, "thwip-health+jws");
   return c.json({ ...payload, jws });
+});
+
+/**
+ * The keys that verify thwip's signed records.
+ *
+ * Public and unauthenticated on purpose. A merge record is only evidence if
+ * somebody who does not run this service can check it, and that means the
+ * verifying key has to be fetchable by anyone holding the record.
+ */
+app.get("/.well-known/thwip-keys", async (c) => {
+  // A cold isolate has not signed anything yet, so `service_keys` may not
+  // carry the active key even though it is about to be used. Publishing must
+  // not depend on a signature having happened first: a verifier that asks
+  // here before the key exists sees an empty set and rejects a chain that is
+  // actually fine.
+  await serviceKey(c.env);
+  const keys = await verificationKeys(c.env.DB as unknown as D1Like);
+  return c.json({ keys }, 200, { "cache-control": "public, max-age=300" });
 });
 
 // --- Viewer/session bootstrap ---------------------------------------------
