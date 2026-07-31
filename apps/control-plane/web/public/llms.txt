@@ -28,6 +28,18 @@ remote profile is SLSA Build L3 (GitHub builds and signs the provenance); fast
 and fresh are attributed assertions plus the hermeticity, reproducibility, and
 two-party controls that SLSA's original L4 specified and v1.0 dropped.
 
+## Install
+
+The CLI is published on npm as `@recallnet/thwip`. The installed command is
+`thwip`; there is no repository to clone.
+
+    npm install -g @recallnet/thwip     # or: npx @recallnet/thwip
+    thwip login
+    thwip init --required "lint,typecheck,test"
+    thwip run
+
+Node 22 or newer.
+
 ## Pages
 
 - [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit

@@ -15,6 +15,14 @@ on:
   workflow_run:
     workflows: [thwip]
     types: [completed]
+  # The queue asking for a turn to be driven.
+  #
+  # workflow_run alone made merging depend on a check happening to be in flight
+  # at the instant the queue offered a turn. Every other offer expired ninety
+  # seconds later unclaimed, so the queue cycled offers nobody could take and
+  # nothing merged. A queue has to drive the work, not wait to be noticed.
+  repository_dispatch:
+    types: [thwip-queue-turn]
 
 permissions:
   contents: read
@@ -24,7 +32,9 @@ permissions:
 jobs:
   merge:
     name: merge
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    if: >-
+      github.event_name == 'repository_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     steps:
       - name: Merge under Thwip Queue authorization
@@ -34,6 +44,7 @@ jobs:
           MERGE_TOKEN: ${{ secrets.THWIP_ENQUEUE_TOKEN }}
           REPO_ID: ${{ github.event.repository.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCHED_PR: ${{ github.event.client_payload.pullRequestNumber }}
         run: |
           set -uo pipefail
           if [ -z "${MERGE_TOKEN:-}" ]; then
@@ -41,10 +52,17 @@ jobs:
             exit 0
           fi
 
-          # Resolve the pull request from the head commit the check ran on, so this
-          # can never merge a different pull request than the one that was verified.
-          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
-                 --jq '[.[] | select(.state=="open")][0] // empty')
+          # Resolve the pull request. From the head commit the check ran on, so
+          # this can never merge a different pull request than the one verified;
+          # or from the number the queue named when it asked for this turn.
+          if [ -n "${DISPATCHED_PR:-}" ]; then
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$DISPATCHED_PR" \
+                   --jq 'select(.state=="open")' || true)
+            HEAD_SHA=$(printf '%s' "$pr" | jq -r '.head.sha // empty')
+          else
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
+                   --jq '[.[] | select(.state=="open")][0] // empty')
+          fi
           if [ -z "$pr" ]; then
             echo "::notice::no open pull request for $HEAD_SHA"
             exit 0

@@ -162,6 +162,33 @@ async function storeEvidence(
   }
 }
 
+/**
+ * Ask GitHub to drive whichever pull request currently holds or has been offered
+ * the lane.
+ *
+ * Merging used to depend on a check being in flight at the instant the queue
+ * offered a turn. Every other offer expired ninety seconds later unclaimed, so
+ * the queue cycled offers nobody could take and nothing merged. A queue has to
+ * cause the work, not wait to be noticed.
+ *
+ * Safe to call whenever the lane moves: the workflow asks the queue for
+ * authorization itself and does nothing if the answer is no.
+ */
+async function driveLane(
+  env: QueueRouteEnv,
+  deps: { driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void> },
+  repositoryId: string,
+  snapshot: Awaited<ReturnType<BranchQueue["snapshot"]>>,
+): Promise<void> {
+  const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+  if (holder === undefined) return;
+  try {
+    await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
+  } catch {
+    /* the turn survives; a later tick or the drain asks again */
+  }
+}
+
 async function resolveQueue(
   env: QueueRouteEnv,
   repositoryId: string,
@@ -286,6 +313,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
+  driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /** Read a commit's tree and parents from GitHub, for confirming from facts. */
   commitFacts(
     env: TEnv,
@@ -457,7 +486,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`),
       decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     });
-    await project(c.env, repositoryId, baseRef, queue);
+    const after = await queue.snapshot();
+    await project(c.env, repositoryId, baseRef, queue, after);
+    await driveLane(c.env, deps, repositoryId, after);
     return c.json({ result });
   });
 
