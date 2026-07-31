@@ -9,6 +9,16 @@ import {
 import type { BranchQueue } from "./BranchQueue.js";
 
 /**
+ * NOT ON THE LIVE PATH. Nothing calls createInstance on this, so no instance has
+ * ever run. It is bound in wrangler and typed in env, which makes it read as the
+ * thing driving turns; it is not. Turns are driven by the queue dispatching
+ * thwip-merge.yml and thwip-queue-verify.yml.
+ *
+ * It stays because it is the designed home for device execution, where a turn
+ * waits on a developer's machine to run the suites, and that path is real work
+ * still to do. Deleting it would throw away a tested design; leaving it unlabelled
+ * was worse, because it looks like the running system.
+ *
  * One durable turn per attempt (plan.md §40).
  *
  * Every decision this class makes is delegated to the pure planner in turn.ts,

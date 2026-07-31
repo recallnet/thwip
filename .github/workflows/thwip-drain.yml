@@ -54,6 +54,13 @@ jobs:
             exit 0
           fi
 
+          # A lane the object's alarm offered has nobody telling it. The alarm runs
+          # inside the object, which cannot reach GitHub, so without this the turn
+          # sits idle until an unrelated request happens to move it. Reads the
+          # projection and wakes no object, so it is free to call every half hour.
+          n=$(curl -sS -X POST "$THWIP_ENDPOINT/v1/queue/$REPO_ID/nudge?ref=refs%2Fheads%2Fmain" || true)
+          echo "nudge: $n"
+
           # The Actions API only. GITHUB_TOKEN cannot reach the pull request API
           # on this repository, through gh pr list or through REST, so the drain
           # asks about workflow runs instead: which thwip runs failed, and re-run

@@ -782,6 +782,37 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
+   * Push whoever currently holds the lane, reading only the projection.
+   *
+   * A turn offered by the object's alarm cannot be pushed from inside the object:
+   * it has no installation token and no way to reach GitHub. So the lane sat idle
+   * until some unrelated request happened to move it.
+   *
+   * This closes that from the outside, and costs nothing to call: it reads D1 and
+   * wakes no object. The drain calls it on a schedule, so a lane offered by an
+   * alarm is picked up within the half hour even if nothing else happens at all.
+   */
+  app.post("/v1/queue/:repositoryId/nudge", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    const baseRef = branchRef(c.req.query("ref"));
+    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+
+    const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    if (projected === null) return c.json({ nudged: false, reason: "NOTHING_PROJECTED" });
+
+    const entries = projected["entries"] as Array<{ state: string; pullRequestNumber: number }>;
+    const holder = entries.find((e) => e.state === "Offered" || e.state === "Active");
+    if (holder === undefined) return c.json({ nudged: false, reason: "LANE_IDLE" });
+
+    try {
+      await deps.driveTurn(c.env, repositoryId, holder.pullRequestNumber);
+    } catch {
+      return c.json({ nudged: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber });
+    }
+    return c.json({ nudged: true, pullRequestNumber: holder.pullRequestNumber, state: holder.state });
+  });
+
+  /**
    * The gate the queue decides.
    *
    * Called by the pinned verification workflow, which checks out its own revision
@@ -1050,6 +1081,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const snapshot = await queue.snapshot();
     const entry = snapshot.entries.find((e) => e.entryId === entryId);
+
+    // A check's authorize moves the lane as much as a tick does: admit enqueues,
+    // evaluates, ticks and claims. If that offered the turn to somebody else,
+    // nothing was telling them, and the lane sat until an unrelated call happened
+    // to notice.
+    await driveLane(c.env, deps, repositoryId, snapshot);
 
     // An attempt already walked to merge-ready by an earlier caller still has an
     // operation, and the caller that will perform the write needs its id. Without
