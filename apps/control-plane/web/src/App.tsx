@@ -344,13 +344,13 @@ function OrgSwitcher({ me }: { me: Me }) {
 function Dashboard({
   me,
   tab,
-  accessProjectId,
-  setupProjectId,
+  projectId,
+  projectSection,
 }: {
   me: Me;
   tab: string;
-  accessProjectId?: string;
-  setupProjectId?: string;
+  projectId?: string;
+  projectSection?: string;
 }) {
   const org = me.organization;
   return (
@@ -404,10 +404,8 @@ function Dashboard({
         )}
         {tab === "overview" && <Overview />}
         {tab === "projects" &&
-          (accessProjectId ? (
-            <ProjectAccess projectId={accessProjectId} me={me} />
-          ) : setupProjectId ? (
-            <ProjectSetup projectId={setupProjectId} />
+          (projectId ? (
+            <ProjectPage projectId={projectId} section={projectSection ?? "overview"} me={me} />
           ) : (
             <Projects me={me} />
           ))}
@@ -745,11 +743,11 @@ function Projects({ me }: { me: Me }) {
           {data.projects.map((p) => (
             <tr key={p.id}>
               <td>
-                <a href={`https://github.com/${p.github_name}`} target="_blank" rel="noreferrer">
+                <a href={`/dashboard/projects/${p.id}`}>
                   <code>{p.github_name}</code>
                 </a>
                 <div className="gp-panel__meta">
-                  <a href={`/dashboard/projects/${p.id}/access`}>{p.collaborators} with access</a> · {p.default_branch}
+                  {p.collaborators} with access · {p.default_branch} · App check {p.proof_check_mode}
                 </div>
               </td>
               <td>
@@ -795,8 +793,14 @@ function Projects({ me }: { me: Me }) {
                 )}
               </td>
               <td style={{ whiteSpace: "nowrap" }}>
-                <a className="gp-btn gp-btn--sm" href={`/dashboard/projects/${p.id}/setup`}>
-                  Set up
+                {/*
+                  One way in, and the one action worth doing from a list.
+                  Everything else about a project — its queue, who can reach it,
+                  how to set it up — lives on its own page rather than as another
+                  button in a table cell.
+                */}
+                <a className="gp-btn gp-btn--sm" href={`/dashboard/projects/${p.id}`}>
+                  Open
                 </a>{" "}
                 <button
                   className={`gp-btn gp-btn--sm${p.enabled ? " gp-btn--quiet" : ""}`}
@@ -809,19 +813,7 @@ function Projects({ me }: { me: Me }) {
                   onClick={() => void act(p, p.enabled ? "disable" : "enable")}
                 >
                   {p.enabled ? "Disable" : "Enable"}
-                </button>{" "}
-                {p.enabled ? (
-                  <button
-                    className="gp-btn gp-btn--sm"
-                    disabled={busy === p.id}
-                    onClick={() =>
-                      void setProofMode(p, p.proof_check_mode === "observe" ? "enforced" : "observe")
-                    }
-                  >
-                    {p.proof_check_mode === "observe" ? "Enforce App check" : "Observe only"}
-                  </button>
-                ) : null}
-                <div className="gp-panel__meta">App check: {p.proof_check_mode}</div>
+                </button>
               </td>
             </tr>
           ))}
@@ -917,6 +909,195 @@ function buildSetupPrompt(p: {
     hasActivePolicy: p.policy_version !== null,
   });
 }
+const PROJECT_SECTIONS = [
+  ["overview", "Overview"],
+  ["queue", "Queue"],
+  ["access", "Access"],
+  ["setup", "Set up"],
+] as const;
+
+/**
+ * One page per project.
+ *
+ * A project used to be a row in a table with three buttons in it, and everything
+ * about that project lived somewhere else: who could reach it behind a link, its
+ * queue on an organization-wide tab stacked with every other project's, its setup
+ * behind a button. Anyone asking "what is going on with this repository" had to
+ * assemble the answer from four places.
+ *
+ * The organization tabs keep what is genuinely organization-wide — people,
+ * policies, billing, plan limits. What belongs to one repository lives here.
+ */
+function ProjectPage({ projectId, section, me }: { projectId: string; section: string; me: Me }) {
+  const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+
+  const project = data.projects.find((p) => p.id === projectId);
+  if (!project) {
+    return (
+      <>
+        <p style={{ marginBottom: "0.8rem" }}>
+          <a href="/dashboard/projects">← Projects</a>
+        </p>
+        <p className="thwip-error">No project here. It may have been removed from the organization.</p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p style={{ marginBottom: "0.6rem" }}>
+        <a href="/dashboard/projects">← Projects</a>
+      </p>
+      <h2 style={{ margin: "0 0 0.2rem", fontSize: "1.15rem" }}>
+        <a href={`https://github.com/${project.github_name}`} target="_blank" rel="noreferrer">
+          {project.github_name}
+        </a>
+      </h2>
+      <p className="gp-panel__meta" style={{ marginBottom: "0.9rem" }}>
+        {describeProject(project)}
+      </p>
+      <ul className="tab-nav" role="tablist" style={{ marginBottom: "1rem" }}>
+        {PROJECT_SECTIONS.map(([key, label]) => (
+          <li key={key}>
+            <NavLink
+              to={`/dashboard/projects/${project.id}${key === "overview" ? "" : `/${key}`}`}
+              className={section === key ? "is-active" : ""}
+            >
+              {label}
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+      {section === "overview" && <ProjectOverview project={project} reload={reload} />}
+      {section === "queue" && (
+        <QueuePanel
+          repositoryId={project.github_repository_id}
+          baseRef={`refs/heads/${project.default_branch}`}
+          repositoryName={project.github_name}
+        />
+      )}
+      {section === "access" && <ProjectAccess projectId={project.id} me={me} />}
+      {section === "setup" && <ProjectSetup projectId={project.id} />}
+    </>
+  );
+}
+
+/** One line saying where this project stands, for the page header. */
+function describeProject(p: ProjectRow): string {
+  const parts: string[] = [];
+  // Enabled and disabled are the same fact, so it is stated once.
+  parts.push(
+    p.activation_state === "active"
+      ? `verifying · policy v${p.policy_version ?? "?"} · ${p.policy_profile ?? "unknown profile"}`
+      : p.activation_state === "awaiting_policy"
+        ? "enabled, waiting for a policy to activate"
+        : "not enabled",
+  );
+  parts.push(`default branch ${p.default_branch}`);
+  parts.push(`App check ${p.proof_check_mode}`);
+  return parts.join(" · ");
+}
+
+function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const act = async (action: "enable" | "disable" | "enforce") => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      if (action === "enforce") {
+        await api(`/v1/dashboard/projects/${project.id}/proof-mode`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "enforced" }),
+        });
+      } else {
+        await api(`/v1/dashboard/projects/${project.id}/${action}`, { method: "POST", body: "{}" });
+      }
+      reload();
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Panel title="Verification" meta="what the queue requires before this repository merges">
+        <table className="gp-data-table">
+          <tbody>
+            <tr>
+              <td>Active policy</td>
+              <td>
+                {project.activation_state === "active"
+                  ? `v${project.policy_version ?? "?"} · ${project.policy_profile ?? ""}`
+                  : "none activated"}
+              </td>
+            </tr>
+            <tr>
+              <td>Where it came from</td>
+              <td>{describeConfigSource(project.config_source)}</td>
+            </tr>
+            <tr>
+              <td>Last verification</td>
+              <td>
+                {project.last_outcome === null ? (
+                  <span className="gp-panel__meta">nothing verified yet</span>
+                ) : (
+                  <span className={project.last_outcome === "PASS" ? "ok" : "bad"}>{project.last_outcome}</span>
+                )}
+              </td>
+            </tr>
+            <tr>
+              <td>App-owned check</td>
+              <td>
+                {project.proof_check_mode === "enforced"
+                  ? "enforced"
+                  : "observing — it reports what it would have said, and blocks nothing"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </Panel>
+
+      <Panel title="Actions" meta="enabling consumes plan quota; requires repository admin on GitHub">
+        {actionError && <p className="thwip-error">{actionError}</p>}
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          {project.enabled === 1 ? (
+            <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("disable")}>
+              Disable
+            </button>
+          ) : (
+            <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("enable")}>
+              Enable
+            </button>
+          )}
+          {project.enabled === 1 && project.proof_check_mode === "observe" && (
+            <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("enforce")}>
+              Enforce App check
+            </button>
+          )}
+        </div>
+      </Panel>
+    </>
+  );
+}
+
+function describeConfigSource(source: ProjectRow["config_source"]): string {
+  switch (source) {
+    case "repository-override":
+      return "repository override over organization defaults";
+    case "repository":
+      return "committed thwip.yaml";
+    case "global":
+      return "organization defaults";
+    default:
+      return "add organization defaults or activate from the canonical default branch";
+  }
+}
+
 function ProjectSetup({ projectId }: { projectId: string }) {
   const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   const [copied, setCopied] = useState(false);
@@ -927,9 +1108,6 @@ function ProjectSetup({ projectId }: { projectId: string }) {
   const prompt = buildSetupPrompt(p);
   return (
     <>
-      <p style={{ marginBottom: "0.8rem" }}>
-        <a href="/dashboard/projects">← Projects</a>
-      </p>
       <Panel
         title={`Set up ${p.github_name}`}
         meta="paste into your coding agent, in a checkout of this repository"
@@ -969,9 +1147,6 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <>
-      <p style={{ marginBottom: "0.8rem" }}>
-        <a href="/dashboard/projects">← Projects</a>
-      </p>
       <Panel title={`Access · ${data.project.github_name}`} meta="from GitHub; who may sign a proof for this repository">
         <table className="gp-data-table">
           <thead>
@@ -1532,8 +1707,7 @@ function QueueTab() {
 export function App() {
   const me = useMe();
   const path = usePath();
-  const accessMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/access/.exec(path);
-  const setupMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)\/setup/.exec(path);
+  const projectMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)(?:\/([a-z]+))?/.exec(path);
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
@@ -1573,8 +1747,16 @@ export function App() {
         </div>
       );
     }
-    if (accessMatch) return <Dashboard me={me} tab="projects" accessProjectId={accessMatch[1]!} />;
-    if (setupMatch) return <Dashboard me={me} tab="projects" setupProjectId={setupMatch[1]!} />;
+    if (projectMatch) {
+      return (
+        <Dashboard
+          me={me}
+          tab="projects"
+          projectId={projectMatch[1]!}
+          projectSection={projectMatch[2] ?? "overview"}
+        />
+      );
+    }
     return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
   }
   return <Home me={me} signIn={() => void signInWithGitHub("/dashboard")} />;
