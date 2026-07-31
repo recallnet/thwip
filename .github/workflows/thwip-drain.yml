@@ -19,9 +19,11 @@ on:
     - cron: "23,53 * * * *"
   workflow_dispatch:
 
+# Only what it uses. The pull request API is unreachable with GITHUB_TOKEN on this
+# repository, and asking for a permission that does nothing is a claim about what
+# this job touches that is not true.
 permissions:
   contents: read
-  pull-requests: read
   actions: write
 
 concurrency:
@@ -41,9 +43,9 @@ jobs:
         run: |
           set -uo pipefail
 
-          # Ask the queue whether it is healthy before touching anything. Reading
-          # the projection costs no Durable Object request, so this is safe to run
-          # every half hour forever, including while the queue is down.
+          # Ask the queue whether it is healthy before touching anything. This
+          # reads the projection, so it costs no Durable Object request and is
+          # safe to run every half hour forever, including while the queue is down.
           q=$(curl -sS -w '\n%{http_code}' \
             "$THWIP_ENDPOINT/v1/queue/$REPO_ID?ref=refs%2Fheads%2Fmain" || true)
           code=$(printf '%s' "$q" | tail -n1)
@@ -52,35 +54,34 @@ jobs:
             exit 0
           fi
 
-          # A check that failed seconds ago is probably still telling the truth.
-          # Thirty minutes is long enough that a transient outage has either
-          # cleared or become something a person should look at.
+          # The Actions API only. GITHUB_TOKEN cannot reach the pull request API
+          # on this repository, through gh pr list or through REST, so the drain
+          # asks about workflow runs instead: which thwip runs failed, and re-run
+          # them. It never needs to know a pull request number.
           cutoff=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
             || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
-          echo "re-running thwip checks that failed before $cutoff"
+          echo "re-running thwip runs that failed before $cutoff"
 
-          # REST, not `gh pr list`. That goes through GraphQL, which GITHUB_TOKEN
-          # cannot reach on this repository: the first fix got past "not a git
-          # repository" only to fail with 403 Resource not accessible by
-          # integration. The REST endpoint works with the pull-requests: read this
-          # job already declares.
-          gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
-            --jq '.[] | "\(.number) \(.head.sha)"' |
-          while read -r pr sha; do
-            run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
-              --jq '[.check_runs[] | select(.name == "thwip")] | first // empty')
-            [ -n "$run" ] || continue
-            [ "$(printf '%s' "$run" | jq -r '.conclusion')" = "failure" ] || continue
+          runs=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/thwip-required.yml/runs?status=failure&event=pull_request&per_page=30" \
+            --jq ".workflow_runs[] | select(.updated_at < \"$cutoff\") | \"\(.id) \(.head_branch)\"" || true)
 
-            completed=$(printf '%s' "$run" | jq -r '.completed_at // empty')
-            if [ -n "$completed" ] && [ "$completed" \> "$cutoff" ]; then
-              echo "PR #$pr: failed at $completed, too recent to re-drive"
-              continue
-            fi
+          if [ -z "$runs" ]; then
+            echo "nothing failed long enough ago to re-drive"
+            exit 0
+          fi
 
-            id=$(printf '%s' "$run" | jq -r '.details_url' | grep -oE '[0-9]+' | head -1)
+          # One re-run per branch: a branch with several failed runs only needs its
+          # most recent one, and re-running the older ones would spend Actions
+          # minutes proving the same thing.
+          seen=""
+          printf '%s\n' "$runs" | while read -r id branch; do
             [ -n "$id" ] || continue
-            echo "PR #$pr: re-running thwip (run $id)"
-            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs" >/dev/null 2>&1 \
-              || echo "PR #$pr: could not re-run $id"
+            case " $seen " in *" $branch "*) continue ;; esac
+            seen="$seen $branch"
+            if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs" >/dev/null 2>&1; then
+              echo "re-ran thwip for $branch (run $id)"
+            else
+              echo "could not re-run $branch (run $id)"
+            fi
           done
