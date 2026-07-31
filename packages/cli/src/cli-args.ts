@@ -70,8 +70,12 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
   verify: `Usage: thwip verify [--json]\n\nParse and print the proof carried by HEAD.\n`,
   "verify-chain":
-    `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n\n` +
-    `Fetch a branch's merge chain and thwip's published keys, then verify it.\n`,
+    `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n` +
+    `       thwip verify-chain --repository-id ID [--branch BRANCH]\n\n` +
+    `Fetch a branch's merge chain and thwip's published keys, then verify it.\n` +
+    `No thwip account is required. --repo is resolved through GitHub's public\n` +
+    `API; pass --repository-id instead for a private repository or when GitHub\n` +
+    `is rate limiting.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,
   setup: `Usage: thwip setup\n\nPrint the human-guided machine setup prompt.\n`,
@@ -240,7 +244,7 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
     case "verify":
       return simpleCommand("verify", rest, { boolean: ["--json"] });
     case "verify-chain":
-      return simpleCommand("verify-chain", rest, { value: ["--repo", "--branch"] });
+      return simpleCommand("verify-chain", rest, { value: ["--repo", "--branch", "--repository-id"] });
     case "keys": {
       if (rest.length === 0) return command("keys-status");
       if (wantsHelp(rest)) return { kind: "help", text: SIMPLE_HELP["keys-status"] };

@@ -44,6 +44,9 @@ export async function verifyPublishedChain(
     digest: l.digest,
     bytes: encoder.encode(l.record),
     jws: l.jws,
+    // How a record that has gone missing is told from history written before
+    // records existed. Dropping it makes every gap look like the latter.
+    sequence: l.sequence,
   }));
 
   const findings = await verifyChain(links, {
