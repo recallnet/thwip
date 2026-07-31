@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkInvariants } from "@thwip/queue-domain";
 import { BranchQueueStore, type SubmittedEvent } from "./store.js";
+import { cellOf, SnapshotQueueStore, type SnapshotCell } from "./snapshot-store.js";
 import type { SqlLike } from "./sql.js";
 
 /**
@@ -35,6 +36,34 @@ afterEach(() => {
 
 const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/heads/main" };
 
+/**
+ * Both stores, one suite.
+ *
+ * The document store exists to take the Durable Object out of the path of every
+ * decision, and the only way to believe it is a drop-in is to hold it to the
+ * tests the SQL store already passes, eviction chaos included. A behaviour that
+ * appears in one implementation and not the other fails here rather than in a
+ * repository whose queue has stopped.
+ *
+ * `backing` is whatever the store persists into: a SQLite handle for one, the
+ * stored document for the other. Reopening over the same backing is a restart in
+ * both cases.
+ */
+type AnyStore = BranchQueueStore | SnapshotQueueStore;
+
+const IMPLEMENTATIONS = [
+  {
+    name: "BranchQueueStore",
+    backing: () => sqlite() as never,
+    open: (b: never, id: typeof IDENTITY): AnyStore => BranchQueueStore.open(b as SqlLike, id),
+  },
+  {
+    name: "SnapshotQueueStore",
+    backing: () => cellOf() as never,
+    open: (b: never, id: typeof IDENTITY): AnyStore => SnapshotQueueStore.open(b as SnapshotCell, id),
+  },
+];
+
 let n = 0;
 function ev(body: Omit<SubmittedEvent, "idempotencyKey" | "at">, key?: string): SubmittedEvent {
   n += 1;
@@ -45,7 +74,7 @@ function ev(body: Omit<SubmittedEvent, "idempotencyKey" | "at">, key?: string): 
   } as SubmittedEvent;
 }
 
-function request(store: BranchQueueStore, entryId: string, principal: string, pr: number) {
+function request(store: AnyStore, entryId: string, principal: string, pr: number) {
   store.append(
     ev({
       type: "QueueRequested",
@@ -68,17 +97,17 @@ function request(store: BranchQueueStore, entryId: string, principal: string, pr
   );
 }
 
-describe("BranchQueueStore", () => {
+describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
   it("creates its schema and meta row once", () => {
-    const sql = sqlite();
-    const first = BranchQueueStore.open(sql, IDENTITY);
-    const second = BranchQueueStore.open(sql, IDENTITY);
+    const sql = backing();
+    const first = open(sql, IDENTITY);
+    const second = open(sql, IDENTITY);
     expect(first.generation()).toBe(0);
     expect(second.state().entries.size).toBe(0);
   });
 
   it("applies an event and advances the generation", () => {
-    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    const store = open(backing(), IDENTITY);
     const result = store.append(
       ev({
         type: "QueueRequested",
@@ -94,7 +123,7 @@ describe("BranchQueueStore", () => {
   });
 
   it("writes nothing when the reducer rejects the command", () => {
-    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    const store = open(backing(), IDENTITY);
     const before = store.generation();
     const rejected = store.append(
       ev({
@@ -112,7 +141,7 @@ describe("BranchQueueStore", () => {
   });
 
   it("returns the committed result for a duplicate idempotency key", () => {
-    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    const store = open(backing(), IDENTITY);
     const event = ev(
       {
         type: "QueueRequested",
@@ -133,12 +162,12 @@ describe("BranchQueueStore", () => {
   });
 
   it("does not consume a sequence for an event the reducer treats as a no-op", () => {
-    // A no-op that consumed a sequence would leave an events row ahead of
-    // lastSequence, and the next append would collide on that sequence — which is
+    // A no-op that consumed a sequence would leave a recorded event ahead of
+    // lastSequence, and the next append would reuse that sequence — which is
     // exactly how this surfaced in production, as a UNIQUE constraint failure.
-    const sql = sqlite();
-    const store = BranchQueueStore.open(sql, IDENTITY);
+    const store = open(backing(), IDENTITY);
     request(store, "e1", "alice", 7);
+    const before = store.state().lastSequence;
 
     // Requesting the same entry again is a no-op in the reducer.
     const repeat = store.append(
@@ -152,11 +181,7 @@ describe("BranchQueueStore", () => {
       }),
     );
     expect(repeat.status).toBe("duplicate");
-
-    const maxSequence = sql
-      .exec<{ m: number | null }>("SELECT MAX(sequence) AS m FROM events")
-      .toArray()[0]!.m;
-    expect(store.state().lastSequence).toBe(maxSequence);
+    expect(store.state().lastSequence).toBe(before);
 
     // And the next real command still applies rather than colliding.
     expect(
@@ -164,26 +189,10 @@ describe("BranchQueueStore", () => {
     ).toBe("applied");
   });
 
-  it("heals a stored sequence counter that has fallen behind the event log", () => {
-    // What an object written by an earlier build can look like. Trusting the
-    // counter would make every later append collide on the primary key.
-    const sql = sqlite();
-    const store = BranchQueueStore.open(sql, IDENTITY);
-    request(store, "e1", "alice", 7);
-    const real = store.state().lastSequence;
-    sql.exec("UPDATE queue_meta SET last_sequence = ? WHERE id = 1", real - 1);
-
-    const reopened = BranchQueueStore.open(sql, IDENTITY);
-    expect(reopened.state().lastSequence).toBe(real);
-    expect(
-      reopened.append(ev({ type: "EntryHeadChanged", entryId: "e1", headSha: "z".repeat(40) })).status,
-    ).toBe("applied");
-  });
-
   describe("eviction", () => {
     it("rehydrates to the same state after every command", () => {
-      const sql = sqlite();
-      const store = BranchQueueStore.open(sql, IDENTITY);
+      const sql = backing();
+      const store = open(sql, IDENTITY);
       const events: SubmittedEvent[] = [];
 
       request(store, "e1", "alice", 7);
@@ -221,14 +230,14 @@ describe("BranchQueueStore", () => {
         expect(JSON.stringify(dump(store))).toEqual(warm);
       }
 
-      const fresh = BranchQueueStore.open(sql, IDENTITY);
+      const fresh = open(sql, IDENTITY);
       expect(JSON.stringify(dump(fresh))).toEqual(JSON.stringify(dump(store)));
       expect(checkInvariants(fresh.state())).toEqual([]);
     });
 
     it("keeps deduplication working across an eviction", () => {
-      const sql = sqlite();
-      const store = BranchQueueStore.open(sql, IDENTITY);
+      const sql = backing();
+      const store = open(sql, IDENTITY);
       const event = ev(
         {
           type: "QueueRequested",
@@ -241,7 +250,7 @@ describe("BranchQueueStore", () => {
         "dedupe-me",
       );
       store.append(event);
-      const rehydrated = BranchQueueStore.open(sql, IDENTITY);
+      const rehydrated = open(sql, IDENTITY);
       expect(rehydrated.append(event)).toMatchObject({ status: "duplicate" });
       expect(rehydrated.state().entries.size).toBe(1);
     });
@@ -249,7 +258,7 @@ describe("BranchQueueStore", () => {
 
   describe("scheduling", () => {
     it("refuses to pick a turn while the lane is busy or the queue is paused", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       expect(store.nextTurn("2026-07-29T12:10:00Z")).not.toBeNull();
 
@@ -286,7 +295,7 @@ describe("BranchQueueStore", () => {
     });
 
     it("does not offer to an offline entry but keeps its place", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       const ordinal = store.state().entries.get("e1")!.fairnessOrdinal;
       store.append(
@@ -307,7 +316,7 @@ describe("BranchQueueStore", () => {
 
   describe("deadlines and the single alarm", () => {
     it("schedules the earliest deadline and reports what is due", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       store.append(
         ev({
@@ -330,7 +339,7 @@ describe("BranchQueueStore", () => {
     });
 
     it("survives an alarm delivered twice", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       store.append(
         ev({
@@ -360,7 +369,7 @@ describe("BranchQueueStore", () => {
 
   describe("outbox", () => {
     it("holds an item until it is acknowledged and counts attempts", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       store.append(
         ev({
@@ -385,7 +394,7 @@ describe("BranchQueueStore", () => {
     });
 
     it("does not duplicate an outbox item when its command is retried", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       const offer = ev(
         {
@@ -406,7 +415,7 @@ describe("BranchQueueStore", () => {
 
   describe("callback classification", () => {
     it("tells a stale attempt from a conflicted current one", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       store.append(
         ev({
@@ -424,7 +433,7 @@ describe("BranchQueueStore", () => {
     });
 
     it("bumps the revision only when asked", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       request(store, "e1", "alice", 7);
       const before = store.attemptRevision();
       store.append(ev({ type: "EntryHeadChanged", entryId: "e1", headSha: "z".repeat(40) }));
@@ -448,22 +457,22 @@ describe("BranchQueueStore", () => {
     };
 
     it("records the write before the network call and refuses a second start", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       expect(store.beginMergeOperation(op)).toEqual({ status: "started" });
       expect(store.beginMergeOperation(op)).toEqual({ status: "already-started", outcome: null });
     });
 
     it("still refuses after a crash, because the row outlives the workflow", () => {
-      const sql = sqlite();
-      const store = BranchQueueStore.open(sql, IDENTITY);
+      const sql = backing();
+      const store = open(sql, IDENTITY);
       store.beginMergeOperation(op);
       // The workflow died before committing its step and re-enters from scratch.
-      const restarted = BranchQueueStore.open(sql, IDENTITY);
+      const restarted = open(sql, IDENTITY);
       expect(restarted.beginMergeOperation(op)).toMatchObject({ status: "already-started" });
     });
 
     it("remembers how an operation resolved", () => {
-      const store = BranchQueueStore.open(sqlite(), IDENTITY);
+      const store = open(backing(), IDENTITY);
       store.beginMergeOperation(op);
       store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
       expect(store.mergeOperation("op-1")).toMatchObject({ attemptId: "a1", outcome: "MERGED" });
@@ -473,7 +482,7 @@ describe("BranchQueueStore", () => {
   });
 
   it("keeps the attempt DAG edges it is told about", () => {
-    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    const store = open(backing(), IDENTITY);
     request(store, "e1", "alice", 7);
     store.append(
       ev({
@@ -509,8 +518,30 @@ describe("BranchQueueStore", () => {
   });
 });
 
+/**
+ * Only the SQL store can be corrupted this particular way, so this stays outside
+ * the shared suite rather than being watered down until both can run it.
+ */
+describe("BranchQueueStore, on storage an earlier build wrote", () => {
+  it("heals a stored sequence counter that has fallen behind the event log", () => {
+    // Trusting the counter would make every later append collide on the primary
+    // key.
+    const sql = sqlite();
+    const store = BranchQueueStore.open(sql, IDENTITY);
+    request(store, "e1", "alice", 7);
+    const real = store.state().lastSequence;
+    sql.exec("UPDATE queue_meta SET last_sequence = ? WHERE id = 1", real - 1);
+
+    const reopened = BranchQueueStore.open(sql, IDENTITY);
+    expect(reopened.state().lastSequence).toBe(real);
+    expect(
+      reopened.append(ev({ type: "EntryHeadChanged", entryId: "e1", headSha: "z".repeat(40) })).status,
+    ).toBe("applied");
+  });
+});
+
 /** Comparable snapshot of everything that must survive an eviction. */
-function dump(store: BranchQueueStore): unknown {
+function dump(store: AnyStore): unknown {
   const state = store.state();
   return {
     lastSequence: state.lastSequence,
@@ -536,9 +567,9 @@ function dump(store: BranchQueueStore): unknown {
  * calling, four entries sat Deferred past their cooldown while the lane was free
  * and the queue reported no eligible entry.
  */
-describe("a cooled-down entry competes again on its own", () => {
+describe.each(IMPLEMENTATIONS)("$name: a cooled-down entry competes again on its own", ({ backing, open }) => {
   it("is eligible once its cooldown is set, and the scheduler applies the clock", () => {
-    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    const store = open(backing(), IDENTITY);
     request(store, "e1", "alice", 7);
     store.append(
       ev({
