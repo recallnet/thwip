@@ -11,8 +11,7 @@ import {
   type PolicyPush,
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
-import { queueRoutes } from "./queue/routes.js";
-import { queueKey as queueKeyOf } from "@thwip/queue-domain";
+import { queueRoutes, runOnQueue } from "./queue/routes.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -1175,40 +1174,50 @@ async function queueFromPullRequest(env: Env, payload: {
           .first<{ id: string }>();
   if (principal === null) return { handled: false, detail: "author has no activated principal" };
 
-  const key = await queueKeyOf(String(repositoryId), ref);
-  const stub = env.BRANCH_QUEUE.get(env.BRANCH_QUEUE.idFromName(key));
-  await stub.bind({ queueKey: key, repositoryId: String(repositoryId), baseRef: ref });
-
   const entryId = `entry_${repositoryId}_${number}`;
-  if (payload.action === "closed") {
-    await stub.cancel({
-      idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+  const action = payload.action ?? "sync";
+  const draft = pr?.draft === true;
+  const open = pr?.state === "open";
+
+  // Against the queue, not against the Durable Object.
+  //
+  // This kept writing to the object after the authority moved to D1, so GitHub's
+  // events reached a copy nothing reads. A closed pull request therefore stayed
+  // in the queue, and because a closed one is never coming back to take its turn,
+  // the first one to be closed while holding the lane held it indefinitely. That
+  // happened within the hour.
+  await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
+    if (action === "closed") {
+      commands.cancel({
+        idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+        entryId,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+      return;
+    }
+
+    commands.requestQueue({
+      idempotencyKey: `webhook:request:${entryId}`,
       entryId,
-      actorPrincipalId: "github",
-      reason: "the pull request was closed",
+      pullRequestNumber: number,
+      sponsorPrincipalId: principal.id,
+      sponsorGithubUserId: String(authorId),
+      headSha,
     });
-    return { handled: true, detail: "entry cancelled" };
-  }
 
-  await stub.request({
-    idempotencyKey: `webhook:request:${entryId}`,
-    entryId,
-    pullRequestNumber: number,
-    sponsorPrincipalId: principal.id,
-    sponsorGithubUserId: String(authorId),
-    headSha,
+    // Readiness is re-derived from what GitHub just told us plus what it already
+    // said; the event alone never decides it.
+    commands.evaluateReadiness({
+      idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
+      entryId,
+      ready: !draft && open,
+      schedulerEligible: false,
+      primaryReason: draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : "AGENT_OFFLINE",
+    });
   });
 
-  // Readiness is re-derived from what GitHub just told us plus what it already
-  // said; the event alone never decides it.
-  await stub.readiness({
-    idempotencyKey: `webhook:ready:${entryId}:${headSha}:${payload.action ?? "sync"}`,
-    entryId,
-    ready: pr?.draft !== true && pr?.state === "open",
-    schedulerEligible: false,
-    primaryReason: pr?.draft === true ? "PR_DRAFT" : pr?.state !== "open" ? "PR_CLOSED" : "AGENT_OFFLINE",
-  });
-
+  if (action === "closed") return { handled: true, detail: "entry cancelled" };
   return { handled: true, detail: `placed in ${project.activation_state}` };
 }
 

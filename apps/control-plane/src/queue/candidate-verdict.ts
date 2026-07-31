@@ -29,7 +29,6 @@ export function requiresIntegratedRun(securityProfile: string): boolean {
 export type CandidateRefusal =
   | "CANDIDATE_NOT_VERIFIED"
   | "CANDIDATE_TREE_MISMATCH"
-  | "CANDIDATE_SHA_MISMATCH"
   | "CANDIDATE_BASE_MOVED"
   | "CANDIDATE_REJECTED"
   | "CANDIDATE_DIGEST_MISMATCH"
@@ -135,9 +134,20 @@ export async function decideCandidate(
   if (verdict.candidateTreeOid !== expected.candidateTreeOid) {
     return { ok: false, code: "CANDIDATE_TREE_MISMATCH", detail: "the verdict names another tree" };
   }
-  if (verdict.candidateSha !== expected.candidateSha) {
-    return { ok: false, code: "CANDIDATE_SHA_MISMATCH", detail: "the verdict names another candidate commit" };
-  }
+  // The candidate commit's own hash is not checked, and must not be.
+  //
+  // The tree is the code and the base is what it merges onto; together they fix
+  // exactly what the suites ran against. A commit hash also folds in the message,
+  // the author and the timestamp, so GitHub recreating the merge commit for an
+  // unchanged pull request produces a different hash for identical code. It does
+  // that whenever the base branch moves.
+  //
+  // Gating on it deadlocked a pull request tonight. A verdict is immutable and
+  // keyed by tree, so once the hash had moved on there was no hash that could
+  // ever match and no second verdict that could replace it: the queue refused the
+  // merge, released the lane, offered the same turn back, and refused again. The
+  // hash is still recorded on the verdict, where it belongs, as provenance.
+
   // The same tree can be reached from a different base after a fast-forward. The
   // suites passing there does not establish they pass here.
   if (verdict.baseSha !== expected.baseSha) {
