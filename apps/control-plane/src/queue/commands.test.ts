@@ -454,3 +454,28 @@ function driveToMergeRequested(commands: QueueCommands): string {
   commands.beginMergeWrite({ idempotencyKey: "m1", attemptId, operationId: "op-x" });
   return attemptId;
 }
+
+/**
+ * The alarm has to terminate.
+ *
+ * Deadlines were cleared as a side effect of the command that handled them, so a
+ * deadline whose command was a no-op survived. It stayed due, earliestDeadline
+ * kept returning a time in the past, and the alarm rescheduled to that past time
+ * and fired again at once: a wake loop writing no events, invisible in the state,
+ * that spent an entire day of the object's request budget in a few hours.
+ */
+describe("the alarm terminates", () => {
+  it("never asks to be woken at a time that has already passed", () => {
+    const { store, commands, clock } = harness();
+    ready(commands, "e1", "alice", 7);
+    ready(commands, "e2", "bob", 8);
+    commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+
+    for (let i = 0; i < 5; i += 1) {
+      clock.advance(600);
+      commands.runAlarm();
+      const next = store.earliestDeadline();
+      if (next !== null) expect(next > clock.now()).toBe(true);
+    }
+  });
+});
