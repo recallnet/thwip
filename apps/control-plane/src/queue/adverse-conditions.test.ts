@@ -1,10 +1,8 @@
-import Database from "better-sqlite3";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
+import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
 /**
  * The queue under the conditions that actually broke it.
@@ -17,42 +15,13 @@ import type { TurnCheckUpdate } from "./turn-check.js";
  */
 
 const open: Array<{ close(): void }> = [];
-let raw: Database.Database;
+let raw: import("better-sqlite3").Database;
 
 function env(): QueueRouteEnv {
-  const db = new Database(":memory:");
-  open.push(db);
-  raw = db;
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
-  for (const file of readdirSync(dir).sort()) {
-    if (!file.endsWith(".sql")) continue;
-    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
-      const sql = statement
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("--"))
-        .join("\n")
-        .trim();
-      if (sql.length === 0) continue;
-      try {
-        db.exec(sql);
-      } catch {
-        /* migrations altering tables these tests do not use */
-      }
-    }
-  }
-  const d1 = {
-    prepare: (query: string) => ({
-      bind: (...values: unknown[]) => ({
-        run: async () => ({ meta: { changes: db.prepare(query).run(...(values as never[])).changes } }),
-        first: async <T,>() => (db.prepare(query).get(...(values as never[])) ?? null) as T | null,
-        all: async <T,>() => ({ results: db.prepare(query).all(...(values as never[])) as T[] }),
-      }),
-    }),
-    batch: async (statements: Array<{ run(): Promise<unknown> }>) => {
-      for (const s of statements) await s.run();
-    },
-  };
-  return { DB: d1, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
+  const t = testD1();
+  open.push(t);
+  raw = t.raw;
+  return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
 afterEach(() => {
@@ -333,13 +302,51 @@ describe("a merge that is not the one the queue authorized", () => {
   });
 });
 
+/**
+ * The base branch moving underneath a turn.
+ *
+ * This used to be asserted by calling the pause endpoint, which proved that
+ * pausing pauses and said nothing about whether anything notices a branch that
+ * moved. Nothing did: the reducer, the invariant and the command all existed
+ * with no caller. So this drives the detector the webhook actually uses.
+ */
 describe("the base branch moves underneath a turn", () => {
-  it("stops merging until somebody rebaselines", async () => {
+  const pushed = (over: Record<string, unknown> = {}) => ({
+    ref: REF,
+    after: "e".repeat(40),
+    deleted: false,
+    repository: { id: Number(REPO), default_branch: "main" },
+    head_commit: { id: "e".repeat(40), message: "merged by hand, around the queue", ...(over["head_commit"] as object ?? {}) },
+    ...over,
+  });
+
+  it("is seen for a push the queue did not make", () => {
+    expect(externalPushFromWebhook("push", pushed())).toEqual({
+      repositoryId: REPO,
+      baseRef: REF,
+      observedBaseSha: "e".repeat(40),
+    });
+  });
+
+  it("is not seen for the queue's own merge", () => {
+    const own = pushed({
+      head_commit: {
+        id: "e".repeat(40),
+        message: `Merge pull request #1 (Thwip Queue)\n\n${QUEUE_MERGE_TRAILER}: merge_att_1\n`,
+      },
+    });
+    expect(externalPushFromWebhook("push", own)).toBeNull();
+  });
+
+  it("stops the queue authorizing anybody once it has been told", async () => {
     const e = env();
     const app = routes();
-    await authorize(app, e, 59);
+    const holder = await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    expect(holder.reason).toBe("HOLDS_TURN");
 
-    const paused = await app.request(
+    // What the webhook does with what the detector returned.
+    await app.request(
       `/v1/queue/${REPO}/pause?ref=${encodeURIComponent(REF)}`,
       {
         method: "POST",
@@ -348,7 +355,6 @@ describe("the base branch moves underneath a turn", () => {
       },
       e,
     );
-    expect(paused.status).toBe(200);
 
     expect((await authorize(app, e, 59)).authorized).toBe(false);
     expect((await authorize(app, e, 61)).authorized).toBe(false);

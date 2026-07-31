@@ -1,8 +1,5 @@
-import Database from "better-sqlite3";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { testD1 } from "../../test/d1.js";
 import { candidateVerdict, claimCandidateDispatch, recordCandidateVerdict } from "./candidate-store.js";
 import type { D1Like } from "./projection.js";
 import type { CandidateVerdict } from "./store.js";
@@ -17,47 +14,9 @@ import type { CandidateVerdict } from "./store.js";
 const open: Array<{ close(): void }> = [];
 
 function d1(): D1Like {
-  const db = new Database(":memory:");
-  open.push(db);
-  // From the migrations, not restated here: a second copy of the schema drifts
-  // and then the tests describe a table that no longer exists.
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
-  for (const file of readdirSync(dir).sort()) {
-    if (!file.endsWith(".sql")) continue;
-    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
-      const sql = statement
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("--"))
-        .join("\n")
-        .trim();
-      if (sql.length === 0) continue;
-      try {
-        db.exec(sql);
-      } catch (error) {
-        if (/candidate_verdicts|candidate_dispatches/.test(sql)) throw error;
-      }
-    }
-  }
-
-  const prepare = (query: string) => ({
-    bind: (...values: unknown[]) => ({
-      async run() {
-        db.prepare(query).run(...(values as never[]));
-      },
-      async first<T>() {
-        return (db.prepare(query).get(...(values as never[])) ?? null) as T | null;
-      },
-      async all<T>() {
-        return { results: db.prepare(query).all(...(values as never[])) as T[] };
-      },
-    }),
-  });
-  return {
-    prepare,
-    async batch(statements: unknown[]) {
-      for (const s of statements) await (s as { run(): Promise<unknown> }).run();
-    },
-  } as unknown as D1Like;
+  const t = testD1();
+  open.push(t);
+  return t.db;
 }
 
 afterEach(() => {

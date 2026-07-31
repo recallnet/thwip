@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueueSnapshot } from "./queue-operations.js";
-import { turnCheckUpdates, turnStateOf } from "./turn-check.js";
+import { turnCheckRun, turnCheckUpdates, turnStateOf, type TurnCheckUpdate, type TurnState } from "./turn-check.js";
 
 /**
  * Whose turn it is, as a check GitHub can require.
@@ -137,5 +137,61 @@ describe("deciding what to publish", () => {
     });
     const updates = turnCheckUpdates(null, after);
     expect(updates.every((u) => u.waiting === 3)).toBe(true);
+  });
+});
+
+/**
+ * What the check actually says is the part that decides whether a merge is
+ * blocked, so it is worth pinning separately from what triggers a publish.
+ */
+describe("what the check says", () => {
+  const update = (state: TurnState, waiting = 0): TurnCheckUpdate => ({
+    entryId: "e",
+    pullRequestNumber: 1,
+    headSha: "a".repeat(40),
+    state,
+    waiting,
+  });
+
+  it("completes green only for the pull request that holds the turn", () => {
+    expect(turnCheckRun(update("holds"))).toMatchObject({ status: "completed", conclusion: "success" });
+  });
+
+  it("leaves a waiting pull request in progress rather than failing it", () => {
+    const run = turnCheckRun(update("waiting", 3));
+    expect(run).toMatchObject({ status: "in_progress", conclusion: null });
+    // A failed required check keeps refusing the merge after the queue has said
+    // yes, which is the whole reason this is not a failure.
+    expect(run.conclusion).not.toBe("failure");
+  });
+
+  it("counts the ones ahead, not itself", () => {
+    expect(turnCheckRun(update("waiting", 3)).title).toContain("behind 2 other pull requests");
+    expect(turnCheckRun(update("waiting", 2)).title).toContain("behind 1 other pull request");
+    expect(turnCheckRun(update("waiting", 1)).title).toContain("behind 0 other pull requests");
+    // Never negative, however the count arrives.
+    expect(turnCheckRun(update("waiting", 0)).title).toContain("behind 0");
+  });
+
+  it("says a halted queue is halted, without failing anybody for it", () => {
+    expect(turnCheckRun(update("halted"))).toMatchObject({ status: "in_progress", conclusion: null });
+  });
+
+  /**
+   * The one failure. Waiting resolves itself; an author with no activated
+   * principal does not, so a check that sat in progress forever would say
+   * nothing about what to do.
+   */
+  it("fails a pull request the queue cannot place, and says what unblocks it", () => {
+    const run = turnCheckRun(update("unplaceable"));
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(run.summary).toMatch(/activat/i);
+  });
+
+  it("never leaves a completed run without a conclusion, or an in-progress one with one", () => {
+    for (const state of ["holds", "waiting", "halted", "unplaceable"] as const) {
+      const run = turnCheckRun(update(state));
+      expect(run.status === "completed" ? run.conclusion !== null : run.conclusion === null, state).toBe(true);
+    }
   });
 });

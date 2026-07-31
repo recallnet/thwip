@@ -14,7 +14,9 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
-import { TURN_CHECK, type TurnCheckUpdate } from "./queue/turn-check.js";
+import { TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
+import { externalPushFromWebhook } from "./queue/external-push.js";
+import { queueExternalMove } from "./queue/external-move.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
 import {
   appProofTaskFromWebhook,
@@ -1398,6 +1400,21 @@ app.post("/api/github/webhooks", async (c) => {
     }
   }
 
+  // A push to the guarded branch that the queue did not make.
+  //
+  // The reducer has paused on this since the beginning and nothing ever told it,
+  // so a branch that moved underneath the queue left it certifying merges onto a
+  // tree it had never seen. The event, the invariant and the command all existed;
+  // the caller did not.
+  const external = externalPushFromWebhook(event, payload as never);
+  if (external !== null) {
+    try {
+      queued = await queueExternalMove(c.env, external);
+    } catch (error) {
+      queued = { handled: false, detail: error instanceof Error ? error.message : "external move failed" };
+    }
+  }
+
   const policyPush = policyPushFromGithubWebhook(event, payload);
   const appProofTask = appProofTaskFromWebhook(event, payload as never);
   const reconcileProofRepositoryId =
@@ -1714,55 +1731,57 @@ app.route(
         .first<{ github_name: string; installation_id: string | null }>();
       if (project === null || project.installation_id === null) return;
       const token = await installationToken(env, project.installation_id);
+      const said = turnCheckRun(update);
+      const call = (path: string, init?: RequestInit) =>
+        fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+          ...init,
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "content-type": "application/json",
+            "user-agent": "thwip-control-plane",
+            ...(init?.headers ?? {}),
+          },
+        });
 
-      const said =
-        update.state === "unplaceable"
-          ? {
-              status: "completed" as const,
-              conclusion: "failure" as const,
-              title: "Thwip Queue cannot place this pull request",
-              summary:
-                "The author has no activated thwip principal, so the queue has nobody to give the turn to. Activating the author, or having somebody who is activated sponsor the pull request, is what unblocks this. It will not resolve on its own.",
-            }
-          : update.state === "holds"
-          ? {
-              status: "completed" as const,
-              conclusion: "success" as const,
-              title: "It is this pull request's turn",
-              summary:
-                "Thwip Queue has offered this pull request the lane. The merge may proceed while it holds it.",
-            }
-          : update.state === "halted"
-            ? {
-                status: "in_progress" as const,
-                title: "The queue is paused",
-                summary:
-                  "Thwip Queue is not offering turns. An administrator paused it, or the base branch moved outside the queue and a rebaseline is pending.",
-              }
-            : {
-                status: "in_progress" as const,
-                title: `Waiting for a turn, behind ${update.waiting - 1} other pull request${update.waiting === 2 ? "" : "s"}`,
-                summary:
-                  "Thwip Queue merges one pull request at a time onto this branch. This check completes when it is this pull request's turn; nothing is wrong with it.",
-              };
+      // What this commit already says, if anything.
+      //
+      // One read buys two things. Creating a check run per publish left a pile of
+      // them on a pull request that waited through several turns, and publishing
+      // unconditionally — which the unplaceable path did — made a new one on every
+      // poll. Neither broke the gate, because GitHub reads the latest, but both
+      // were unbounded writes to say something already said.
+      const existing = await call(
+        `/commits/${encodeURIComponent(update.headSha)}/check-runs?check_name=${encodeURIComponent(TURN_CHECK)}`,
+      )
+        .then((r) => (r.ok ? (r.json() as Promise<{ check_runs?: Array<Record<string, unknown>> }>) : null))
+        .catch(() => null);
+      const current = existing?.check_runs?.[0];
 
-      await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-          "user-agent": "thwip-control-plane",
-        },
-        body: JSON.stringify({
-          name: TURN_CHECK,
-          head_sha: update.headSha,
-          status: said.status,
-          ...("conclusion" in said ? { conclusion: said.conclusion } : {}),
-          details_url: `${env.PUBLIC_ORIGIN}/projects`,
-          output: { title: said.title, summary: said.summary },
-        }),
+      if (
+        current !== undefined &&
+        current["status"] === said.status &&
+        (current["conclusion"] ?? null) === said.conclusion &&
+        (current["output"] as { title?: string } | undefined)?.title === said.title
+      ) {
+        return;
+      }
+
+      const body = JSON.stringify({
+        name: TURN_CHECK,
+        head_sha: update.headSha,
+        status: said.status,
+        ...(said.conclusion === null ? {} : { conclusion: said.conclusion }),
+        details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
+        output: { title: said.title, summary: said.summary },
       });
+
+      const id = current?.["id"];
+      if (typeof id === "number") {
+        await call(`/check-runs/${id}`, { method: "PATCH", body });
+        return;
+      }
+      await call("/check-runs", { method: "POST", body });
     },
     async dispatchCandidateVerification(
       env: Env,
