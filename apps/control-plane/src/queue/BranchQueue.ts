@@ -113,8 +113,17 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
+    // Never ask to be woken at a time that has already passed. setAlarm with a
+    // past timestamp fires immediately, so a deadline the alarm fails to clear
+    // becomes a spin at machine speed: the object sustained fifteen wakes a second
+    // for hours, writing almost no events, and spent an entire day of its request
+    // budget before anything noticed.
+    //
+    // Clearing deadlines unconditionally is the actual fix. This is the floor
+    // under it, so a case nobody predicted degrades into a slow retry rather than
+    // a runaway.
+    const target = Math.max(Date.parse(next), Date.now() + 1_000);
     const current = await this.ctx.storage.getAlarm();
-    const target = Date.parse(next);
     if (current === null || current > target) await this.ctx.storage.setAlarm(target);
   }
 
