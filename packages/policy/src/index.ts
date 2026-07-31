@@ -69,6 +69,17 @@ function validatedThwipYaml(value: unknown): ThwipYaml {
   if (!["fast", "fresh", "audited", "remote"].includes(y.profile)) {
     throw new Error("thwip.yaml: profile must be fast | fresh | audited | remote");
   }
+  // Fresh and Audited are defined as issuing an assignment and requiring an
+  // integration receipt signed where the suites ran. Nothing issues one and
+  // nothing signs one, so selecting either used to deliver what Remote delivers
+  // under a name that claims more than happened. Refuse, and say what to pick.
+  if (y.profile === "fresh" || y.profile === "audited") {
+    throw new Error(
+      `thwip.yaml: profile ${y.profile} requires an integration receipt signed where the suites ran, ` +
+        "and nothing issues one yet. Use remote to run the required suites in GitHub Actions against the " +
+        "merge candidate, or fast to reuse the proof already on the head.",
+    );
+  }
   if (!Array.isArray(y.required) || y.required.length === 0) {
     throw new Error("thwip.yaml: 'required' must list at least one suite id");
   }

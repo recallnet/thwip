@@ -44,13 +44,26 @@ The queue publishes the turn check itself when it offers the lane. Nothing needs
 re-running.
 
 
+## Which profile to choose
+
+Two profiles are available.
+
+`fast` merges on the proof already carried by the pull request head. That proof
+describes work done before the branch was integrated, which is what `fast` says
+and all it says.
+
+`remote` runs the required suites in GitHub Actions against the merge candidate
+and merges on that verdict.
+
+`fresh` and `audited` are described elsewhere as issuing an assignment and
+requiring an integration receipt signed on the machine that ran the suites.
+Nothing issues an assignment and nothing signs a receipt yet, so selecting
+either is refused rather than quietly giving you what `remote` gives under a
+name that claims more.
+
 ## Candidate verification
 
-Under the `fast` profile the evidence for a merge is the proof already on the
-pull request head. That proof describes work done before the branch was
-integrated, which is what `fast` says and all it says.
-
-Under any stronger profile the queue claims the integration itself was run, and
+Under `remote` the queue claims the integration itself was run, and
 it will not certify a merge until something has run it. The required suites
 execute against the merge commit GitHub produced for the pull request, and the
 verdict is stored against that commit's tree. A verdict for a different tree is
@@ -63,4 +76,4 @@ from its own content, so a result edited after the fact no longer matches it.
 
 The queue verifies the integrated candidate before it certifies a merge.
 
-A merge under a stronger profile carries a verdict bound to the tree that landed.
+A merge under `remote` carries a verdict bound to the tree that landed.
