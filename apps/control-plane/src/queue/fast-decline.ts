@@ -32,7 +32,19 @@ export interface ProjectedQueue {
   readonly activeAttemptId: string | null;
   readonly paused: boolean;
   readonly entries: readonly ProjectedEntry[];
+  /** When the projection last moved, which is also when deadlines were last swept. */
+  readonly projectedAt?: string | null;
 }
+
+/**
+ * How long the lane may appear held with nothing happening before this stops
+ * answering and makes the caller go to the queue itself.
+ *
+ * Longer than any turn can legitimately take, so an ordinary merge is never
+ * interrupted, and short enough that a stuck lane costs one waiting pull request
+ * one extra round rather than a day.
+ */
+const LANE_HELD_TOO_LONG_MS = 15 * 60_000;
 
 export type Decline =
   | { readonly decline: true; readonly reason: string; readonly queuePosition: number }
@@ -44,7 +56,7 @@ export type Decline =
  */
 export function declineFromProjection(
   projected: ProjectedQueue | null,
-  input: { readonly entryId: string; readonly headSha: string },
+  input: { readonly entryId: string; readonly headSha: string; readonly now?: number },
 ): Decline {
   if (projected === null) return { decline: false };
 
@@ -75,6 +87,23 @@ export function declineFromProjection(
   // round. It cannot be ahead, so this can never decline a pull request that
   // actually holds the lane.
   if (projected.activeAttemptId !== null) {
+    // A lane that has appeared held for longer than a turn can last is the one
+    // case where declining is not merely pessimistic but self-perpetuating.
+    //
+    // Deadlines are swept when something runs a command, and the projection moves
+    // at the same moment, so a projection that has not moved means no sweep has
+    // happened. If every waiting pull request is answered from here, none of them
+    // ever runs a command, nothing ever sweeps, and the expired turn holds the
+    // lane forever. The queue would sit wedged while confidently explaining why.
+    //
+    // So past that point this stops answering and lets the caller reach the
+    // queue, which expires the turn and moves the lane on.
+    const projectedAt = projected.projectedAt ?? null;
+    if (projectedAt !== null) {
+      const age = (input.now ?? Date.now()) - Date.parse(projectedAt);
+      if (Number.isFinite(age) && age > LANE_HELD_TOO_LONG_MS) return { decline: false };
+    }
+
     const holder = projected.entries.find((e) => e.lastAttemptId === projected.activeAttemptId);
     if (holder !== undefined && holder.entryId !== input.entryId) {
       return { decline: true, reason: "WAITING_FOR_TURN", queuePosition: waiting };

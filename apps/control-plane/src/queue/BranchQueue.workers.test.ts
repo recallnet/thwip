@@ -134,41 +134,39 @@ describe("BranchQueue in workerd", () => {
     expect((await stub.snapshot()).entries).toHaveLength(1);
   });
 
-  it("schedules a real alarm and expires an unclaimed offer when it fires", async () => {
+  /**
+   * The queue's authority is in D1 now, and deadlines are handled by whatever
+   * touches the queue next rather than by a timer. What this object must do is
+   * stop: every wake is billed against a daily cap, and two separate spins have
+   * already spent a whole day of it at a time.
+   */
+  it("stops rather than rescheduling when an alarm reaches it", async () => {
     const { stub, key } = await open("2000000004");
     await ready(stub, "e1", "alice", 1);
-    const offered = await stub.tick({
-      idempotencyKey: "tick",
-      decisionDigest: `sha256:${"0".repeat(64)}`,
-    });
-    expect(offered.status).toBe("applied");
+    await stub.tick({ idempotencyKey: "tick", decisionDigest: `sha256:${"0".repeat(64)}` });
 
     const id = env.BRANCH_QUEUE.idFromName(key);
-    // An alarm must be scheduled; without one the lane would be held forever.
+    const ran = await runDurableObjectAlarm(env.BRANCH_QUEUE.get(id));
+    expect(ran).toBe(true);
+
     const scheduled = await runInDurableObject(env.BRANCH_QUEUE.get(id), async (_i, state) =>
       state.storage.getAlarm(),
     );
-    expect(scheduled).not.toBeNull();
-
-    // Run it early: the offer deadline has not passed, so nothing should change.
-    const ranEarly = await runDurableObjectAlarm(env.BRANCH_QUEUE.get(id));
-    expect(ranEarly).toBe(true);
-    const stillOffered = await stub.snapshot();
-    expect(stillOffered.activeAttemptId).not.toBeNull();
+    expect(scheduled).toBeNull();
   });
 
-  it("is idempotent when its alarm is delivered twice", async () => {
+  it("changes nothing when its alarm is delivered twice", async () => {
     const { stub, key } = await open("2000000005");
     await ready(stub, "e1", "alice", 1);
     await stub.tick({ idempotencyKey: "tick", decisionDigest: `sha256:${"0".repeat(64)}` });
 
     const id = env.BRANCH_QUEUE.idFromName(key);
+    const before = await stub.snapshot();
     await runDurableObjectAlarm(env.BRANCH_QUEUE.get(id));
-    const afterFirst = await stub.snapshot();
     await runDurableObjectAlarm(env.BRANCH_QUEUE.get(id));
-    const afterSecond = await stub.snapshot();
-    expect(afterSecond.generation).toBe(afterFirst.generation);
-    expect(afterSecond.entries).toEqual(afterFirst.entries);
+    const after = await stub.snapshot();
+    expect(after.generation).toBe(before.generation);
+    expect(after.entries).toEqual(before.entries);
   });
 
   it("keeps separate lanes for separate branches of one repository", async () => {
