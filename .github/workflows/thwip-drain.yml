@@ -59,11 +59,13 @@ jobs:
             || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
           echo "re-running thwip checks that failed before $cutoff"
 
-          # --repo, because this job has no checkout: gh cannot infer the
-          # repository from a working tree that does not exist. Its first real run
-          # died on "not a git repository" for exactly this.
-          gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-            --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"' |
+          # REST, not `gh pr list`. That goes through GraphQL, which GITHUB_TOKEN
+          # cannot reach on this repository: the first fix got past "not a git
+          # repository" only to fail with 403 Resource not accessible by
+          # integration. The REST endpoint works with the pull-requests: read this
+          # job already declares.
+          gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
+            --jq '.[] | "\(.number) \(.head.sha)"' |
           while read -r pr sha; do
             run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
               --jq '[.check_runs[] | select(.name == "thwip")] | first // empty')
