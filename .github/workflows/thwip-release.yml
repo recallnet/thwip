@@ -155,7 +155,9 @@ jobs:
         run: |
           set -euo pipefail
           git add packages/cli/package.json
-          git commit -m "release: @recallnet/thwip v$V"
+          # Named as thwip's own, so the queue does not read its own release as
+          # somebody merging around it and pause itself after every publish.
+          git commit -m "$(printf 'release: @recallnet/thwip v%s\n\nthwip-automated: release\n' "$V")"
           git tag -a "v$V" -m "thwip $V"
           git push origin "HEAD:${{ github.ref_name }}"
           git push origin "v$V"
