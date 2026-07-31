@@ -142,12 +142,18 @@ importers:
       '@thwip/queue-domain':
         specifier: workspace:*
         version: link:../queue-domain
+      '@thwip/queue-protocol':
+        specifier: workspace:*
+        version: link:../queue-protocol
       '@thwip/sshsig':
         specifier: workspace:*
         version: link:../sshsig
       '@thwip/verifier':
         specifier: workspace:*
         version: link:../verifier
+      jose:
+        specifier: ^6.0.0
+        version: 6.2.4
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
