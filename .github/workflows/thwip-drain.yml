@@ -59,7 +59,11 @@ jobs:
             || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
           echo "re-running thwip checks that failed before $cutoff"
 
-          gh pr list --state open --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"' |
+          # --repo, because this job has no checkout: gh cannot infer the
+          # repository from a working tree that does not exist. Its first real run
+          # died on "not a git repository" for exactly this.
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"' |
           while read -r pr sha; do
             run=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
               --jq '[.check_runs[] | select(.name == "thwip")] | first // empty')

@@ -63,7 +63,18 @@ writeFileSync(
   )}\n`,
 );
 
+// The package README must be written for someone who has just installed the
+// CLI. Falling back to the repository's README once published an internal
+// engineering document to npm, naming the staging control plane, plan.md and
+// how internal pull requests merge. A missing README is a build failure now,
+// because the quiet fallback is worse than stopping.
 const readme = join(root, "packages/cli/README.md");
-copyFileSync(existsSync(readme) ? readme : join(root, "README.md"), join(out, "README.md"));
+if (!existsSync(readme)) {
+  throw new Error(
+    "packages/cli/README.md is missing. It is what npm renders on the package page; " +
+      "the repository README is an internal document and must never be published.",
+  );
+}
+copyFileSync(readme, join(out, "README.md"));
 
 process.stdout.write(`built ${out} (thwip@${version})\n`);

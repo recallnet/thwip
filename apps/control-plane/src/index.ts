@@ -1436,6 +1436,34 @@ app.route(
         verifier,
       };
     },
+    /**
+     * Ask GitHub to run the merge workflow for a pull request the queue offered.
+     *
+     * repository_dispatch, because it needs only Contents: write, which the App
+     * has, and because it always runs the default branch's copy of the workflow.
+     */
+    async driveTurn(env: Env, repositoryId: string, pullRequestNumber: number) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return;
+      const token = await installationToken(env, project.installation_id);
+      await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "thwip-control-plane",
+        },
+        body: JSON.stringify({
+          event_type: "thwip-queue-turn",
+          client_payload: { pullRequestNumber },
+        }),
+      });
+    },
     async dispatchCandidateVerification(
       env: Env,
       repositoryId: string,
