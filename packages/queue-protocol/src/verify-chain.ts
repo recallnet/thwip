@@ -35,7 +35,8 @@ export interface ChainFinding {
     | "BAD_SIGNATURE"
     | "UNPARSEABLE"
     | "PRE_ATTESTATION"
-    | "MISSING_RECORD";
+    | "MISSING_RECORD"
+    | "WRONG_SUBJECT";
   readonly sequence: number | null;
   readonly digest: string;
   readonly detail: string;
@@ -49,6 +50,16 @@ export interface ChainVerifierPorts {
    * written before records existed and is reported, not failed.
    */
   epochStartsAt: number;
+  /**
+   * What this chain was asked for. Optional so an existing caller that has
+   * not passed one keeps working: without it, a record's own repository and
+   * ref are trusted rather than checked against a request.
+   *
+   * When present, a parsed record naming a different repository or ref is a
+   * finding, not a silent pass — a chain served from the wrong branch must
+   * not verify clean just because its own links join up internally.
+   */
+  subject?: { readonly repositoryId: string; readonly baseRef: string };
 }
 
 export async function verifyChain(
@@ -136,6 +147,18 @@ async function inspect(
   if (!record.ok) {
     findings.push({ code: "UNPARSEABLE", sequence: null, digest: link.digest, detail: record.detail });
     return { readable: false, sequence: null, previousDigest: null, findings };
+  }
+
+  if (
+    ports.subject !== undefined &&
+    (record.value.repositoryId !== ports.subject.repositoryId || record.value.baseRef !== ports.subject.baseRef)
+  ) {
+    findings.push({
+      code: "WRONG_SUBJECT",
+      sequence: record.value.transitionSequence,
+      digest: link.digest,
+      detail: `names ${record.value.repositoryId}@${record.value.baseRef}, not the branch this chain was requested for`,
+    });
   }
 
   if (record.value.transitionSequence >= ports.epochStartsAt) {

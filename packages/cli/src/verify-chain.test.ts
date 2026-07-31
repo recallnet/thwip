@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cmdVerifyChain,
   exitForStatus,
+  parseChainResponse,
+  parseKeySet,
   resolveRepositoryIdFromGithub,
   summarize,
   verifyPublishedChain,
@@ -137,5 +139,170 @@ describe("cmdVerifyChain network failure", () => {
     const code = await cmdVerifyChain(["--repository-id", "123"]);
 
     expect(code).toBe(EXIT.unavailable);
+  });
+});
+
+/**
+ * A keys outage must never be reported as a forged chain. Every signature
+ * would fail against no keys at all, which reads exactly like a forged chain
+ * unless the outage is caught first.
+ */
+describe("cmdVerifyChain keys outage", () => {
+  it("exits unavailable and prints no signature verdict when the keys endpoint fails", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) return new Response("boom", { status: 503 });
+        return Response.json({ epochStartsAt: 1, links: [] });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+
+    expect(code).toBe(EXIT.unavailable);
+    expect(writes.join("")).not.toMatch(/BAD_SIGNATURE/);
+    vi.restoreAllMocks();
+  });
+
+  it("exits unavailable when the key set is present but empty", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) return Response.json({ keys: [] });
+        return Response.json({ epochStartsAt: 1, links: [] });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+
+    expect(code).toBe(EXIT.unavailable);
+  });
+});
+
+/**
+ * The response is validated, not cast. A malformed body must exit with a code
+ * rather than crash on `.links.map`.
+ */
+describe("cmdVerifyChain malformed chain response", () => {
+  it("exits unavailable instead of throwing on a junk body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) {
+          return Response.json({ keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] });
+        }
+        return Response.json({ not: "a chain" });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+
+    expect(code).toBe(EXIT.unavailable);
+  });
+});
+
+describe("parseChainResponse", () => {
+  it("rejects a body missing the shape it needs", () => {
+    expect(parseChainResponse(null)).toBeNull();
+    expect(parseChainResponse({})).toBeNull();
+    expect(parseChainResponse({ epochStartsAt: 1, links: "nope" })).toBeNull();
+    expect(parseChainResponse({ epochStartsAt: 1, links: [{ digest: "d" }] })).toBeNull();
+  });
+
+  it("accepts a well-shaped body", () => {
+    const body = { epochStartsAt: 1, links: [{ digest: "d", record: "{}", jws: "j", sequence: 1 }] };
+    expect(parseChainResponse(body)).toEqual(body);
+  });
+});
+
+describe("parseKeySet", () => {
+  it("rejects a missing or empty key array", () => {
+    expect(parseKeySet(null)).toBeNull();
+    expect(parseKeySet({})).toBeNull();
+    expect(parseKeySet({ keys: [] })).toBeNull();
+  });
+
+  it("accepts a non-empty key array", () => {
+    const body = { keys: [{ kty: "EC" }] };
+    expect(parseKeySet(body)).toEqual(body);
+  });
+});
+
+/**
+ * A server that claims signature checking starts far in the future would make
+ * the verifier skip every check and print a clean "N links verified" for a
+ * chain with no valid signature at all. `--epoch` exists so a caller does not
+ * have to trust that claim.
+ */
+describe("cmdVerifyChain --epoch pinning", () => {
+  it("still reports BAD_SIGNATURE when the server claims a huge epochStartsAt", async () => {
+    const record = {
+      schemaVersion: "1",
+      kind: "reused-proof-merge",
+      repositoryId: "123",
+      baseRef: "refs/heads/main",
+      queueEpoch: 1,
+      transitionSequence: 1,
+      previousTransitionDigest: null,
+      before: { baseSha: null, treeOid: null },
+      after: {
+        baseSha: "3".repeat(40),
+        treeOid: "4".repeat(40),
+        parentOids: ["3".repeat(40)],
+        parentCount: 1,
+        parentOidsDigest: `sha256:${"7".repeat(64)}`,
+        parentsComplete: true,
+      },
+      observedAt: "2026-07-31T12:00:00Z",
+      reusedProof: {
+        attemptId: "att-1",
+        mergeIntentDigest: `sha256:${"1".repeat(64)}`,
+        pullRequestNumber: 1,
+        headSha: "2".repeat(40),
+        candidateSha: "3".repeat(40),
+        candidateTreeOid: "4".repeat(40),
+        mergeMethod: "squash",
+        workReceiptDigest: `sha256:${"2".repeat(64)}`,
+        policyDigest: `sha256:${"6".repeat(64)}`,
+        pipelineDigest: `sha256:${"8".repeat(64)}`,
+        requiredSuitesDigest: `sha256:${"9".repeat(64)}`,
+        checkRunId: "778899",
+      },
+    };
+    const { canonicalBytes, envelopeDigest } = await import("@thwip/queue-protocol");
+    const bytes = canonicalBytes(JSON.stringify(record));
+    const digest = await envelopeDigest(bytes);
+
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) {
+          return Response.json({ keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] });
+        }
+        // A server claiming the epoch starts absurdly far in the future would
+        // make an unpinned verifier skip this link's signature check entirely.
+        return Response.json({
+          epochStartsAt: 999_999_999,
+          links: [{ digest, record: new TextDecoder().decode(bytes), jws: "not-a-real-signature", sequence: 1 }],
+        });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123", "--epoch", "1"]);
+
+    expect(code).toBe(EXIT.evidenceRejected);
+    expect(writes.join("")).toMatch(/BAD_SIGNATURE/);
+    expect(writes.join("")).toMatch(/epoch: 1 \(pinned\)/);
+    vi.restoreAllMocks();
   });
 });

@@ -16,7 +16,7 @@ export function publicJwkFrom(jwk: JWK): JWK {
   if (typeof jwk.kid !== "string" || jwk.kid.length === 0) {
     throw new Error("a signing key needs a kid; verifiers select the key by id");
   }
-  const { d: _private, ...rest } = jwk as JWK & { d?: string };
+  const { d: _private, ...rest } = jwk;
   return { ...rest, use: "sig", alg: "ES256" };
 }
 

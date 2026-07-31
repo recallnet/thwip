@@ -225,7 +225,7 @@ export async function readChain(
       `SELECT digest, transition_sequence AS sequence, bytes, jws
          FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
-        ORDER BY transition_sequence`,
+        ORDER BY transition_sequence, created_at`,
     )
     .bind(repositoryId, baseRef)
     .all<{ digest: string; sequence: number; bytes: string; jws: string }>();

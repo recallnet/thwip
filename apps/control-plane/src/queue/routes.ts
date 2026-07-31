@@ -1956,9 +1956,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * A branch's whole chain, with the bytes each link was signed over.
    *
-   * Open, like the records it serves. A reader fetches this, fetches the keys
-   * from /.well-known/thwip-keys, and checks the chain without trusting this
-   * service for anything except the bytes it is being asked to verify.
+   * Open only when the project has said so. A chain names pull request
+   * numbers, head and base SHAs, tree oids, actor GitHub ids and free-text
+   * override reasons — public for a public repository, and nobody else's
+   * business for a private one. A caller cannot make it public just by
+   * knowing the numeric repository id, so a private project is served the
+   * same way every other authenticated queue route is: the caller has to be
+   * a member.
    */
   app.get("/v1/queue/:repositoryId/chain", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
@@ -1966,11 +1970,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
 
     const project = await c.env.DB.prepare(
-      "SELECT attested_from_sequence AS epoch FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
+      "SELECT attested_from_sequence AS epoch, chain_public AS chainPublic FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
     )
       .bind(repositoryId, baseRef)
-      .first<{ epoch: number }>();
+      .first<{ epoch: number; chainPublic: number }>();
     if (project === null) return c.json({ error: "no queue for that branch" }, 404);
+
+    if (project.chainPublic !== 1) {
+      const who = await deps.authenticate(c, c.env);
+      if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    }
 
     const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
     const decoder = new TextDecoder();
