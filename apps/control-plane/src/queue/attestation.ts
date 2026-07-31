@@ -207,3 +207,33 @@ export async function readAttestation(
   if (row === null) return null;
   return { digest: row.digest, kind: row.kind, record: JSON.parse(row.bytes) as unknown, jws: row.jws };
 }
+
+/**
+ * Every signed link on a branch, oldest first.
+ *
+ * Only records occupy a position in the chain, so intents are left out: they are
+ * cited by the record that follows them and are fetched by digest when a reader
+ * wants one.
+ */
+export async function readChain(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+): Promise<Array<{ digest: string; sequence: number; bytes: Uint8Array; jws: string }>> {
+  const rows = await db
+    .prepare(
+      `SELECT digest, transition_sequence AS sequence, bytes, jws
+         FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+        ORDER BY transition_sequence`,
+    )
+    .bind(repositoryId, baseRef)
+    .all<{ digest: string; sequence: number; bytes: string; jws: string }>();
+  const encoder = new TextEncoder();
+  return rows.results.map((r) => ({
+    digest: r.digest,
+    sequence: r.sequence,
+    bytes: encoder.encode(r.bytes),
+    jws: r.jws,
+  }));
+}
