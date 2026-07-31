@@ -388,6 +388,11 @@ git commit -m "feat(keys): publish the verification keys at /.well-known/thwip-k
 
 This is the piece that turns the chain from an assertion into something checkable. It does no I/O so it can run in the Worker, in the CLI, and in a test.
 
+Two rules this module lives or dies by, both learned the hard way in review:
+
+- A link the walk cannot read must not hide a break in the link after it. Carry the claimed digest forward even when the record itself is unreadable.
+- A record that has gone missing is not the same fact as history written before records existed. `ChainLink` therefore carries the position the store recorded, and an empty link inside the attested range is `MISSING_RECORD` rather than `PRE_ATTESTATION`.
+
 **Files:**
 - Create: `packages/queue-protocol/src/verify-chain.ts`
 - Test: `packages/queue-protocol/src/verify-chain.test.ts`
@@ -940,6 +945,9 @@ export async function verifyPublishedChain(
     digest: l.digest,
     bytes: encoder.encode(l.record),
     jws: l.jws,
+    // The position the store recorded. A link whose record is missing cannot say
+    // where it sits, and that is how a lost record is told from history.
+    sequence: l.sequence,
   }));
 
   const findings = await verifyChain(links, {
