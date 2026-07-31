@@ -903,11 +903,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const baseRef = branchRef(c.req.query("ref"));
     if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
 
-    const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef);
-    if (projected === null) return c.json({ nudged: false, reason: "NOTHING_PROJECTED" });
-
-    const entries = projected["entries"] as Array<{ state: string; pullRequestNumber: number }>;
-    const holder = entries.find((e) => e.state === "Offered" || e.state === "Active");
+    // From the queue, not the projection.
+    //
+    // This picked whose turn to drive out of a read model that lags, so it could
+    // dispatch for a pull request whose turn had already ended. Harmless, because
+    // the merge workflow asks the queue itself and does nothing if the answer is
+    // no — but it is a wasted run and the same habit that wedged the lane once
+    // already. Reading the queue costs one row.
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
     if (holder === undefined) return c.json({ nudged: false, reason: "LANE_IDLE" });
 
     try {
