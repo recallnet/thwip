@@ -196,6 +196,18 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       requiredSuites: readonly string[];
     } | null>;
     proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
+  /**
+   * Publish the candidate verdict as a check on the pull request head.
+   *
+   * The verifier workflow used to do this and was refused the permission, so a
+   * passing verification finished as a failed run. Optional, because failing to
+   * publish must never cost a verdict that has already been recorded.
+   */
+  publishCandidateCheck?(
+    env: TEnv,
+    repositoryId: string,
+    update: { headSha: string; accepted: boolean; summary: string },
+  ): Promise<void>;
     signRecordBytes(env: TEnv, bytes: Uint8Array, typ: string): Promise<string>;
     commitFacts(
       env: TEnv,
@@ -551,6 +563,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * record nothing rather than to cite a check that never ran.
    */
   proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
+  /**
+   * Publish the candidate verdict as a check on the pull request head.
+   *
+   * The verifier workflow used to do this and was refused the permission, so a
+   * passing verification finished as a failed run. Optional, because failing to
+   * publish must never cost a verdict that has already been recorded.
+   */
+  publishCandidateCheck?(
+    env: TEnv,
+    repositoryId: string,
+    update: { headSha: string; accepted: boolean; summary: string },
+  ): Promise<void>;
   /**
    * Sign canonical record bytes with the service key, returning a compact JWS.
    *
@@ -999,6 +1023,29 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       digest: resultDigest as `sha256:${string}`,
       bytes: candidateResultBytes(content),
     });
+
+    // Say so on the pull request. The verifier workflow cannot: it asks GitHub
+    // for `checks: write` and is refused, so it finished red on every passing
+    // verification. Only on the first recording, and never at the cost of the
+    // verdict itself, which is already stored by this point.
+    if (stored.status === "applied" && deps.publishCandidateCheck !== undefined) {
+      const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+      const head = snapshot.entries.find((e) => e.pullRequestNumber === body.pullRequestNumber)?.headSha;
+      if (head != null) {
+        const lines = suites
+          .map((s) => `- \`${s.name}\`: ${s.outcome} in ${Math.round(s.durationMs / 100) / 10}s`)
+          .join("\n");
+        try {
+          await deps.publishCandidateCheck(c.env, repositoryId, {
+            headSha: head,
+            accepted: body.accepted === true,
+            summary: `Ran against merge tree \`${candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
+          });
+        } catch {
+          /* the verdict stands; the check is how it is shown, not what it is */
+        }
+      }
+    }
 
     // Call the merge back. This is the other half of not polling: the verdict
     // has landed, the queue knows whose turn it is, so it tells that pull request

@@ -14,7 +14,7 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue } from "./queue/routes.js";
-import { PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
+import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
@@ -1834,6 +1834,51 @@ app.route(
     async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
       const { key, kid } = await serviceKey(env);
       return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
+    },
+    /**
+     * The candidate verdict, as a check on the pull request head.
+     *
+     * Moved here from the verifier workflow, which asked GitHub for
+     * `checks: write` and was refused because this repository's default workflow
+     * permission is read-only. Every passing verification therefore finished as a
+     * failed run. The App already holds the permission and already publishes the
+     * other two checks.
+     *
+     * Not a required check: it reports what ran against the integrated candidate,
+     * and the queue decides the merge from the verdict it stored, not from this.
+     */
+    async publishCandidateCheck(
+      env: Env,
+      repositoryId: string,
+      update: { headSha: string; accepted: boolean; summary: string },
+    ) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return;
+      const token = await installationToken(env, project.installation_id);
+      await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "thwip-control-plane",
+        },
+        body: JSON.stringify({
+          name: CANDIDATE_CHECK,
+          head_sha: update.headSha,
+          status: "completed",
+          conclusion: update.accepted ? "success" : "failure",
+          details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
+          output: {
+            title: "Required suites against the integrated candidate",
+            summary: update.summary,
+          },
+        }),
+      });
     },
     async dispatchCandidateVerification(
       env: Env,
