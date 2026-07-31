@@ -250,6 +250,7 @@ describe("GitHub refuses the merge", () => {
     expect(stateOf(after, 59)).toBe("Deferred");
     expect(stateOf(after, 61)).toBe("Offered");
   });
+});
 
 describe("a merge that is not the one the queue authorized", () => {
   it("is refused rather than recorded", async () => {
