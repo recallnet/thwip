@@ -7,6 +7,7 @@ export type CliCommand =
   | "queue"
   | "init"
   | "verify"
+  | "verify-chain"
   | "keys-status"
   | "setup"
   | "run"
@@ -53,6 +54,7 @@ COMMANDS
   setup                     Print the machine setup prompt.
   run                       Run approved suites and attach a proof.
   verify                    Parse and print the proof on HEAD.
+  verify-chain              Fetch and verify a branch's merge chain.
   policy digest             Print policy and pipeline digests.
 
 Run \`thwip <command> --help\` for command-specific help.
@@ -67,6 +69,9 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Usage: thwip init --required "lint,typecheck,test" [--profile PROFILE] [--sign-commits]\n\n` +
     `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
   verify: `Usage: thwip verify [--json]\n\nParse and print the proof carried by HEAD.\n`,
+  "verify-chain":
+    `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n\n` +
+    `Fetch a branch's merge chain and thwip's published keys, then verify it.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,
   setup: `Usage: thwip setup\n\nPrint the human-guided machine setup prompt.\n`,
@@ -234,6 +239,8 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
       });
     case "verify":
       return simpleCommand("verify", rest, { boolean: ["--json"] });
+    case "verify-chain":
+      return simpleCommand("verify-chain", rest, { value: ["--repo", "--branch"] });
     case "keys": {
       if (rest.length === 0) return command("keys-status");
       if (wantsHelp(rest)) return { kind: "help", text: SIMPLE_HELP["keys-status"] };

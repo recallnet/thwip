@@ -29,6 +29,8 @@ import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "
 import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 import { executeCli, type CommandInvocation } from "./cli-args.js";
+import type { JSONWebKeySet } from "jose";
+import { summarize, verifyPublishedChain, type ChainResponse } from "./verify-chain.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -585,6 +587,16 @@ async function run(cmd: string, args: string[], cwd: string): Promise<string> {
   return stdout;
 }
 
+/** Resolve `owner/name` to the numeric GitHub repository id thwip tracks. */
+async function resolveRepositoryId(endpoint: string, auth: string, repo: string): Promise<string | null> {
+  const resolved = await fetch(endpoint + "/v1/resolve-repo?name=" + encodeURIComponent(repo), {
+    headers: { authorization: auth },
+  });
+  if (!resolved.ok) return null;
+  const { repositoryId } = (await resolved.json()) as { repositoryId: string };
+  return repositoryId;
+}
+
 /** `thwip queue …`. Parsing, authority, and confirmations live in queue-commands.ts. */
 async function cmdQueue(argv: string[]): Promise<number> {
   const parsed = planQueueCommand(argv);
@@ -602,15 +614,11 @@ async function cmdQueue(argv: string[]): Promise<number> {
   const repo = flag(argv, "--repo") ?? "";
   let path = parsed.plan.path;
   if (path.includes("{repositoryId}")) {
-    const resolved = await fetch(
-      endpoint + "/v1/resolve-repo?name=" + encodeURIComponent(repo),
-      { headers: { authorization: auth } },
-    );
-    if (!resolved.ok) {
-      process.stderr.write(`cannot resolve ${repo}: ${resolved.status}\n`);
+    const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+    if (repositoryId === null) {
+      process.stderr.write(`cannot resolve ${repo}\n`);
       return EXIT.setupInvalid;
     }
-    const { repositoryId } = (await resolved.json()) as { repositoryId: string };
     path = path.replaceAll("{repositoryId}", repositoryId);
   }
 
@@ -629,6 +637,49 @@ async function cmdQueue(argv: string[]): Promise<number> {
   return res.ok ? 0 : res.status === 403 ? EXIT.permission : EXIT.unavailable;
 }
 
+/**
+ * Fetch a branch's chain and the keys thwip publishes, then verify it. The
+ * chain and keys endpoints are open — no session is required to read them —
+ * but resolving `owner/name` to a repository id goes through the same
+ * `/v1/resolve-repo` lookup `thwip queue` uses, so that still needs a session.
+ */
+async function cmdVerifyChain(argv: string[]): Promise<number> {
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const repo = flag(argv, "--repo") ?? "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+    process.stderr.write("usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n");
+    return EXIT.usage;
+  }
+  const branch = flag(argv, "--branch") ?? "main";
+
+  const auth = await apiAuthHeader();
+  if (auth === null) {
+    process.stderr.write("not signed in: run `thwip login`\n");
+    return EXIT.authRequired;
+  }
+  const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+  if (repositoryId === null) {
+    process.stderr.write(`cannot resolve ${repo}\n`);
+    return EXIT.setupInvalid;
+  }
+  const ref = encodeURIComponent(`refs/heads/${branch}`);
+
+  const [chainRes, keysRes] = await Promise.all([
+    fetch(`${endpoint}/v1/queue/${repositoryId}/chain?ref=${ref}`),
+    fetch(`${endpoint}/.well-known/thwip-keys`),
+  ]);
+  if (!chainRes.ok) {
+    process.stderr.write(`could not read the chain (${chainRes.status})\n`);
+    return EXIT.unavailable;
+  }
+  const chain = (await chainRes.json()) as ChainResponse;
+  const jwks = (await keysRes.json()) as JSONWebKeySet;
+
+  const { verified, findings } = await verifyPublishedChain(chain, jwks);
+  process.stdout.write(summarize(verified, findings) + "\n");
+  return findings.some((f) => f.code !== "PRE_ATTESTATION") ? EXIT.evidenceRejected : EXIT.ok;
+}
+
 async function dispatchCli(invocation: CommandInvocation): Promise<number> {
   switch (invocation.command) {
     case "run":
@@ -643,6 +694,8 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
       return cmdInit([...invocation.argv]);
     case "verify":
       return cmdVerifyLocal();
+    case "verify-chain":
+      return cmdVerifyChain([...invocation.argv]);
     case "keys-status":
       return cmdKeysStatus();
     case "setup":
