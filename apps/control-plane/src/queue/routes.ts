@@ -188,7 +188,7 @@ async function driveLane(
  * safe; the projection write afterwards is what the dashboard and the fast
  * decline path read, and a stale one only ever costs a pull request a round.
  */
-async function runOnQueue<T>(
+export async function runOnQueue<T>(
   env: QueueRouteEnv,
   repositoryId: string,
   baseRef: string,
