@@ -1956,7 +1956,26 @@ git commit -m "feat(queue): backfill signed records into durable storage"
 
 This is the largest phase and the only one that unlocks a product tier. `verified-merge` binds an assignment and an integration receipt, and nothing issues either, which is why `fresh` and `audited` are currently refused.
 
-**Open decision before starting:** who runs the integration suites for `fresh`. The plan below assumes the existing CLI agent does it on the developer's machine, because `buildAssignment` and the `IntegrationReceipt` schema already describe that shape. If the answer is a hosted runner instead, tasks 5.2 and 5.3 change substantially and this phase should be re-planned first.
+**Decided, from the specification rather than invented.** The developer's machine runs the integration suites. plan.md:278 has the CLI claim the offer, fetch the signed assignment and materialize the exact candidate in an isolated worktree; plan.md:39 has the agent run the approved suites there and sign an integration receipt. `AssignmentExecution` already encodes it as `{ mode: "run", profile, runnerPrincipalId, deviceKeyId }`.
+
+**There is no fallback to GitHub Actions, and that is the point.** plan.md:452 makes an entry scheduler-eligible only when a compatible connected runner exists, and an offline entry keeps its fairness identity, receives no offer, and does not block another Ready entry. plan.md:2402 shows the operator what to do about it: reason `AGENT_OFFLINE`, remedy `thwip queue work --watch`. So a closed laptop delays that one pull request, visibly, while the rest of the queue keeps merging. Wanting Actions to run the suites is the `remote` profile, chosen deliberately. A profile that quietly degrades into a weaker one is the exact misrepresentation removed earlier in this work.
+
+**Runner liveness is the keystone, and it was missing from the first draft of this phase.** Nothing today ever marks an entry scheduler-eligible on the strength of a connected runner, so a `fresh` entry would never be offered a turn and the assignment and receipt path would never run. Liveness comes first.
+
+**Where liveness lives, decided here.** plan.md:887 assumes WebSocket hibernation on a Durable Object. That object was retired to D1 because the free tier's daily request cap is the deliberate circuit breaker on this account, and D1 cannot hold a socket. Liveness is therefore heartbeat rows in D1, not a revived WebSocket object:
+
+- The domain already models it. `HeartbeatReceived`, `HeartbeatLost`, `Reconnected` and `graceUntil` all exist in the reducer, so only the transport is missing.
+- A heartbeat is one bounded write per connected runner per interval, which the free tier absorbs where a per-connection object does not.
+- plan.md:887 already sanctions HTTP polling as the transport for restrictive networks, so this is the documented fallback rather than a departure.
+
+**Revised task order for this phase.** Task 5.0 does not yet have step-level detail and needs it written before anyone starts:
+
+- **5.0 Runner liveness.** A heartbeat endpoint, `thwip queue work --watch` posting to it, and `schedulerEligible` derived from a heartbeat inside the grace window. Nothing else in this phase can be reached without it.
+- **5.1** Give the assignment builder the policy document, version and Dagger digests.
+- **5.2** Issue and sign an assignment when a connected runner claims a turn.
+- **5.3** Run the candidate in an isolated worktree and sign an integration receipt.
+- **5.4** Accept the receipt and produce a `verified-merge` record.
+- **5.5** Let `fresh` and `audited` be selected again.
 
 ### Task 5.1: Give the assignment builder what it needs
 
