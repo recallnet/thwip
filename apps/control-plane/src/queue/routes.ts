@@ -197,7 +197,16 @@ async function runOnQueue<T>(
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
   const out = await withQueueState(db, repositoryId, baseRef, (store) => {
-    const result = decide({ store, commands: commandsFor(store) });
+    const commands = commandsFor(store);
+    // Whatever is already due, before anything else.
+    //
+    // A Durable Object has an alarm; D1 does not. Without this, an offer nobody
+    // claimed never expires, and an offer that never expires holds the lane
+    // forever. This is what the alarm did, minus the waking up: the queue is
+    // touched on every authorization, every webhook and every nudge, and the
+    // document is loaded already, so catching up costs nothing.
+    commands.runAlarm();
+    const result = decide({ store, commands });
     return { result, snapshot: buildSnapshot(store) };
   });
   try {
@@ -923,7 +932,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         repositoryId,
         baseRef,
       )) as ProjectedQueue | null;
-      const declined = declineFromProjection(projected, { entryId, headSha: body.headSha });
+      const declined = declineFromProjection(projected, {
+        entryId,
+        headSha: body.headSha,
+        now: Date.now(),
+      });
       if (declined.decline) {
         const enforcing = project.activationState === "canary" || project.activationState === "enforced";
         return c.json({
@@ -950,10 +963,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // against the stored document. This was a Durable Object round trip, which
     // is the one resource with a daily cliff; it is now a row read and, only when
     // something actually changed, a row write.
-    const held = await withQueueState(db, repositoryId, baseRef, (store) =>
+    const { snapshot: held } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
       principalId === null
         ? buildSnapshot(store)
-        : admit(commandsFor(store), store, {
+        : admit(commands, store, {
             entryId,
             pullRequestNumber,
             sponsorPrincipalId: principalId,
@@ -1102,7 +1115,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         const candidateSha = cand.candidateSha;
         const candidateTree = cand.candidateTreeOid;
 
-        const walked = await withQueueState(db, repositoryId, baseRef, (store) => {
+        const { result: walked } = await runOnQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
           // Checked again inside the transaction. Consulting the verifier took
           // network time, and the lane can move while that happens; walking an
           // attempt that no longer holds it would prepare a merge for a pull
@@ -1110,7 +1123,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           if (store.state().activeAttemptId !== attemptId) {
             return { operationId: null, snapshot: buildSnapshot(store) };
           }
-          return walkToMergeReady(commandsFor(store), store, {
+          return walkToMergeReady(commands, store, {
             attemptId,
             baseSha,
             headSha,
