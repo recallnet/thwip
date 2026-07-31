@@ -343,7 +343,8 @@ export class QueueCommands {
     attemptId: string;
     nonce: string;
     accepted: boolean;
-    resultDigest: string;
+    /** Null where nothing ran to produce one; see the reducer's own gate. */
+    resultDigest: string | null;
   }): CommandResult {
     return this.store.append(
       {
@@ -491,7 +492,7 @@ export class QueueCommands {
 
   recordTransition(input: {
     idempotencyKey: string;
-    kind: "genesis" | "verified" | "override" | "external";
+    kind: "genesis" | "verified" | "reused" | "override" | "external";
     transitionSequence: number;
     priorDigest: string | null;
     digest: string;

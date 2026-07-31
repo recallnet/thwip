@@ -191,6 +191,27 @@ export async function buildMergeIntent(input: {
         readonly candidateCheckRunId: string;
       }
     | {
+        /** A merge the queue had the integrated candidate run for. */
+        readonly kind: "candidate-verified";
+        readonly workReceiptDigest: Sha256;
+        readonly pipelineDigest: Sha256;
+        readonly requiredSuitesDigest: Sha256;
+        readonly verifierResultDigest: Sha256;
+        readonly proofCheckRunId: string;
+      }
+    | {
+        /**
+         * A merge resting on the proof already carried by the head. It names no
+         * assignment and no verifier result because nothing was dispatched and
+         * nothing ran against the integrated candidate.
+         */
+        readonly kind: "reused";
+        readonly workReceiptDigest: Sha256;
+        readonly pipelineDigest: Sha256;
+        readonly requiredSuitesDigest: Sha256;
+        readonly proofCheckRunId: string;
+      }
+    | {
         readonly kind: "override";
         readonly workReceiptDigest: Sha256;
         readonly assignmentDigest: Sha256;
@@ -218,9 +239,13 @@ export async function buildMergeIntent(input: {
     createdAt: input.createdAt,
   };
 
-  if (input.evidence.kind === "verified") {
-    const { kind: _kind, ...evidence } = input.evidence;
-    return { ...base, kind: "verified", evidence };
+  if (
+    input.evidence.kind === "verified" ||
+    input.evidence.kind === "reused" ||
+    input.evidence.kind === "candidate-verified"
+  ) {
+    const { kind, ...evidence } = input.evidence;
+    return { ...base, kind, evidence };
   }
   const { kind: _kind, override, ...evidence } = input.evidence;
   return { ...base, kind: "override", evidence, override };
@@ -283,6 +308,74 @@ export async function buildTransitionRecord(input: {
       verifierResultDigest: input.verifierResultDigest,
       checkRunId: input.checkRunId,
       actionRunId: input.actionRunId,
+    },
+  };
+}
+
+/**
+ * Build the transition record for a merge that rested on the head's own proof.
+ *
+ * The same git facts as a verified merge, and a different claim: no verifier
+ * result and no integration evidence, because nothing ran against the integrated
+ * candidate, and no assignment, because no runner was dispatched. What it binds
+ * instead is why the reuse was legitimate — the proof, the policy and pipeline it
+ * satisfied, the suites that were required, and the check run that verified it.
+ */
+export async function buildReusedProofRecord(input: {
+  /** Which claim this record makes; see the two kinds in @thwip/queue-protocol. */
+  readonly verifierResultDigest?: Sha256;
+  readonly git: GitSubject;
+  readonly queueEpoch: number;
+  readonly transitionSequence: number;
+  readonly previousTransitionDigest: Sha256 | null;
+  readonly before: { readonly baseSha: string | null; readonly treeOid: string | null };
+  readonly final: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
+  readonly observedAt: string;
+  readonly mergeMethod: "merge" | "squash";
+  readonly attemptId: string;
+  readonly pullRequestNumber: number;
+  readonly mergeIntentDigest: Sha256;
+  readonly workReceiptDigest: Sha256;
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly checkRunId: string;
+}): Promise<Record<string, unknown>> {
+  const parents = input.final.parentShas;
+  const embedded = parents.slice(0, 16);
+  const verified = input.verifierResultDigest !== undefined;
+  return {
+    schemaVersion: "1",
+    kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
+    repositoryId: input.git.repositoryId,
+    baseRef: input.git.baseRef,
+    queueEpoch: input.queueEpoch,
+    transitionSequence: input.transitionSequence,
+    previousTransitionDigest: input.previousTransitionDigest,
+    before: input.before,
+    after: {
+      baseSha: input.final.sha,
+      treeOid: input.final.treeOid,
+      parentOids: embedded,
+      parentCount: parents.length,
+      parentOidsDigest: await parentOidsDigest(parents),
+      parentsComplete: embedded.length === parents.length,
+    },
+    observedAt: input.observedAt,
+    [verified ? "candidateVerified" : "reusedProof"]: {
+      attemptId: input.attemptId,
+      mergeIntentDigest: input.mergeIntentDigest,
+      pullRequestNumber: input.pullRequestNumber,
+      headSha: input.git.headSha,
+      candidateSha: input.final.sha,
+      candidateTreeOid: input.final.treeOid,
+      mergeMethod: input.mergeMethod,
+      workReceiptDigest: input.workReceiptDigest,
+      policyDigest: input.policyDigest,
+      pipelineDigest: input.pipelineDigest,
+      requiredSuitesDigest: input.requiredSuitesDigest,
+      ...(verified ? { verifierResultDigest: input.verifierResultDigest } : {}),
+      checkRunId: input.checkRunId,
     },
   };
 }
