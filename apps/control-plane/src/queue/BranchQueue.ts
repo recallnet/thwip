@@ -103,13 +103,40 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
   private async withAlarm<T>(fn: (parts: { store: BranchQueueStore; commands: QueueCommands }) => T): Promise<T> {
     const parts = this.require();
     const result = fn(parts);
+    // A command arrived, so whatever the alarm was stuck on is worth retrying.
+    this.idleAlarms = 0;
     await this.rescheduleAlarm(parts.store);
     return result;
   }
 
+  /**
+   * Consecutive alarm runs that changed nothing.
+   *
+   * A wake loop is invisible in queue state precisely because it writes no
+   * events, so nothing about the queue can reveal it. This counts the shape
+   * directly, and stops rescheduling once it is unmistakable.
+   */
+  private idleAlarms = 0;
+
+  /** Enough to ride out a transient, far short of the thousands a spin produces. */
+  private static readonly IDLE_ALARM_LIMIT = 20;
+
   private async rescheduleAlarm(store: BranchQueueStore): Promise<void> {
     const next = store.earliestDeadline();
     if (next === null) {
+      this.idleAlarms = 0;
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    if (this.idleAlarms >= BranchQueue.IDLE_ALARM_LIMIT) {
+      // Stop asking to be woken. Something is due that handling does not clear,
+      // and continuing costs a request every second for as long as it takes
+      // somebody to notice. Any real command reopens the loop, because it resets
+      // the counter and reschedules.
+      console.error(
+        `branch queue: ${this.idleAlarms} consecutive alarms changed nothing, deadline ${next}; ` +
+          `refusing to reschedule until a command arrives`,
+      );
       await this.ctx.storage.deleteAlarm();
       return;
     }
@@ -523,7 +550,12 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
   override async alarm(): Promise<void> {
     const parts = this.store === null ? null : this.require();
     if (parts === null) return;
+    const before = parts.store.generation();
     parts.commands.runAlarm();
+    // An alarm that changed nothing is the shape of a spin. One is ordinary; a
+    // run of them is the object waking itself forever over a deadline that
+    // handling never clears.
+    this.idleAlarms = parts.store.generation() === before ? this.idleAlarms + 1 : 0;
     await this.rescheduleAlarm(parts.store);
   }
 }
