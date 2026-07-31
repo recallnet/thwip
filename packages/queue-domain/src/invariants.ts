@@ -134,7 +134,9 @@ export function witnessDepth(state: BranchQueueState, fromSequence: number): num
   const principals = new Set<string>();
   for (const transition of state.transitions) {
     if (transition.transitionSequence <= fromSequence) continue;
-    if (transition.kind !== "verified") continue;
+    // A reuse merge is witnessed by the same people in the same way; what
+    // differs is what was checked, not who certified it.
+    if (transition.kind !== "verified" && transition.kind !== "reused") continue;
     for (const principal of transition.witnessPrincipalIds) principals.add(principal);
   }
   return principals.size;

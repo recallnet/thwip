@@ -1,3 +1,4 @@
+import { requiredSuitesDigest } from "@thwip/queue-protocol";
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
 import { buildMergeIntent, buildReusedProofRecord, signMergeIntent, signTransitionRecord } from "./evidence.js";
 import type { Signer, SignedRecord } from "./evidence.js";
@@ -28,6 +29,33 @@ export interface ReuseEvidence {
   readonly requiredSuitesDigest: Sha256;
   /** The App's proof check that verified this head. */
   readonly proofCheckRunId: string;
+}
+
+/**
+ * Gather what a reuse merge rests on, or say what is missing.
+ *
+ * Every value here is read from something that already happened. Where one
+ * cannot be read the answer is what is absent, never a substitute: the whole
+ * point of signing these records is that a reader can believe them, and a record
+ * assembled around a stand-in is worth less than no record at all.
+ */
+export async function reuseEvidenceFor(
+  workReceiptDigest: Sha256,
+  policy: { policyDigest: string; pipelineDigest: string | null; requiredSuites: readonly string[] } | null,
+  proofCheckRunId: string | null,
+): Promise<ReuseEvidence | { missing: string }> {
+  if (policy === null) return { missing: "the repository has no active policy" };
+  if (policy.pipelineDigest === null) return { missing: "the active policy names no pipeline" };
+  if (proofCheckRunId === null) {
+    return { missing: "no passing proof check was found for this head" };
+  }
+  return {
+    workReceiptDigest,
+    policyDigest: policy.policyDigest as Sha256,
+    pipelineDigest: policy.pipelineDigest as Sha256,
+    requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
+    proofCheckRunId,
+  };
 }
 
 export interface ChainPosition {

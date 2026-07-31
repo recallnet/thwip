@@ -13,7 +13,8 @@ import {
   admit,
   buildSnapshot,
   commandsFor,
-  confirmAndRecord,
+  confirmOnly,
+  recordOnly,
   diagnose,
   walkToMergeReady,
   type QueueSnapshot,
@@ -21,6 +22,14 @@ import {
 import { loadQueueState, withQueueState } from "./queue-state.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
+import {
+  readAttestation,
+  reuseEvidenceFor,
+  signReusedIntent,
+  signReusedRecord,
+  storeAttestation,
+} from "./attestation.js";
+import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
@@ -167,6 +176,135 @@ async function storeEvidence(
  * Safe to call whenever the lane moves: the workflow asks the queue for
  * authorization itself and does nothing if the answer is no.
  */
+/**
+ * Build, sign, store and record the transition for a merge that landed.
+ *
+ * The chain link is the digest of the record, so the record has to exist before
+ * the link can. Where it cannot be built the link is not written: a missing link
+ * is visible and can be retried, while a link naming a record nobody has is the
+ * thing this replaces.
+ */
+async function recordMergedTransition<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  deps: {
+    activePolicy(
+      env: TEnv,
+      repositoryId: string,
+    ): Promise<{
+      policyDigest: string;
+      pipelineDigest: string | null;
+      requiredSuites: readonly string[];
+    } | null>;
+    proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
+    signRecordBytes(env: TEnv, bytes: Uint8Array, typ: string): Promise<string>;
+    commitFacts(
+      env: TEnv,
+      repositoryId: string,
+      sha: string,
+    ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
+  },
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    attemptId: string;
+    mergeSha: string;
+    mergeTree: string;
+    parentShas: readonly string[];
+    attempt: { baseSha: string | null; headSha: string | null; receiptDigest: string | null; intentDigest: string | null } | null;
+    chainHead: { sequence: number; digest: string } | null;
+    queueEpoch: number;
+    turnSequence: number;
+    pullRequestNumber: number | null;
+    witnessPrincipalIds: readonly string[];
+    onQueue: <T>(
+      env: TEnv,
+      repositoryId: string,
+      baseRef: string,
+      decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+    ) => Promise<{ result: T; snapshot: QueueSnapshot }>;
+  },
+): Promise<{
+  status: string;
+  sequence: number | null;
+  digest: string | null;
+  detail?: string;
+  snapshot: QueueSnapshot | null;
+}> {
+  const skip = (detail: string) => ({ status: "skipped", sequence: null, digest: null, detail, snapshot: null });
+
+  const attempt = input.attempt;
+  if (attempt?.headSha == null || attempt.baseSha == null || attempt.receiptDigest == null) {
+    return skip("the attempt no longer holds what the record would cite");
+  }
+  if (attempt.intentDigest == null) return skip("no signed merge intent to cite");
+  if (input.pullRequestNumber === null) return skip("the merged entry could not be found");
+
+  const evidence = await reuseEvidenceFor(
+    attempt.receiptDigest as Sha256,
+    await deps.activePolicy(env, input.repositoryId),
+    await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
+  );
+  if ("missing" in evidence) return skip(evidence.missing);
+
+  // The tree the branch had before this merge. A transition that is not the
+  // first in its epoch has to say where it started from, and only the commit
+  // itself can say that.
+  const before = await deps.commitFacts(env, input.repositoryId, attempt.baseSha);
+
+  const signed = await signReusedRecord({
+    attemptId: input.attemptId,
+    git: {
+      objectFormat: "sha1",
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef as `refs/heads/${string}`,
+      baseSha: attempt.baseSha,
+      headRepositoryId: input.repositoryId,
+      headSha: attempt.headSha,
+      candidateSha: input.mergeSha,
+      candidateTreeOid: input.mergeTree,
+      candidateParentOids: [...input.parentShas],
+    },
+    position: {
+      queueEpoch: input.queueEpoch,
+      turnSequence: input.turnSequence,
+      transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
+      previousTransitionDigest: (input.chainHead?.digest ?? null) as Sha256 | null,
+    },
+    pullRequestNumber: input.pullRequestNumber,
+    evidence,
+    mergeIntentDigest: attempt.intentDigest as Sha256,
+    before: { baseSha: attempt.baseSha, treeOid: before?.treeOid ?? null },
+    final: { sha: input.mergeSha, treeOid: input.mergeTree, parentShas: input.parentShas },
+    observedAt: new Date().toISOString(),
+    signer: { sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ) },
+  });
+  if ("error" in signed) return skip(`the queue refused to sign its own record: ${signed.error}`);
+
+  // Stored before the link is written, so a link never names a record that
+  // cannot be read back.
+  await storeAttestation(env.DB as unknown as D1Like, {
+    digest: signed.digest,
+    kind: "reused-proof-merge",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
+    attemptId: input.attemptId,
+    bytes: signed.bytes,
+    jws: signed.jws,
+  });
+
+  const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
+    recordOnly(commands, store, {
+      attemptId: input.attemptId,
+      kind: "reused",
+      digest: signed.digest,
+      baseSha: input.mergeSha,
+      witnessPrincipalIds: input.witnessPrincipalIds,
+    }),
+  );
+  return { status: result.transition.status, sequence: result.sequence, digest: signed.digest, snapshot };
+}
+
 async function driveLane(
   env: QueueRouteEnv,
   deps: { driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void> },
@@ -343,6 +481,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     repositoryId: string,
   ): Promise<{
     policyDigest: string;
+    /**
+     * The pipeline the proof had to satisfy, which a reuse record binds. Null
+     * when the bundle names none; a record then cannot be built rather than
+     * being built around a substitute.
+     */
+    pipelineDigest: string | null;
     requiredSuites: readonly string[];
     securityProfile: string;
     /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
@@ -390,6 +534,22 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     repositoryId: string,
     sha: string,
   ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
+  /**
+   * The App's proof check that verified a head, by its run id.
+   *
+   * A reuse merge rests on that check having passed, so the record cites it. Null
+   * when no accepted verification exists for the head, which is a reason to
+   * record nothing rather than to cite a check that never ran.
+   */
+  proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
+  /**
+   * Sign canonical record bytes with the service key, returning a compact JWS.
+   *
+   * Takes bytes rather than a value so the signature covers exactly what the
+   * digest names; re-serialising here would sign something else that happens to
+   * mean the same.
+   */
+  signRecordBytes(env: TEnv, bytes: Uint8Array, typ: string): Promise<string>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
 
@@ -1091,7 +1251,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // No active policy means no stronger claim is being made, so the head proof
       // stands, as it did before candidate verification existed.
       const needsIntegratedRun = policy !== null && requiresIntegratedRun(policy.securityProfile);
-      let verifiedResultDigest = `sha256:${"3".repeat(64)}`;
+      // Null unless something actually ran. Under reuse nothing does, and the
+      // constant that used to sit here was stored on the attempt as though a
+      // verifier had spoken.
+      let verifiedResultDigest: string | null = null;
       let candidatePolicyDigest = policy?.policyDigest ?? `sha256:${"0".repeat(64)}`;
 
       if (needsIntegratedRun && policy !== null) {
@@ -1220,6 +1383,78 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         const candidateSha = cand.candidateSha;
         const candidateTree = cand.candidateTreeOid;
 
+        // The merge intent, signed before the merge is asked for.
+        //
+        // This was `sha256:4444…4444`. The queue recorded that an intent existed
+        // and never made one, so nothing said what it was about to do or on what
+        // basis. Under this profile the basis is the proof on the head, the
+        // policy and pipeline it satisfied, and the check that verified it —
+        // every one of which is a real value or the merge does not proceed.
+        const reuse = await reuseEvidenceFor(
+          workReceiptDigest,
+          policy,
+          await deps.proofCheckRunId(c.env, repositoryId, headSha),
+        );
+        if ("missing" in reuse) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: "MERGE_EVIDENCE_INCOMPLETE",
+            detail: `nothing may be signed for this merge: ${reuse.missing}`,
+            entryId,
+            operationId: null,
+          });
+        }
+
+        const mergeOperationId = `merge_${attemptId}`;
+        const signedIntent = await signReusedIntent({
+          operationId: mergeOperationId,
+          attemptId,
+          git: {
+            objectFormat: "sha1",
+            repositoryId,
+            baseRef: baseRef as `refs/heads/${string}`,
+            baseSha,
+            headRepositoryId: repositoryId,
+            headSha,
+            candidateSha,
+            candidateTreeOid: candidateTree,
+            candidateParentOids: [baseSha, headSha],
+          },
+          position: {
+            queueEpoch: held.queueEpoch,
+            turnSequence: held.turnSequence,
+            transitionSequence: (held.chainHead?.sequence ?? 0) + 1,
+            previousTransitionDigest: (held.chainHead?.digest ?? null) as Sha256 | null,
+          },
+          pullRequestNumber: body.pullRequestNumber,
+          evidence: reuse,
+          createdAt: new Date().toISOString(),
+          signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
+        });
+        if ("error" in signedIntent) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: "MERGE_INTENT_INVALID",
+            detail: `the queue refused to sign its own merge intent: ${signedIntent.error}`,
+            entryId,
+            operationId: null,
+          });
+        }
+        await storeAttestation(c.env.DB as unknown as D1Like, {
+          digest: signedIntent.digest,
+          kind: "merge-intent",
+          repositoryId,
+          baseRef,
+          transitionSequence: null,
+          attemptId,
+          bytes: signedIntent.bytes,
+          jws: signedIntent.jws,
+        });
+
         const { result: walked } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
           // Checked again inside the transaction. Consulting the verifier took
           // network time, and the lane can move while that happens; walking an
@@ -1236,11 +1471,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             candidateTree,
             policyDigest: candidatePolicyDigest,
             runner: needsIntegratedRun ? "verified-candidate" : "reuse",
-            assignmentDigest: `sha256:${"1".repeat(64)}`,
+            // Nothing was dispatched, so there is no assignment to issue. The
+            // reducer no longer demands one for an attempt nobody assigned.
+            assignmentDigest: null,
             receiptDigest: workReceiptDigest,
             verifierResultDigest: verifiedResultDigest,
-            intentDigest: `sha256:${"4".repeat(64)}`,
-            operationId: `merge_${attemptId}`,
+            intentDigest: signedIntent.digest,
+            operationId: mergeOperationId,
           });
         });
         operationId = walked.operationId;
@@ -1375,27 +1612,50 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
       if (facts === null) return c.json({ error: "could not read that commit" }, 404);
 
-      // Confirmation and its transition together, with the chain head read inside
-      // the transaction rather than from a snapshot fetched before the network
-      // call to GitHub.
-      const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
-        confirmAndRecord(commands, store, {
-          attemptId,
-          operationId: `merge_${attemptId}`,
-          mergeSha,
-          mergeTree: facts.treeOid,
-          parentShas: facts.parentShas,
-          transitionDigest: `sha256:${mergeSha.padEnd(64, "0").slice(0, 64)}`,
-          witnessPrincipalIds: [who.principalId],
-        }),
+      // Confirmed first, then the signed record, exactly as the merge callback
+      // does it. An operator resolving by hand produces the same link as the
+      // workflow would have; the digest used to be the merge sha padded out, so
+      // reconciliation wrote a link that attested to nothing.
+      const { result: confirmation, snapshot: afterConfirm } = await onQueue(
+        c.env,
+        repositoryId,
+        baseRef,
+        ({ commands, store }) =>
+          confirmOnly(commands, store, {
+            attemptId,
+            operationId: `merge_${attemptId}`,
+            mergeSha,
+            mergeTree: facts.treeOid,
+            parentShas: facts.parentShas,
+          }),
       );
-      if (result.confirmed.status === "rejected") {
-        return c.json({ error: result.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+      if (confirmation.confirmed.status === "rejected") {
+        return c.json({ error: confirmation.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
       }
+
+      const recorded = await recordMergedTransition(c.env, deps, {
+        repositoryId,
+        baseRef,
+        attemptId,
+        mergeSha,
+        mergeTree: facts.treeOid,
+        parentShas: facts.parentShas,
+        attempt: confirmation.attempt,
+        chainHead: confirmation.chainHead,
+        queueEpoch: afterConfirm.queueEpoch,
+        turnSequence: afterConfirm.turnSequence,
+        pullRequestNumber:
+          afterConfirm.entries.find((e) => e.entryId === confirmation.attempt?.entryId)?.pullRequestNumber ?? null,
+        witnessPrincipalIds: [who.principalId],
+        onQueue,
+      });
+
       return c.json({
-        resolved: result.confirmed.status,
-        transition: result.transition?.status ?? "skipped",
-        sequence: result.sequence,
+        resolved: confirmation.confirmed.status,
+        transition: recorded.status,
+        sequence: recorded.sequence,
+        transitionDigest: recorded.digest,
+        detail: recorded.detail,
         attemptId,
         actor: who.principalId,
         reason,
@@ -1557,35 +1817,82 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
     }
 
-    // Confirming the merge and recording the transition it produced, in one
-    // compare-and-swap. The chain head is derived inside, so nothing here can
-    // race the queue over its own chain.
-    const confirmation = {
-      attemptId: body.attemptId!,
-      operationId: body.operationId!,
-      mergeSha: body.mergeSha!,
-      mergeTree: body.mergeTree!,
-      parentShas: body.parentShas ?? [],
-      transitionDigest: body.transitionDigest ?? `sha256:${body.mergeSha!.padEnd(64, "0").slice(0, 64)}`,
-      witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
-    };
-    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
-      confirmAndRecord(commands, store, confirmation),
+    const attemptId = body.attemptId!;
+    const mergeSha = body.mergeSha!;
+
+    // Confirm first. The record that becomes the chain link binds the tree that
+    // actually landed, so it cannot be built until the queue has accepted that
+    // this is the tree it authorized.
+    const { result: confirmation, snapshot: afterConfirm } = await onQueue(
+      c.env,
+      repositoryId,
+      baseRef,
+      ({ commands, store }) =>
+        confirmOnly(commands, store, {
+          attemptId,
+          operationId: body.operationId!,
+          mergeSha,
+          mergeTree: body.mergeTree!,
+          parentShas: body.parentShas ?? [],
+        }),
     );
 
-    if (result.confirmed.status === "rejected") {
+    if (confirmation.confirmed.status === "rejected") {
       // The reducer refuses a tree that is not the candidate it authorized, so a
       // rejection here means something other than the verified integration landed.
-      return c.json({ error: result.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
+      return c.json({ error: confirmation.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
     }
 
-    await driveLane(c.env, deps, repositoryId, snapshot);
+    // The transition record, signed, and its digest is the link. This was the
+    // merge commit id padded out to sixty-four characters — a value shaped like a
+    // digest that was the digest of nothing, so the chain recorded that merges
+    // happened and attested to none of them.
+    const recorded = await recordMergedTransition(c.env, deps, {
+      repositoryId,
+      baseRef,
+      attemptId,
+      mergeSha,
+      mergeTree: body.mergeTree!,
+      parentShas: body.parentShas ?? [],
+      attempt: confirmation.attempt,
+      chainHead: confirmation.chainHead,
+      queueEpoch: afterConfirm.queueEpoch,
+      turnSequence: afterConfirm.turnSequence,
+      pullRequestNumber:
+        afterConfirm.entries.find((e) => e.entryId === confirmation.attempt?.entryId)?.pullRequestNumber ?? null,
+      witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
+      onQueue,
+    });
+
+    await driveLane(c.env, deps, repositoryId, recorded.snapshot ?? afterConfirm);
     return c.json({
       merged: true,
-      confirmed: result.confirmed.status,
-      transition: result.transition?.status ?? "skipped",
-      sequence: result.sequence,
+      confirmed: confirmation.confirmed.status,
+      transition: recorded.status,
+      sequence: recorded.sequence,
+      transitionDigest: recorded.digest,
+      // Said plainly when a link could not be built, because a chain short by one
+      // is something an operator has to be able to see.
+      detail: recorded.detail,
     });
+  });
+
+  /**
+   * A signed record, by the digest that names it.
+   *
+   * The chain reports digests; this is what makes them checkable. Without it a
+   * reader can see that a link exists and has no way to see what it says, which
+   * is the position the queue was in when a link was a padded commit id.
+   *
+   * Open, like the chain it belongs to: a record names commits, digests and a
+   * check run, all of which are visible to anyone who can see the repository.
+   */
+  app.get("/v1/queue/records/:digest", async (c) => {
+    const digest = c.req.param("digest");
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return c.json({ error: "not a digest" }, 400);
+    const found = await readAttestation(c.env.DB as unknown as D1Like, digest);
+    if (found === null) return c.json({ error: "no record with that digest" }, 404);
+    return c.json(found);
   });
 
   return app;
