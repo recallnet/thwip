@@ -159,7 +159,7 @@ required: [test]
 suites:
   test: npm test
 `;
-    const yaml2 = yaml1.replace("version: 1", "version: 2").replace("profile: fast", "profile: fresh");
+    const yaml2 = yaml1.replace("version: 1", "version: 2").replace("profile: fast", "profile: remote");
     const snapshots = new Map<string, RepositorySnapshot>([
       [sha1, new MemorySnapshot({ "thwip.yaml": yaml1 })],
       [sha2, new MemorySnapshot({ "thwip.yaml": yaml2 })],
@@ -290,7 +290,7 @@ suites:
     database.prepare("UPDATE projects SET enabled = 1 WHERE id = 'project_1'").run();
 
     const repositoryOverride =
-      "version: 2\nprofile: audited\nrequired: [test]\npolicy:\n  allow_author_as_signer: false\n";
+      "version: 2\nprofile: remote\nrequired: [test]\npolicy:\n  allow_author_as_signer: false\n";
     const snapshots = new Map<string, RepositorySnapshot>([
       [sha1, new MemorySnapshot({ "package-lock.json": "{}" })],
       [
@@ -352,7 +352,7 @@ suites:
       ),
     ).toMatchObject({
       version: 2,
-      securityProfile: "audited",
+      securityProfile: "remote",
       minimumPermission: "maintain",
       allowAuthorAsSigner: false,
       pipeline: { requiredSuites: ["test"] },

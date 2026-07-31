@@ -33,11 +33,58 @@ class MemorySnapshot implements RepositorySnapshot {
   }
 }
 
+/**
+ * Two of the four profiles promise something nothing produces.
+ *
+ * Fresh and Audited are defined as issuing an assignment and requiring an
+ * integration receipt signed where the suites ran. Nothing issues an assignment
+ * and nothing signs a receipt, so a repository selecting either got what Remote
+ * gives — suites run in GitHub Actions against the candidate — under a name that
+ * claims more. Refusing is better than quietly delivering something else.
+ */
+describe("profiles the service can actually deliver", () => {
+  const withProfile = (profile: string) => `
+version: 3
+profile: ${profile}
+required: [lint, test]
+policy:
+  minimum_permission: maintain
+`;
+  const derive = (profile: string) => {
+    const yaml = withProfile(profile);
+    return deriveProjectConfigFromText(
+      yaml,
+      { ownerId: "10", repositoryId: "20" },
+      new MemorySnapshot({ "thwip.yaml": yaml, "pnpm-lock.yaml": "lockfileVersion: '9.0'" }),
+    );
+  };
+
+  it("accepts the two it can deliver", async () => {
+    for (const profile of ["fast", "remote"]) {
+      await expect(derive(profile), profile).resolves.toBeDefined();
+    }
+  });
+
+  it("refuses the two that need a receipt nothing signs", async () => {
+    for (const profile of ["fresh", "audited"]) {
+      await expect(derive(profile), profile).rejects.toThrow(/integration receipt/i);
+    }
+  });
+
+  it("says what to use instead, rather than only saying no", async () => {
+    await expect(derive("fresh")).rejects.toThrow(/remote/);
+  });
+
+  it("still refuses a profile that is not one at all", async () => {
+    await expect(derive("turbo")).rejects.toThrow(/profile/i);
+  });
+});
+
 describe("canonical project policy derivation", () => {
   it("derives command policy from the frozen repository tree", async () => {
     const yaml = `
 version: 3
-profile: fresh
+profile: remote
 required: [lint, test]
 remote: [build-darwin]
 policy:
@@ -62,7 +109,7 @@ policy:
       repositoryId: "20",
       ownerId: "10",
       version: 3,
-      securityProfile: "fresh",
+      securityProfile: "remote",
       minimumPermission: "maintain",
       pipeline: { digest: config.pipelineDigest, requiredSuites: ["lint", "test"], remoteSuites: ["build-darwin"] },
     });
@@ -149,7 +196,7 @@ pipeline:
       defaults,
       `
 version: 4
-profile: audited
+profile: remote
 required: [lint, integration]
 suites:
   integration: npm run integration
@@ -162,7 +209,7 @@ policy:
       source: "repository-override",
       config: {
         version: 4,
-        profile: "audited",
+        profile: "remote",
         required: ["lint", "integration"],
         remote: ["windows"],
         suites: {
