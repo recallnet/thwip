@@ -724,6 +724,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       bytes: candidateResultBytes(content),
     });
 
+    // Call the merge back. This is the other half of not polling: the verdict
+    // has landed, the queue knows whose turn it is, so it tells that pull request
+    // rather than leaving it to ask. Only on acceptance, and only when this is the
+    // first time we have recorded it, so a retried report does not re-drive.
+    if (body.accepted === true && stored.status === "applied") {
+      try {
+        await deps.driveTurn(c.env, repositoryId, body.pullRequestNumber);
+      } catch {
+        /* the turn survives; the drain re-drives it if this was the only chance */
+      }
+    }
+
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
   });
 
