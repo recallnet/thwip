@@ -120,7 +120,7 @@ async function liveState(app: App, e: QueueRouteEnv) {
     activeAttemptId: string | null;
     paused: boolean;
     rebaselineRequired: boolean;
-    entries: Array<{ pullRequestNumber: number; state: string }>;
+    entries: Array<{ pullRequestNumber: number; state: string; headSha: string | null }>;
   };
 }
 
@@ -520,6 +520,27 @@ describe("the check that says whose turn it is", () => {
     const app = routes({ principalFor: async () => null });
     await authorize(app, e, 59);
     expect(published.map((u) => u.state)).toContain("unplaceable");
+  });
+
+  /**
+   * Joining the queue is keyed by the entry, so a pull request already in it kept
+   * whatever commit it joined with. The turn check is published against that
+   * commit, so a stale one puts the check on an old commit and leaves the current
+   * head without one — and a required check that never arrives blocks the merge
+   * forever.
+   */
+  it("follows a pull request to its new commit when it is pushed to", async () => {
+    const e = env();
+    const app = routes();
+    await authorize(app, e, 59);
+    published.length = 0;
+
+    const moved = "f".repeat(40);
+    await authorize(app, e, 59, { headSha: moved });
+
+    expect(published.map((u) => u.headSha)).toContain(moved);
+    const snapshot = await liveState(app, e);
+    expect(snapshot.entries.find((entry) => entry.pullRequestNumber === 59)).toBeDefined();
   });
 
   it("keeps the queue working when publishing fails", async () => {
