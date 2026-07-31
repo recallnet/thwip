@@ -104,9 +104,27 @@ export interface ReusedMergeEvidence {
   readonly proofCheckRunId: string;
 }
 
+/**
+ * A merge the queue had the integrated candidate run for.
+ *
+ * Carries the verifier's result, which a reuse cannot claim, and no assignment
+ * or integration receipt, which the managed verifier does not produce.
+ */
+export interface CandidateVerifiedMergeEvidence {
+  readonly workReceiptDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly verifierResultDigest: Sha256;
+  readonly proofCheckRunId: string;
+}
+
 export type MergeIntentV1 =
   | (MergeIntentBaseV1 & { readonly kind: "verified"; readonly evidence: VerifiedMergeEvidence })
   | (MergeIntentBaseV1 & { readonly kind: "reused"; readonly evidence: ReusedMergeEvidence })
+  | (MergeIntentBaseV1 & {
+      readonly kind: "candidate-verified";
+      readonly evidence: CandidateVerifiedMergeEvidence;
+    })
   | (MergeIntentBaseV1 & {
       readonly kind: "override";
       readonly evidence: OverrideMergeEvidence;
@@ -162,6 +180,14 @@ const REUSED_EVIDENCE_KEYS = [
   "workReceiptDigest",
   "pipelineDigest",
   "requiredSuitesDigest",
+  "proofCheckRunId",
+] as const;
+
+const CANDIDATE_VERIFIED_EVIDENCE_KEYS = [
+  "workReceiptDigest",
+  "pipelineDigest",
+  "requiredSuitesDigest",
+  "verifierResultDigest",
   "proofCheckRunId",
 ] as const;
 
@@ -301,7 +327,12 @@ function parseOverrideAuthorization(v: unknown): ParseResult<OverrideAuthorizati
 export function parseMergeIntent(v: unknown): ParseResult<MergeIntentV1> {
   if (!isRecord(v)) return fail("mergeIntent must be an object");
 
-  const kind = literal(v["kind"], "mergeIntent.kind", ["verified", "reused", "override"] as const);
+  const kind = literal(v["kind"], "mergeIntent.kind", [
+    "verified",
+    "reused",
+    "candidate-verified",
+    "override",
+  ] as const);
   if (!kind.ok) return kind;
 
   const allowed = kind.value === "override" ? [...BASE_KEYS, "override"] : BASE_KEYS;
@@ -325,6 +356,18 @@ export function parseMergeIntent(v: unknown): ParseResult<MergeIntentV1> {
       ...base.value,
       kind: "verified",
       evidence: digests.value as unknown as VerifiedMergeEvidence,
+    });
+  }
+
+  if (kind.value === "candidate-verified") {
+    const evidenceShape = exactKeys(evidence, "mergeIntent.evidence", CANDIDATE_VERIFIED_EVIDENCE_KEYS);
+    if (!evidenceShape.ok) return evidenceShape;
+    const digests = readDigests(evidence, CANDIDATE_VERIFIED_EVIDENCE_KEYS);
+    if (!digests.ok) return digests;
+    return ok({
+      ...base.value,
+      kind: "candidate-verified",
+      evidence: digests.value as unknown as CandidateVerifiedMergeEvidence,
     });
   }
 

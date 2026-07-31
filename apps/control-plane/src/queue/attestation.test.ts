@@ -159,6 +159,69 @@ describe("the transition record the queue signs", () => {
   });
 });
 
+/**
+ * What this repository actually produces. Its profile has the queue dispatch a
+ * verifier against the integrated candidate, so the merge is stronger than a
+ * reuse and must not be recorded as one — a reader would otherwise see a weaker
+ * claim than the one the queue is entitled to make.
+ */
+describe("a merge the candidate verifier ran for", () => {
+  const verified = { ...evidence, verifierResultDigest: D("9") };
+
+  async function verifiedRecord() {
+    const signed = await signReusedRecord({
+      attemptId: "att-1",
+      git,
+      position,
+      pullRequestNumber: 82,
+      evidence: verified,
+      mergeIntentDigest: D("f"),
+      before: { baseSha: BASE, treeOid: "5".repeat(40) },
+      final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
+      observedAt: "2026-07-31T12:01:00Z",
+      signer,
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    return signed;
+  }
+
+  it("is recorded as candidate-verified, not as a reuse", async () => {
+    const signed = await verifiedRecord();
+    const parsed = parseTransitionRecord(JSON.parse(new TextDecoder().decode(signed.bytes)));
+    if (!parsed.ok) throw new Error(parsed.detail);
+    expect(parsed.value.kind).toBe("candidate-verified-merge");
+    if (parsed.value.kind !== "candidate-verified-merge") return;
+    expect(parsed.value.candidateVerified.verifierResultDigest).toBe(D("9"));
+  });
+
+  /** The claims it still cannot make: nothing was assigned, no receipt exists. */
+  it("names no assignment and no integration receipt", async () => {
+    const signed = await verifiedRecord();
+    const doc = JSON.parse(new TextDecoder().decode(signed.bytes)) as {
+      candidateVerified: Record<string, unknown>;
+    };
+    expect(doc.candidateVerified).not.toHaveProperty("assignmentDigest");
+    expect(doc.candidateVerified).not.toHaveProperty("integrationEvidenceDigest");
+  });
+
+  it("signs an intent that carries the verifier result too", async () => {
+    const signed = await signReusedIntent({
+      operationId: "merge_att-1",
+      attemptId: "att-1",
+      git,
+      position,
+      pullRequestNumber: 82,
+      evidence: verified,
+      createdAt: "2026-07-31T12:00:00Z",
+      signer,
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    const parsed = parseMergeIntent(JSON.parse(new TextDecoder().decode(signed.bytes)));
+    if (!parsed.ok || parsed.value.kind !== "candidate-verified") throw new Error("wrong kind");
+    expect(parsed.value.evidence.verifierResultDigest).toBe(D("9"));
+  });
+});
+
 describe("keeping the signed bytes", () => {
   const open: Array<{ close(): void }> = [];
   afterEach(() => {

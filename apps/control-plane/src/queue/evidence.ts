@@ -191,6 +191,15 @@ export async function buildMergeIntent(input: {
         readonly candidateCheckRunId: string;
       }
     | {
+        /** A merge the queue had the integrated candidate run for. */
+        readonly kind: "candidate-verified";
+        readonly workReceiptDigest: Sha256;
+        readonly pipelineDigest: Sha256;
+        readonly requiredSuitesDigest: Sha256;
+        readonly verifierResultDigest: Sha256;
+        readonly proofCheckRunId: string;
+      }
+    | {
         /**
          * A merge resting on the proof already carried by the head. It names no
          * assignment and no verifier result because nothing was dispatched and
@@ -230,7 +239,11 @@ export async function buildMergeIntent(input: {
     createdAt: input.createdAt,
   };
 
-  if (input.evidence.kind === "verified" || input.evidence.kind === "reused") {
+  if (
+    input.evidence.kind === "verified" ||
+    input.evidence.kind === "reused" ||
+    input.evidence.kind === "candidate-verified"
+  ) {
     const { kind, ...evidence } = input.evidence;
     return { ...base, kind, evidence };
   }
@@ -309,6 +322,8 @@ export async function buildTransitionRecord(input: {
  * satisfied, the suites that were required, and the check run that verified it.
  */
 export async function buildReusedProofRecord(input: {
+  /** Which claim this record makes; see the two kinds in @thwip/queue-protocol. */
+  readonly verifierResultDigest?: Sha256;
   readonly git: GitSubject;
   readonly queueEpoch: number;
   readonly transitionSequence: number;
@@ -328,9 +343,10 @@ export async function buildReusedProofRecord(input: {
 }): Promise<Record<string, unknown>> {
   const parents = input.final.parentShas;
   const embedded = parents.slice(0, 16);
+  const verified = input.verifierResultDigest !== undefined;
   return {
     schemaVersion: "1",
-    kind: "reused-proof-merge",
+    kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
     repositoryId: input.git.repositoryId,
     baseRef: input.git.baseRef,
     queueEpoch: input.queueEpoch,
@@ -346,7 +362,7 @@ export async function buildReusedProofRecord(input: {
       parentsComplete: embedded.length === parents.length,
     },
     observedAt: input.observedAt,
-    reusedProof: {
+    [verified ? "candidateVerified" : "reusedProof"]: {
       attemptId: input.attemptId,
       mergeIntentDigest: input.mergeIntentDigest,
       pullRequestNumber: input.pullRequestNumber,
@@ -358,6 +374,7 @@ export async function buildReusedProofRecord(input: {
       policyDigest: input.policyDigest,
       pipelineDigest: input.pipelineDigest,
       requiredSuitesDigest: input.requiredSuitesDigest,
+      ...(verified ? { verifierResultDigest: input.verifierResultDigest } : {}),
       checkRunId: input.checkRunId,
     },
   };

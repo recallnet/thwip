@@ -210,7 +210,13 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     mergeSha: string;
     mergeTree: string;
     parentShas: readonly string[];
-    attempt: { baseSha: string | null; headSha: string | null; receiptDigest: string | null; intentDigest: string | null } | null;
+    attempt: {
+      baseSha: string | null;
+      headSha: string | null;
+      receiptDigest: string | null;
+      intentDigest: string | null;
+      verifierResultDigest: string | null;
+    } | null;
     chainHead: { sequence: number; digest: string } | null;
     queueEpoch: number;
     turnSequence: number;
@@ -243,6 +249,9 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     attempt.receiptDigest as Sha256,
     await deps.activePolicy(env, input.repositoryId),
     await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
+    // Present exactly when the queue had the integrated candidate run, which is
+    // what decides whether the record claims a verified merge or a reuse.
+    attempt.verifierResultDigest,
   );
   if ("missing" in evidence) return skip(evidence.missing);
 
@@ -284,7 +293,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // cannot be read back.
   await storeAttestation(env.DB as unknown as D1Like, {
     digest: signed.digest,
-    kind: "reused-proof-merge",
+    kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
@@ -296,7 +305,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
     recordOnly(commands, store, {
       attemptId: input.attemptId,
-      kind: "reused",
+      kind: evidence.verifierResultDigest === undefined ? "reused" : "verified",
       digest: signed.digest,
       baseSha: input.mergeSha,
       witnessPrincipalIds: input.witnessPrincipalIds,
@@ -1394,6 +1403,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           workReceiptDigest,
           policy,
           await deps.proofCheckRunId(c.env, repositoryId, headSha),
+          verifiedResultDigest,
         );
         if ("missing" in reuse) {
           return c.json({
