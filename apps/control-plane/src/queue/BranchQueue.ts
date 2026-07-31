@@ -288,6 +288,65 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     return this.withAlarm(({ commands }) => commands.mergeOutcomeUnknown(input));
   }
 
+  /**
+   * Confirm a merge and record its transition, in one call.
+   *
+   * This was four: confirm, read the snapshot to work out the next sequence and
+   * prior digest, record, then read the snapshot again to project. Two of those
+   * existed only to ask the object for the chain head it already holds.
+   *
+   * The sequence and prior digest are derived here rather than passed in. A
+   * caller computing them from a snapshot it fetched earlier is a caller racing
+   * the object over its own chain.
+   */
+  async confirmAndRecord(input: {
+    attemptId: string;
+    operationId: string;
+    mergeSha: string;
+    mergeTree: string;
+    parentShas: readonly string[];
+    transitionDigest: string;
+    witnessPrincipalIds: readonly string[];
+  }) {
+    return this.withAlarm(({ commands, store }) => {
+      const confirmed = commands.confirmMerge({
+        idempotencyKey: `merged:${input.attemptId}`,
+        attemptId: input.attemptId,
+        operationId: input.operationId,
+        mergeSha: input.mergeSha,
+        mergeTree: input.mergeTree,
+        parentShas: [...input.parentShas],
+      });
+      if (confirmed.status === "rejected") {
+        return {
+          confirmed,
+          transition: null as null | ReturnType<QueueCommands["recordTransition"]>,
+          sequence: null as number | null,
+          snapshot: this.buildSnapshot(store),
+        };
+      }
+
+      const head = store.state().transitions.at(-1);
+      const sequence = (head?.transitionSequence ?? 0) + 1;
+      const transition = commands.recordTransition({
+        idempotencyKey: `transition:${input.attemptId}`,
+        kind: "verified",
+        transitionSequence: sequence,
+        priorDigest: head?.digest ?? null,
+        digest: input.transitionDigest,
+        baseSha: input.mergeSha,
+        attemptId: input.attemptId,
+        witnessPrincipalIds: [...input.witnessPrincipalIds],
+      });
+      return {
+        confirmed,
+        transition: transition as null | ReturnType<QueueCommands["recordTransition"]>,
+        sequence: sequence as number | null,
+        snapshot: this.buildSnapshot(store),
+      };
+    });
+  }
+
   async confirmMerge(input: Parameters<QueueCommands["confirmMerge"]>[0]) {
     return this.withAlarm(({ commands }) => commands.confirmMerge(input));
   }
@@ -408,9 +467,10 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     verifierResultDigest: string;
     intentDigest: string;
     operationId: string;
-  }): Promise<{ operationId: string | null }> {
-    return this.withAlarm(({ commands }) => {
+  }): Promise<{ operationId: string | null; snapshot: ReturnType<BranchQueue["buildSnapshot"]> }> {
+    return this.withAlarm(({ commands, store }) => {
       const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
+      const done = (operationId: string | null) => ({ operationId, snapshot: this.buildSnapshot(store) });
       const prepared = commands.candidatePrepared({
         idempotencyKey: `authorize:candidate:${input.attemptId}`,
         attemptId: input.attemptId,
@@ -421,7 +481,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
         policyDigest: input.policyDigest,
         runner: input.runner as never,
       });
-      if (!ok(prepared)) return { operationId: null };
+      if (!ok(prepared)) return done(null);
 
       commands.assign({
         idempotencyKey: `authorize:assign:${input.attemptId}`,
@@ -438,7 +498,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
         attemptId: input.attemptId,
       });
       const nonce = "nonce" in started ? (started as { nonce: string }).nonce : undefined;
-      if (nonce === undefined) return { operationId: null };
+      if (nonce === undefined) return done(null);
 
       commands.completeVerification({
         idempotencyKey: `authorize:verdict:${input.attemptId}`,
@@ -457,10 +517,7 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
         attemptId: input.attemptId,
         operationId: input.operationId,
       });
-      return {
-        operationId:
-          begun.status === "applied" || begun.status === "already-started" ? input.operationId : null,
-      };
+      return done(begun.status === "applied" || begun.status === "already-started" ? input.operationId : null);
     });
   }
 
