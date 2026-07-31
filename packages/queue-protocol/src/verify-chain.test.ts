@@ -147,4 +147,45 @@ describe("verifying a chain", () => {
     expect(findings.map((f) => f.code)).not.toContain("SEQUENCE_GAP");
     expect(findings.map((f) => f.code)).not.toContain("BROKEN_LINK");
   });
+
+  /**
+   * Every record carries the repository and ref it belongs to. Without a check
+   * against what was actually requested, a chain served from a different
+   * branch — or a different repository — verifies clean as long as its own
+   * links join up internally.
+   */
+  describe("checking the subject", () => {
+    it("passes when the requested subject matches every record", async () => {
+      const one = await link(1, null);
+      const findings = await verifyChain([one], {
+        ...signedOk,
+        subject: { repositoryId: "1315419165", baseRef: "refs/heads/main" },
+      });
+      expect(findings.map((f) => f.code)).not.toContain("WRONG_SUBJECT");
+    });
+
+    it("reports a record naming a different branch than the one requested", async () => {
+      const one = await link(1, null);
+      const findings = await verifyChain([one], {
+        ...signedOk,
+        subject: { repositoryId: "1315419165", baseRef: "refs/heads/other" },
+      });
+      expect(findings.map((f) => f.code)).toContain("WRONG_SUBJECT");
+    });
+
+    it("reports a record naming a different repository than the one requested", async () => {
+      const one = await link(1, null);
+      const findings = await verifyChain([one], {
+        ...signedOk,
+        subject: { repositoryId: "999", baseRef: "refs/heads/main" },
+      });
+      expect(findings.map((f) => f.code)).toContain("WRONG_SUBJECT");
+    });
+
+    it("is silent about the subject when none was requested, for existing callers", async () => {
+      const one = await link(1, null);
+      const findings = await verifyChain([one], signedOk);
+      expect(findings.map((f) => f.code)).not.toContain("WRONG_SUBJECT");
+    });
+  });
 });

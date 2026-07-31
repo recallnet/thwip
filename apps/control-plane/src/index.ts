@@ -231,6 +231,12 @@ app.get("/health", async (c) => {
  * verifying key has to be fetchable by anyone holding the record.
  */
 app.get("/.well-known/thwip-keys", async (c) => {
+  // A cold isolate has not signed anything yet, so `service_keys` may not
+  // carry the active key even though it is about to be used. Publishing must
+  // not depend on a signature having happened first: a verifier that asks
+  // here before the key exists sees an empty set and rejects a chain that is
+  // actually fine.
+  await serviceKey(c.env);
   const keys = await verificationKeys(c.env.DB as unknown as D1Like);
   return c.json({ keys }, 200, { "cache-control": "public, max-age=300" });
 });
