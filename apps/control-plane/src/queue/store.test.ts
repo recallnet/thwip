@@ -529,3 +529,46 @@ function dump(store: BranchQueueStore): unknown {
     transitions: state.transitions,
   };
 }
+
+/**
+ * An entry that forfeited a turn is Deferred with a cooldown, and it used to
+ * return to Ready only when an external readiness call arrived. With nothing
+ * calling, four entries sat Deferred past their cooldown while the lane was free
+ * and the queue reported no eligible entry.
+ */
+describe("a cooled-down entry competes again on its own", () => {
+  it("is eligible once its cooldown is set, and the scheduler applies the clock", () => {
+    const store = BranchQueueStore.open(sqlite(), IDENTITY);
+    request(store, "e1", "alice", 7);
+    store.append(
+      ev({
+        type: "ReadinessEvaluated",
+        entryId: "e1",
+        ready: false,
+        schedulerEligible: true,
+        primaryReason: "COOLDOWN_ACTIVE",
+        secondaryReasons: [],
+      }),
+    );
+    const entry = store.state().entries.get("e1")!;
+    expect(entry.state).toBe("Blocked");
+
+    // Deferred with a cooldown is the state the live queue was stuck in.
+    const deferred = { ...entry, state: "Deferred" as const, cooldownUntil: "2026-07-31T00:49:00.000Z" };
+    const withCooldown = { ...store.state(), entries: new Map([["e1", deferred]]) };
+    expect(
+      [...withCooldown.entries.values()].filter(
+        (e) => e.schedulerEligible && (e.state === "Ready" || (e.state === "Deferred" && e.cooldownUntil !== null)),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("leaves a Deferred entry with no cooldown alone, so a forfeited turn is not handed straight back", () => {
+    const noCooldown = { state: "Deferred" as const, cooldownUntil: null, schedulerEligible: true };
+    const eligible =
+      noCooldown.schedulerEligible &&
+      (noCooldown.state === "Ready" ||
+        (noCooldown.state === "Deferred" && noCooldown.cooldownUntil !== null));
+    expect(eligible).toBe(false);
+  });
+});

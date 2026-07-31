@@ -569,7 +569,29 @@ export class BranchQueueStore {
   eligibleEntries(): EligibleEntry[] {
     const state = this.state();
     return [...state.entries.values()]
-      .filter((entry) => entry.state === "Ready" && entry.schedulerEligible)
+      // Deferred is not out of the running. An entry that forfeited a turn is
+      // Deferred with a cooldown, and it only returned to Ready when an external
+      // readiness call happened to arrive. With nothing calling, four entries sat
+      // Deferred past their cooldown and the queue reported no eligible entry
+      // while its lane was free.
+      //
+      // selectNext already takes `now` and reads cooldownUntil, so the cooldown
+      // is still enforced. This just stops filtering the candidate out before the
+      // scheduler can apply its own rule.
+      .filter(
+        (entry) =>
+          entry.schedulerEligible &&
+          (entry.state === "Ready" ||
+            // A Deferred entry that is serving a cooldown comes back on its own.
+            // It used to need an external readiness call to return to Ready, so
+            // with nothing calling, four entries sat Deferred past their cooldown
+            // while the lane was free and the queue reported no eligible entry.
+            //
+            // Only when a cooldown is actually set. Deferred with no cooldown means
+            // something else has to happen first, and re-offering immediately would
+            // hand the turn straight back to an entry that just stepped aside.
+            (entry.state === "Deferred" && entry.cooldownUntil !== null)),
+      )
       .map((entry) => ({
         entryId: entry.entryId,
         sponsorPrincipalId: entry.sponsorPrincipalId,
