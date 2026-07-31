@@ -152,28 +152,55 @@ jobs:
             "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
           mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
           echo "merge: http $mcode"
+          landed=$(printf '%s' "$payload" | jq -r '.sha // empty')
+
           if [ "$mcode" != "200" ]; then
             reason=$(printf '%s' "$payload" | jq -r '.message // "no message"')
-            case "$mcode" in
-              405|409|422)
-                # A definite refusal. Tell the queue so the lane frees now rather
-                # than waiting for a deadline and then needing an operator.
-                curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
-                  -H "content-type: application/json" \
-                  -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" --arg detail "$mcode $reason" \
-                        '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
-                  "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
-                echo "::error::GitHub refused the merge ($mcode: $reason); the queue has released the lane"
-                ;;
-              *)
-                # Anything unclear is left to reconciliation, never retried here.
-                echo "::error::merge outcome unclear ($mcode: $reason); leaving it to reconciliation"
-                ;;
-            esac
-            exit 1
+
+            # The status code says what this call did, not what happened to the
+            # pull request.
+            #
+            # Two merge runs can race for one turn. One merges; the other is told
+            # 405 "Merge already in progress" and used to report that as a
+            # refusal, which declares a merge did not happen at the moment it
+            # just did. The queue then terminated the attempt, refused the real
+            # confirmation, and the branch moved with no transition record: a
+            # merge nobody could audit, which is the one outcome this exists to
+            # prevent.
+            #
+            # So ask GitHub what became of the pull request instead of reading it
+            # off the response to our own call. Both racing runs then report the
+            # same merge under the same idempotency key, which is harmless.
+            state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
+              --jq '{merged:(.merged // false), sha:(.merge_commit_sha // "")}' 2>/dev/null || echo '{}')
+            if [ "$(printf '%s' "$state" | jq -r '.merged // false')" = "true" ]; then
+              landed=$(printf '%s' "$state" | jq -r '.sha // empty')
+              echo "::notice::this run did not perform the merge ($mcode: $reason), but the pull request is merged; recording it"
+            else
+              case "$mcode" in
+                405|409|422)
+                  # A refusal, and the pull request really is unmerged. Tell the
+                  # queue so the lane frees now rather than waiting for a
+                  # deadline and then needing an operator.
+                  curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
+                    -H "content-type: application/json" \
+                    -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" --arg detail "$mcode $reason" \
+                          '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
+                    "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+                  echo "::error::GitHub refused the merge ($mcode: $reason); the queue has released the lane"
+                  ;;
+                *)
+                  # Anything unclear is left to reconciliation, never retried here.
+                  echo "::error::merge outcome unclear ($mcode: $reason); leaving it to reconciliation"
+                  ;;
+              esac
+              exit 1
+            fi
           fi
 
-          landed=$(printf '%s' "$payload" | jq -r .sha)
+          if [ -z "$landed" ]; then
+            echo "::error::merged, but GitHub named no commit; leaving it to reconciliation"; exit 1
+          fi
           commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$landed" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
           report=$(curl -sS -w '\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \
             -H "content-type: application/json" \
