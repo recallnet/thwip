@@ -64,9 +64,15 @@ describe("decideCandidate", () => {
       expect(await decideCandidate(other, expected)).toMatchObject({ code: "CANDIDATE_TREE_MISMATCH" });
     });
 
-    it("refuses a verdict for another candidate commit", async () => {
+    /**
+     * The commit hash folds in the message, author and timestamp as well as the
+     * code, so GitHub recreating a merge commit for an unchanged pull request
+     * changes it. Gating on it deadlocked a pull request: a verdict is immutable
+     * and keyed by tree, so no hash could ever match again.
+     */
+    it("accepts a verdict whose candidate commit was recreated over the same tree and base", async () => {
       const other = await verdict({ candidateSha: "9".repeat(40) });
-      expect(await decideCandidate(other, expected)).toMatchObject({ code: "CANDIDATE_SHA_MISMATCH" });
+      expect(await decideCandidate(other, expected)).toMatchObject({ ok: true });
     });
 
     it("refuses when the base moved after the candidate was verified", async () => {
