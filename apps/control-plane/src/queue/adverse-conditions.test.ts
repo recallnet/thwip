@@ -30,7 +30,8 @@ afterEach(() => {
 
 const REPO = "1315419165";
 const REF = "refs/heads/main";
-const TREE = "t".repeat(40);
+// A real object id: the signed records refuse anything that is not one.
+const TREE = "7".repeat(40);
 
 /** A commit message carrying a readable proof, as a shipped head does. */
 const PROVEN =
@@ -47,12 +48,24 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
     verifyOidc: async () => ({ repository_id: REPO }),
     pinnedVerifier: async () => null,
-    activePolicy: async () => null,
+    // A configured repository, which is what the queue actually runs against.
+    // Signing a merge record needs a policy to name; see the test that pins what
+    // happens without one.
+    activePolicy: async () => ({
+      policyDigest: `sha256:${"b".repeat(64)}`,
+      pipelineDigest: `sha256:${"c".repeat(64)}`,
+      requiredSuites: ["unit"],
+      securityProfile: "fast",
+      organizationId: "org_1",
+      verifier: null,
+    }),
+    proofCheckRunId: async () => "778899",
+    signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: TREE, parentShas: ["p".repeat(40)], message: PROVEN }),
+    commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
     ...over,
   });
 }
@@ -163,7 +176,7 @@ describe("GitHub refuses the merge", () => {
         baseSha: "b".repeat(40),
         candidateSha: "c".repeat(40),
         candidateTreeOid: TREE,
-        parentShas: ["p".repeat(40)],
+        parentShas: ["b".repeat(40), "6".repeat(40)],
       },
     });
     expect(holder.operationId).not.toBeNull();
@@ -202,7 +215,7 @@ describe("GitHub refuses the merge", () => {
         baseSha: "b".repeat(40),
         candidateSha: "c".repeat(40),
         candidateTreeOid: TREE,
-        parentShas: ["p".repeat(40)],
+        parentShas: ["b".repeat(40), "6".repeat(40)],
       },
     });
     const attemptId = holder.operationId!.replace("merge_", "");
@@ -235,7 +248,7 @@ describe("a merge that is not the one the queue authorized", () => {
         baseSha: "b".repeat(40),
         candidateSha: "c".repeat(40),
         candidateTreeOid: TREE,
-        parentShas: ["p".repeat(40)],
+        parentShas: ["b".repeat(40), "6".repeat(40)],
       },
     });
     const attemptId = holder.operationId!.replace("merge_", "");
@@ -252,7 +265,7 @@ describe("a merge that is not the one the queue authorized", () => {
           mergeSha: "9".repeat(40),
           // Not the tree the queue pinned for this turn.
           mergeTree: "0".repeat(40),
-          parentShas: ["p".repeat(40)],
+          parentShas: ["b".repeat(40), "6".repeat(40)],
         }),
       },
       e,
@@ -271,7 +284,7 @@ describe("a merge that is not the one the queue authorized", () => {
         baseSha: "b".repeat(40),
         candidateSha: "c".repeat(40),
         candidateTreeOid: TREE,
-        parentShas: ["p".repeat(40)],
+        parentShas: ["b".repeat(40), "6".repeat(40)],
       },
     });
     const attemptId = holder.operationId!.replace("merge_", "");
@@ -281,7 +294,7 @@ describe("a merge that is not the one the queue authorized", () => {
       operationId: holder.operationId,
       mergeSha: "9".repeat(40),
       mergeTree: TREE,
-      parentShas: ["p".repeat(40)],
+      parentShas: ["b".repeat(40), String(59).padStart(40, "a")],
     });
     const post = () =>
       app.request(
@@ -303,6 +316,124 @@ describe("a merge that is not the one the queue authorized", () => {
       .get(REPO) as { c: number };
     // One merge is one link, however many times it was reported.
     expect(links.c).toBe(1);
+  });
+});
+
+/**
+ * What a chain link actually is now.
+ *
+ * A link used to be the merge commit id padded out to sixty-four characters: a
+ * value shaped like a digest that was the digest of nothing. The product's claim
+ * is that a reader can check what was verified before a merge landed, and that
+ * claim had nothing behind it. These pin the replacement.
+ */
+describe("the record behind a merge", () => {
+  async function mergeOne(app: App, e: QueueRouteEnv, pr: number) {
+    const holder = await authorize(app, e, pr, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    const response = await app.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: holder.operationId!.replace("merge_", ""),
+          operationId: holder.operationId,
+          mergeSha: "9".repeat(40),
+          mergeTree: TREE,
+          parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
+        }),
+      },
+      e,
+    );
+    return (await response.json()) as { transition: string; transitionDigest: string | null; detail?: string };
+  }
+
+  it("is the digest of a record, not the merge commit dressed up as one", async () => {
+    const e = env();
+    const app = routes();
+    const merged = await mergeOne(app, e, 59);
+
+    expect(merged.transition).toBe("applied");
+    expect(merged.transitionDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // The old link was the merge sha padded with zeroes. Nothing should ever
+    // produce that again.
+    expect(merged.transitionDigest).not.toBe(`sha256:${"9".repeat(40)}${"0".repeat(24)}`);
+  });
+
+  it("can be read back and says what the merge rested on", async () => {
+    const e = env();
+    const app = routes();
+    const merged = await mergeOne(app, e, 59);
+
+    const response = await app.request(`/v1/queue/records/${merged.transitionDigest}`, {}, e);
+    expect(response.status).toBe(200);
+    const found = (await response.json()) as {
+      kind: string;
+      jws: string;
+      record: { kind: string; reusedProof: Record<string, unknown> };
+    };
+    expect(found.kind).toBe("reused-proof-merge");
+    expect(found.jws).not.toBe("");
+    // The developer's own proof, by its digest, is what the merge cites.
+    expect(found.record.reusedProof["workReceiptDigest"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(found.record.reusedProof["checkRunId"]).toBe("778899");
+    // And nothing it could not have known.
+    expect(found.record.reusedProof).not.toHaveProperty("verifierResultDigest");
+    expect(found.record.reusedProof).not.toHaveProperty("assignmentDigest");
+  });
+
+  it("is nothing for a digest the queue never signed", async () => {
+    const e = env();
+    const response = await routes().request(`/v1/queue/records/sha256:${"0".repeat(64)}`, {}, e);
+    expect(response.status).toBe(404);
+  });
+
+  /**
+   * A queue with no policy has nothing to certify against, so it can build no
+   * record. Refusing is the point: the alternative is a merge whose record names
+   * a policy that does not exist.
+   */
+  it("refuses to prepare a merge for a repository with no active policy", async () => {
+    const e = env();
+    const app = routes({ activePolicy: async () => null });
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.authorized).toBe(false);
+    expect(holder.reason).toBe("MERGE_EVIDENCE_INCOMPLETE");
+    expect(holder.operationId).toBeNull();
+  });
+
+  /** The same, where the proof check cannot be found for the head. */
+  it("refuses when no passing proof check can be found for the head", async () => {
+    const e = env();
+    const app = routes({ proofCheckRunId: async () => null });
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.authorized).toBe(false);
+    expect(holder.reason).toBe("MERGE_EVIDENCE_INCOMPLETE");
   });
 });
 
@@ -405,8 +536,8 @@ describe("the queue keeps its footing over a long run", () => {
         candidate: {
           baseSha: "b".repeat(40),
           candidateSha: String(pr).padStart(40, "c"),
-          candidateTreeOid: String(pr).padStart(40, "t"),
-          parentShas: ["p".repeat(40)],
+          candidateTreeOid: String(pr).padStart(40, "7"),
+          parentShas: ["b".repeat(40), "6".repeat(40)],
         },
       });
       if (holder.operationId === null) continue;
@@ -420,8 +551,8 @@ describe("the queue keeps its footing over a long run", () => {
             attemptId: holder.operationId.replace("merge_", ""),
             operationId: holder.operationId,
             mergeSha: String(pr).padStart(40, "9"),
-            mergeTree: String(pr).padStart(40, "t"),
-            parentShas: ["p".repeat(40)],
+            mergeTree: String(pr).padStart(40, "7"),
+            parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
           }),
         },
         e,
@@ -576,7 +707,7 @@ describe("the work receipt behind a merge", () => {
     baseSha: "b".repeat(40),
     candidateSha: "c".repeat(40),
     candidateTreeOid: TREE,
-    parentShas: ["p".repeat(40)],
+    parentShas: ["b".repeat(40), "6".repeat(40)],
   };
 
   it("prepares the merge when the head carries a readable proof", async () => {
@@ -589,7 +720,7 @@ describe("the work receipt behind a merge", () => {
   it("refuses to prepare a merge for a head with no proof", async () => {
     const e = env();
     const app = routes({
-      commitFacts: async () => ({ treeOid: TREE, parentShas: ["p".repeat(40)], message: "no proof here" }),
+      commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: "no proof here" }),
     });
     const holder = await authorize(app, e, 59, { prepare: true, candidate });
     expect(holder).toMatchObject({ authorized: false, reason: "WORK_RECEIPT_UNREADABLE" });
@@ -601,7 +732,7 @@ describe("the work receipt behind a merge", () => {
     const app = routes({
       commitFacts: async () => ({
         treeOid: TREE,
-        parentShas: ["p".repeat(40)],
+        parentShas: ["b".repeat(40), "6".repeat(40)],
         message: "x\n\nthwip-proof: v1.not-base64\n",
       }),
     });

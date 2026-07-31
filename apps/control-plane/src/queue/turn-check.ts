@@ -31,6 +31,15 @@ import type { QueueSnapshot } from "./queue-operations.js";
 /** The check GitHub requires for the turn, alongside `thwip` for the proof. */
 export const TURN_CHECK = "thwip / turn";
 
+/**
+ * The required check that verifies the proof on a pull request head.
+ *
+ * Published by .github/workflows/thwip-required.yml, whose job is named `thwip`.
+ * A reuse merge rests on this check having passed, so the signed record cites it
+ * by run id.
+ */
+export const PROOF_CHECK = "thwip";
+
 export type TurnState = "holds" | "waiting" | "halted" | "unplaceable";
 
 /** Entry states in which a pull request owns the lane. */

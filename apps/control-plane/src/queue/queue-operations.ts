@@ -38,6 +38,8 @@ export interface QueueSnapshot {
   generation: number;
   attemptRevision: number;
   queueEpoch: number;
+  /** The turn this attempt was offered under, which a signed intent binds. */
+  turnSequence: number;
   paused: boolean;
   pauseReason: string | null;
   rebaselineRequired: boolean;
@@ -71,6 +73,7 @@ export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
     generation: store.generation(),
     attemptRevision: store.attemptRevision(),
     queueEpoch: store.queueEpoch(),
+    turnSequence: Number(state.turnSequence),
     paused: state.paused,
     pauseReason: state.pauseReason,
     rebaselineRequired: state.rebaselineRequired,
@@ -222,9 +225,15 @@ export interface WalkInput {
   candidateTree: string;
   policyDigest: string;
   runner: string;
-  assignmentDigest: string;
+  /**
+   * Null where nothing was dispatched. An assignment is the queue telling a
+   * runner to run something, and a reuse merge tells no one anything, so there
+   * is none to issue rather than one to invent.
+   */
+  assignmentDigest: string | null;
   receiptDigest: string;
-  verifierResultDigest: string;
+  /** Null where nothing ran to produce one. */
+  verifierResultDigest: string | null;
   intentDigest: string;
   operationId: string;
 }
@@ -255,11 +264,13 @@ export function walkToMergeReady(
   });
   if (!ok(prepared)) return done(null);
 
-  commands.assign({
-    idempotencyKey: `authorize:assign:${input.attemptId}`,
-    attemptId: input.attemptId,
-    assignmentDigest: input.assignmentDigest,
-  });
+  if (input.assignmentDigest !== null) {
+    commands.assign({
+      idempotencyKey: `authorize:assign:${input.attemptId}`,
+      attemptId: input.attemptId,
+      assignmentDigest: input.assignmentDigest,
+    });
+  }
   commands.submitReceipt({
     idempotencyKey: `authorize:receipt:${input.attemptId}`,
     attemptId: input.attemptId,
@@ -300,23 +311,42 @@ export interface ConfirmInput {
   parentShas: readonly string[];
   transitionDigest: string;
   witnessPrincipalIds: readonly string[];
+  /**
+   * What kind of merge this was. A reuse rested on the head's own proof and a
+   * verified merge ran the integrated candidate; recording both as `verified`
+   * would leave a reader unable to tell which claim the chain is making.
+   */
+  kind?: "verified" | "reused";
 }
 
 /**
- * Confirm the merge and record the transition it produced.
+ * Confirm the merge, without yet recording the transition.
  *
- * The sequence and prior digest are derived here rather than passed in. A caller
- * computing them from a snapshot it fetched earlier is a caller racing the queue
- * over its own chain.
+ * Split from recording because the chain link is now the digest of a signed
+ * record, and that record cannot be built until the merge is confirmed: it binds
+ * the tree that actually landed and the position the link will occupy. Signing
+ * is asynchronous and a queue transaction is not, so the two cannot share one.
+ *
+ * A confirmed merge with no transition yet is a state the queue already knows how
+ * to see: the chain is short by one, and recording is retried. That is better
+ * than the alternative it replaces, which was a link that named a commit and
+ * attested to nothing.
  */
-export function confirmAndRecord(
+export function confirmOnly(
   commands: QueueCommands,
   store: QueueStateStore,
-  input: ConfirmInput,
+  input: Omit<ConfirmInput, "transitionDigest" | "witnessPrincipalIds" | "kind">,
 ): {
   confirmed: ReturnType<QueueCommands["confirmMerge"]>;
-  transition: ReturnType<QueueCommands["recordTransition"]> | null;
-  sequence: number | null;
+  /** What the queue authorized, for the record that is about to be built. */
+  attempt: {
+    baseSha: string | null;
+    headSha: string | null;
+    receiptDigest: string | null;
+    intentDigest: string | null;
+    entryId: string;
+  } | null;
+  chainHead: { sequence: number; digest: string } | null;
   snapshot: QueueSnapshot;
 } {
   const confirmed = commands.confirmMerge({
@@ -327,21 +357,49 @@ export function confirmAndRecord(
     mergeTree: input.mergeTree,
     parentShas: [...input.parentShas],
   });
-  if (confirmed.status === "rejected") {
-    return { confirmed, transition: null, sequence: null, snapshot: buildSnapshot(store) };
-  }
+  const state = store.state();
+  const found = state.attempts.get(input.attemptId);
+  const head = state.transitions.at(-1);
+  return {
+    confirmed,
+    attempt:
+      found === undefined
+        ? null
+        : {
+            baseSha: found.baseSha,
+            headSha: found.headSha,
+            receiptDigest: found.receiptDigest,
+            intentDigest: found.intentDigest,
+            entryId: found.entryId,
+          },
+    chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
+    snapshot: buildSnapshot(store),
+  };
+}
 
+/** Record a transition whose record has already been built and signed. */
+export function recordOnly(
+  commands: QueueCommands,
+  store: QueueStateStore,
+  input: {
+    attemptId: string;
+    kind: "verified" | "reused";
+    digest: string;
+    baseSha: string;
+    witnessPrincipalIds: readonly string[];
+  },
+): { transition: ReturnType<QueueCommands["recordTransition"]>; sequence: number; snapshot: QueueSnapshot } {
   const head = store.state().transitions.at(-1);
   const sequence = (head?.transitionSequence ?? 0) + 1;
   const transition = commands.recordTransition({
     idempotencyKey: `transition:${input.attemptId}`,
-    kind: "verified",
+    kind: input.kind,
     transitionSequence: sequence,
     priorDigest: head?.digest ?? null,
-    digest: input.transitionDigest,
-    baseSha: input.mergeSha,
+    digest: input.digest,
+    baseSha: input.baseSha,
     attemptId: input.attemptId,
     witnessPrincipalIds: [...input.witnessPrincipalIds],
   });
-  return { confirmed, transition, sequence, snapshot: buildSnapshot(store) };
+  return { transition, sequence, snapshot: buildSnapshot(store) };
 }
