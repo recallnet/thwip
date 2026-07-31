@@ -22,19 +22,6 @@
 /** Written into every merge commit the queue makes, by the merge workflow. */
 export const QUEUE_MERGE_TRAILER = "thwip-queue-operation";
 
-/**
- * Written into the other commits thwip's own workflows push to the branch.
- *
- * The release workflow pushes a version bump straight to the default branch,
- * which is a push the queue did not make and would otherwise read as somebody
- * merging around it — pausing the queue after every publish.
- *
- * Skipping it is safe because it is not what protects an in-flight turn. The
- * queue pins the candidate tree it authorized and refuses to confirm a merge
- * whose tree is not that one, so a base that moved underneath a turn is caught
- * when the merge is reported, whatever this decides.
- */
-export const AUTOMATION_TRAILER = "thwip-automated";
 
 export interface ExternalPush {
   readonly repositoryId: string;
@@ -75,10 +62,7 @@ export function externalPushFromWebhook(event: string, payload: PushPayload): Ex
   // because the cost of being wrong is a pause an administrator clears, not a
   // merge onto a branch nobody checked.
   const message = payload.head_commit?.message;
-  if (typeof message === "string") {
-    if (message.includes(`${QUEUE_MERGE_TRAILER}:`)) return null;
-    if (message.includes(`${AUTOMATION_TRAILER}:`)) return null;
-  }
+  if (typeof message === "string" && message.includes(`${QUEUE_MERGE_TRAILER}:`)) return null;
 
   return { repositoryId: String(repositoryId), baseRef, observedBaseSha };
 }
