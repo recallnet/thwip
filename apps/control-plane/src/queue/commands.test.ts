@@ -1,7 +1,9 @@
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { checkInvariants } from "@thwip/queue-domain";
 import { BranchQueueStore } from "./store.js";
+import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
+import type { QueueStateStore } from "./store.js";
 import type { SqlLike } from "./sql.js";
 import { DEFAULT_TIMINGS, QueueCommands, validateTimings } from "./commands.js";
 
@@ -40,13 +42,39 @@ class Clock {
   }
 }
 
+const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/heads/main" };
+
+/**
+ * The command layer, over both places the state can live.
+ *
+ * The commands are where the queue's rules turn into events, so running them
+ * only against the Durable Object's SQLite would leave the D1 document trusted
+ * on the strength of a store-level comparison alone.
+ */
+const STORES = [
+  { name: "BranchQueueStore", make: () => BranchQueueStore.open(sqlite(), IDENTITY) },
+  { name: "SnapshotQueueStore", make: () => SnapshotQueueStore.open(cellOf(), IDENTITY) },
+];
+
+let makeStore: () => QueueStateStore = STORES[0]!.make;
+
 function harness() {
+  const store = makeStore();
+  const clock = new Clock();
+  let counter = 0;
+  const ids = {
+    attemptId: () => `att-${++counter}`,
+    operationId: () => `op-${++counter}`,
+    nonce: () => `nonce-${++counter}`,
+    claimToken: () => `tok-${++counter}`,
+  };
+  return { store, clock, commands: new QueueCommands(store, clock, ids) };
+}
+
+/** Pinned to SQLite, for the tests that reach past the store's own surface. */
+function sqlHarness() {
   const sql = sqlite();
-  const store = BranchQueueStore.open(sql, {
-    queueKey: "qk",
-    repositoryId: "1315419165",
-    baseRef: "refs/heads/main",
-  });
+  const store = BranchQueueStore.open(sql, IDENTITY);
   const clock = new Clock();
   let counter = 0;
   const ids = {
@@ -86,7 +114,11 @@ describe("validateTimings", () => {
   });
 });
 
-describe("QueueCommands", () => {
+describe.each(STORES)("QueueCommands over $name", ({ make }) => {
+  beforeEach(() => {
+    makeStore = make;
+  });
+
   it("reports noop when nothing is eligible", () => {
     const { commands } = harness();
     expect(commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" })).toMatchObject({
@@ -254,7 +286,7 @@ describe("QueueCommands", () => {
       // at-least-once and a crash can lose the clear. The second delivery must
       // recognise the action by its deadline-derived key, not by the absence of
       // the row.
-      const { sql, store, commands, clock } = harness();
+      const { sql, store, commands, clock } = sqlHarness();
       ready(commands, "e1", "alice", 7);
       const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
         attemptId: string;
@@ -464,7 +496,11 @@ function driveToMergeRequested(commands: QueueCommands): string {
  * and fired again at once: a wake loop writing no events, invisible in the state,
  * that spent an entire day of the object's request budget in a few hours.
  */
-describe("the alarm terminates", () => {
+describe.each(STORES)("the alarm terminates, over $name", ({ make }) => {
+  beforeEach(() => {
+    makeStore = make;
+  });
+
   it("never asks to be woken at a time that has already passed", () => {
     const { store, commands, clock } = harness();
     ready(commands, "e1", "alice", 7);

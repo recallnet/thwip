@@ -132,6 +132,40 @@ interface MetaRow {
   active_config_digest: string | null;
 }
 
+/**
+ * What the command layer needs from durable state, named apart from where that
+ * state lives.
+ *
+ * Two implementations satisfy it: the Durable Object's SQLite, and the D1
+ * document that replaced it in the decision path. Deriving the contract from the
+ * SQL store rather than restating it means the two cannot drift into agreeing on
+ * a method name while disagreeing on its signature.
+ */
+export type QueueStateStore = Pick<
+  BranchQueueStore,
+  | "queueKey"
+  | "repositoryId"
+  | "baseRef"
+  | "state"
+  | "generation"
+  | "attemptRevision"
+  | "queueEpoch"
+  | "transitionChain"
+  | "append"
+  | "eligibleEntries"
+  | "nextTurn"
+  | "dueDeadlines"
+  | "earliestDeadline"
+  | "clearDeadline"
+  | "pendingOutbox"
+  | "acknowledgeOutbox"
+  | "recordOutboxAttempt"
+  | "beginMergeOperation"
+  | "resolveMergeOperation"
+  | "mergeOperation"
+  | "classifyCallback"
+>;
+
 export class BranchQueueStore {
   private cached: BranchQueueState | null = null;
 

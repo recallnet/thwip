@@ -45,6 +45,42 @@ describe("declineFromProjection", () => {
     });
   });
 
+  /**
+   * The one way declining is not merely pessimistic. Deadlines are swept when a
+   * command runs, so if every waiting pull request is answered from here, nothing
+   * sweeps, and an expired turn holds the lane forever while this explains why.
+   */
+  describe("a lane that has appeared held for too long", () => {
+    const NOW = Date.parse("2026-07-31T12:00:00Z");
+    const heldSince = (iso: string) =>
+      queue({
+        activeAttemptId: "att_other",
+        projectedAt: iso,
+        entries: [entry(), entry({ entryId: "entry_2", lastAttemptId: "att_other" })],
+      });
+
+    it("stops answering, so somebody reaches the queue and expires it", () => {
+      const projected = heldSince("2026-07-31T11:40:00Z");
+      expect(declineFromProjection(projected, { ...asking, now: NOW })).toEqual({ decline: false });
+    });
+
+    it("keeps answering while the turn could still be legitimate", () => {
+      const projected = heldSince("2026-07-31T11:55:00Z");
+      expect(declineFromProjection(projected, { ...asking, now: NOW })).toMatchObject({
+        decline: true,
+        reason: "WAITING_FOR_TURN",
+      });
+    });
+
+    it("keeps answering when the projection does not say when it last moved", () => {
+      const projected = queue({
+        activeAttemptId: "att_other",
+        entries: [entry(), entry({ entryId: "entry_2", lastAttemptId: "att_other" })],
+      });
+      expect(declineFromProjection(projected, { ...asking, now: NOW })).toMatchObject({ decline: true });
+    });
+  });
+
   it("declines while the queue is paused", () => {
     const projected = queue({ paused: true, entries: [entry()] });
     expect(declineFromProjection(projected, asking)).toMatchObject({
