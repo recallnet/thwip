@@ -295,6 +295,84 @@ describe("GitHub refuses the merge", () => {
   });
 });
 
+describe("a losing merge run reports GitHub's refusal", () => {
+  /**
+   * `not-merged` is the path a losing merge run takes when GitHub refuses its
+   * merge, so it fires in normal operation. `mergeOutcomeUnknown` plus
+   * `confirmNotMerged` frees the lane exactly like a cancel or a merge does,
+   * and nothing was telling the next holder about the offer that followed.
+   */
+  it("drives whoever gets the turn after not-merged frees the lane", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    const attemptId = holder.operationId!.replace("merge_", "");
+
+    driven.length = 0;
+    await app.request(
+      `/v1/queue/${REPO}/not-merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseRef: REF, attemptId, operationId: holder.operationId }),
+      },
+      e,
+    );
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
+  });
+});
+
+describe("an operator reconciles a lane that never merged", () => {
+  /**
+   * Reconciliation ends the held attempt the same way a cancel or a merge
+   * does. All three `observed` branches free the lane, so one is enough to
+   * prove the route drives the next holder rather than leaving the offer for
+   * somebody to notice. `merged-outside-the-turn` needs no prior deadline, so
+   * it is the branch that can be reached from a plain held attempt.
+   */
+  it("drives whoever gets the turn after reconciling merged-outside-the-turn", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+
+    driven.length = 0;
+    const response = await app.request(
+      `/v1/queue/${REPO}/reconcile?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          observed: "merged-outside-the-turn",
+          reason: "operator found it merged by hand",
+          mergeSha: "d".repeat(40),
+        }),
+      },
+      e,
+    );
+    expect(response.status).toBe(200);
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
+  });
+});
+
 describe("a merge that is not the one the queue authorized", () => {
   it("is refused rather than recorded", async () => {
     const e = env();
