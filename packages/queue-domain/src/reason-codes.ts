@@ -30,6 +30,15 @@ export const BLOCKING_REASONS = [
   "POLICY_CHANGED",
   "COOLDOWN_ACTIVE",
   "NEEDS_REPAIR",
+  // A turn can end for reasons that have nothing to do with the branch. Telling
+  // the developer to push a fix when an administrator cancelled the turn, when
+  // GitHub refused the merge, or when the queue itself broke sends them to edit
+  // code that is fine. Each of these names an ending the reader acts on
+  // differently, and each is already a reason code the CLI classifies.
+  "MERGE_REJECTED",
+  "MERGE_OUTCOME_UNKNOWN",
+  "ADMIN_CANCELLED",
+  "INTERNAL_FAILURE",
 ] as const;
 
 export type BlockingReason = (typeof BLOCKING_REASONS)[number];

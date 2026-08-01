@@ -248,32 +248,64 @@ function blockEntry(entry: Entry, reason: BlockingReason): void {
 }
 
 /**
- * Why an entry is blocked after its turn ended badly.
+ * Where an entry lands when its turn ends without a merge.
+ *
+ * `defer` keeps the place in line and waits for another turn. It is the answer
+ * whenever the ending asks nothing of anybody: the offer lapsed, the deadline
+ * passed, a newer attempt took over, or the source moved under the turn. The
+ * queue takes a fresh turn against what is there now, and the developer reads a
+ * pull request that is waiting rather than one that is broken.
+ *
+ * `block` names a reason, and the reason is what the dashboard, the GitHub check
+ * and the terminal all say. Ten endings used to share `NEEDS_REPAIR`, so an
+ * administrator cancelling a turn, GitHub refusing the merge and the queue
+ * contradicting itself all read as "the integration failed, push a fix". They
+ * are grouped here by what the person reading has to do next.
  *
  * A total map rather than a default, so adding an attempt outcome forces a
- * decision about what a reader should be told instead of silently becoming
- * "needs repair".
+ * decision about what a reader is told.
  */
-const BLOCK_REASON_FOR_OUTCOME: Record<AttemptOutcome, BlockingReason> = {
-  EXPIRED_UNCLAIMED: "NEEDS_REPAIR",
-  EXPIRED_EXECUTION: "NEEDS_REPAIR",
-  CI_FAILED: "REQUIRED_CHECK_FAILED",
-  RECEIPT_REJECTED: "LOCAL_RECEIPT_REJECTED",
-  VERIFICATION_FAILED: "VERIFICATION_REJECTED",
-  HEAD_MOVED: "NEEDS_REPAIR",
-  BASE_MOVED: "NEEDS_REPAIR",
-  POLICY_CHANGED: "POLICY_CHANGED",
-  REVIEWS_CHANGED: "REVIEW_REQUIRED",
-  PERMISSION_REVOKED: "APP_PERMISSION_DRIFT",
-  MERGE_CONFLICT: "MERGE_CONFLICT",
-  MERGE_REJECTED: "NEEDS_REPAIR",
-  CONFIRMED_NOT_MERGED: "NEEDS_REPAIR",
-  PROVIDER_FAILURE: "NEEDS_REPAIR",
-  INVARIANT_FAILURE: "NEEDS_REPAIR",
-  APP_UNINSTALLED: "APP_PERMISSION_DRIFT",
-  ADMIN_CANCELLED: "NEEDS_REPAIR",
-  SUPERSEDED: "NEEDS_REPAIR",
-  INTERNAL_FAILURE: "NEEDS_REPAIR",
+type Ending = { readonly kind: "defer" } | { readonly kind: "block"; readonly reason: BlockingReason };
+
+const DEFER: Ending = { kind: "defer" };
+
+function blocked(reason: BlockingReason): Ending {
+  return { kind: "block", reason };
+}
+
+const ENDING_FOR_OUTCOME: Record<AttemptOutcome, Ending> = {
+  // Nothing to do. The turn is spent and the place is not.
+  EXPIRED_UNCLAIMED: DEFER,
+  EXPIRED_EXECUTION: DEFER,
+  SUPERSEDED: DEFER,
+  // The source changed, so this turn's proof no longer covers what would merge.
+  // The next turn builds a candidate from the new head or the new base.
+  HEAD_MOVED: DEFER,
+  BASE_MOVED: DEFER,
+  // Something about the pull request has to change before it can merge.
+  CI_FAILED: blocked("REQUIRED_CHECK_FAILED"),
+  RECEIPT_REJECTED: blocked("LOCAL_RECEIPT_REJECTED"),
+  VERIFICATION_FAILED: blocked("VERIFICATION_REJECTED"),
+  MERGE_CONFLICT: blocked("MERGE_CONFLICT"),
+  POLICY_CHANGED: blocked("POLICY_CHANGED"),
+  REVIEWS_CHANGED: blocked("REVIEW_REQUIRED"),
+  // A permission changed. `PERMISSION_REVOKED` is the sponsor's own access, which
+  // `APP_PERMISSION_DRIFT` used to report as the App missing a scope, sending an
+  // admin to reinstall an App that is installed correctly.
+  PERMISSION_REVOKED: blocked("OWNER_UNAUTHORIZED"),
+  APP_UNINSTALLED: blocked("APP_PERMISSION_DRIFT"),
+  // GitHub would not complete the merge. The rules on the base branch, or the
+  // pull request itself, are where the answer is.
+  MERGE_REJECTED: blocked("MERGE_REJECTED"),
+  CONFIRMED_NOT_MERGED: blocked("MERGE_REJECTED"),
+  // The queue cannot say what happened to the merge. Nobody should push or
+  // requeue until the pull request has been read.
+  PROVIDER_FAILURE: blocked("MERGE_OUTCOME_UNKNOWN"),
+  // A person stopped this turn, and only that person knows why.
+  ADMIN_CANCELLED: blocked("ADMIN_CANCELLED"),
+  // The queue broke. No push fixes this, so it goes to whoever runs the queue.
+  INVARIANT_FAILURE: blocked("INTERNAL_FAILURE"),
+  INTERNAL_FAILURE: blocked("INTERNAL_FAILURE"),
 };
 
 function checkReason(reason: BlockingReason | null): BlockingReason | null {
@@ -691,10 +723,15 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const entry = state.entries.get(attempt.entryId);
       terminate(state, attempt, event.outcome);
       if (entry !== undefined && entry.state !== "Merged" && entry.state !== "Cancelled") {
-        if (event.outcome === "SUPERSEDED" || event.outcome === "EXPIRED_EXECUTION") {
+        // One fact, one answer. An offer nobody claimed used to land in
+        // Deferred when `OfferExpired` noticed the deadline and in Blocked
+        // NEEDS_REPAIR when the same deadline arrived as a termination, so what
+        // the developer read depended on which sweep got there first.
+        const ending = ENDING_FOR_OUTCOME[event.outcome as AttemptOutcome];
+        if (ending.kind === "defer") {
           setEntryState(entry, "Deferred");
         } else {
-          blockEntry(entry, BLOCK_REASON_FOR_OUTCOME[event.outcome as AttemptOutcome]);
+          blockEntry(entry, ending.reason);
         }
       }
       break;
