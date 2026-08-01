@@ -1331,7 +1331,7 @@ export async function queueFromPullRequest(env: Env, payload: {
   // ejected it by hand. That happened three times in one night, to pull
   // requests 78, 96 and 97, each already merged.
   if (action === "closed") {
-    await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
+    const { snapshot } = await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
       commands.cancel({
         idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
         entryId,
@@ -1339,6 +1339,22 @@ export async function queueFromPullRequest(env: Env, payload: {
         reason: "the pull request was closed",
       });
     });
+
+    // Cancelling a closed entry that held the lane frees it exactly like an
+    // eject does, and the same ninety-second offer expires unclaimed unless
+    // something drives it. The eject route drives through `driveLane`; this
+    // webhook has no route deps to borrow it from, so it repeats the same
+    // lookup directly against `driveTurnFor`, the same dispatcher the route
+    // uses underneath.
+    const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+    if (holder !== undefined) {
+      try {
+        await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
+      } catch {
+        /* the turn survives; a later tick or the drain asks again */
+      }
+    }
+
     return { handled: true, detail: "entry cancelled" };
   }
 
