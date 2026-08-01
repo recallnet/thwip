@@ -82,12 +82,80 @@ export interface MergeIntentBaseV1 {
   readonly createdAt: string;
 }
 
+/**
+ * Where the required suites ran against the integrated candidate.
+ *
+ * `fresh` dispatches the run to the developer's own machine. Nothing about that
+ * execution has a check run id or an Actions run id, because GitHub never saw
+ * it, and the two fields that used to sit here unconditionally could only be
+ * filled from some other run. A reader would then be told the queue watched the
+ * candidate run when it did not. So the execution says where it happened and
+ * carries only the ids that exist there.
+ *
+ * `audited` runs the suites a second time in Actions, and `remote` runs them
+ * on a managed runner: those executions have a result and both run ids and no
+ * device of the developer's. Whichever ran, the receipt this record cites names
+ * the machine that signed for the suites.
+ */
+export type VerifiedExecutionV1 =
+  | { readonly ranOn: "device"; readonly deviceKeyId: string }
+  | {
+      readonly ranOn: "github-actions";
+      readonly verifierResultDigest: Sha256;
+      readonly checkRunId: string;
+      readonly actionRunId: string;
+    };
+
+export const VERIFIED_EXECUTION_HOSTS = ["device", "github-actions"] as const;
+
+/**
+ * Read an execution block, refusing anything the host it names cannot have.
+ *
+ * A device execution carrying a check run id is refused rather than trimmed:
+ * the field would be a claim about GitHub having run something, and a parser
+ * that quietly dropped it would let the claim into the bytes that get signed.
+ */
+export function parseVerifiedExecution(v: unknown, label: string): ParseResult<VerifiedExecutionV1> {
+  if (!isRecord(v)) return fail(`${label} must be an object`);
+  const ranOn = literal(v["ranOn"], `${label}.ranOn`, VERIFIED_EXECUTION_HOSTS);
+  if (!ranOn.ok) return ranOn;
+
+  if (ranOn.value === "device") {
+    const shape = exactKeys(v, label, ["ranOn", "deviceKeyId"]);
+    if (!shape.ok) return shape;
+    const deviceKeyId = opaqueId(v["deviceKeyId"], `${label}.deviceKeyId`);
+    if (!deviceKeyId.ok) return deviceKeyId;
+    return ok({ ranOn: "device", deviceKeyId: deviceKeyId.value });
+  }
+
+  const shape = exactKeys(v, label, ["ranOn", "verifierResultDigest", "checkRunId", "actionRunId"]);
+  if (!shape.ok) return shape;
+  const verifierResultDigest = sha256(v["verifierResultDigest"], `${label}.verifierResultDigest`);
+  if (!verifierResultDigest.ok) return verifierResultDigest;
+  const checkRunId = decimalId(v["checkRunId"], `${label}.checkRunId`);
+  if (!checkRunId.ok) return checkRunId;
+  const actionRunId = decimalId(v["actionRunId"], `${label}.actionRunId`);
+  if (!actionRunId.ok) return actionRunId;
+  return ok({
+    ranOn: "github-actions",
+    verifierResultDigest: verifierResultDigest.value,
+    checkRunId: checkRunId.value,
+    actionRunId: actionRunId.value,
+  });
+}
+
+/**
+ * A merge the queue assigned to a device, which signed a receipt for what it
+ * ran. The assignment and the receipt are what make this the strongest kind,
+ * and the pipeline and suite digests say what the run had to cover.
+ */
 export interface VerifiedMergeEvidence {
   readonly workReceiptDigest: Sha256;
   readonly assignmentDigest: Sha256;
   readonly integrationEvidenceDigest: Sha256;
-  readonly verifierResultDigest: Sha256;
-  readonly candidateCheckRunId: string;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly execution: VerifiedExecutionV1;
 }
 
 export interface OverrideMergeEvidence {
@@ -152,13 +220,15 @@ const BASE_KEYS = [
   "evidence",
 ] as const;
 
-const VERIFIED_EVIDENCE_KEYS = [
+const VERIFIED_EVIDENCE_DIGEST_KEYS = [
   "workReceiptDigest",
   "assignmentDigest",
   "integrationEvidenceDigest",
-  "verifierResultDigest",
-  "candidateCheckRunId",
+  "pipelineDigest",
+  "requiredSuitesDigest",
 ] as const;
+
+const VERIFIED_EVIDENCE_KEYS = [...VERIFIED_EVIDENCE_DIGEST_KEYS, "execution"] as const;
 
 const OVERRIDE_EVIDENCE_KEYS = [
   "workReceiptDigest",
@@ -350,12 +420,14 @@ export function parseMergeIntent(v: unknown): ParseResult<MergeIntentV1> {
   if (kind.value === "verified") {
     const evidenceShape = exactKeys(evidence, "mergeIntent.evidence", VERIFIED_EVIDENCE_KEYS);
     if (!evidenceShape.ok) return evidenceShape;
-    const digests = readDigests(evidence, VERIFIED_EVIDENCE_KEYS);
+    const digests = readDigests(evidence, VERIFIED_EVIDENCE_DIGEST_KEYS);
     if (!digests.ok) return digests;
+    const execution = parseVerifiedExecution(evidence["execution"], "mergeIntent.evidence.execution");
+    if (!execution.ok) return execution;
     return ok({
       ...base.value,
       kind: "verified",
-      evidence: digests.value as unknown as VerifiedMergeEvidence,
+      evidence: { ...digests.value, execution: execution.value } as unknown as VerifiedMergeEvidence,
     });
   }
 

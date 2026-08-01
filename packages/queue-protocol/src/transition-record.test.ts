@@ -45,9 +45,28 @@ function verifiedMerge(over: Record<string, unknown> = {}): Record<string, unkno
       workReceiptDigest: D("2"),
       assignmentDigest: D("3"),
       integrationEvidenceDigest: D("4"),
-      verifierResultDigest: D("5"),
-      checkRunId: "778899",
-      actionRunId: "112233",
+      policyDigest: D("7"),
+      pipelineDigest: D("8"),
+      requiredSuitesDigest: D("9"),
+      execution: { ranOn: "device", deviceKeyId: "dev-1" },
+    },
+    ...over,
+  };
+}
+
+/** The same record, with the audited profile's second execution named. */
+function verifiedInActions(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const record = verifiedMerge();
+  return {
+    ...record,
+    verifiedMerge: {
+      ...(record["verifiedMerge"] as Record<string, unknown>),
+      execution: {
+        ranOn: "github-actions",
+        verifierResultDigest: D("5"),
+        checkRunId: "778899",
+        actionRunId: "112233",
+      },
     },
     ...over,
   };
@@ -82,6 +101,80 @@ function overrideMerge(over: Record<string, unknown> = {}): Record<string, unkno
 describe("parseTransitionRecord", () => {
   it("accepts a verified merge", () => {
     expect(parseTransitionRecord(verifiedMerge())).toMatchObject({ ok: true });
+  });
+
+  /**
+   * The record is what an outside auditor reads, so it has to say what the
+   * merge actually rested on. Under `fresh` the suites ran on a device, and no
+   * check run and no Actions run exist for that execution. Carrying a GitHub id
+   * from an unrelated run would read as though the queue watched the candidate
+   * run, which is the claim this profile does not make.
+   */
+  describe("where the integration ran", () => {
+    it("names the assignment, the receipt and the device", () => {
+      const parsed = parseTransitionRecord(verifiedMerge());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
+      expect(parsed.value.verifiedMerge.assignmentDigest).toBe(D("3"));
+      expect(parsed.value.verifiedMerge.integrationEvidenceDigest).toBe(D("4"));
+      expect(parsed.value.verifiedMerge.execution).toEqual({ ranOn: "device", deviceKeyId: "dev-1" });
+    });
+
+    it("binds the policy, the pipeline and the suites the run had to cover", () => {
+      const parsed = parseTransitionRecord(verifiedMerge());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
+      expect(parsed.value.verifiedMerge.policyDigest).toBe(D("7"));
+      expect(parsed.value.verifiedMerge.pipelineDigest).toBe(D("8"));
+      expect(parsed.value.verifiedMerge.requiredSuitesDigest).toBe(D("9"));
+    });
+
+    it("accepts a second execution in Actions, with its result and its run ids", () => {
+      const parsed = parseTransitionRecord(verifiedInActions());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
+      expect(parsed.value.verifiedMerge.execution).toEqual({
+        ranOn: "github-actions",
+        verifierResultDigest: D("5"),
+        checkRunId: "778899",
+        actionRunId: "112233",
+      });
+    });
+
+    it("refuses a device execution that names a check run", () => {
+      const lying = verifiedMerge();
+      const facts = lying["verifiedMerge"] as Record<string, unknown>;
+      facts["execution"] = { ranOn: "device", deviceKeyId: "dev-1", checkRunId: "778899" };
+      expect(parseTransitionRecord(lying)).toMatchObject({ ok: false });
+    });
+
+    it("refuses an Actions execution missing the result it produced", () => {
+      const partial = verifiedInActions();
+      const facts = partial["verifiedMerge"] as Record<string, unknown>;
+      facts["execution"] = { ranOn: "github-actions", checkRunId: "778899", actionRunId: "112233" };
+      expect(parseTransitionRecord(partial)).toMatchObject({ ok: false });
+    });
+
+    it("refuses a record that does not say where the integration ran", () => {
+      const silent = verifiedMerge();
+      const facts = silent["verifiedMerge"] as Record<string, unknown>;
+      delete facts["execution"];
+      expect(parseTransitionRecord(silent)).toMatchObject({ ok: false });
+    });
+
+    it("refuses a record with no assignment behind it", () => {
+      const unassigned = verifiedMerge();
+      const facts = unassigned["verifiedMerge"] as Record<string, unknown>;
+      delete facts["assignmentDigest"];
+      expect(parseTransitionRecord(unassigned)).toMatchObject({ ok: false });
+    });
+
+    it("refuses a record with no integration receipt behind it", () => {
+      const unreceipted = verifiedMerge();
+      const facts = unreceipted["verifiedMerge"] as Record<string, unknown>;
+      delete facts["integrationEvidenceDigest"];
+      expect(parseTransitionRecord(unreceipted)).toMatchObject({ ok: false });
+    });
   });
 
   it("accepts an override merge", () => {

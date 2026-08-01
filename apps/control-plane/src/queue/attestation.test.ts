@@ -238,22 +238,22 @@ describe("a merge the candidate verifier ran for", () => {
 
 /**
  * The strongest kind, unreachable until an assignment and a signed receipt
- * existed to back it. It asserts three things happened — an assignment was
- * issued, the runner it was issued to signed a receipt back, and a verifier
- * produced a result — and a record built without one of those would be
- * signing a claim the queue cannot show.
+ * existed to back it. It asserts two things happened that no other kind may
+ * claim: an assignment was issued, and the device it was issued to signed a
+ * receipt for what it ran. A record built without either would be signing a
+ * claim the queue cannot show.
  */
 describe("a merge backed by an assignment and a signed receipt", () => {
   const verifiedEvidence = {
     workReceiptDigest: D("a"),
     organizationId: "org_1",
     policyDigest: D("b"),
+    pipelineDigest: D("c"),
+    requiredSuitesDigest: D("d"),
     assignmentDigest: D("0"),
     integrationEvidenceDigest: D("1"),
-    verifierResultDigest: D("2"),
-    candidateCheckRunId: "990011",
-    actionRunId: "123456",
-  };
+    execution: { ranOn: "device", deviceKeyId: "dev-1" },
+  } as const;
 
   async function verifiedIntent() {
     const signed = await signVerifiedIntent({
@@ -289,7 +289,7 @@ describe("a merge backed by an assignment and a signed receipt", () => {
     return signed;
   }
 
-  it("parses as a verified merge and binds all four extra digests", async () => {
+  it("parses as a verified merge and names what justified it", async () => {
     const i = await verifiedIntent();
     const signed = await verifiedRecord(i.digest);
     const parsed = parseTransitionRecord(JSON.parse(new TextDecoder().decode(signed.bytes)));
@@ -299,31 +299,88 @@ describe("a merge backed by an assignment and a signed receipt", () => {
     expect(parsed.value.verifiedMerge.mergeIntentDigest).toBe(i.digest);
     expect(parsed.value.verifiedMerge.assignmentDigest).toBe(verifiedEvidence.assignmentDigest);
     expect(parsed.value.verifiedMerge.integrationEvidenceDigest).toBe(verifiedEvidence.integrationEvidenceDigest);
-    expect(parsed.value.verifiedMerge.verifierResultDigest).toBe(verifiedEvidence.verifierResultDigest);
-    expect(parsed.value.verifiedMerge.actionRunId).toBe(verifiedEvidence.actionRunId);
+    expect(parsed.value.verifiedMerge.execution).toEqual({ ranOn: "device", deviceKeyId: "dev-1" });
+    expect(parsed.value.verifiedMerge.requiredSuitesDigest).toBe(verifiedEvidence.requiredSuitesDigest);
   });
 
-  it("signs an intent that carries the same four digests", async () => {
+  it("signs an intent that carries the same assignment and receipt", async () => {
     const signed = await verifiedIntent();
     const parsed = parseMergeIntent(JSON.parse(new TextDecoder().decode(signed.bytes)));
     if (!parsed.ok || parsed.value.kind !== "verified") throw new Error("expected a verified intent");
     expect(parsed.value.evidence.assignmentDigest).toBe(verifiedEvidence.assignmentDigest);
     expect(parsed.value.evidence.integrationEvidenceDigest).toBe(verifiedEvidence.integrationEvidenceDigest);
-    expect(parsed.value.evidence.verifierResultDigest).toBe(verifiedEvidence.verifierResultDigest);
+    expect(parsed.value.evidence.execution).toEqual({ ranOn: "device", deviceKeyId: "dev-1" });
   });
 
-  it("gathers the evidence when all three facts are present", () => {
+  /** The audited profile's second execution, which fresh does not have. */
+  it("records an Actions rerun where one happened", async () => {
+    const signed = await signVerifiedRecord({
+      attemptId: "att-1",
+      git,
+      position,
+      pullRequestNumber: 82,
+      evidence: {
+        ...verifiedEvidence,
+        execution: {
+          ranOn: "github-actions",
+          verifierResultDigest: D("2"),
+          checkRunId: "990011",
+          actionRunId: "123456",
+        },
+      },
+      mergeMethod: "merge",
+      mergeIntentDigest: D("f"),
+      before: { baseSha: BASE, treeOid: "5".repeat(40) },
+      final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
+      observedAt: "2026-07-31T12:01:00Z",
+      signer,
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    const parsed = parseTransitionRecord(JSON.parse(new TextDecoder().decode(signed.bytes)));
+    if (!parsed.ok || parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
+    expect(parsed.value.verifiedMerge.execution).toEqual({
+      ranOn: "github-actions",
+      verifierResultDigest: D("2"),
+      checkRunId: "990011",
+      actionRunId: "123456",
+    });
+  });
+
+  it("gathers the evidence when the assignment and the receipt are both there", () => {
     const result = verifiedEvidenceFor({
       workReceiptDigest: verifiedEvidence.workReceiptDigest,
       organizationId: verifiedEvidence.organizationId,
       policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
       assignmentDigest: verifiedEvidence.assignmentDigest,
       integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
-      verifierResultDigest: verifiedEvidence.verifierResultDigest,
-      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
-      actionRunId: verifiedEvidence.actionRunId,
+      deviceKeyId: "dev-1",
+      rerun: null,
     });
     expect(result).toEqual(verifiedEvidence);
+  });
+
+  it("carries the rerun where the audited profile ran one", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      deviceKeyId: "dev-1",
+      rerun: { verifierResultDigest: D("2"), checkRunId: "990011", actionRunId: "123456" },
+    });
+    expect(result).toMatchObject({
+      execution: {
+        ranOn: "github-actions",
+        verifierResultDigest: D("2"),
+        checkRunId: "990011",
+        actionRunId: "123456",
+      },
+    });
   });
 
   it("refuses when no assignment was issued", () => {
@@ -331,11 +388,12 @@ describe("a merge backed by an assignment and a signed receipt", () => {
       workReceiptDigest: verifiedEvidence.workReceiptDigest,
       organizationId: verifiedEvidence.organizationId,
       policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
       assignmentDigest: null,
       integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
-      verifierResultDigest: verifiedEvidence.verifierResultDigest,
-      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
-      actionRunId: verifiedEvidence.actionRunId,
+      deviceKeyId: "dev-1",
+      rerun: null,
     });
     expect(result).toEqual({ missing: "no assignment was issued for this attempt" });
   });
@@ -345,27 +403,63 @@ describe("a merge backed by an assignment and a signed receipt", () => {
       workReceiptDigest: verifiedEvidence.workReceiptDigest,
       organizationId: verifiedEvidence.organizationId,
       policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
       assignmentDigest: verifiedEvidence.assignmentDigest,
       integrationEvidenceDigest: null,
-      verifierResultDigest: verifiedEvidence.verifierResultDigest,
-      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
-      actionRunId: verifiedEvidence.actionRunId,
+      deviceKeyId: "dev-1",
+      rerun: null,
     });
     expect(result).toEqual({ missing: "no integration receipt was signed for this attempt" });
   });
 
-  it("refuses when no verifier result was produced", () => {
+  it("refuses when nothing names the device that ran it", () => {
     const result = verifiedEvidenceFor({
       workReceiptDigest: verifiedEvidence.workReceiptDigest,
       organizationId: verifiedEvidence.organizationId,
       policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
       assignmentDigest: verifiedEvidence.assignmentDigest,
       integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
-      verifierResultDigest: null,
-      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
-      actionRunId: verifiedEvidence.actionRunId,
+      deviceKeyId: null,
+      rerun: null,
     });
-    expect(result).toEqual({ missing: "no verifier result was produced for this attempt" });
+    expect(result).toEqual({ missing: "no device is named by the receipt this merge rests on" });
+  });
+
+  it("refuses when the active policy names no pipeline", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: null,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      deviceKeyId: "dev-1",
+      rerun: null,
+    });
+    expect(result).toEqual({ missing: "the active policy names no pipeline" });
+  });
+
+  /**
+   * Half a rerun is not a rerun. Naming a result with no run to point at, or a
+   * run with no result, would put a claim in the record that nothing backs.
+   */
+  it("refuses a rerun that is missing the run it happened in", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      pipelineDigest: verifiedEvidence.pipelineDigest,
+      requiredSuitesDigest: verifiedEvidence.requiredSuitesDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      deviceKeyId: "dev-1",
+      rerun: { verifierResultDigest: D("2"), checkRunId: null, actionRunId: null },
+    });
+    expect(result).toEqual({ missing: "the second execution names no check run and no Actions run" });
   });
 });
 
