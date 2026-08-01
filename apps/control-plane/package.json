@@ -24,6 +24,7 @@
     "@thwip/prompts": "workspace:*",
     "@thwip/policy": "workspace:*",
     "@thwip/queue-domain": "workspace:*",
+    "@thwip/vocabulary": "workspace:*",
     "@thwip/queue-protocol": "workspace:*",
     "@thwip/protocol": "workspace:*",
     "@thwip/verifier": "workspace:*"

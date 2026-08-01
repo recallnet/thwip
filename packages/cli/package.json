@@ -23,6 +23,7 @@
     "yaml": "^2.9.0",
     "@thwip/prompts": "workspace:*",
     "@thwip/queue-domain": "workspace:*",
+    "@thwip/vocabulary": "workspace:*",
     "@thwip/queue-protocol": "workspace:*",
     "jose": "^6.0.0"
   },
