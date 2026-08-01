@@ -2,6 +2,7 @@ import {
   ATTEMPT_OUTCOMES,
   BLOCKING_REASONS,
   TRANSITION_KINDS,
+  TERMINAL_ENTRY_STATES,
   isCapabilityReason,
   phaseRank,
   type AttemptOutcome,
@@ -179,47 +180,132 @@ function terminate(state: BranchQueueState, attempt: Attempt, outcome: AttemptOu
 }
 
 /**
+ * Whether the queue may still commit to a merge write.
+ *
+ * The two conditions live here rather than at the callers because a merge write
+ * is the one thing the queue does that nothing can take back, and every guard
+ * this codebase has left to a caller has eventually been forgotten by one of
+ * them. The route that authorizes a turn already refuses both, and the merge
+ * callback reaches the log without passing through that route.
+ *
+ * A pause refuses the merge outright. It is the single lever an operator has
+ * during an incident, the attempt holding the lane is usually the one they are
+ * trying to stop, and the `Thwip / Merge` check already tells whoever reads it
+ * that nothing merges through a paused queue. Refusing here is what makes that
+ * sentence true.
+ *
+ * A pending rebaseline refuses it too: the candidate was integrated against a
+ * base that no longer exists, so a `verified` transition for it would name a
+ * base the queue never saw. The caller terminates the attempt BASE_MOVED and the
+ * pull request takes a fresh turn once the queue is rebaselined.
+ *
+ * Confirmation is deliberately outside this gate. `MergeConfirmed` and
+ * `MergeConfirmedNotMerged` report what GitHub already did, and refusing a fact
+ * would leave the log denying a merge that exists and an unknown outcome that
+ * nothing could ever resolve. The stop belongs on the write, not on the news.
+ */
+function requireMergeable(state: BranchQueueState, attempt: Attempt): void {
+  if (state.rebaselineRequired) {
+    fail(`BASE_MOVED: the base moved outside the queue; attempt ${attempt.attemptId} may not merge onto it`);
+  }
+  if (state.paused) {
+    fail(
+      `QUEUE_PAUSED: the queue is paused (${state.pauseReason ?? "no reason recorded"}); ` +
+        `attempt ${attempt.attemptId} may not merge`,
+    );
+  }
+}
+
+/**
+ * Merged and Cancelled are endings, not stages. A merged pull request has a
+ * signed transition record naming it, so moving its entry anywhere else leaves
+ * the queue contradicting the chain: `buildCheck` publishes "Removed from the
+ * queue" for a pull request that is in `main`. The guard sits on the two
+ * functions that write `state` so that no event handler has to remember it, and
+ * an event that would move a finished entry is refused rather than applied.
+ */
+function requireOpen(entry: Entry, next: EntryState): void {
+  if ((TERMINAL_ENTRY_STATES as readonly string[]).includes(entry.state)) {
+    fail(`ENTRY_TERMINAL: entry ${entry.entryId} is ${entry.state}; it cannot become ${next}`);
+  }
+}
+
+/**
  * Every state but Blocked. Blocking goes through `blockEntry` so the reason is a
  * parameter rather than something a caller may forget: a live queue once held a
  * merged pull request in Blocked with a null reason, which every reader rendered
  * as though nothing were wrong.
  */
 function setEntryState(entry: Entry, next: Exclude<EntryState, "Blocked">): void {
+  requireOpen(entry, next);
   entry.state = next;
 }
 
 function blockEntry(entry: Entry, reason: BlockingReason): void {
+  requireOpen(entry, "Blocked");
   entry.state = "Blocked";
   entry.primaryReason = reason;
 }
 
 /**
- * Why an entry is blocked after its turn ended badly.
+ * Where an entry lands when its turn ends without a merge.
+ *
+ * `defer` keeps the place in line and waits for another turn. It is the answer
+ * whenever the ending asks nothing of anybody: the offer lapsed, the deadline
+ * passed, a newer attempt took over, or the source moved under the turn. The
+ * queue takes a fresh turn against what is there now, and the developer reads a
+ * pull request that is waiting rather than one that is broken.
+ *
+ * `block` names a reason, and the reason is what the dashboard, the GitHub check
+ * and the terminal all say. Ten endings used to share `NEEDS_REPAIR`, so an
+ * administrator cancelling a turn, GitHub refusing the merge and the queue
+ * contradicting itself all read as "the integration failed, push a fix". They
+ * are grouped here by what the person reading has to do next.
  *
  * A total map rather than a default, so adding an attempt outcome forces a
- * decision about what a reader should be told instead of silently becoming
- * "needs repair".
+ * decision about what a reader is told.
  */
-const BLOCK_REASON_FOR_OUTCOME: Record<AttemptOutcome, BlockingReason> = {
-  EXPIRED_UNCLAIMED: "NEEDS_REPAIR",
-  EXPIRED_EXECUTION: "NEEDS_REPAIR",
-  CI_FAILED: "REQUIRED_CHECK_FAILED",
-  RECEIPT_REJECTED: "LOCAL_RECEIPT_REJECTED",
-  VERIFICATION_FAILED: "VERIFICATION_REJECTED",
-  HEAD_MOVED: "NEEDS_REPAIR",
-  BASE_MOVED: "NEEDS_REPAIR",
-  POLICY_CHANGED: "POLICY_CHANGED",
-  REVIEWS_CHANGED: "REVIEW_REQUIRED",
-  PERMISSION_REVOKED: "APP_PERMISSION_DRIFT",
-  MERGE_CONFLICT: "MERGE_CONFLICT",
-  MERGE_REJECTED: "NEEDS_REPAIR",
-  CONFIRMED_NOT_MERGED: "NEEDS_REPAIR",
-  PROVIDER_FAILURE: "NEEDS_REPAIR",
-  INVARIANT_FAILURE: "NEEDS_REPAIR",
-  APP_UNINSTALLED: "APP_PERMISSION_DRIFT",
-  ADMIN_CANCELLED: "NEEDS_REPAIR",
-  SUPERSEDED: "NEEDS_REPAIR",
-  INTERNAL_FAILURE: "NEEDS_REPAIR",
+type Ending = { readonly kind: "defer" } | { readonly kind: "block"; readonly reason: BlockingReason };
+
+const DEFER: Ending = { kind: "defer" };
+
+function blocked(reason: BlockingReason): Ending {
+  return { kind: "block", reason };
+}
+
+const ENDING_FOR_OUTCOME: Record<AttemptOutcome, Ending> = {
+  // Nothing to do. The turn is spent and the place is not.
+  EXPIRED_UNCLAIMED: DEFER,
+  EXPIRED_EXECUTION: DEFER,
+  SUPERSEDED: DEFER,
+  // The source changed, so this turn's proof no longer covers what would merge.
+  // The next turn builds a candidate from the new head or the new base.
+  HEAD_MOVED: DEFER,
+  BASE_MOVED: DEFER,
+  // Something about the pull request has to change before it can merge.
+  CI_FAILED: blocked("REQUIRED_CHECK_FAILED"),
+  RECEIPT_REJECTED: blocked("LOCAL_RECEIPT_REJECTED"),
+  VERIFICATION_FAILED: blocked("VERIFICATION_REJECTED"),
+  MERGE_CONFLICT: blocked("MERGE_CONFLICT"),
+  POLICY_CHANGED: blocked("POLICY_CHANGED"),
+  REVIEWS_CHANGED: blocked("REVIEW_REQUIRED"),
+  // A permission changed. `PERMISSION_REVOKED` is the sponsor's own access, which
+  // `APP_PERMISSION_DRIFT` used to report as the App missing a scope, sending an
+  // admin to reinstall an App that is installed correctly.
+  PERMISSION_REVOKED: blocked("OWNER_UNAUTHORIZED"),
+  APP_UNINSTALLED: blocked("APP_PERMISSION_DRIFT"),
+  // GitHub would not complete the merge. The rules on the base branch, or the
+  // pull request itself, are where the answer is.
+  MERGE_REJECTED: blocked("MERGE_REJECTED"),
+  CONFIRMED_NOT_MERGED: blocked("MERGE_REJECTED"),
+  // The queue cannot say what happened to the merge. Nobody should push or
+  // requeue until the pull request has been read.
+  PROVIDER_FAILURE: blocked("MERGE_OUTCOME_UNKNOWN"),
+  // A person stopped this turn, and only that person knows why.
+  ADMIN_CANCELLED: blocked("ADMIN_CANCELLED"),
+  // The queue broke. No push fixes this, so it goes to whoever runs the queue.
+  INVARIANT_FAILURE: blocked("INTERNAL_FAILURE"),
+  INTERNAL_FAILURE: blocked("INTERNAL_FAILURE"),
 };
 
 function checkReason(reason: BlockingReason | null): BlockingReason | null {
@@ -257,6 +343,20 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
     case "QueueRequested": {
       const existing = state.entries.get(event.entryId);
       if (existing !== undefined && event.resetOrdinal !== true) return previous;
+      // Closing and reopening a pull request re-requests it with a fresh
+      // ordinal while its turn is still held. The rebuilt entry owns no attempt,
+      // so the live one kept the lane and no entry could give it back: every
+      // later offer failed on "lane is occupied by another attempt" until the
+      // deadline sweep reaped it. The reset ends that turn instead.
+      if (existing?.currentAttemptId != null) {
+        const held = state.attempts.get(existing.currentAttemptId);
+        if (held !== undefined && held.outcome === null) {
+          // A merge write already sent to GitHub cannot be superseded: nothing
+          // here knows whether it landed, and only confirmation may say.
+          if (held.outcomeUnknown) fail("cannot re-request an entry while a merge outcome is unknown");
+          terminate(state, held, "SUPERSEDED");
+        }
+      }
       state.ordinalSequence += 1n;
       state.entries.set(event.entryId, {
         entryId: event.entryId,
@@ -383,7 +483,19 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
     case "OfferClaimed": {
       const attempt = requireLive(requireAttempt(state, event.attemptId));
-      if (attempt.executionMode !== null) return previous;
+      // Two runners for the same sponsor can race one offer. Swallowing the
+      // loser's claim told it nothing, so it went on believing it held the turn
+      // and everything it sent afterwards was ignored or credited to the winner.
+      // The same claim arriving twice is a redelivery and stays a no-op.
+      if (attempt.executionMode !== null) {
+        const sameClaim =
+          attempt.executionMode === event.executionMode && attempt.deviceId === (event.deviceId ?? null);
+        if (sameClaim) return previous;
+        fail(
+          `OFFER_ALREADY_CLAIMED: attempt ${attempt.attemptId} was already claimed by ` +
+            `${attempt.deviceId ?? attempt.executionMode}`,
+        );
+      }
       if (event.executionMode === "device" && event.deviceId === undefined) {
         fail("a device claim requires a device id");
       }
@@ -494,6 +606,23 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.verificationNonce !== event.nonce) {
         fail(`verifier nonce mismatch for attempt ${attempt.attemptId}`);
       }
+      // The nonce stays valid for the life of the attempt, so at-least-once
+      // delivery hands the same verdict back long after it was acted on. Once
+      // the attempt is verified, the merge gate has read the result and the
+      // intent may already be signed over it, so a later verdict has nothing
+      // left to decide.
+      //
+      // A repeat acceptance asks for nothing, so it is dropped: applying it
+      // would rewrite verifierResultDigest, and the transition record cites that
+      // field, so the chain could name evidence the gate never read. A late
+      // rejection asks the queue to unwind a commitment it has already made —
+      // terminating an attempt whose merge may be landing on GitHub, and handing
+      // the lane to the next pull request while it lands — so it is refused
+      // loudly rather than obeyed.
+      if (phaseRank(attempt.phase) >= phaseRank("VERIFIED")) {
+        if (event.accepted) return previous;
+        fail(`VERDICT_TOO_LATE: attempt ${attempt.attemptId} is already ${attempt.phase}; the verdict cannot be revised`);
+      }
       if (!event.accepted) {
         terminate(state, attempt, "VERIFICATION_FAILED");
         blockEntry(requireEntry(state, attempt.entryId), "VERIFICATION_REJECTED");
@@ -517,6 +646,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.phase !== "VERIFIED") {
         fail(`attempt ${attempt.attemptId} is not verified; no merge intent may exist`);
       }
+      requireMergeable(state, attempt);
       advancePhase(attempt, "MERGE_INTENT_CREATED");
       attempt.intentDigest = event.intentDigest;
       break;
@@ -527,6 +657,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.outcomeUnknown) fail("merge outcome is unknown; a second write is forbidden");
       if (attempt.intentDigest === null) fail("no signed merge intent for this attempt");
       if (attempt.phase === "MERGE_REQUESTED") return previous;
+      requireMergeable(state, attempt);
       advancePhase(attempt, "MERGE_REQUESTED");
       setEntryState(requireEntry(state, attempt.entryId), "Merging");
       break;
@@ -592,10 +723,15 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const entry = state.entries.get(attempt.entryId);
       terminate(state, attempt, event.outcome);
       if (entry !== undefined && entry.state !== "Merged" && entry.state !== "Cancelled") {
-        if (event.outcome === "SUPERSEDED" || event.outcome === "EXPIRED_EXECUTION") {
+        // One fact, one answer. An offer nobody claimed used to land in
+        // Deferred when `OfferExpired` noticed the deadline and in Blocked
+        // NEEDS_REPAIR when the same deadline arrived as a termination, so what
+        // the developer read depended on which sweep got there first.
+        const ending = ENDING_FOR_OUTCOME[event.outcome as AttemptOutcome];
+        if (ending.kind === "defer") {
           setEntryState(entry, "Deferred");
         } else {
-          blockEntry(entry, BLOCK_REASON_FOR_OUTCOME[event.outcome as AttemptOutcome]);
+          blockEntry(entry, ending.reason);
         }
       }
       break;
@@ -670,6 +806,11 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
     case "EntryCancelled": {
       const entry = requireEntry(state, event.entryId);
+      // An administrator ejecting an entry a second after it merged, or a close
+      // webhook replayed against a merged pull request, is late rather than
+      // wrong. There is nothing left to cancel, so the cancel does nothing. A
+      // second cancel of a cancelled entry is the same story.
+      if ((TERMINAL_ENTRY_STATES as readonly string[]).includes(entry.state)) return previous;
       if (entry.currentAttemptId !== null) {
         const attempt = state.attempts.get(entry.currentAttemptId);
         if (attempt !== undefined && attempt.outcome === null) {

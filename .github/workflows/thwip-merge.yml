@@ -135,6 +135,10 @@ jobs:
           authorized=$(printf '%s' "$abody" | jq -r '.authorized // false')
           enforcing=$(printf '%s' "$abody" | jq -r '.enforcing // false')
           op=$(printf '%s' "$abody" | jq -r '.operationId // empty')
+          # The method the record the queue just signed already bound. Read
+          # from the same answer rather than typed again here, so this and the
+          # record it will later be checked against cannot silently disagree.
+          method=$(printf '%s' "$abody" | jq -r '.mergeMethod // "merge"')
           if [ "$enforcing" != "true" ]; then
             echo "queue is observing; not merging"; exit 0
           fi
@@ -148,7 +152,8 @@ jobs:
             -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \
             -H "content-type: application/json" \
             -d "$(jq -nc --arg sha "$HEAD_SHA" --arg title "Merge pull request #$PR (Thwip Queue)" \
-                  --arg msg "$msg" '{sha:$sha, merge_method:"merge", commit_title:$title, commit_message:$msg}')" \
+                  --arg msg "$msg" --arg method "$method" \
+                  '{sha:$sha, merge_method:$method, commit_title:$title, commit_message:$msg}')" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
           mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
           echo "merge: http $mcode"

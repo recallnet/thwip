@@ -40,7 +40,7 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async (_e, _r, pullRequestNumber) => {
       driven.push(pullRequestNumber);
@@ -163,7 +163,7 @@ describe("the merge gate", () => {
 
   it("observes without enforcing", async () => {
     const e = env();
-    const routes = app({ queueProject: async () => ({ activationState: "observe" }) });
+    const routes = app({ queueProject: async () => ({ activationState: "observe", mergeMethod: "merge" }) });
     await authorize(routes, e, 59);
     // The second pull request is told what would have happened and let through
     // anyway, which is what makes adoption reversible.

@@ -35,6 +35,7 @@ export type CandidateRefusal =
   | "CANDIDATE_POLICY_MISMATCH"
   | "CANDIDATE_SUITE_NOT_PASSED"
   | "CANDIDATE_SUITES_INCOMPLETE"
+  | "CANDIDATE_SUITE_DUPLICATE"
   | "CANDIDATE_VERIFIER_NOT_PINNED";
 
 export interface CandidateExpectation {
@@ -191,6 +192,23 @@ export async function decideCandidate(
       ok: false,
       code: "CANDIDATE_REJECTED",
       detail: verdict.reasonCodes.length > 0 ? verdict.reasonCodes.join(", ") : "the verifier refused",
+    };
+  }
+
+  // One name, one result. A workflow that re-runs a job and reports both lines
+  // sends `test: failed` followed by `test: passed`; indexed by name the second
+  // line erased the first, and the digest still matched because it covers the
+  // whole list. The proof verifier refuses this shape outright (SUITE_DUPLICATE)
+  // and the merge gate now refuses it the same way, rather than picking which of
+  // two disagreeing results to believe.
+  const duplicates = [
+    ...new Set(verdict.suites.filter((s, i) => verdict.suites.findIndex((o) => o.name === s.name) !== i).map((s) => s.name)),
+  ];
+  if (duplicates.length > 0) {
+    return {
+      ok: false,
+      code: "CANDIDATE_SUITE_DUPLICATE",
+      detail: `suite(s) reported more than once: ${duplicates.join(", ")}`,
     };
   }
 

@@ -377,10 +377,16 @@ describe("reducer", () => {
       expect(() => applyEvent(state, rewrite)).toThrow(/immutable/i);
     });
 
-    it("treats a duplicate claim as a no-op rather than a second share", () => {
+    it("treats a redelivered claim as a no-op rather than a second share", () => {
       const state = applyEvents(base(), happyPath().slice(0, 8));
-      const again = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d2" });
+      const again = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d1" });
       expect(applyEvent(state, again).attempts.get("a1")!.deviceId).toBe("d1");
+    });
+
+    it("refuses a claim from a second device rather than letting it believe it won", () => {
+      const state = applyEvents(base(), happyPath().slice(0, 8));
+      const other = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d2" });
+      expect(() => applyEvent(state, other)).toThrow(/OFFER_ALREADY_CLAIMED/);
     });
 
     it("ignores a heartbeat that lands after the receipt", () => {
@@ -458,6 +464,27 @@ describe("reducer", () => {
       expect(state.entries.get("e1")!.state).toBe("Deferred");
       expect(state.entries.get("e1")!.cooldownUntil).toBe("2026-07-29T12:30:00Z");
       expect(state.activeAttemptId).toBeNull();
+    });
+
+    it("still records a merge that landed while the queue was paused", () => {
+      // The pause refuses the writes the queue controls and never refuses the
+      // news. Refusing a confirmation would leave the log denying a merge that
+      // exists on GitHub, and an attempt in Merging that nothing could resolve.
+      let state = applyEvents(base(), happyPath().slice(0, 12));
+      state = applyEvent(state, ev({ type: "QueuePaused", actorPrincipalId: "admin", reason: "incident" }));
+      state = applyEvent(
+        state,
+        ev({
+          type: "MergeConfirmed",
+          attemptId: "a1",
+          mergeSha: "m".repeat(40),
+          mergeTree: "t".repeat(40),
+          parentShas: ["b".repeat(40), "h".repeat(40)],
+        }),
+      );
+      expect(state.entries.get("e1")!.state).toBe("Merged");
+      expect(state.activeAttemptId).toBeNull();
+      expect(checkInvariants(state)).toEqual([]);
     });
 
     it("refuses to confirm a merge whose tree is not the candidate tree (§6.2 invariant 18)", () => {

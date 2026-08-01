@@ -20,7 +20,14 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { capabilityFor, recordHeartbeat, requiresDeviceOnly } from "./runners.js";
+import {
+  capabilityFor,
+  deviceKeyClaimedByAnother,
+  recordHeartbeat,
+  requiresDeviceOnly,
+  wellFormedDeviceKeyId,
+} from "./runners.js";
+import { mayActOnRepository, REPOSITORY_FORBIDDEN } from "./repository-access.js";
 import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
@@ -33,6 +40,7 @@ import {
   storeAttestation,
   transitionRecordFor,
 } from "./attestation.js";
+import { DEFAULT_MERGE_METHOD, type MergeMethod } from "./merge-commit.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
@@ -88,6 +96,25 @@ function decimal(value: string | undefined): string | null {
  * run that dies without reporting must not wedge its candidate forever.
  */
 const CANDIDATE_DISPATCH_STALE_MS = 15 * 60_000;
+
+/**
+ * Which queue a request is about.
+ *
+ * Twelve routes parsed this the same way and answered both failures with
+ * "invalid queue key", which names the id whichever input was actually wrong.
+ * Someone holding a correct repository id read that as "your id is wrong" and
+ * went looking for an internal database key that does not exist. On the public
+ * chain route an outside auditor gets no second chance to guess.
+ */
+function requestedQueue(c: {
+  req: { param(name: string): string | undefined; query(name: string): string | undefined };
+}): { repositoryId: string; baseRef: string } | { error: string } {
+  const repositoryId = decimal(c.req.param("repositoryId"));
+  if (repositoryId === null) return { error: "the repository id must be GitHub's numeric repository id" };
+  const baseRef = branchRef(c.req.query("ref"));
+  if (baseRef === null) return { error: "ref must name a branch, like refs/heads/main" };
+  return { repositoryId, baseRef };
+}
 
 function branchRef(value: string | undefined): string | null {
   if (value === undefined) return null;
@@ -201,6 +228,12 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
       organizationId: string;
     } | null>;
+    /** The merge method the record must bind — the same one the workflow used. */
+    queueProject(
+      env: TEnv,
+      repositoryId: string,
+      baseRef: string,
+    ): Promise<{ mergeMethod: MergeMethod } | null>;
     proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
    * Publish the candidate verdict as a check on the pull request head.
@@ -311,8 +344,16 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // itself can say that.
   const before = await deps.commitFacts(env, input.repositoryId, attempt.baseSha);
 
+  // The same method the workflow was told to merge with, read from the same
+  // row rather than assumed. A record that claims "merge" for a squash landing
+  // fails its own two-parent shape check and never reaches the chain — that is
+  // the bug this binds shut.
+  const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
+  const mergeMethod = project?.mergeMethod ?? DEFAULT_MERGE_METHOD;
+
   const signed = await signReusedRecord({
     attemptId: input.attemptId,
+    mergeMethod,
     git: {
       objectFormat: "sha1",
       repositoryId: input.repositoryId,
@@ -581,7 +622,19 @@ function failure(error: unknown): {
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** Who the caller is, from the existing session or bearer auth. */
   authenticate(c: { req: { raw: Request } }, env: TEnv): Promise<
-    { ok: true; principalId: string; githubUserId: string; isAdmin: boolean } | { ok: false; status: 401 | 403 }
+    | {
+        ok: true;
+        principalId: string;
+        githubUserId: string;
+        isAdmin: boolean;
+        /**
+         * The deployment's operator token rather than a person's session. It
+         * is not a principal in any organization, so it has no membership to
+         * compare — see `repository-access.ts`.
+         */
+        operator?: boolean;
+      }
+    | { ok: false; status: 401 | 403 }
   >;
   /** Verify a GitHub Actions OIDC token and return its claims. */
   verifyOidc(c: { req: { raw: Request } }, env: TEnv): Promise<Record<string, unknown> | null>;
@@ -631,7 +684,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     },
   ): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   /** Queue configuration for a branch, or null when the branch has no queue. */
-  queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
+  queueProject(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+  ): Promise<{ activationState: string; mergeMethod: MergeMethod } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
@@ -712,9 +769,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * a state read, a workflow-log grep, and a guess.
    */
   app.get("/v1/queue/:repositoryId/explain", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
@@ -744,9 +801,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /** Read the queue. Safe for any authenticated member of the repository. */
   app.get("/v1/queue/:repositoryId", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -787,9 +844,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * its place through failure (plan.md §7.1).
    */
   app.post("/v1/queue/:repositoryId/entries", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -833,9 +890,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /** Leave the queue, or eject someone as an administrator. */
   app.delete("/v1/queue/:repositoryId/entries/:entryId", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -863,9 +920,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * the object refuses to offer while a lane is busy or the queue is paused.
    */
   app.post("/v1/queue/:repositoryId/tick", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -889,6 +946,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * absent-to-present transition does this touch any queue document, so a
    * runner polling every fifteen seconds costs one row write per call and a
    * queue write only the first time it shows up.
+   *
+   * Being signed in is not enough to reach it. That absent-to-present
+   * transition compare-and-swaps the repository's queue document and then
+   * drives the lane, which fires a `repository_dispatch` on the repository, so
+   * a stranger who could pass this gate could spend another organization's
+   * Actions minutes once per grace window for as long as they cared to keep
+   * calling. Membership is checked before anything is written.
    */
   app.post("/v1/queue/:repositoryId/runners/heartbeat", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
@@ -897,17 +961,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
-    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: string };
-    if (typeof body.deviceKeyId !== "string" || body.deviceKeyId.length === 0) {
-      return c.json({ error: "deviceKeyId required" }, 400);
+    const db = c.env.DB as unknown as D1Like;
+    if (!(await mayActOnRepository(db, repositoryId, who))) {
+      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
     }
 
-    const db = c.env.DB as unknown as D1Like;
+    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: unknown };
+    if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
+      return c.json({ error: "deviceKeyId must be a device key id this deployment issues" }, 400);
+    }
+    const deviceKeyId = body.deviceKeyId;
+    if (await deviceKeyClaimedByAnother(db, deviceKeyId, who.githubUserId)) {
+      return c.json({ error: "that device key belongs to somebody else, or has been revoked" }, 403);
+    }
+
     const now = new Date().toISOString();
     const { wasOffline } = await recordHeartbeat(db, {
       repositoryId,
       principalId: who.principalId,
-      deviceKeyId: body.deviceKeyId,
+      deviceKeyId,
       now,
     });
 
@@ -959,9 +1031,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /** Administrative pause, resume, and rebaseline (plan.md §28.5). */
   app.post("/v1/queue/:repositoryId/pause", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -983,9 +1055,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   app.post("/v1/queue/:repositoryId/resume", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -1002,9 +1074,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   app.post("/v1/queue/:repositoryId/rebaseline", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -1303,9 +1375,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * alarm is picked up within the half hour even if nothing else happens at all.
    */
   app.post("/v1/queue/:repositoryId/nudge", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     // From the queue, not the projection.
     //
@@ -1688,7 +1760,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             headSha,
             candidateSha,
             candidateTreeOid: candidateTree,
-            candidateParentOids: [baseSha, headSha],
+            // A merge commit's second parent is the pull request head; a squash
+            // has none, because it never becomes a parent of anything.
+            candidateParentOids: project.mergeMethod === "squash" ? [baseSha] : [baseSha, headSha],
           },
           position: {
             queueEpoch: held.queueEpoch,
@@ -1698,6 +1772,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           },
           pullRequestNumber: body.pullRequestNumber,
           evidence: reuse,
+          mergeMethod: project.mergeMethod,
           createdAt: new Date().toISOString(),
           signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
         });
@@ -1805,6 +1880,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorized,
       enforcing,
       activationState: project.activationState,
+      // What the workflow must tell GitHub when it performs this merge, so the
+      // method it uses and the method the signed record binds can never drift.
+      mergeMethod: project.mergeMethod,
       reason: halted
         ? snapshot.rebaselineRequired
           ? "REBASELINE_REQUIRED"
@@ -1830,9 +1908,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * links, and it stops at the first break rather than leaving a hole.
    */
   app.post("/v1/queue/:repositoryId/adopt-chain", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
@@ -1859,9 +1937,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
 
     const body = (await c.req.json().catch(() => ({}))) as {
       observed?: "merged" | "not-merged" | "merged-outside-the-turn";
@@ -2204,26 +2282,61 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * numbers, head and base SHAs, tree oids, actor GitHub ids and free-text
    * override reasons — public for a public repository, and nobody else's
    * business for a private one. A caller cannot make it public just by
-   * knowing the numeric repository id, so a private project is served the
-   * same way every other authenticated queue route is: the caller has to be
-   * a member.
+   * knowing the numeric repository id, so a private project is served only to
+   * a member of the organization that owns the repository.
+   *
+   * Nothing about the project is disclosed before that decision. The 404 for
+   * an unknown branch used to come out first, which let a caller with no
+   * session walk the numeric repository id space, read 404 against 401, and
+   * learn which private repositories are onboarded and which base refs they
+   * queue. A caller who has not proved membership now gets the same answer
+   * either way, and the 404 waits until it is a member asking.
    */
   app.get("/v1/queue/:repositoryId/chain", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
+    if (repositoryId === null) {
+      return c.json({ error: "the repository id must be GitHub's numeric repository id" }, 400);
+    }
+
+    const asked = c.req.query("ref");
+    let baseRef = asked === undefined ? null : branchRef(asked);
+    if (asked !== undefined && baseRef === null) {
+      return c.json({ error: "ref must name a branch, like refs/heads/main" }, 400);
+    }
+
+    if (baseRef === null) {
+      // A published chain resolves its own branch, so an outside verifier does
+      // not have to be told the spelling before it can read the record.
+      //
+      // Only a published one. Resolving for an unpublished chain would answer
+      // "does this private repository use the queue" to anyone who asked, which
+      // is the enumeration the 404 further down exists to prevent.
+      const published = await c.env.DB.prepare(
+        "SELECT base_ref AS baseRef FROM queue_projects WHERE github_repository_id = ? AND chain_public = 1",
+      )
+        .bind(repositoryId)
+        .all<{ baseRef: string }>();
+      const branches = published.results ?? [];
+      if (branches.length !== 1) {
+        return c.json({ error: "name the branch with ?ref=refs/heads/<branch>" }, 400);
+      }
+      baseRef = branches[0]!.baseRef;
+    }
 
     const project = await c.env.DB.prepare(
       "SELECT attested_from_sequence AS epoch, chain_public AS chainPublic FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
     )
       .bind(repositoryId, baseRef)
       .first<{ epoch: number; chainPublic: number }>();
-    if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
-    if (project.chainPublic !== 1) {
+    if (project === null || project.chainPublic !== 1) {
       const who = await deps.authenticate(c, c.env);
       if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+      if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
+        return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+      }
     }
+    if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
     const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
     const decoder = new TextDecoder();

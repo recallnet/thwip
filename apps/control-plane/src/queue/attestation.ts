@@ -9,6 +9,7 @@ import {
 } from "./evidence.js";
 import type { Signer, SignedRecord } from "./evidence.js";
 import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
+import type { MergeMethod } from "./merge-commit.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -94,6 +95,7 @@ export async function signReusedIntent(input: {
   readonly position: ChainPosition;
   readonly pullRequestNumber: number;
   readonly evidence: ReuseEvidence;
+  readonly mergeMethod: MergeMethod;
   readonly createdAt: string;
   readonly signer: Signer;
 }): Promise<SignedRecord<unknown> | { error: string }> {
@@ -105,7 +107,7 @@ export async function signReusedIntent(input: {
     turnSequence: input.position.turnSequence,
     transitionSequence: input.position.transitionSequence,
     pullRequestNumber: input.pullRequestNumber,
-    mergeMethod: "merge",
+    mergeMethod: input.mergeMethod,
     policyDigest: input.evidence.policyDigest,
     previousTransitionDigest: input.position.previousTransitionDigest,
     // What the workflow is told to write, so the intent specifies the commit
@@ -140,6 +142,7 @@ export async function signReusedRecord(input: {
   readonly position: ChainPosition;
   readonly pullRequestNumber: number;
   readonly evidence: ReuseEvidence;
+  readonly mergeMethod: MergeMethod;
   readonly mergeIntentDigest: Sha256;
   readonly before: { readonly baseSha: string | null; readonly treeOid: string | null };
   readonly final: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
@@ -154,7 +157,7 @@ export async function signReusedRecord(input: {
     before: input.before,
     final: input.final,
     observedAt: input.observedAt,
-    mergeMethod: "merge",
+    mergeMethod: input.mergeMethod,
     attemptId: input.attemptId,
     pullRequestNumber: input.pullRequestNumber,
     mergeIntentDigest: input.mergeIntentDigest,
@@ -236,6 +239,7 @@ export async function signVerifiedIntent(input: {
   readonly position: ChainPosition;
   readonly pullRequestNumber: number;
   readonly evidence: VerifiedEvidence;
+  readonly mergeMethod: MergeMethod;
   readonly createdAt: string;
   readonly signer: Signer;
 }): Promise<SignedRecord<unknown> | { error: string }> {
@@ -247,7 +251,7 @@ export async function signVerifiedIntent(input: {
     turnSequence: input.position.turnSequence,
     transitionSequence: input.position.transitionSequence,
     pullRequestNumber: input.pullRequestNumber,
-    mergeMethod: "merge",
+    mergeMethod: input.mergeMethod,
     policyDigest: input.evidence.policyDigest,
     previousTransitionDigest: input.position.previousTransitionDigest,
     // What the workflow is told to write, so the intent specifies the commit
@@ -273,6 +277,7 @@ export async function signVerifiedRecord(input: {
   readonly position: ChainPosition;
   readonly pullRequestNumber: number;
   readonly evidence: VerifiedEvidence;
+  readonly mergeMethod: MergeMethod;
   readonly mergeIntentDigest: Sha256;
   readonly before: { readonly baseSha: string | null; readonly treeOid: string | null };
   readonly final: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
@@ -287,7 +292,7 @@ export async function signVerifiedRecord(input: {
     before: input.before,
     final: input.final,
     observedAt: input.observedAt,
-    mergeMethod: "merge",
+    mergeMethod: input.mergeMethod,
     attemptId: input.attemptId,
     pullRequestNumber: input.pullRequestNumber,
     mergeIntentDigest: input.mergeIntentDigest,

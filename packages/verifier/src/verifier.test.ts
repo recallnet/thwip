@@ -359,3 +359,267 @@ describe("hybrid: remote suites proven by GitHub", () => {
     expect(r.code).toBe("SUITE_NOT_PASSED");
   });
 });
+
+// --- Lease, merge tree, key presence and audit ------------------------------
+
+function b64url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+const NOW_SECONDS = Math.floor(Date.parse(NOW) / 1000);
+
+/** A lease shaped like the one `/v1/run-leases` mints. `sig` decides the fake signature. */
+function makeLease(claims?: Record<string, unknown>, header?: Record<string, unknown>, sig = "GOOD"): string {
+  const payload = {
+    aud: "urn:thwip:ci-run:v1",
+    iss: "https://thwip.recall.net",
+    repositoryId: "1315419165",
+    treeOid: TREE,
+    parentOids: [PARENT],
+    baseSha: BASE,
+    policyDigest: POLICY_DIGEST,
+    deviceKeyId: "key_test1",
+    profile: "fresh",
+    iat: NOW_SECONDS - 60,
+    nbf: NOW_SECONDS - 60,
+    exp: NOW_SECONDS + 1740,
+    ...claims,
+  };
+  return `${b64url(JSON.stringify({ alg: "ES256", kid: "svc1", ...header }))}.${b64url(JSON.stringify(payload))}.${b64url(sig)}`;
+}
+
+const leaseDeps: VerifyDeps = {
+  ...deps,
+  verifyLeaseSignature: async ({ signingInput, signature }) =>
+    signingInput.length > 0 && Buffer.from(signature).toString("utf8") === "GOOD",
+};
+
+function leasePolicy(b: VerificationBundleV1, maxAgeSeconds = 1800): void {
+  b.policy.securityProfile = "fresh";
+  b.policy.lease = { required: true, maxAgeSeconds };
+  b.leaseIssuerJwks = [{ kty: "EC", crv: "P-256", kid: "svc1", x: "x", y: "y" }];
+}
+
+async function runWith(
+  overrides: {
+    statement?: InTotoStatementV1;
+    bundle?: VerificationBundleV1;
+    facts?: GithubFacts;
+    now?: string;
+  },
+  withDeps: VerifyDeps,
+) {
+  const statement = overrides.statement ?? makeStatement();
+  return verifyProof(
+    {
+      commitMessage: commitMessageFor(envelopeFor(statement)),
+      facts: overrides.facts ?? makeFacts(),
+      bundle: overrides.bundle ?? makeBundle(),
+      now: overrides.now ?? NOW,
+    },
+    withDeps,
+  );
+}
+
+describe("run leases", () => {
+  const leaseStatement = (lease: string): InTotoStatementV1 =>
+    makeStatement((s) => {
+      s.predicate.run.lease = lease;
+    });
+
+  it("passes a lease signed by the issuer, in date, and bound to this run", async () => {
+    const r = await runWith({ statement: leaseStatement(makeLease()), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("PASS");
+  });
+
+  it("refuses a proof with no lease when the policy requires one", async () => {
+    const r = await runWith({ bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_REQUIRED");
+  });
+
+  it("refuses a lease the issuer did not sign", async () => {
+    const lease = makeLease(undefined, undefined, "FORGED");
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_INVALID");
+  });
+
+  it("refuses a lease when the project has no issuer keys", async () => {
+    const bundle = makeBundle((b) => {
+      leasePolicy(b);
+      b.leaseIssuerJwks = [];
+    });
+    const r = await runWith({ statement: leaseStatement(makeLease()), bundle }, leaseDeps);
+    expect(r.code).toBe("LEASE_INVALID");
+  });
+
+  it("refuses a lease when nothing can check lease signatures", async () => {
+    const r = await runWith({ statement: leaseStatement(makeLease()), bundle: makeBundle(leasePolicy) }, deps);
+    expect(r.code).toBe("LEASE_INVALID");
+  });
+
+  it("refuses a lease older than the policy window", async () => {
+    const lease = makeLease({ iat: NOW_SECONDS - 3600, exp: NOW_SECONDS + 600 });
+    const r = await runWith(
+      { statement: leaseStatement(lease), bundle: makeBundle((b) => leasePolicy(b, 60)) },
+      leaseDeps,
+    );
+    expect(r.code).toBe("LEASE_EXPIRED");
+  });
+
+  it("refuses a lease that has run out", async () => {
+    const lease = makeLease({ exp: NOW_SECONDS - 1 });
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_EXPIRED");
+  });
+
+  it("refuses a lease minted after the run it claims to cover", async () => {
+    // Run once, then mint a fresh lease to keep the old evidence alive.
+    const lease = makeLease({ iat: NOW_SECONDS - 10, nbf: NOW_SECONDS - 10 });
+    const statement = makeStatement((s) => {
+      s.predicate.run.lease = lease;
+      s.predicate.run.startedAt = "2026-07-28T11:00:00Z";
+      s.predicate.run.finishedAt = "2026-07-28T11:30:00Z";
+    });
+    const r = await runWith({ statement, bundle: makeBundle((b) => leasePolicy(b, 3600)) }, leaseDeps);
+    expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("refuses a valid lease minted for another tree", async () => {
+    const lease = makeLease({ treeOid: "9".repeat(40) });
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("refuses a valid lease minted for another repository", async () => {
+    const lease = makeLease({ repositoryId: "999" });
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("refuses a valid lease minted for another device", async () => {
+    const lease = makeLease({ deviceKeyId: "key_someone_else" });
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("ignores a lease the policy does not require", async () => {
+    const r = await runWith({ statement: leaseStatement("not-a-lease") }, deps);
+    expect(r.code).toBe("PASS");
+  });
+});
+
+describe("merge-tree evaluation", () => {
+  const MERGE = "e".repeat(40);
+  const mergeBundle = () =>
+    makeBundle((b) => {
+      b.policy.evaluationMode = "merge-tree";
+    });
+  const mergeStatement = (mergeTreeOid?: string) =>
+    makeStatement((s) => {
+      s.predicate.git.evaluationMode = "merge-tree";
+      if (mergeTreeOid !== undefined) s.predicate.git.mergeTreeOid = mergeTreeOid;
+    });
+
+  it("passes when the proof names the merge GitHub computes", async () => {
+    const r = await runWith(
+      { statement: mergeStatement(MERGE), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
+      deps,
+    );
+    expect(r.code).toBe("PASS");
+  });
+
+  it("refuses a proof that names a different merge tree", async () => {
+    const r = await runWith(
+      { statement: mergeStatement("f".repeat(40)), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
+      deps,
+    );
+    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
+  });
+
+  it("refuses a proof that names no merge tree", async () => {
+    const r = await runWith(
+      { statement: mergeStatement(), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
+      deps,
+    );
+    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
+  });
+
+  it("refuses when the merge GitHub computes is unavailable", async () => {
+    const r = await runWith({ statement: mergeStatement(MERGE), bundle: mergeBundle() }, deps);
+    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
+  });
+
+  it("leaves head-tree projects alone", async () => {
+    expect((await runWith({}, deps)).code).toBe("PASS");
+  });
+});
+
+describe("requireGithubKeyPresence", () => {
+  const strict = () =>
+    makeBundle((b) => {
+      b.policy.requireGithubKeyPresence = true;
+    });
+
+  it("passes when GitHub publishes the enrolled key", async () => {
+    const r = await runWith(
+      { bundle: strict() },
+      { ...deps, githubUserSigningKeys: async () => ["ssh-ed25519 AAAATESTKEY andrew@laptop"] },
+    );
+    expect(r.code).toBe("PASS");
+  });
+
+  it("refuses when GitHub publishes other keys", async () => {
+    const r = await runWith({ bundle: strict() }, { ...deps, githubUserSigningKeys: async () => ["ssh-ed25519 AAAAOTHER"] });
+    expect(r.code).toBe("SIGNER_KEY_UNKNOWN");
+  });
+
+  it("refuses when nothing can read the signer's GitHub keys", async () => {
+    expect((await runWith({ bundle: strict() }, deps)).code).toBe("SIGNER_KEY_UNKNOWN");
+  });
+});
+
+describe("audit", () => {
+  const audited = (basisPoints: number, mandatoryPaths: string[] = []) =>
+    makeBundle((b) => {
+      b.policy.securityProfile = "audited";
+      b.policy.audit = { basisPoints, mandatoryPaths };
+    });
+
+  it("audits nothing when the rate is zero and no paths are protected", async () => {
+    expect((await runWith({ bundle: audited(0) }, deps)).code).toBe("PASS");
+  });
+
+  it("refuses when every proof is audited and no auditor is available", async () => {
+    expect((await runWith({ bundle: audited(10_000) }, deps)).code).toBe("AUDIT_REQUIRED");
+  });
+
+  it("passes when the audit re-run agrees", async () => {
+    const r = await runWith({ bundle: audited(10_000) }, { ...deps, auditProof: async () => ({ agrees: true }) });
+    expect(r.code).toBe("PASS");
+  });
+
+  it("refuses when the audit re-run disagrees", async () => {
+    const r = await runWith(
+      { bundle: audited(10_000) },
+      { ...deps, auditProof: async () => ({ agrees: false, detail: "test failed on re-run" }) },
+    );
+    expect(r.code).toBe("AUDIT_DISAGREED");
+  });
+
+  it("audits a change under a protected path whatever the sampling rate", async () => {
+    const r = await runWith(
+      { bundle: audited(0, ["infra/"]), facts: makeFacts({ changedPaths: ["infra/deploy.tf"] }) },
+      deps,
+    );
+    expect(r.code).toBe("AUDIT_REQUIRED");
+  });
+
+  it("leaves a change outside the protected paths alone", async () => {
+    const r = await runWith({ bundle: audited(0, ["infra/"]), facts: makeFacts({ changedPaths: ["src/app.ts"] }) }, deps);
+    expect(r.code).toBe("PASS");
+  });
+
+  it("refuses when the protected paths cannot be compared to the change", async () => {
+    expect((await runWith({ bundle: audited(0, ["infra/"]) }, deps)).code).toBe("AUDIT_REQUIRED");
+  });
+});

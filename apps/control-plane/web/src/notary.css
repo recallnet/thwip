@@ -448,9 +448,11 @@
   font-size: 13px;
 }
 
+/* As many columns as there are things to say, rather than a fixed three that
+   had to be filled. */
 .nt-cols {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: 0;
   border-top: 1px solid var(--ink);
 }

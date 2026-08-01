@@ -21,6 +21,21 @@
   --sans: "Public Sans", system-ui, sans-serif;
   --num: "Archivo", var(--sans);
 
+  /* One spacing scale, in px, for everything the dashboard draws.
+     There were two: the library's rem steps and a drift of hand-picked px
+     values (9, 11, 14, 20) plus inline rem margins in the components. Nothing
+     below picks a number that is not on this scale. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* Status chips share one width so a column of them has a straight edge. */
+  --status-width: 20ch;
+
   /* Graphics Press reads these; every one is a notary value. */
   --gp-paper: var(--paper);
   --gp-ink: var(--ink);
@@ -34,6 +49,10 @@
   --gp-green: var(--pass);
   --gp-red: var(--fail);
   --gp-ochre: var(--civic);
+  /* The one token this file forgot to re-point. The library's default is dark,
+     so every repository name and login set in `code` came out as an inverted
+     block on a white page. */
+  --gp-code-bg: var(--hair);
   --gp-page-width: 1060px;
 }
 
@@ -88,15 +107,15 @@ textarea {
   border-top: 1px solid var(--ink);
   background: var(--paper);
   box-shadow: none;
-  margin: 0 0 20px;
+  margin: 0 0 var(--s5);
 }
 .gp-panel__header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--s4);
   flex-wrap: wrap;
-  padding: 11px 16px;
+  padding: var(--s3) var(--s4);
   border-bottom: 1px solid var(--rule);
   background: var(--paper);
 }
@@ -110,7 +129,7 @@ textarea {
   margin: 0;
   max-width: none;
 }
-.gp-panel__body { padding: 16px; }
+.gp-panel__body { padding: var(--s4); }
 .gp-panel__meta {
   font-family: var(--mono);
   font-size: 11.5px;
@@ -119,15 +138,28 @@ textarea {
   color: var(--muted);
 }
 
-/* ---------- buttons ---------- */
+/* One rhythm inside a panel. Every block sits one step from the last, and the
+   first and last sit flush against the padding, so no panel is taller than its
+   neighbour by an accident of which element happened to be first. */
+.gp-panel__body > * { margin-top: 0; margin-bottom: 0; }
+.gp-panel__body > * + * { margin-top: var(--s3); }
+.gp-panel__body > .gp-data-table + p,
+.gp-panel__body > p + .gp-data-table,
+.gp-panel__body > .thwip-actions { margin-top: var(--s4); }
 
+/* ---------- buttons: three weights, and only three ---------- */
+
+/* Solid is the one thing a group is for, and there is at most one per group.
+   Quiet is a safe alternative or a control. Danger takes something away or
+   locks something in. Enable was solid on one page while Disable was solid on
+   another, so the same word carried two weights depending on where you stood. */
 .gp-btn {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 400;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 11px 18px;
+  padding: var(--s3) var(--s4);
   border: 1px solid var(--civic);
   background: var(--civic);
   color: var(--paper);
@@ -135,14 +167,13 @@ textarea {
   text-decoration: none;
   display: inline-block;
   box-shadow: none;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
 }
 .gp-btn:hover { background: var(--civic-dark); border-color: var(--civic-dark); color: var(--paper); }
-.gp-btn--sm { padding: 7px 12px; font-size: 10px; }
+.gp-btn--sm { padding: var(--s2) var(--s3); font-size: 10px; }
 .gp-btn[disabled] { opacity: 0.4; cursor: default; }
+.gp-btn[disabled]:hover { background: var(--civic); border-color: var(--civic); }
 
-/* An action that takes something away should not look as inviting as the one
-   that gives it. Enable and Disable sat in the same slot as identical filled
-   buttons, so turning a project off read as the obvious next step. */
 .gp-btn--quiet {
   background: transparent;
   color: var(--muted);
@@ -150,22 +181,74 @@ textarea {
 }
 .gp-btn--quiet:hover {
   background: transparent;
+  color: var(--civic);
+  border-color: var(--civic);
+}
+.gp-btn--quiet[disabled]:hover { background: transparent; color: var(--muted); border-color: var(--rule); }
+
+.gp-btn--danger {
+  background: transparent;
   color: var(--fail);
   border-color: var(--fail);
 }
+/* It fills on hover, so the weight of the thing is felt before the click. */
+.gp-btn--danger:hover { background: var(--fail); border-color: var(--fail); color: var(--paper); }
+.gp-btn--danger[disabled]:hover { background: transparent; color: var(--fail); border-color: var(--fail); }
+
+/* A select is a control, never the action of a group. */
+select.gp-btn,
+select.gp-btn:hover {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--rule);
+}
+
+/* ---------- confirmation before an escalating action ---------- */
+
+.thwip-confirm {
+  border: 1px solid var(--fail);
+  border-left-width: 3px;
+  padding: var(--s3) var(--s4) var(--s4);
+}
+.thwip-confirm__title {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fail);
+  margin: 0 0 var(--s2);
+}
+.thwip-confirm__body { font-size: 14px; color: var(--ink); }
+.thwip-confirm__body p { margin: 0 0 var(--s2); max-width: 60ch; }
+.thwip-confirm__body p:last-child { margin-bottom: 0; }
+.thwip-confirm .thwip-actions { margin-top: var(--s3); }
 
 /* ---------- chips: a stamped label ---------- */
 
 .gp-chip {
+  display: inline-block;
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.13em;
   text-transform: uppercase;
-  padding: 3px 7px 4px;
+  padding: var(--s1) var(--s2);
   border: 1px solid var(--rule);
   background: var(--paper);
   color: var(--muted);
 }
+
+/* A status chip belongs to a column, so every one is the same box. They were
+   drawn ad hoc at eight call sites and came out at three different widths. */
+.gp-chip--status {
+  min-width: var(--status-width);
+  text-align: center;
+  white-space: nowrap;
+  border-left-width: 3px;
+}
+.gp-chip--status.is-ok { border-left-color: var(--pass); color: var(--ink); }
+.gp-chip--status.is-wait { border-left-color: var(--civic); color: var(--ink); }
+.gp-chip--status.is-bad { border-left-color: var(--fail); color: var(--fail); }
+.gp-chip--status.is-off { border-left-color: var(--rule); color: var(--muted); }
 
 /* ---------- tables ---------- */
 
@@ -183,17 +266,21 @@ textarea {
   text-transform: uppercase;
   color: var(--muted);
   text-align: left;
-  padding: 9px 14px 9px 0;
+  padding: var(--s3) var(--s4) var(--s3) 0;
   border-bottom: 1px solid var(--ink);
   background: var(--paper);
 }
 .gp-data-table td {
-  padding: 9px 14px 9px 0;
+  padding: var(--s3) var(--s4) var(--s3) 0;
   border-bottom: 1px solid var(--rule);
   vertical-align: top;
 }
+.gp-data-table td:last-child,
+.gp-data-table th:last-child { padding-right: 0; }
 .gp-data-table tr:hover td { background: transparent; }
 .gp-mono { font-family: var(--mono); font-size: 12.5px; }
+/* Actions in a row sit on one line, at the row's own rhythm. */
+.gp-data-table .thwip-row-actions { display: flex; gap: var(--s2); white-space: nowrap; }
 
 .gp-workspace { background: var(--paper); }
 
@@ -256,10 +343,10 @@ textarea {
 .metric-strip {
   border-top: 1px solid var(--ink);
   border-bottom: 1px solid var(--rule);
-  padding: 14px 0 16px;
-  margin-bottom: 20px;
+  padding: var(--s4) 0;
+  margin: 0 0 var(--s5);
 }
-.metric-strip__item { border: 0; }
+.metric-strip__item { border: 0; padding: 0 var(--s5) 0 0; }
 .metric-strip__label {
   font-family: var(--mono);
   font-size: 10.5px;
@@ -276,10 +363,15 @@ textarea {
   font-size: 26px;
   line-height: 1.1;
   letter-spacing: -0.02em;
+  margin-top: var(--s1);
   color: var(--ink);
 }
+/* Being at the limit is a fact about the number, not a different kind of text.
+   The `bad` utility retyped it as 11.5px mono, so the number that mattered
+   most in the row was the one the eye reached last. Colour only. */
+.metric-strip__value.is-limit { color: var(--fail); }
 
-.tab-nav { border-bottom: 1px solid var(--rule); }
+.tab-nav { border-bottom: 1px solid var(--rule); margin: var(--s4) 0 var(--s5); }
 .tab-nav a {
   font-family: var(--mono);
   font-size: 11px;
@@ -287,7 +379,7 @@ textarea {
   text-transform: uppercase;
   color: var(--muted);
   text-decoration: none;
-  padding-bottom: 8px;
+  padding-bottom: var(--s2);
 }
 .tab-nav a:hover { color: var(--civic); }
 .tab-nav a.is-active {
@@ -323,14 +415,68 @@ textarea {
 
 .ok,
 .bad,
+.wait,
 .thwip-error {
   font-family: var(--mono);
   font-size: 11.5px;
   letter-spacing: 0.06em;
 }
 .ok { color: var(--pass); }
+/* Colour without retyping, for prose that happens to report a good outcome. */
+.is-verified { color: var(--pass); }
+.wait { color: var(--muted); }
 .bad,
 .thwip-error { color: var(--fail); }
+
+/* A line of short facts. Written as one string it broke wherever the box
+   ended, which stranded the word "App" from "App check observing" on a line of
+   its own. Each fact is one unbreakable run; the line breaks between them. */
+.thwip-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+  margin: 0;
+  max-width: none;
+}
+.thwip-facts > span { white-space: nowrap; }
+/* The separator trails the fact it follows, so a wrapped line begins with a
+   word rather than with what looks like a bullet. */
+.thwip-facts > span:not(:last-child)::after {
+  content: "·";
+  color: var(--ghost);
+  margin-left: var(--s2);
+}
+
+/* ---------- page rhythm ---------- */
+
+.thwip-actions { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: flex-start; }
+/* A question takes the whole row, so the button it replaces is not still
+   sitting next to it looking like the alternative answer. */
+.thwip-actions > .thwip-confirm { flex: none; width: 100%; box-sizing: border-box; }
+.thwip-back { margin: 0 0 var(--s3); }
+.thwip-page-title { margin: 0 0 var(--s1); font-size: 20px; }
+.thwip-page-subtitle { margin: 0 0 var(--s4); }
+.thwip-loading { padding: var(--s7) 0; }
+.thwip-note { margin-top: var(--s3); }
+.thwip-code-block {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin: var(--s4) 0 0;
+  padding: var(--s3);
+  border-left: 2px solid var(--rule);
+  background: var(--paper);
+  max-width: none;
+}
+.thwip-json-field {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
 
 .thwip-slip {
   font-family: var(--mono);

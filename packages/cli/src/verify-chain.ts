@@ -12,16 +12,22 @@ import { EXIT } from "./queue-exit.js";
  */
 
 /**
+ * What was established, said in the summary's first line.
+ *
  * `totalLinks` and `signaturesChecked` are reported together on purpose. A
  * link with no bytes to read (`PRE_ATTESTATION`, `MISSING_RECORD`) or bytes
  * that do not parse (`UNPARSEABLE`) was never going to have a signature
  * checked, and that is not a problem — but every other readable link is
  * expected to, and `epochStartsAt` can silently make it skip that check
- * without raising a finding. A bare "N links verified" cannot tell those two
- * apart, so it is only ever printed when `signaturesChecked` accounts for
- * every readable link; otherwise the line says exactly how many of how many
- * were checked, so "42 links, 0 signatures checked" cannot be misread as a
- * clean pass.
+ * without raising a finding.
+ *
+ * Subtracting the unreadable links from the expected count used to let a
+ * response of nothing but history land on "0 of 0 checked", which read as
+ * agreement and printed the clean line. So the count is not the whole test:
+ * a run that checked no signature at all never reaches the clean line,
+ * whatever the arithmetic says, because verifying nothing is not verifying.
+ * An earlier attempt at this changed only the wording and left both the
+ * arithmetic and the exit code alone.
  */
 export function summarize(totalLinks: number, signaturesChecked: number, findings: readonly ChainFinding[]): string {
   const history = findings.filter((f) => f.code === "PRE_ATTESTATION");
@@ -30,8 +36,13 @@ export function summarize(totalLinks: number, signaturesChecked: number, finding
   const problems = findings.filter((f) => f.code !== "PRE_ATTESTATION");
 
   const lines: string[] = [];
-  if (problems.length === 0 && signaturesChecked === expectedChecks) {
-    lines.push(`${totalLinks} links verified.`);
+  if (signaturesChecked === 0) {
+    // Counted against every link, not against the ones that were expected to
+    // carry a signature. When the expectation itself is zero, "0 of 0" is the
+    // sentence that started this.
+    lines.push(`${totalLinks} links, 0 of ${totalLinks} signatures checked: nothing was verified.`);
+  } else if (problems.length === 0 && signaturesChecked === expectedChecks) {
+    lines.push(`${totalLinks} links verified (${signaturesChecked} signatures checked).`);
   } else if (problems.length === 0) {
     lines.push(
       `${totalLinks} links, ${signaturesChecked} of ${expectedChecks} signatures checked: not a clean verification.`,
@@ -284,5 +295,16 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
     epochStartsAt,
   );
   process.stdout.write(summarize(totalLinks, signaturesChecked, findings) + "\n");
-  return findings.some((f) => f.code !== "PRE_ATTESTATION") ? EXIT.evidenceRejected : EXIT.ok;
+  if (findings.some((f) => f.code !== "PRE_ATTESTATION")) return EXIT.evidenceRejected;
+  // Nothing checked is not a pass. A gate scripted on this exit status is the
+  // whole point of the command, and it used to succeed on a run that verified
+  // no signature at all: a server claiming its epoch starts far in the future
+  // made every check skip, no finding fired, and the chain could be entirely
+  // fabricated. A verifier that returns success having checked nothing is
+  // worse than no verifier, because the gate that trusts it now passes forged
+  // evidence. A branch with no merges lands here too, and that is right —
+  // "nothing has merged" and "every merge was withheld" look identical from
+  // out here, and neither one is a verification.
+  if (signaturesChecked === 0) return EXIT.evidenceRejected;
+  return EXIT.ok;
 }
