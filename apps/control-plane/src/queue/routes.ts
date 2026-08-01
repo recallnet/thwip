@@ -39,12 +39,20 @@ import {
   reuseEvidenceFor,
   signReusedIntent,
   signReusedRecord,
+  signVerifiedIntent,
+  signVerifiedRecord,
   storeAttestation,
   transitionRecordFor,
+  verifiedEvidenceFor,
 } from "./attestation.js";
 import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
-import { parseTransitionRecord, type Sha256, type TransitionRecordV1 } from "@thwip/queue-protocol";
+import {
+  parseTransitionRecord,
+  requiredSuitesDigest,
+  type Sha256,
+  type TransitionRecordV1,
+} from "@thwip/queue-protocol";
 import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
@@ -380,7 +388,8 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     // "candidate-verified-merge" record here too, and hardcoding "reused"
     // would misreport that merge as a reuse forever.
     const existing = await readAttestation(db, existingDigest);
-    const existingKind = existing?.kind === "candidate-verified-merge" ? "verified" : "reused";
+    const existingKind =
+      existing?.kind === "candidate-verified-merge" || existing?.kind === "verified-merge" ? "verified" : "reused";
     const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
       recordOnly(commands, store, {
         attemptId: input.attemptId,
@@ -403,15 +412,34 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   if (attempt.intentDigest == null) return skip("no signed merge intent to cite");
   if (input.pullRequestNumber === null) return skip("the merged entry could not be found");
 
-  const evidence = await reuseEvidenceFor(
-    attempt.receiptDigest as Sha256,
-    await deps.activePolicy(env, input.repositoryId),
-    await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
-    // Present exactly when the queue had the integrated candidate run, which is
-    // what decides whether the record claims a verified merge or a reuse.
-    attempt.verifierResultDigest,
-  );
+  // What the device did, read from storage rather than inferred from the queue
+  // document. Its presence is what makes this a verified merge: an assignment
+  // this queue issued and a receipt the device signed for the tree that landed.
+  const localRun = await acceptedReceiptFor(db, input.attemptId);
+  const activePolicy = await deps.activePolicy(env, input.repositoryId);
+  const evidence =
+    localRun === null || activePolicy === null
+      ? await reuseEvidenceFor(
+          attempt.receiptDigest as Sha256,
+          activePolicy,
+          await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
+          // Present exactly when the queue had the integrated candidate run, which is
+          // what decides whether the record claims a candidate-verified merge or a reuse.
+          attempt.verifierResultDigest,
+        )
+      : verifiedEvidenceFor({
+          workReceiptDigest: attempt.receiptDigest as Sha256,
+          organizationId: activePolicy.organizationId,
+          policyDigest: activePolicy.policyDigest as Sha256,
+          pipelineDigest: activePolicy.pipelineDigest as Sha256 | null,
+          requiredSuitesDigest: await requiredSuitesDigest(activePolicy.requiredSuites),
+          assignmentDigest: localRun.assignmentDigest as Sha256,
+          integrationEvidenceDigest: localRun.receiptDigest as Sha256,
+          deviceKeyId: localRun.deviceKeyId,
+          rerun: null,
+        });
   if ("missing" in evidence) return skip(evidence.missing);
+  const verifiedMerge = "assignmentDigest" in evidence;
 
   // The tree the branch had before this merge. A transition that is not the
   // first in its epoch has to say where it started from, and only the commit
@@ -425,11 +453,11 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
   const mergeMethod = project?.mergeMethod ?? DEFAULT_MERGE_METHOD;
 
-  const signed = await signReusedRecord({
+  const recordSubject = {
     attemptId: input.attemptId,
     mergeMethod,
     git: {
-      objectFormat: "sha1",
+      objectFormat: "sha1" as const,
       repositoryId: input.repositoryId,
       baseRef: input.baseRef as `refs/heads/${string}`,
       baseSha: attempt.baseSha,
@@ -446,20 +474,27 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       previousTransitionDigest: (input.chainHead?.digest ?? null) as Sha256 | null,
     },
     pullRequestNumber: input.pullRequestNumber,
-    evidence,
     mergeIntentDigest: attempt.intentDigest as Sha256,
     before: { baseSha: attempt.baseSha, treeOid: before?.treeOid ?? null },
     final: { sha: input.mergeSha, treeOid: input.mergeTree, parentShas: input.parentShas },
     observedAt: new Date().toISOString(),
-    signer: { sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ) },
-  });
+    signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
+  };
+  const signed =
+    "assignmentDigest" in evidence
+      ? await signVerifiedRecord({ ...recordSubject, evidence })
+      : await signReusedRecord({ ...recordSubject, evidence });
   if ("error" in signed) return skip(`the queue refused to sign its own record: ${signed.error}`);
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
   const stored = await storeAttestation(db, {
     digest: signed.digest,
-    kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
+    kind: verifiedMerge
+      ? "verified-merge"
+      : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
+        ? "candidate-verified-merge"
+        : "reused-proof-merge",
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
@@ -482,11 +517,14 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // is already stored and is what the transition has to cite — this call's
   // own signed bytes never occupy a link and are not persisted.
   let digest = signed.digest;
-  let kind = evidence.verifierResultDigest === undefined ? "reused" : "verified";
+  let kind =
+    verifiedMerge || ("verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined)
+      ? "verified"
+      : "reused";
   if (!stored.stored) {
     digest = stored.digest as Sha256;
     const winner = await readAttestation(db, stored.digest);
-    kind = winner?.kind === "candidate-verified-merge" ? "verified" : "reused";
+    kind = winner?.kind === "candidate-verified-merge" || winner?.kind === "verified-merge" ? "verified" : "reused";
   }
 
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
@@ -2464,29 +2502,50 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // basis. Under this profile the basis is the proof on the head, the
         // policy and pipeline it satisfied, and the check that verified it —
         // every one of which is a real value or the merge does not proceed.
-        const reuse = await reuseEvidenceFor(
-          workReceiptDigest,
-          policy,
-          await deps.proofCheckRunId(c.env, repositoryId, headSha),
-          verifiedResultDigest,
-        );
-        if ("missing" in reuse) {
+        //
+        // A device ran this candidate under an assignment this queue signed, so
+        // the intent says that rather than describing a reuse. The two are
+        // different claims and the schemas refuse to be each other.
+        const evidenceForIntent =
+          localRun === null || policy === null
+            ? await reuseEvidenceFor(
+                workReceiptDigest,
+                policy,
+                await deps.proofCheckRunId(c.env, repositoryId, headSha),
+                verifiedResultDigest,
+              )
+            : verifiedEvidenceFor({
+                workReceiptDigest,
+                organizationId: policy.organizationId,
+                policyDigest: policy.policyDigest as Sha256,
+                pipelineDigest: policy.pipelineDigest as Sha256 | null,
+                requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
+                assignmentDigest: localRun.assignmentDigest as Sha256,
+                integrationEvidenceDigest: localRun.receiptDigest as Sha256,
+                deviceKeyId: localRun.deviceKeyId,
+                // `audited` runs the suites again in Actions. That execution's
+                // run ids are not carried this far, so the record names the
+                // device's run rather than a rerun it cannot cite.
+                rerun: null,
+              });
+        if ("missing" in evidenceForIntent) {
           return c.json({
             authorized: false,
             enforcing: true,
             activationState: project.activationState,
             reason: "MERGE_EVIDENCE_INCOMPLETE",
-            detail: `nothing may be signed for this merge: ${reuse.missing}`,
+            detail: `nothing may be signed for this merge: ${evidenceForIntent.missing}`,
             entryId,
             operationId: null,
           });
         }
+        const evidenceOrganizationId = evidenceForIntent.organizationId;
 
-        const signedIntent = await signReusedIntent({
+        const intentSubject = {
           operationId: mergeOperationId(attemptId),
           attemptId,
           git: {
-            objectFormat: "sha1",
+            objectFormat: "sha1" as const,
             repositoryId,
             baseRef: baseRef as `refs/heads/${string}`,
             baseSha,
@@ -2505,11 +2564,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             previousTransitionDigest: (held.chainHead?.digest ?? null) as Sha256 | null,
           },
           pullRequestNumber: body.pullRequestNumber,
-          evidence: reuse,
           mergeMethod: project.mergeMethod,
           createdAt: new Date().toISOString(),
-          signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
-        });
+          signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(c.env, bytes, typ) },
+        };
+        const signedIntent =
+          "assignmentDigest" in evidenceForIntent
+            ? await signVerifiedIntent({ ...intentSubject, evidence: evidenceForIntent })
+            : await signReusedIntent({ ...intentSubject, evidence: evidenceForIntent });
         if ("error" in signedIntent) {
           return c.json({
             authorized: false,
@@ -2530,7 +2592,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           attemptId,
           bytes: signedIntent.bytes,
           jws: signedIntent.jws,
-          organizationId: reuse.organizationId,
+          organizationId: evidenceOrganizationId,
           mirror: (input) =>
             storeEvidence(c.env, {
               organizationId: input.organizationId,
