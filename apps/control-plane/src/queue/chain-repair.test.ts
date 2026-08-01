@@ -98,7 +98,11 @@ function seed(): void {
  * Write the merge intent exactly as the authorize route writes it, so the
  * repair reads a real signed record rather than a fixture shaped to suit it.
  */
-async function seedIntent(merge: Merge, candidateSha = "9f".repeat(20)): Promise<string> {
+async function seedIntent(
+  merge: Merge,
+  candidateSha = "9f".repeat(20),
+  createdAt = "2026-07-31T22:00:00.000Z",
+): Promise<string> {
   const signed = await signReusedIntent({
     operationId: `merge_${merge.attemptId}`,
     attemptId: merge.attemptId,
@@ -124,17 +128,17 @@ async function seedIntent(merge: Merge, candidateSha = "9f".repeat(20)): Promise
       proofCheckRunId: "91289436271",
     },
     mergeMethod: "merge",
-    createdAt: "2026-07-31T22:00:00.000Z",
+    createdAt,
     signer: { sign: async () => "jws-intent" },
   });
   if ("error" in signed) throw new Error(signed.error);
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?)`,
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
     )
-    .run(signed.digest, REPO, REF, merge.attemptId, new TextDecoder().decode(signed.bytes), signed.jws);
+    .run(signed.digest, REPO, REF, merge.attemptId, new TextDecoder().decode(signed.bytes), signed.jws, createdAt);
   return signed.digest;
 }
 
@@ -340,6 +344,69 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
     expect(again.status).toBe(200);
     expect(await again.json()).toMatchObject({ recorded: "already", transitionDigest: first.transitionDigest });
     expect(await chainLinks(app, e)).toHaveLength(1);
+  });
+
+  /**
+   * One attempt can sign its intent more than once. The authorize route is
+   * called again when a merge run restarts, and each call stamps a fresh
+   * `createdAt`, so two rows end up authorizing the same commit for the same
+   * attempt. Pull requests 103 and 105 on staging are both shaped like that.
+   *
+   * Nothing is ambiguous about that: the two intents pin the same tree on the
+   * same parents for the same pull request under the same policy and the same
+   * evidence. The record cites the first one, because it is the authorization
+   * that was in force when the merge was asked for.
+   */
+  it("records a merge whose attempt signed its intent twice, citing the first", async () => {
+    const e = env();
+    seed();
+    const earlier = await seedIntent(FIRST);
+    const later = await seedIntent(FIRST, "a0".repeat(20), "2026-07-31T22:04:00.000Z");
+    expect(later).not.toBe(earlier);
+    const app = routes();
+
+    const response = await repair(app, e, { mergeSha: FIRST.mergeSha, reason: REASON });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recorded: "applied", mergeIntentDigest: earlier });
+  });
+
+  /**
+   * Two different attempts on the same base and head do authorize the same
+   * commit, and the record has to name one of them. Guessing would attribute a
+   * merge to a turn that did not ask for it, so this asks.
+   */
+  it("refuses when two different attempts authorize the same commit", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    await seedIntent({ ...FIRST, attemptId: "att_retry" });
+    const app = routes();
+
+    const response = await repair(app, e, { mergeSha: FIRST.mergeSha, reason: REASON });
+
+    expect(response.status).toBe(409);
+    expect((await response.json()) as { error: string }).toMatchObject({
+      error: expect.stringContaining("att_retry") as unknown as string,
+    });
+    expect(await chainLinks(app, e)).toEqual([]);
+  });
+
+  it("names the attempt to settle which of two authorized the commit", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    await seedIntent({ ...FIRST, attemptId: "att_retry" });
+    const app = routes();
+
+    const response = await repair(app, e, {
+      mergeSha: FIRST.mergeSha,
+      reason: REASON,
+      attemptId: "att_retry",
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recorded: "applied", attemptId: "att_retry" });
   });
 
   it("requires an administrator of the organization that owns the repository", async () => {

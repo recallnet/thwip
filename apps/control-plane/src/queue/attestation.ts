@@ -527,11 +527,42 @@ export async function authorizationFor(
         "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
     };
   }
-  if (matched.length > 1) {
-    const attempts = matched.map((m) => m.intent.attemptId).join(", ");
-    return { refused: `more than one attempt authorizes this commit; name one of ${attempts}` };
+  const attempts = [...new Set(matched.map((m) => m.intent.attemptId))];
+  if (attempts.length > 1) {
+    return { refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}` };
   }
-  return matched[0]!;
+
+  // One attempt can sign its intent more than once: a merge run that restarts
+  // asks to be authorized again, and each call stamps a fresh `createdAt` and
+  // rebuilds the candidate commit, so two rows authorize the same merge under
+  // different digests. That is not an ambiguity about what was authorized, and
+  // refusing it would leave a merge unrecordable for a reason that says nothing
+  // about the merge. What would be an ambiguity is two intents that disagree
+  // about anything the record repeats, so that is what is compared, and the
+  // earliest of a set that agrees is cited: it is the authorization that was in
+  // force when the merge was asked for.
+  const first = matched[0]!;
+  if (matched.some((m) => cited(m.intent) !== cited(first.intent))) {
+    return { refused: "this commit's merge intents disagree about what they authorized" };
+  }
+  return first;
+}
+
+/** Everything a transition record repeats from the intent it cites. */
+function cited(intent: MergeIntentV1): string {
+  return JSON.stringify([
+    intent.kind,
+    intent.attemptId,
+    intent.pullRequestNumber,
+    intent.mergeMethod,
+    intent.policyDigest,
+    intent.turnSequence,
+    intent.git.baseSha,
+    intent.git.headSha,
+    intent.git.candidateTreeOid,
+    intent.git.candidateParentOids,
+    Object.entries(intent.evidence).sort(),
+  ]);
 }
 
 export async function readAttestation(
