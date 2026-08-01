@@ -263,13 +263,20 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   const db = env.DB as unknown as D1Like;
   const existingDigest = await transitionRecordFor(db, input.attemptId);
   if (existingDigest !== null) {
+    // Read back what was actually stored: a plain replay stored a
+    // "reused-proof-merge" record, but a process that died between storing
+    // the record and recording the transition on a first report leaves a
+    // "candidate-verified-merge" record here too, and hardcoding "reused"
+    // would misreport that merge as a reuse forever.
+    const existing = await readAttestation(db, existingDigest);
+    const existingKind = existing?.kind === "candidate-verified-merge" ? "verified" : "reused";
     const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
       recordOnly(commands, store, {
         attemptId: input.attemptId,
         // Ignored on replay: the domain layer's idempotency key is keyed on
         // attempt id alone, so this call can only ever return the transition
         // this attempt already recorded.
-        kind: "reused",
+        kind: existingKind,
         digest: existingDigest,
         baseSha: input.mergeSha,
         witnessPrincipalIds: input.witnessPrincipalIds,
