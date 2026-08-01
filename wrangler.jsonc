@@ -42,7 +42,7 @@
           { "queue": "thwip-sync-staging", "dead_letter_queue": "thwip-sync-staging-dlq", "max_retries": 5 }
         ]
       },
-      "triggers": { "crons": ["17 3 * * *"] },
+      "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },
       "vars": {
         "THWIP_ENV": "staging",
         "PUBLIC_ORIGIN": "https://thwip.recall.net",
