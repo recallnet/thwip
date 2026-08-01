@@ -26,6 +26,12 @@ export interface ActivePolicy {
   readonly organizationId: string;
   /** Null when no verifier is pinned, which only matters to a stronger profile. */
   readonly verifier: { workflowRef: string; workflowSha: string | null } | null;
+  /** The document itself. An assignment digests it rather than trusting a value. */
+  readonly document: unknown;
+  readonly version: number;
+  /** Null for a command pipeline, which has no Dagger anything. */
+  readonly daggerModuleDigest: string | null;
+  readonly daggerEngineDigest: string | null;
 }
 
 export async function readActivePolicy(db: D1Like, repositoryId: string): Promise<ActivePolicy | null> {
@@ -44,7 +50,8 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
 
   const bundle = JSON.parse(row.bundle) as {
     securityProfile?: unknown;
-    pipeline?: { requiredSuites?: string[]; digest?: string };
+    version?: unknown;
+    pipeline?: { requiredSuites?: string[]; digest?: string; moduleDigest?: unknown; engineDigest?: unknown };
   };
 
   // A bundle that does not say what it requires cannot be certified against.
@@ -70,5 +77,9 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
     securityProfile: bundle.securityProfile,
     organizationId: row.org,
     verifier,
+    document: bundle,
+    version: typeof bundle.version === "number" ? bundle.version : 0,
+    daggerModuleDigest: typeof bundle.pipeline?.moduleDigest === "string" ? bundle.pipeline.moduleDigest : null,
+    daggerEngineDigest: typeof bundle.pipeline?.engineDigest === "string" ? bundle.pipeline.engineDigest : null,
   };
 }

@@ -54,6 +54,7 @@ function project(columnProfile: string, bundle: Record<string, unknown>) {
 const bundle = (over: Record<string, unknown> = {}) => ({
   schemaVersion: "1",
   securityProfile: "fast",
+  version: 4,
   pipeline: { digest: `sha256:${"c".repeat(64)}`, runner: "command", requiredSuites: ["lint", "test"] },
   ...over,
 });
@@ -91,5 +92,47 @@ describe("the active policy", () => {
 
   it("reports no policy for a repository it does not know", async () => {
     expect(await readActivePolicy(db(), "404")).toBeNull();
+  });
+
+  /**
+   * An assignment digests the policy document rather than trusting a digest
+   * passed alongside it, so the reader needs the document itself.
+   */
+  it("returns the document and version an assignment has to bind", async () => {
+    const store = db();
+    project("fast", bundle({ securityProfile: "remote", version: 4 }));
+
+    const policy = await readActivePolicy(store, REPO);
+    expect(policy?.version).toBe(4);
+    expect(policy?.document).toMatchObject({ securityProfile: "remote" });
+  });
+
+  it("reports the dagger digests when the pipeline names them", async () => {
+    const store = db();
+    project(
+      "fast",
+      bundle({
+        pipeline: {
+          digest: `sha256:${"c".repeat(64)}`,
+          runner: "dagger",
+          requiredSuites: ["test"],
+          moduleDigest: `sha256:${"d".repeat(64)}`,
+          engineDigest: `sha256:${"e".repeat(64)}`,
+        },
+      }),
+    );
+
+    const policy = await readActivePolicy(store, REPO);
+    expect(policy?.daggerModuleDigest).toBe(`sha256:${"d".repeat(64)}`);
+    expect(policy?.daggerEngineDigest).toBe(`sha256:${"e".repeat(64)}`);
+  });
+
+  /** A command pipeline has no Dagger digests, and inventing them is the bug
+   *  this whole line of work removed. */
+  it("reports no dagger digests for a command pipeline", async () => {
+    const store = db();
+    project("fast", bundle());
+    const policy = await readActivePolicy(store, REPO);
+    expect(policy?.daggerModuleDigest).toBeNull();
   });
 });
