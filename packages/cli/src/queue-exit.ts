@@ -149,13 +149,15 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   QUEUE_PAUSED: EXIT.humanRequired,
   REBASELINE_REQUIRED: EXIT.humanRequired,
   MERGE_REJECTED: EXIT.humanRequired,
-  AUDIT_REQUIRED: EXIT.humanRequired,
 
   /* The branch needs work before it can integrate. */
   MERGE_CONFLICT: EXIT.repairRequired,
   NEEDS_REPAIR: EXIT.repairRequired,
 
   /* The turn was lost but the place in line was not. Retry is safe. */
+  // The window closed with the place in line intact, which is what every other
+  // lost turn means. Waiting for the next offer is the whole answer.
+  ASSIGNMENT_EXPIRED: EXIT.turnLost,
   EXPIRED_UNCLAIMED: EXIT.turnLost,
   EXPIRED_EXECUTION: EXIT.turnLost,
   SUPERSEDED: EXIT.turnLost,
@@ -202,7 +204,6 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   MERGE_EVIDENCE_INCOMPLETE: EXIT.invariant,
   MERGE_INTENT_INVALID: EXIT.invariant,
   CANDIDATE_DIGEST_MISMATCH: EXIT.invariant,
-  AUDIT_DISAGREED: EXIT.invariant,
   BUNDLE_SIGNATURE_INVALID: EXIT.invariant,
 };
 

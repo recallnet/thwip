@@ -56,7 +56,6 @@ const policyFor = (lease: { required: boolean; maxAgeSeconds: number }) => ({
   version: 4,
   lease,
   pipeline: { digest: `sha256:${"c".repeat(64)}`, runner: "command", requiredSuites: ["test"] },
-  audit: { basisPoints: 0, mandatoryPaths: [] },
 });
 
 describe("the keys a bundle offers for checking a lease", () => {

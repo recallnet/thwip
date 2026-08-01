@@ -303,3 +303,27 @@ describe("what a profile derives", () => {
     }
   });
 });
+
+/**
+ * A policy field nothing sets is not a control. It reads as one to whoever
+ * opens the policy, and the verifier spends a branch on data no part of the
+ * system produces. These three carried that shape and are gone.
+ */
+describe("fields a policy no longer carries", () => {
+  const ids = { ownerId: "162603603", repositoryId: "1315419165" };
+  const snapshot = new MemorySnapshot({ "pnpm-lock.yaml": "" });
+
+  it("names no evaluation mode, audit rate or GitHub key requirement", async () => {
+    for (const profile of ["fast", "remote"] as const) {
+      const { policy } = await deriveProjectConfig(
+        { version: 1, profile, required: ["lint"] },
+        ids,
+        snapshot,
+      );
+      const keys = Object.keys(policy);
+      expect(keys, profile).not.toContain("evaluationMode");
+      expect(keys, profile).not.toContain("audit");
+      expect(keys, profile).not.toContain("requireGithubKeyPresence");
+    }
+  });
+});

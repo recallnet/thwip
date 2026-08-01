@@ -29,16 +29,12 @@ export interface GithubFacts {
   baseRef: string;
   baseSha: string;
   objectFormat: "sha1" | "sha256";
-  /** numeric GitHub user id of the PR author, when known */
-  prAuthorGithubUserId?: string;
   /**
-   * Tree of GitHub's own merge of this head into the base, read from the
-   * provider. Required when the policy evaluates merge trees; the verifier
-   * refuses that mode rather than guess when the caller cannot supply it.
+   * Numeric GitHub user id of the pull request author. A project that forbids
+   * the author from signing their own work cannot be judged without it, so the
+   * caller resolves it and the verifier refuses when it is absent.
    */
-  mergeTreeOid?: string;
-  /** Paths this head changes against the base, when the caller can list them. */
-  changedPaths?: string[];
+  prAuthorGithubUserId?: string;
 }
 
 export interface VerifyDeps {
@@ -72,20 +68,6 @@ export interface VerifyDeps {
     signingInput: Uint8Array;
     signature: Uint8Array;
   }): Promise<boolean>;
-  /**
-   * SSH public keys GitHub currently publishes for a user, in
-   * authorized_keys format. A policy with `requireGithubKeyPresence` refuses
-   * when this is missing.
-   */
-  githubUserSigningKeys?(githubUserId: string): Promise<string[]>;
-  /**
-   * An independent re-run of the proven pipeline over the same tree. A policy
-   * that selects this proof for audit refuses when this is missing.
-   */
-  auditProof?(args: {
-    statement: InTotoStatementV1;
-    facts: GithubFacts;
-  }): Promise<{ agrees: boolean; detail?: string }>;
   /**
    * Waiting between reads of a source that is eventually consistent with its
    * own writes. Injected so tests read as many times as production does without
@@ -212,41 +194,10 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
   }
   if (pred.git.baseSha !== facts.baseSha) return res("SUBJECT_BASE_MISMATCH", undefined, { statement });
 
-  // 5b. Merge tree. Under `merge-tree` the claim is about the tree the merge
-  // produces, so the proof has to name it and it has to be the tree GitHub gets
-  // when it merges this head into the base.
-  if (bundle.policy.evaluationMode === "merge-tree") {
-    const claimed = pred.git.mergeTreeOid;
-    if (claimed === undefined) {
-      return res(
-        "SUBJECT_TREE_MISMATCH",
-        "this project verifies the merged tree and the proof does not name one; upgrade the thwip CLI and run the tests again on the merge of your branch with the base",
-        { statement },
-      );
-    }
-    if (facts.mergeTreeOid === undefined) {
-      return res(
-        "SUBJECT_TREE_MISMATCH",
-        "this project verifies the merged tree and the checker could not read the merge of this branch with the base from GitHub; retry once GitHub has computed the merge",
-        { statement },
-      );
-    }
-    if (claimed !== facts.mergeTreeOid) {
-      return res(
-        "SUBJECT_TREE_MISMATCH",
-        `the proof names merge tree ${claimed} and GitHub merges this branch into the base as ${facts.mergeTreeOid}; run the tests again on the current merge`,
-        { statement },
-      );
-    }
-  }
-
   // 6. Policy binding.
   const policyEligible =
     pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
   if (!policyEligible) return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
-  if (pred.git.evaluationMode !== bundle.policy.evaluationMode) {
-    return res("POLICY_NOT_ACTIVE", "evaluation mode mismatch", { statement });
-  }
 
   // 7. Pipeline binding.
   if (pred.pipeline.digest !== bundle.policy.pipeline.digest || pred.pipeline.runner !== bundle.policy.pipeline.runner) {
@@ -264,32 +215,20 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
   if ((PERMISSION_RANK[grant.permission] ?? 0) < need) {
     return res("SIGNER_PERMISSION_INSUFFICIENT", grant.permission, { statement });
   }
-  if (!bundle.policy.allowAuthorAsSigner && facts.prAuthorGithubUserId === key.githubUserId) {
-    return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
-  }
-  if (bundle.policy.requireGithubKeyPresence) {
-    if (!deps.githubUserSigningKeys) {
+  // The control is "somebody other than the author signed this". Judging it
+  // needs the author, so a checker that does not know who opened the pull
+  // request cannot judge it, and the merge waits rather than passing on a
+  // comparison against nothing.
+  if (!bundle.policy.allowAuthorAsSigner) {
+    if (facts.prAuthorGithubUserId === undefined) {
       return res(
-        "SIGNER_KEY_UNKNOWN",
-        "this project requires the signing key to be published on the signer's GitHub account and the checker cannot read GitHub's key list",
+        "SIGNER_PERMISSION_INSUFFICIENT",
+        "this project requires somebody other than the author to sign, and the checker could not find out who opened the pull request for this commit; re-run the check, and if it persists ask an administrator to check the GitHub App's pull request permission",
         { statement },
       );
     }
-    let published: string[];
-    try {
-      published = await deps.githubUserSigningKeys(key.githubUserId);
-    } catch {
-      return res("SIGNER_KEY_UNKNOWN", "GitHub did not answer when asked which keys this signer publishes; try again", {
-        statement,
-      });
-    }
-    const wanted = sshKeyBody(key.publicKey);
-    if (wanted === undefined || !published.some((line) => sshKeyBody(line) === wanted)) {
-      return res(
-        "SIGNER_KEY_UNKNOWN",
-        `key ${key.keyId} is not among the SSH keys ${key.githubUserId} publishes on GitHub; add it to the GitHub account or enroll the key that is there`,
-        { statement },
-      );
+    if (facts.prAuthorGithubUserId === key.githubUserId) {
+      return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
     }
   }
 
@@ -374,48 +313,6 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     if (verdict !== undefined) return { ...verdict, statement };
   }
 
-  // 13. Audit. Where the policy selects this proof for audit, the merge waits
-  // on an independent re-run that agrees with it.
-  const audit = bundle.policy.audit;
-  const mandatoryPaths = audit.mandatoryPaths ?? [];
-  const basisPoints = audit.basisPoints ?? 0;
-  if (mandatoryPaths.length > 0 || basisPoints > 0) {
-    if (mandatoryPaths.length > 0 && facts.changedPaths === undefined) {
-      return res(
-        "AUDIT_REQUIRED",
-        "this project audits changes under protected paths and the checker could not read which paths this branch changes; retry, and if it persists ask an administrator to check the GitHub App's contents permission",
-        { statement },
-      );
-    }
-    const touchesProtected = (facts.changedPaths ?? []).some((path) =>
-      mandatoryPaths.some((prefix) => path === prefix || path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)),
-    );
-    if (touchesProtected || sampledForAudit(facts.treeOid, basisPoints)) {
-      if (!deps.auditProof) {
-        return res(
-          "AUDIT_REQUIRED",
-          "this project audits a share of proofs by re-running them and no auditor is available to this checker; ask an administrator to enable the audit runner or lower the audit rate",
-          { statement },
-        );
-      }
-      let outcome: { agrees: boolean; detail?: string };
-      try {
-        outcome = await deps.auditProof({ statement, facts });
-      } catch {
-        return res("AUDIT_REQUIRED", "the audit re-run did not complete, so this proof is unaudited; run it again", {
-          statement,
-        });
-      }
-      if (!outcome.agrees) {
-        return res(
-          "AUDIT_DISAGREED",
-          outcome.detail ?? "an independent re-run of this pipeline disagreed with the proof; run the tests again and look at what differs",
-          { statement },
-        );
-      }
-    }
-  }
-
   return res("PASS", undefined, { statement, signerKey: key });
 }
 
@@ -423,26 +320,6 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
 const CLOCK_SKEW_TOLERANCE_MS = 60_000;
 
 const LEASE_ALGORITHMS = new Set(["ES256", "EdDSA"]);
-
-/**
- * Deterministic per-tree sampling. Tree object ids are uniform over their hex
- * digits, so the leading 32 bits give the same verdict for the same tree on
- * every verifier, which keeps a re-run from dodging an audit.
- */
-function sampledForAudit(treeOid: string, basisPoints: number): boolean {
-  if (basisPoints <= 0) return false;
-  if (basisPoints >= 10_000) return true;
-  const bucket = Number.parseInt(treeOid.slice(0, 8), 16);
-  if (!Number.isFinite(bucket)) return true;
-  return bucket % 10_000 < basisPoints;
-}
-
-/** Key type and body of an authorized_keys line, without the trailing comment. */
-function sshKeyBody(line: string): string | undefined {
-  const parts = line.trim().split(/\s+/);
-  if (parts.length < 2) return undefined;
-  return `${parts[0]} ${parts[1]}`;
-}
 
 function b64urlDecode(value: string): Uint8Array {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");

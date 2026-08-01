@@ -40,8 +40,11 @@ export interface ThwipCiRunPredicateV1 {
     parentOids: GitOid[];
     baseRef: string;
     baseSha: GitOid;
-    evaluationMode: "head-tree" | "merge-tree";
-    mergeTreeOid?: GitOid;
+    /**
+     * What the run covered. A proof is about the head tree and nothing else;
+     * the field stays so the claim is explicit in the signed bytes.
+     */
+    evaluationMode: "head-tree";
   };
   policy: {
     digest: Sha256;
@@ -88,9 +91,7 @@ export interface PolicyBundleV1 {
   securityProfile: "fast" | "fresh" | "audited" | "remote";
   minimumPermission: "triage" | "write" | "maintain" | "admin";
   allowAuthorAsSigner: boolean;
-  evaluationMode: "head-tree" | "merge-tree";
   allowedKeyAlgorithms: string[];
-  requireGithubKeyPresence: boolean;
   lease: { required: boolean; maxAgeSeconds: number };
   pipeline: {
     digest: Sha256;
@@ -101,7 +102,6 @@ export interface PolicyBundleV1 {
     remoteSuites?: string[];
   };
   proofMaxAgeSeconds: number;
-  audit: { basisPoints: number; mandatoryPaths: string[] };
 }
 
 export interface EnrolledKey {
@@ -188,8 +188,6 @@ export const REASON_CODES = [
   "LEASE_INVALID",
   "LEASE_EXPIRED",
   "LEASE_CONTEXT_MISMATCH",
-  "AUDIT_REQUIRED",
-  "AUDIT_DISAGREED",
   "BUNDLE_UNAVAILABLE",
   "BUNDLE_SIGNATURE_INVALID",
   "BUNDLE_EXPIRED",

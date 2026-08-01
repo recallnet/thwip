@@ -70,8 +70,6 @@ const OUTCOME_STYLE: Record<ProtocolReasonCode | "BOOTSTRAP_PENDING", Omit<Outco
   LEASE_INVALID: { label: "Lease did not check out", tone: "bad" },
   LEASE_EXPIRED: { label: "Lease expired mid-run", tone: "bad" },
   LEASE_CONTEXT_MISMATCH: { label: "Lease was issued for another run", tone: "bad" },
-  AUDIT_REQUIRED: { label: "An independent rerun is required", tone: "wait" },
-  AUDIT_DISAGREED: { label: "The independent rerun disagreed", tone: "bad" },
   BUNDLE_UNAVAILABLE: { label: "Trust bundle could not be read", tone: "bad" },
   BUNDLE_SIGNATURE_INVALID: { label: "Trust bundle did not verify", tone: "bad" },
   BUNDLE_EXPIRED: { label: "Trust bundle is out of date", tone: "bad" },
