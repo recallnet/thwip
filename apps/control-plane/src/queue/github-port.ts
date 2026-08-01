@@ -7,6 +7,7 @@ import {
 } from "./candidate.js";
 import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 import type { MergeAttemptOutcome } from "./turn.js";
+import { confirmMergeAbsence } from "./merge-absence.js";
 
 /**
  * The real GitHub side of an integration turn.
@@ -179,6 +180,26 @@ export async function mergePullRequest(
 }
 
 /**
+ * Whether the base branch already contains a commit.
+ *
+ * Git ancestry, not the pull request's own merged flag: the flag lagged its own
+ * write by seconds and the ancestry did not. Null when the comparison cannot be
+ * read, which is not the same as "no".
+ */
+export async function baseContainsCommit(
+  http: GitHubHttp,
+  repo: RepoRef,
+  sha: string,
+): Promise<boolean | null> {
+  const branch = repo.baseRef.replace(/^refs\/heads\//, "");
+  const compared = await http
+    .json<{ status?: string }>(`/repos/${repo.owner}/${repo.repo}/compare/${branch}...${sha}`)
+    .catch(() => null);
+  if (compared?.status === undefined) return null;
+  return compared.status === "behind" || compared.status === "identical";
+}
+
+/**
  * Read what actually happened, for reconciliation after an unknown outcome. This
  * is the only way out of an ambiguous merge: never another write, always a read
  * (plan.md §40.1 step 3).
@@ -194,16 +215,37 @@ export async function observeMergeResult(
       readonly candidateTreeOid: string;
     };
     readonly mergeMethod: "merge" | "squash";
+    /** The backoff between confirmation reads. Overridden in tests. */
+    readonly sleep?: (ms: number) => Promise<void>;
   },
 ): Promise<MergeAttemptOutcome> {
+  const readPull = async () => {
+    const pull = await http
+      .json<PullResponse>(`/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}`)
+      .catch(() => null);
+    return pull === null ? null : { merged: pull.merged === true, mergeCommitSha: pull.merge_commit_sha };
+  };
+
+  // A negative needs more than one read of a pull request that is eventually
+  // consistent with its own merge, so this asks repeatedly and asks git too.
+  const absence = await confirmMergeAbsence(
+    {
+      readPull,
+      baseContainsHead: () => baseContainsCommit(http, repo, input.assigned.headSha),
+    },
+    input.sleep === undefined ? {} : { sleep: input.sleep },
+  );
+  if (absence.kind === "not-merged") {
+    // The attempt ends; a later turn may try again with a new assignment, nonce,
+    // and operation.
+    return { kind: "rejected", reason: absence.reason };
+  }
+  if (absence.kind === "unknown") return { kind: "unknown", reason: absence.reason };
+
   const pull = await http.json<PullResponse>(
     `/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}`,
   );
-  if (pull.merged !== true) {
-    // Proven not merged. The attempt ends; a later turn may try again with a new
-    // assignment, nonce, and operation.
-    return { kind: "rejected", reason: "GitHub reports the pull request as not merged" };
-  }
+  if (pull.merged !== true) return { kind: "unknown", reason: absence.reason };
 
   const mergeSha = pull.merge_commit_sha;
   if (mergeSha === null) return { kind: "unknown", reason: "merged with no merge commit reported" };

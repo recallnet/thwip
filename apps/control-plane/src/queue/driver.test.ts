@@ -133,6 +133,7 @@ function fakeProvider(over: Partial<ProviderPort> = {}) {
       merged: true,
       commit: { sha: MERGE, treeOid: TREE, parentShas: [BASE, HEAD] },
     }),
+    baseContainsHead: async () => true,
     publishCheck: async () => {},
   };
 
@@ -321,12 +322,27 @@ describe("runTurn", () => {
     expect(queue.calls).not.toContain("confirmMerge");
   });
 
-  it("treats a definite refusal as a clean non-merge", async () => {
+  /**
+   * Pull request 105 merged at 16:41:38 and the queue recorded
+   * CONFIRMED_NOT_MERGED at 16:41:39, because GitHub's read had not caught up
+   * with GitHub's own write. No transition record was written for a merge that
+   * is on main, so the chain stopped one link short of the truth.
+   */
+  it("does not conclude a merge is absent while GitHub's read is behind its own write", async () => {
     const queue = fakeQueue();
     let policyDigest = "";
+    let observations = 0;
     const provider = fakeProvider({
       readGuardFacts: async () => guardFacts({ policyDigest }),
-      merge: async () => ({ status: 409, body: { message: "Head branch was modified" } }),
+      // A racing merge run landed it; ours is told it may not merge.
+      merge: async () => ({ status: 405, body: { message: "Merge already in progress" } }),
+      observeResult: async () => {
+        observations += 1;
+        return observations === 1
+          ? { merged: false, commit: null }
+          : { merged: true, commit: { sha: MERGE, treeOid: TREE, parentShas: [BASE, HEAD] } };
+      },
+      baseContainsHead: async () => false,
     });
     const patched: QueuePort = {
       ...queue.port,
@@ -335,7 +351,76 @@ describe("runTurn", () => {
         return queue.port.candidatePrepared(input);
       },
     };
-    const result = await runTurn(context(), patched, provider.port, signer);
+
+    const result = await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
+    expect(queue.calls).not.toContain("confirmNotMerged");
+    expect(result).toMatchObject({ outcome: "merged", mergeSha: MERGE });
+    expect(queue.calls).toContain("recordTransition");
+  });
+
+  it("believes git over the pull request when the base already contains the head", async () => {
+    const queue = fakeQueue();
+    let policyDigest = "";
+    const provider = fakeProvider({
+      readGuardFacts: async () => guardFacts({ policyDigest }),
+      merge: async () => ({ status: 405, body: { message: "Merge already in progress" } }),
+      // Every pull request read is behind; git is not.
+      observeResult: async () => ({ merged: false, commit: null }),
+      baseContainsHead: async () => true,
+    });
+    const patched: QueuePort = {
+      ...queue.port,
+      candidatePrepared: async (input) => {
+        policyDigest = input.policyDigest;
+        return queue.port.candidatePrepared(input);
+      },
+    };
+
+    const result = await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
+    expect(queue.calls).not.toContain("confirmNotMerged");
+    expect(queue.calls).toContain("mergeOutcomeUnknown");
+    expect(result).toMatchObject({ outcome: "reconciling" });
+  });
+
+  it("does not conclude a merge is absent when GitHub cannot be read at all", async () => {
+    const queue = fakeQueue();
+    let policyDigest = "";
+    const provider = fakeProvider({
+      readGuardFacts: async () => guardFacts({ policyDigest }),
+      merge: async () => ({ status: 409, body: { message: "Head branch was modified" } }),
+      observeResult: async () => ({ merged: false, commit: null }),
+      baseContainsHead: async () => null,
+    });
+    const patched: QueuePort = {
+      ...queue.port,
+      candidatePrepared: async (input) => {
+        policyDigest = input.policyDigest;
+        return queue.port.candidatePrepared(input);
+      },
+    };
+
+    const result = await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
+    expect(queue.calls).not.toContain("confirmNotMerged");
+    expect(result).toMatchObject({ outcome: "reconciling" });
+  });
+
+  it("treats a refusal every read confirms as a clean non-merge", async () => {
+    const queue = fakeQueue();
+    let policyDigest = "";
+    const provider = fakeProvider({
+      readGuardFacts: async () => guardFacts({ policyDigest }),
+      merge: async () => ({ status: 409, body: { message: "Head branch was modified" } }),
+      observeResult: async () => ({ merged: false, commit: null }),
+      baseContainsHead: async () => false,
+    });
+    const patched: QueuePort = {
+      ...queue.port,
+      candidatePrepared: async (input) => {
+        policyDigest = input.policyDigest;
+        return queue.port.candidatePrepared(input);
+      },
+    };
+    const result = await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
     expect(result).toMatchObject({ outcome: "not-merged" });
     expect(queue.calls).toContain("confirmNotMerged");
   });
