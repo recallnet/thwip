@@ -196,6 +196,8 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       policyDigest: string;
       pipelineDigest: string | null;
       requiredSuites: readonly string[];
+      /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
+      organizationId: string;
     } | null>;
     proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
@@ -347,6 +349,15 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     attemptId: input.attemptId,
     bytes: signed.bytes,
     jws: signed.jws,
+    organizationId: evidence.organizationId,
+    mirror: (input) =>
+      storeEvidence(env, {
+        organizationId: input.organizationId,
+        repositoryId: input.repositoryId,
+        kind: input.kind,
+        digest: input.digest as `sha256:${string}`,
+        bytes: input.bytes,
+      }).then(() => undefined),
   });
 
   // Lost a simultaneous race with another report of the same merge: the
@@ -1568,6 +1579,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           attemptId,
           bytes: signedIntent.bytes,
           jws: signedIntent.jws,
+          organizationId: reuse.organizationId,
+          mirror: (input) =>
+            storeEvidence(c.env, {
+              organizationId: input.organizationId,
+              repositoryId: input.repositoryId,
+              kind: input.kind,
+              digest: input.digest as `sha256:${string}`,
+              bytes: input.bytes,
+            }).then(() => undefined),
         });
 
         const { result: walked } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
