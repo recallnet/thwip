@@ -90,7 +90,7 @@ function routes(session: { principalId: string; githubUserId: string } | null) {
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async () => null,
     driveTurn: async (_e, _r, pullRequestNumber) => {
       dispatched.push(pullRequestNumber);

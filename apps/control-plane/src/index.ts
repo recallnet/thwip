@@ -20,6 +20,7 @@ import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
+import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
 import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
@@ -1699,11 +1700,17 @@ app.route(
     },
     async queueProject(env: Env, repositoryId: string, baseRef: string) {
       const row = await env.DB.prepare(
-        "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+        "SELECT activation_state, merge_method FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
       )
         .bind(repositoryId, baseRef)
-        .first<{ activation_state: string }>();
-      return row === null ? null : { activationState: row.activation_state };
+        .first<{ activation_state: string; merge_method: string }>();
+      if (row === null) return null;
+      // The column is a free-text default in the schema; a record must never
+      // bind a value the protocol does not recognize.
+      const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
+        ? row.merge_method
+        : DEFAULT_MERGE_METHOD;
+      return { activationState: row.activation_state, mergeMethod };
     },
     async principalFor(env: Env, githubUserId: string) {
       if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;

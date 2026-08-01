@@ -105,7 +105,7 @@ function routesAs(principalId: string, securityProfile: string) {
     pinnedVerifier: async () => null,
     activePolicy: async () => ({ securityProfile }),
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
