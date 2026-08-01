@@ -8,18 +8,45 @@ import { verifyChain, type ChainLink } from "./verify-chain.js";
  * Until this existed the chain was a claim. Records were signed and stored and
  * nothing ever checked that the links joined up, that a digest named its own
  * bytes, or that the signature was real. The first two merges to land without a
- * record went unnoticed for exactly that reason.
+ * record went unnoticed for exactly that reason, and a third went unnoticed
+ * after that, because a record nobody wrote leaves the numbering and the digests
+ * intact. Only the base sha moves.
  *
  * Pure on purpose. Signature checking is injected so this runs unchanged in the
  * Worker, in the CLI, and here.
  */
 
-const BASE = "1".repeat(40);
 const HEAD = "2".repeat(40);
-const TREE = "4".repeat(40);
 const D = (c: string) => `sha256:${c.repeat(64)}`;
 
-async function link(sequence: number, previous: string | null, over: Record<string, unknown> = {}): Promise<ChainLink> {
+/**
+ * Where the base stands after `n` recorded transitions, and the tree it
+ * carries. A chain built from these joins up the way a real one does: each
+ * link begins at the sha the link before it ended on. Building every link
+ * from one constant `before` and one constant `after` made every fixture
+ * chain discontinuous, which is the exact defect the walk is meant to catch,
+ * so a fixture that does it cannot be used to test for it.
+ */
+const baseAt = (n: number) => `ba5e${n.toString(16).padStart(36, "0")}`;
+const treeAt = (n: number) => `47ee${n.toString(16).padStart(36, "0")}`;
+
+interface Shape {
+  readonly sequence: number;
+  readonly previous: string | null;
+  /** The base this link starts from. Defaults to where link `sequence - 1` ended. */
+  readonly before?: string;
+  /** The base this link leaves behind. */
+  readonly after?: string;
+  readonly head?: string;
+  readonly over?: Record<string, unknown>;
+}
+
+async function makeLink(shape: Shape): Promise<ChainLink> {
+  const { sequence, previous } = shape;
+  const before = shape.before ?? baseAt(sequence - 1);
+  const after = shape.after ?? baseAt(sequence);
+  const head = shape.head ?? HEAD;
+  const tree = treeAt(sequence);
   const record = {
     schemaVersion: "1",
     kind: "reused-proof-merge",
@@ -28,11 +55,11 @@ async function link(sequence: number, previous: string | null, over: Record<stri
     queueEpoch: 1,
     transitionSequence: sequence,
     previousTransitionDigest: previous,
-    before: { baseSha: BASE, treeOid: "5".repeat(40) },
+    before: { baseSha: before, treeOid: treeAt(sequence - 1) },
     after: {
-      baseSha: "3".repeat(40),
-      treeOid: TREE,
-      parentOids: [BASE, HEAD],
+      baseSha: after,
+      treeOid: tree,
+      parentOids: [before, head],
       parentCount: 2,
       parentOidsDigest: D("7"),
       parentsComplete: true,
@@ -42,9 +69,9 @@ async function link(sequence: number, previous: string | null, over: Record<stri
       attemptId: `att-${sequence}`,
       mergeIntentDigest: D("1"),
       pullRequestNumber: sequence,
-      headSha: HEAD,
-      candidateSha: "3".repeat(40),
-      candidateTreeOid: TREE,
+      headSha: head,
+      candidateSha: after,
+      candidateTreeOid: tree,
       mergeMethod: "merge",
       workReceiptDigest: D("2"),
       policyDigest: D("6"),
@@ -52,10 +79,14 @@ async function link(sequence: number, previous: string | null, over: Record<stri
       requiredSuitesDigest: D("9"),
       checkRunId: "778899",
     },
-    ...over,
+    ...shape.over,
   };
   const bytes = canonicalBytes(JSON.stringify(record));
   return { digest: await envelopeDigest(bytes), bytes, jws: "signature" };
+}
+
+async function link(sequence: number, previous: string | null, over: Record<string, unknown> = {}): Promise<ChainLink> {
+  return makeLink({ sequence, previous, over });
 }
 
 const signedOk = { verifySignature: async () => true, epochStartsAt: 1 };
@@ -89,6 +120,107 @@ describe("verifying a chain", () => {
     const three = await link(3, one.digest);
     const { findings } = await verifyChain([one, three], signedOk);
     expect(findings.map((f) => f.code)).toContain("SEQUENCE_GAP");
+  });
+
+  /**
+   * The failure the sequence check cannot see, taken from the live chain.
+   *
+   * PR 105 merged as a1fe3e7 and wrote no record. Record 52 left the base at
+   * 7059839; record 53 says it began at a1fe3e7, whose parent is 7059839.
+   * Sequence numbers are handed out per recorded transition, so an unrecorded
+   * merge leaves no hole: 53 follows 52 and every existing check agrees.
+   * The move from 7059839 to a1fe3e7 is the merge nobody wrote down, and the
+   * two records already carry both ends of it.
+   */
+  describe("a base that moved between two records", () => {
+    const fiftyTwoBefore = "797c695e4f7965b5592802a4e513fbd9e5982fa2";
+    const fiftyTwoAfter = "7059839f29bf1aa0c0dd55e4e004cd64c155ba99";
+    const unrecorded = "a1fe3e7e32aed7eaeefe799174d5c4962331ac40";
+    const fiftyThreeAfter = "a5f50bacb82ee5fc16de2efc73d320c7deff30fe";
+    const atEpoch = { verifySignature: async () => true, epochStartsAt: 52 };
+
+    it("reports the merge that landed between record 52 and record 53", async () => {
+      const fiftyTwo = await makeLink({
+        sequence: 52,
+        previous: D("a"),
+        before: fiftyTwoBefore,
+        after: fiftyTwoAfter,
+        head: "aaff7ce48dc0eb613ae11d2291ae1cebc137febe",
+      });
+      const fiftyThree = await makeLink({
+        sequence: 53,
+        previous: fiftyTwo.digest,
+        before: unrecorded,
+        after: fiftyThreeAfter,
+        head: "e9bc094f8a436cbfd9744b3ae5e94f1b0ed69541",
+      });
+      const { findings } = await verifyChain([fiftyTwo, fiftyThree], atEpoch);
+      expect(findings.map((f) => f.code)).toEqual(["BASE_DISCONTINUITY"]);
+      expect(findings[0]?.detail).toContain(fiftyTwoAfter);
+      expect(findings[0]?.detail).toContain(unrecorded);
+    });
+
+    it("says nothing when record 53 begins where record 52 ended", async () => {
+      const fiftyTwo = await makeLink({
+        sequence: 52,
+        previous: D("a"),
+        before: fiftyTwoBefore,
+        after: fiftyTwoAfter,
+      });
+      const fiftyThree = await makeLink({
+        sequence: 53,
+        previous: fiftyTwo.digest,
+        before: fiftyTwoAfter,
+        after: fiftyThreeAfter,
+      });
+      const { findings } = await verifyChain([fiftyTwo, fiftyThree], atEpoch);
+      expect(findings).toEqual([]);
+    });
+
+    it("does not accuse a link whose predecessor could not be read", async () => {
+      const unreadable: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "", sequence: 52 };
+      const fiftyThree = await makeLink({ sequence: 53, previous: D("a"), before: unrecorded, after: fiftyThreeAfter });
+      const { findings } = await verifyChain([unreadable, fiftyThree], atEpoch);
+      expect(findings.map((f) => f.code)).not.toContain("BASE_DISCONTINUITY");
+    });
+  });
+
+  /**
+   * A chain that simply stops cannot be caught from the records alone: the last
+   * record is consistent with everything before it, and the merges after it left
+   * no trace inside the chain. Only the branch's current base, which the caller
+   * has to fetch from somewhere that is not thwip, says the chain is behind.
+   */
+  describe("checking the chain against the branch head", () => {
+    it("reports a chain whose last record does not reach the branch head", async () => {
+      const one = await link(1, null);
+      const two = await link(2, one.digest);
+      const { findings } = await verifyChain([one, two], {
+        ...signedOk,
+        head: { baseSha: "a1fe3e7e32aed7eaeefe799174d5c4962331ac40" },
+      });
+      expect(findings.map((f) => f.code)).toContain("CHAIN_BEHIND_HEAD");
+    });
+
+    it("passes when the last record ends on the branch head", async () => {
+      const one = await link(1, null);
+      const two = await link(2, one.digest);
+      const { findings } = await verifyChain([one, two], { ...signedOk, head: { baseSha: baseAt(2) } });
+      expect(findings).toEqual([]);
+    });
+
+    it("is silent about the head when no caller supplied one", async () => {
+      const one = await link(1, null);
+      const { findings } = await verifyChain([one], signedOk);
+      expect(findings.map((f) => f.code)).not.toContain("CHAIN_BEHIND_HEAD");
+    });
+
+    it("does not judge a head against a last link it could not read", async () => {
+      const one = await link(1, null);
+      const gone: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "", sequence: 2 };
+      const { findings } = await verifyChain([one, gone], { ...signedOk, head: { baseSha: baseAt(9) } });
+      expect(findings.map((f) => f.code)).not.toContain("CHAIN_BEHIND_HEAD");
+    });
   });
 
   it("reports a signature that does not verify", async () => {
