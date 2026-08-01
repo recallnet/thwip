@@ -1,5 +1,6 @@
 import {
   DSSE_PAYLOAD_TYPE,
+  LEASE_AUDIENCE,
   SSH_SIGN_NAMESPACE,
   b64stdDecode,
   dssePae,
@@ -13,6 +14,10 @@ import {
   type VerificationBundleV1,
 } from "@thwip/protocol";
 import { settleRemoteSuites } from "./remote-suite-settlement.js";
+
+import { verifyLeaseSignature as defaultLeaseSignatureCheck } from "./lease-signature.js";
+
+export { verifyLeaseSignature } from "./lease-signature.js";
 
 /** Facts the Action derives independently from GitHub. Never taken from the proof. */
 export interface GithubFacts {
@@ -58,7 +63,8 @@ export interface VerifyDeps {
    * Verify one compact-JWS signing input against one JWK from
    * `bundle.leaseIssuerJwks`. The verifier parses the lease, chooses the
    * candidate keys and judges every claim itself; this only does the maths.
-   * A policy that requires a lease refuses when this is missing.
+   * Optional, and only for tests: production uses the package's own WebCrypto
+   * implementation, so a caller cannot disable the check by omitting it.
    */
   verifyLeaseSignature?(args: {
     jwk: unknown;
@@ -416,9 +422,6 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
 /** A signer's clock may sit slightly ahead of the verifier's. Nothing more. */
 const CLOCK_SKEW_TOLERANCE_MS = 60_000;
 
-/** The audience the control plane mints run leases for. */
-const LEASE_AUDIENCE = "urn:thwip:ci-run:v1";
-
 const LEASE_ALGORITHMS = new Set(["ES256", "EdDSA"]);
 
 /**
@@ -468,12 +471,11 @@ async function checkLease(input: LeaseCheckInput): Promise<VerifyResult | undefi
       "this project requires a run lease and carries no issuer keys to check one against; ask an administrator to reload the project's verification keys",
     );
   }
-  if (!deps.verifyLeaseSignature) {
-    return res(
-      "LEASE_INVALID",
-      "this project requires a run lease and this checker cannot verify lease signatures; update the thwip Action or App to a version that does",
-    );
-  }
+  // No caller has to supply this. The check is arithmetic over WebCrypto with
+  // nothing environmental in it, and making it injectable is how every caller
+  // came to pass nothing and every lease came to refuse. A test may still
+  // substitute one.
+  const checkSignature = deps.verifyLeaseSignature ?? defaultLeaseSignatureCheck;
 
   const parts = lease.split(".");
   if (parts.length !== 3) return res("LEASE_INVALID", "the lease in this proof is not a signed token; run `thwip run` again");
@@ -506,7 +508,7 @@ async function checkLease(input: LeaseCheckInput): Promise<VerifyResult | undefi
   let signatureOk = false;
   for (const jwk of candidates) {
     try {
-      if (await deps.verifyLeaseSignature({ jwk, algorithm: alg, signingInput, signature })) {
+      if (await checkSignature({ jwk, algorithm: alg, signingInput, signature })) {
         signatureOk = true;
         break;
       }

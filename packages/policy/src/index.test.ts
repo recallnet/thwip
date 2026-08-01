@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bytesDigest } from "@thwip/protocol";
 import {
   deriveEffectiveProjectConfig,
+  deriveProjectConfig,
   deriveProjectConfigFromText,
   parseThwipYaml,
   resolveThwipYaml,
@@ -254,5 +255,51 @@ policy:
         null,
       ),
     ).toThrow("minimum_permission");
+  });
+});
+
+/**
+ * What each profile derives, so a profile cannot be a name with no consequence.
+ *
+ * plan.md §19.3 is the source: Fresh "always issues a new assignment and
+ * requires a post-assignment local integration receipt", and Audited is
+ * "fresh local receipt plus a full Dagger rerun in GitHub Actions before
+ * merge". The lease is the proof-layer form of the first: a window this
+ * service opened for this exact tree, which the run has to sit inside. The
+ * rerun is the second, and it is full rather than sampled, so every required
+ * suite has to be proven by GitHub's own checks as well as by the signer.
+ */
+describe("what a profile derives", () => {
+  const ids = { ownerId: "162603603", repositoryId: "1315419165" };
+  const snapshot = new MemorySnapshot({ "pnpm-lock.yaml": "" });
+  const yaml = (profile: ThwipYaml["profile"], extra?: Partial<ThwipYaml>): ThwipYaml => ({
+    version: 1,
+    profile,
+    required: ["lint", "test"],
+    ...extra,
+  });
+
+  it("asks for no lease under fast and a lease under every other profile", async () => {
+    for (const profile of ["fast", "fresh", "audited", "remote"] as const) {
+      const { policy } = await deriveProjectConfig(yaml(profile), ids, snapshot);
+      expect(policy.lease.required, profile).toBe(profile !== "fast");
+    }
+  });
+
+  it("makes audited re-run every required suite in GitHub Actions", async () => {
+    const { policy } = await deriveProjectConfig(yaml("audited"), ids, snapshot);
+    expect(policy.pipeline.remoteSuites).toEqual(["lint", "test"]);
+  });
+
+  it("keeps the suites a project already names remote alongside the audited rerun", async () => {
+    const { policy } = await deriveProjectConfig(yaml("audited", { remote: ["e2e"] }), ids, snapshot);
+    expect(policy.pipeline.remoteSuites).toEqual(["lint", "test", "e2e"]);
+  });
+
+  it("re-runs nothing under the profiles that never promised a second execution", async () => {
+    for (const profile of ["fast", "fresh"] as const) {
+      const { policy } = await deriveProjectConfig(yaml(profile), ids, snapshot);
+      expect(policy.pipeline.remoteSuites, profile).toBeUndefined();
+    }
   });
 });
