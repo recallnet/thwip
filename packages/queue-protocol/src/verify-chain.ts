@@ -11,10 +11,15 @@ import { parseTransitionRecord } from "./transition-record.js";
  *
  * The digest and sequence checks did not see any of the three. A record is
  * numbered when it is written, so a merge nobody wrote down leaves the numbering
- * intact and the digests joined up. What it does disturb is the base: the next
- * record begins at a sha the chain never reached. Comparing each record's
- * `before` against the one before it's `after` is what catches that, and every
- * record already carries both halves.
+ * intact and the digests joined up. What it does disturb is the base: some
+ * record begins at a sha no record ever reached, and every record already
+ * carries both halves of the move it made.
+ *
+ * Which record that is has nothing to do with where it sits in the log. Records
+ * written to repair a missed merge land at the head, because the chain is
+ * append-only, while the merge they describe happened in the middle. So the
+ * base check runs over the set of moves and not their order: each record is an
+ * edge, and the chain holds when the edges form one path. See `walk`.
  *
  * Pure. Signature verification is injected so the same walk runs in the Worker,
  * in the CLI, and in a test, and so this file never needs a key or a network.
@@ -40,6 +45,7 @@ export interface ChainFinding {
     | "BROKEN_LINK"
     | "SEQUENCE_GAP"
     | "BASE_DISCONTINUITY"
+    | "FORKED_BASE"
     | "CHAIN_BEHIND_HEAD"
     | "BAD_SIGNATURE"
     | "UNPARSEABLE"
@@ -111,9 +117,12 @@ export async function verifyChain(
   let signaturesChecked = 0;
   let previous: { digest: string; sequence: number | null; afterBaseSha: string | null } | null = null;
   let first = true;
+  const edges: Edge[] = [];
+  let unreadable = 0;
 
   for (const link of links) {
     if (link.bytes.length === 0) {
+      unreadable++;
       if (first) findings.push(...anchor(link.sequence ?? null, link.digest, ports));
       first = false;
       const history = link.sequence === undefined || link.sequence < ports.epochStartsAt;
@@ -144,6 +153,15 @@ export async function verifyChain(
     if (parsed.signatureChecked) signaturesChecked++;
     if (first) findings.push(...anchor(parsed.sequence, link.digest, ports));
     first = false;
+    if (!parsed.readable) unreadable++;
+    if (parsed.readable && parsed.afterBaseSha !== null) {
+      edges.push({
+        sequence: parsed.sequence,
+        digest: link.digest,
+        before: parsed.beforeBaseSha,
+        after: parsed.afterBaseSha,
+      });
+    }
 
     if (previous !== null && parsed.readable) {
       if (parsed.previousDigest !== previous.digest) {
@@ -167,26 +185,135 @@ export async function verifyChain(
           detail: `link ${parsed.sequence} follows ${previous.sequence}; the records in between were written and not served`,
         });
       }
-      if (
-        previous.afterBaseSha !== null &&
-        parsed.beforeBaseSha !== null &&
-        parsed.beforeBaseSha !== previous.afterBaseSha
-      ) {
-        findings.push({
-          code: "BASE_DISCONTINUITY",
-          sequence: parsed.sequence,
-          digest: link.digest,
-          detail:
-            `begins at ${parsed.beforeBaseSha}, but the record before it left the base at ` +
-            `${previous.afterBaseSha}; the base moved in between and no record says how`,
-        });
-      }
     }
     previous = { digest: link.digest, sequence: parsed.sequence, afterBaseSha: parsed.afterBaseSha };
   }
 
-  findings.push(...reachesHead(previous, ports));
+  const path = walk(edges, unreadable);
+  findings.push(...path.findings);
+  findings.push(...reachesHead(path.endsAt, unreadable, ports));
   return { findings, signaturesChecked };
+}
+
+/**
+ * One record, read as a move of the base from one sha to another. `before` is
+ * null on the record that opened the chain: it began at no base, which makes it
+ * the one place a walk can start without asking what came before.
+ */
+interface Edge {
+  readonly sequence: number | null;
+  readonly digest: string;
+  readonly before: string | null;
+  readonly after: string;
+}
+
+/**
+ * Following the shas, because log order stopped being history order.
+ *
+ * Four merges landed with no record and were recorded afterwards. The chain is
+ * append-only and hash-linked, so the repair could only write them at the head:
+ * the merges happened between records 46 and 53, the records for them are 55 to
+ * 58. Comparing each record with the one printed before it called that chain
+ * broken six times over. Record 55 begins exactly where 46 ended, 47 begins
+ * exactly where 56 ended, and every other seam joins up the same way, so the
+ * chain was complete while the check was still accusing it.
+ *
+ * Continuity is therefore a property of the set of moves. Each record is an
+ * edge from `before.baseSha` to `after.baseSha`, and a chain holds when those
+ * edges form a single path. The walk discovers the order rather than assuming
+ * the log carries it.
+ *
+ * The property that matters is untouched: a base sha that no record moves away
+ * from, with records still unaccounted for, is a merge nobody wrote down. Drop
+ * the record for PR 105 and the walk stops dead at 7059839 with record 53
+ * stranded at a1fe3e7, which is exactly the accusation it was written to make.
+ */
+function walk(edges: readonly Edge[], unreadable: number): { findings: ChainFinding[]; endsAt: Edge | null } {
+  const forks = forked(edges);
+  if (forks.length > 0) return { findings: forks, endsAt: null };
+
+  const out = new Map<string, Edge>();
+  for (const e of edges) if (e.before !== null) out.set(e.before, e);
+
+  const findings: ChainFinding[] = [];
+  const remaining = new Set(edges);
+  let last: Edge | null = null;
+  let stops = 0;
+  while (remaining.size > 0) {
+    const start = root(remaining);
+    if (last !== null) {
+      findings.push({
+        code: "BASE_DISCONTINUITY",
+        sequence: start.sequence,
+        digest: start.digest,
+        detail:
+          `the base stops at ${last.after}: no record moves it from there, and record ` +
+          `${start.sequence ?? "?"} begins further on at ${start.before ?? "no base at all"}; ` +
+          `the merge in between was never recorded`,
+      });
+      stops++;
+    }
+    let step: Edge | undefined = start;
+    while (step !== undefined && remaining.has(step)) {
+      remaining.delete(step);
+      last = step;
+      // A visited edge ends the walk rather than repeating it. Shas are derived
+      // from content, so a cycle takes forged records, and the edges it strands
+      // are reported as the break they look like from here.
+      step = out.get(step.after);
+    }
+  }
+
+  // A record that was not served leaves an edge nobody can see, and the walk
+  // stops at its start looking exactly like a merge that went unrecorded. That
+  // link is already reported, as MISSING_RECORD or PRE_ATTESTATION, so a second
+  // accusation drawn from an incomplete set of records says nothing new and can
+  // be wrong. More stops than withheld records means at least one is real, and
+  // there is no way to say which, so all of them are shown.
+  if (stops > 0 && stops <= unreadable) return { findings: [], endsAt: last };
+  return { findings, endsAt: last };
+}
+
+/**
+ * Two records leaving the same base.
+ *
+ * The branch cannot have moved off one sha two different ways, so one of the
+ * two describes a merge that did not happen here. This is only visible from the
+ * edges: down the log the two sit at different positions and each looks fine
+ * beside its own neighbour. Reported rather than resolved, because picking
+ * which of the two to follow would be inventing the answer.
+ */
+function forked(edges: readonly Edge[]): ChainFinding[] {
+  const byBase = new Map<string, Edge[]>();
+  for (const e of edges) {
+    if (e.before === null) continue;
+    byBase.set(e.before, [...(byBase.get(e.before) ?? []), e]);
+  }
+  const findings: ChainFinding[] = [];
+  for (const [base, group] of byBase) {
+    if (group.length < 2) continue;
+    const [, second] = group;
+    findings.push({
+      code: "FORKED_BASE",
+      sequence: second?.sequence ?? null,
+      digest: second?.digest ?? "",
+      detail:
+        `records ${group.map((e) => e.sequence ?? "?").join(" and ")} both move the base off ${base}; ` +
+        `the branch left it once, so one of them did not happen on this branch`,
+    });
+  }
+  return findings;
+}
+
+/**
+ * Where to start walking a set of records: the one whose base nothing else in
+ * the set reaches. Ties and cycles fall back to the lowest sequence, which is
+ * the earliest thing written and the only ordering left that means anything.
+ */
+function root(edges: ReadonlySet<Edge>): Edge {
+  const arrivals = new Set([...edges].map((e) => e.after));
+  const ordered = [...edges].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+  return ordered.find((e) => e.before === null || !arrivals.has(e.before)) ?? (ordered[0] as Edge);
 }
 
 /**
@@ -205,19 +332,16 @@ export async function verifyChain(
  * and a repository whose every record was withheld look the same from here,
  * and the caller's own "nothing was verified" verdict already covers it.
  */
-function reachesHead(
-  last: { afterBaseSha: string | null; digest: string; sequence: number | null } | null,
-  ports: ChainVerifierPorts,
-): ChainFinding[] {
-  if (ports.head === undefined || last === null || last.afterBaseSha === null) return [];
-  if (last.afterBaseSha === ports.head.baseSha) return [];
+function reachesHead(last: Edge | null, unreadable: number, ports: ChainVerifierPorts): ChainFinding[] {
+  if (ports.head === undefined || last === null || unreadable > 0) return [];
+  if (last.after === ports.head.baseSha) return [];
   return [
     {
       code: "CHAIN_BEHIND_HEAD",
       sequence: last.sequence,
       digest: last.digest,
       detail:
-        `the last record leaves the base at ${last.afterBaseSha}, but the branch stands at ` +
+        `the last record leaves the base at ${last.after}, but the branch stands at ` +
         `${ports.head.baseSha}; the base moved after the chain ended and no record says how`,
     },
   ];

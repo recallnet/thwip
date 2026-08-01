@@ -19,8 +19,20 @@
  * delivery order.
  */
 
-/** Written into every merge commit the queue makes, by the merge workflow. */
+/** Written into every merge commit the queue makes. */
 export const QUEUE_MERGE_TRAILER = "thwip-queue-operation";
+
+/**
+ * Whether a commit message says the queue performed this merge.
+ *
+ * Every path that writes a merge commit and every path that reads one asks this
+ * function, so the writer and the reader cannot drift into disagreeing about
+ * what attribution looks like. They used to agree by both spelling the trailer
+ * by hand, and the driver's message never spelled it at all.
+ */
+export function carriesQueueAttribution(message: string): boolean {
+  return message.includes(`${QUEUE_MERGE_TRAILER}:`);
+}
 
 
 export interface ExternalPush {
@@ -62,7 +74,7 @@ export function externalPushFromWebhook(event: string, payload: PushPayload): Ex
   // because the cost of being wrong is a pause an administrator clears, not a
   // merge onto a branch nobody checked.
   const message = payload.head_commit?.message;
-  if (typeof message === "string" && message.includes(`${QUEUE_MERGE_TRAILER}:`)) return null;
+  if (typeof message === "string" && carriesQueueAttribution(message)) return null;
 
   return { repositoryId: String(repositoryId), baseRef, observedBaseSha };
 }

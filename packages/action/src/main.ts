@@ -263,6 +263,22 @@ async function main(): Promise<void> {
       },
     );
     renderRichSummary(result, commit, facts);
+
+    // This job publishes the `thwip` status check that the ruleset requires, so
+    // anything but a pass has to keep the gate closed. That includes
+    // VERIFICATION_PENDING: the evidence has not settled after the verifier's
+    // own retries, and a green check here would let the merge through on
+    // evidence nobody has read.
+    //
+    // The control plane publishes a separate in-progress check that explains
+    // the wait. Say the same thing here, so the red is not read as "your tests
+    // failed".
+    if (result.code === "VERIFICATION_PENDING") {
+      console.log(
+        `[thwip] ${commit.sha.slice(0, 12)}: waiting for evidence. ${result.detail ?? ""} ` +
+          `Nothing failed. Re-run this job once the checks it names have finished.`,
+      );
+    }
     if (result.code !== "PASS") allPass = false;
 
     // Per-suite check runs on the PR head, so the checks list reads like a
@@ -274,7 +290,13 @@ async function main(): Promise<void> {
     }
 
     // Best-effort observation; never affects the conclusion.
-    await recordObservation(repositoryId, commit.sha, result.code);
+    //
+    // Pending is not a verdict, so it is not recorded as one. The dashboard
+    // reads the newest observation as the project's last verification, and
+    // "we have not decided yet" is not something to show there.
+    if (result.code !== "VERIFICATION_PENDING") {
+      await recordObservation(repositoryId, commit.sha, result.code);
+    }
   }
 
   process.exit(allPass ? 0 : 1);
