@@ -14,6 +14,7 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
+import { requiresDeviceOnly } from "./queue/runners.js";
 import type { D1Like } from "./queue/projection.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
@@ -1347,13 +1348,20 @@ export async function queueFromPullRequest(env: Env, payload: {
     // something drives it. The eject route drives through `driveLane`; this
     // webhook has no route deps to borrow it from, so it repeats the same
     // lookup directly against `driveTurnFor`, the same dispatcher the route
-    // uses underneath.
+    // uses underneath — and the same `requiresDeviceOnly` check `driveLane`
+    // applies, read here with `readActivePolicy` directly rather than through
+    // a `deps` object this module-level handler does not have. Skipping the
+    // check would spend an Actions run under `fresh`/`audited`, where no
+    // workflow can ever claim it.
     const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
     if (holder !== undefined) {
-      try {
-        await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
-      } catch {
-        /* the turn survives; a later tick or the drain asks again */
+      const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
+      if (!requiresDeviceOnly(policy?.securityProfile ?? null)) {
+        try {
+          await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
+        } catch {
+          /* the turn survives; a later tick or the drain asks again */
+        }
       }
     }
 
