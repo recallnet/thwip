@@ -102,6 +102,7 @@ const QUEUE_SUBCOMMANDS = [
   "explain",
   "reconcile",
   "doctor",
+  "work",
 ] as const;
 
 type QueueSubcommand = (typeof QUEUE_SUBCOMMANDS)[number];
@@ -110,7 +111,7 @@ const QUEUE_HELP = `Usage: thwip queue <subcommand> [options]
 
 Subcommands:
   status, list, join, leave, pause, resume, rebaseline, eject, bypass,
-  explain, reconcile, doctor
+  explain, reconcile, doctor, work
 
 Run \`thwip queue <subcommand> --help\` for its accepted options.
 `;
@@ -138,6 +139,11 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
     `Usage: thwip queue reconcile --repo OWNER/NAME --observed RESULT --reason TEXT ` +
     `[--merge-sha OID] [--branch BRANCH]\n`,
   doctor: `Usage: thwip queue doctor --repo OWNER/NAME [--explain] [--strict] [--json]\n`,
+  work:
+    `Usage: thwip queue work --repo OWNER/NAME --watch [--branch BRANCH]\n\n` +
+    `Make this machine available for a fresh/audited turn: heartbeat on an\n` +
+    `interval so it stays scheduler-eligible, and report the moment it holds\n` +
+    `an offer. Exits cleanly on interrupt; queued work keeps its place in line.\n`,
 };
 
 function isQueueSubcommand(value: string | undefined): value is QueueSubcommand {

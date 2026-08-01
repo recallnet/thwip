@@ -31,6 +31,7 @@ import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 import { executeCli, type CommandInvocation } from "./cli-args.js";
 import { cmdVerifyChain } from "./verify-chain.js";
 import { flag } from "./cli-flags.js";
+import { realHeartbeat, runQueueWork } from "./queue-work.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -631,14 +632,69 @@ async function cmdQueue(argv: string[]): Promise<number> {
   return res.ok ? 0 : res.status === 403 ? EXIT.permission : EXIT.unavailable;
 }
 
+/**
+ * `thwip queue work --watch`. Validation and the watch loop itself live in
+ * queue-commands.ts and queue-work.ts; this only resolves identity, the
+ * registered signing key (its fingerprint is the device key id a heartbeat
+ * carries — the same key `thwip run` signs proofs with), and the repository
+ * id, then wires a real heartbeat and the process's own interrupt signals
+ * into the loop.
+ */
+async function cmdQueueWork(argv: string[]): Promise<number> {
+  const parsed = planQueueCommand(["work", ...argv]);
+  if (!parsed.ok) {
+    process.stderr.write(parsed.message + "\n");
+    return parsed.exitCode;
+  }
+  const repo = flag(argv, "--repo") ?? "";
+  const cwd = process.cwd();
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const auth = await apiAuthHeader();
+  if (auth === null) {
+    process.stderr.write("not signed in: run `thwip login`\n");
+    return EXIT.authRequired;
+  }
+
+  const config = await loadConfig();
+  const identity = await resolveGithubIdentity(config);
+  const key = await requireRegisteredKey(cwd, config, identity.login);
+  const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+  if (repositoryId === null) {
+    process.stderr.write(`cannot resolve ${repo}\n`);
+    return EXIT.setupInvalid;
+  }
+
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    return await runQueueWork({
+      repo,
+      ports: {
+        heartbeat: realHeartbeat(endpoint, auth, repositoryId, key.fingerprint),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        signal: controller.signal,
+      },
+      emit: (text) => process.stdout.write(text + "\n"),
+    });
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
+}
+
 async function dispatchCli(invocation: CommandInvocation): Promise<number> {
   switch (invocation.command) {
     case "run":
       return cmdRun([...invocation.argv]);
     case "ship":
       return cmdShip([...invocation.argv]);
-    case "queue":
+    case "queue": {
+      const [subcommand, ...rest] = invocation.argv;
+      if (subcommand === "work") return cmdQueueWork(rest);
       return cmdQueue([...invocation.argv]);
+    }
     case "login":
       return cmdLogin([...invocation.argv]);
     case "init":

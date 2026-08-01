@@ -330,6 +330,29 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
       };
     }
 
+    case "work": {
+      // The actual watch loop lives in queue-work.ts and is dispatched there
+      // directly (it heartbeats on an interval rather than making one
+      // request), so this only validates arguments. The plan below names the
+      // endpoint the loop calls, for `queue --help` and for anything that
+      // inspects a plan without executing it.
+      const unknown = rejectUnknown(flags, ["repo", "branch", "watch"]);
+      if (unknown !== null) return unknown;
+      const repo = requireRepo(flags);
+      if (isPlan(repo)) return repo;
+      if (!flags.values.has("watch")) {
+        return usage("thwip queue work --repo OWNER/NAME --watch [--branch BRANCH]");
+      }
+      return {
+        ok: true,
+        plan: {
+          method: "POST",
+          path: `/v1/queue/{repositoryId}/runners/heartbeat?ref=${encodeURIComponent(requireRef(flags))}`,
+          requiresAdmin: false,
+        },
+      };
+    }
+
     case "doctor": {
       const unknown = rejectUnknown(flags, ["repo", "explain", "strict", "json"]);
       if (unknown !== null) return unknown;
