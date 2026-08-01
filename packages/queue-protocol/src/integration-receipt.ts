@@ -38,17 +38,34 @@ export interface ReceiptSuite {
   readonly reportDigest?: Sha256;
 }
 
+/**
+ * The pipeline's own execution digests exist only when it is a Dagger
+ * pipeline. A command pipeline — what every live policy resolves to today —
+ * has no module and no engine to name, and fabricating one would bind the
+ * receipt to a Dagger run that never happened. So the two digests are
+ * refused for `runner: "command"`, not merely optional, mirroring
+ * {@link AssignmentPolicy} in assignment.ts so the two schemas agree.
+ */
+export type ReceiptPolicy =
+  | {
+      readonly digest: Sha256;
+      readonly runner: "command";
+      readonly requiredSuites: readonly string[];
+    }
+  | {
+      readonly digest: Sha256;
+      readonly runner: "dagger";
+      readonly daggerModuleDigest: Sha256;
+      readonly daggerEngineDigest: Sha256;
+      readonly requiredSuites: readonly string[];
+    };
+
 export interface IntegrationRunPredicateV1 {
   readonly assignmentId: string;
   readonly assignmentDigest: Sha256;
   readonly attemptId: string;
   readonly subject: GitSubject;
-  readonly policy: {
-    readonly digest: Sha256;
-    readonly daggerModuleDigest: Sha256;
-    readonly daggerEngineDigest: Sha256;
-    readonly requiredSuites: readonly string[];
-  };
+  readonly policy: ReceiptPolicy;
   readonly runner: {
     readonly principalId: string;
     readonly githubUserId: string;
@@ -103,6 +120,46 @@ function parseSuite(v: unknown, index: number): ParseResult<ReceiptSuite> {
   return ok({ name, outcome: outcome.value, durationMs: durationMs.value, reportDigest: reportDigest.value });
 }
 
+const POLICY_KEYS_COMMON = ["digest", "runner", "requiredSuites"] as const;
+const POLICY_KEYS_DAGGER = [...POLICY_KEYS_COMMON, "daggerModuleDigest", "daggerEngineDigest"] as const;
+
+function parsePolicy(v: unknown): ParseResult<ReceiptPolicy> {
+  if (!isRecord(v)) return fail("receipt.policy must be an object");
+  const runner = literal(v["runner"], "receipt.policy.runner", ["command", "dagger"] as const);
+  if (!runner.ok) return runner;
+
+  const policyKeys = runner.value === "dagger" ? POLICY_KEYS_DAGGER : POLICY_KEYS_COMMON;
+  const shape = exactKeys(v, "receipt.policy", policyKeys);
+  if (!shape.ok) return shape;
+  const present = requireKeys(v, "receipt.policy", policyKeys);
+  if (!present.ok) return present;
+
+  const digest = sha256(v["digest"], "receipt.policy.digest");
+  if (!digest.ok) return digest;
+  const requiredSuites = array(v["requiredSuites"], "receipt.policy.requiredSuites", BOUNDS.suiteEntries, (item, i) => {
+    if (typeof item !== "string" || item.length === 0) return fail(`suite ${i} must be a string`);
+    return ok(item);
+  });
+  if (!requiredSuites.ok) return requiredSuites;
+  if (requiredSuites.value.length === 0) return fail("receipt.policy.requiredSuites must not be empty");
+
+  if (runner.value === "command") {
+    return ok({ digest: digest.value, runner: "command", requiredSuites: requiredSuites.value });
+  }
+
+  const moduleDigest = sha256(v["daggerModuleDigest"], "receipt.policy.daggerModuleDigest");
+  if (!moduleDigest.ok) return moduleDigest;
+  const engineDigest = sha256(v["daggerEngineDigest"], "receipt.policy.daggerEngineDigest");
+  if (!engineDigest.ok) return engineDigest;
+  return ok({
+    digest: digest.value,
+    runner: "dagger",
+    daggerModuleDigest: moduleDigest.value,
+    daggerEngineDigest: engineDigest.value,
+    requiredSuites: requiredSuites.value,
+  });
+}
+
 export function parseIntegrationReceipt(v: unknown): ParseResult<IntegrationRunPredicateV1> {
   if (!isRecord(v)) return fail("receipt must be an object");
   const shape = exactKeys(v, "receipt", KEYS);
@@ -127,32 +184,8 @@ export function parseIntegrationReceipt(v: unknown): ParseResult<IntegrationRunP
   const subject = parseGitSubject(v["subject"], "receipt.subject");
   if (!subject.ok) return subject;
 
-  const policy = v["policy"];
-  if (!isRecord(policy)) return fail("receipt.policy must be an object");
-  const policyShape = exactKeys(policy, "receipt.policy", [
-    "digest",
-    "daggerModuleDigest",
-    "daggerEngineDigest",
-    "requiredSuites",
-  ]);
-  if (!policyShape.ok) return policyShape;
-  const policyDigest = sha256(policy["digest"], "receipt.policy.digest");
-  if (!policyDigest.ok) return policyDigest;
-  const moduleDigest = sha256(policy["daggerModuleDigest"], "receipt.policy.daggerModuleDigest");
-  if (!moduleDigest.ok) return moduleDigest;
-  const engineDigest = sha256(policy["daggerEngineDigest"], "receipt.policy.daggerEngineDigest");
-  if (!engineDigest.ok) return engineDigest;
-  const requiredSuites = array(
-    policy["requiredSuites"],
-    "receipt.policy.requiredSuites",
-    BOUNDS.suiteEntries,
-    (item, i) => {
-      if (typeof item !== "string" || item.length === 0) return fail(`suite ${i} must be a string`);
-      return ok(item);
-    },
-  );
-  if (!requiredSuites.ok) return requiredSuites;
-  if (requiredSuites.value.length === 0) return fail("receipt.policy.requiredSuites must not be empty");
+  const policy = parsePolicy(v["policy"]);
+  if (!policy.ok) return policy;
 
   const runner = v["runner"];
   if (!isRecord(runner)) return fail("receipt.runner must be an object");
@@ -208,7 +241,7 @@ export function parseIntegrationReceipt(v: unknown): ParseResult<IntegrationRunP
   // repeats a required suite is not a statement about the policy it names.
   const seen = new Map<string, number>();
   for (const suite of suites.value) seen.set(suite.name, (seen.get(suite.name) ?? 0) + 1);
-  for (const required of requiredSuites.value) {
+  for (const required of policy.value.requiredSuites) {
     const count = seen.get(required) ?? 0;
     if (count === 0) return fail(`receipt.run.suites is missing required suite ${required}`);
     if (count > 1) return fail(`receipt.run.suites repeats required suite ${required}`);
@@ -219,12 +252,7 @@ export function parseIntegrationReceipt(v: unknown): ParseResult<IntegrationRunP
     assignmentDigest: assignmentDigest.value,
     attemptId: attemptId.value,
     subject: subject.value,
-    policy: {
-      digest: policyDigest.value,
-      daggerModuleDigest: moduleDigest.value,
-      daggerEngineDigest: engineDigest.value,
-      requiredSuites: requiredSuites.value,
-    },
+    policy: policy.value,
     runner: {
       principalId: principalId.value,
       githubUserId: githubUserId.value,
