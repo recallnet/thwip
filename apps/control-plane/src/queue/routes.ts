@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { queueKey } from "@thwip/queue-domain";
+import { queueKey, type BlockingReason } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
@@ -20,7 +20,8 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { recordHeartbeat, requiresDeviceOnly } from "./runners.js";
+import { capabilityFor, recordHeartbeat, requiresDeviceOnly } from "./runners.js";
+import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
@@ -1444,6 +1445,27 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const pullRequestNumber = body.pullRequestNumber;
     const headSha = body.headSha;
 
+    const baseReady = body.proofAccepted === true && body.draft !== true;
+    const basePrimaryReason: BlockingReason | null =
+      body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING";
+
+    // Runner presence has to be read before the transaction, not inside it:
+    // `onQueue`'s callback runs synchronously against the open store, and this
+    // is a network round trip. Skipped entirely when `principalId` is null —
+    // there is nobody to be connected — and when the profile has no device-only
+    // requirement, `capabilityFor` never touches `queue_runners` at all.
+    const capability =
+      principalId === null
+        ? { serverExecutable: true, compatibleRunnerConnected: false }
+        : await capabilityFor(
+            db,
+            repositoryId,
+            principalId,
+            new Date().toISOString(),
+            (await deps.activePolicy(c.env, repositoryId))?.securityProfile ?? null,
+          );
+    const folded = foldCapability({ ready: baseReady, primaryReason: basePrimaryReason }, capability);
+
     // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
     // against the stored document. This was a Durable Object round trip, which
     // is the one resource with a daily cliff; it is now a row read and, only when
@@ -1457,10 +1479,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             sponsorPrincipalId: principalId,
             sponsorGithubUserId: String(body.authorGithubUserId),
             headSha,
-            ready: body.proofAccepted === true && body.draft !== true,
-            schedulerEligible: body.proofAccepted === true && body.draft !== true,
-            primaryReason:
-              body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
+            ready: baseReady,
+            schedulerEligible: folded.schedulerEligible,
+            primaryReason: folded.primaryReason,
             // Time buckets, so a retried check re-evaluates rather than being
             // deduplicated against a decision taken minutes ago, while a burst of
             // parallel jobs for one head still collapses to one turn.

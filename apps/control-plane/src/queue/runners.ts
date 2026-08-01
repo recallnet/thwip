@@ -146,6 +146,29 @@ export async function isPrincipalConnected(
 }
 
 /**
+ * Capability facts for `readiness.ts`'s `foldCapability`, from the repository's
+ * security profile and, only when that profile needs one, whether this
+ * principal has a device connected right now.
+ *
+ * `serverExecutable` is `!requiresDeviceOnly`, and when it is true presence is
+ * irrelevant — the read against `queue_runners` is skipped entirely, not just
+ * discarded, so a `fast` or `remote` repository never pays for a runner table
+ * it has no rows in.
+ */
+export async function capabilityFor(
+  db: D1Like,
+  repositoryId: string,
+  principalId: string,
+  now: string,
+  securityProfile: string | null,
+): Promise<{ readonly serverExecutable: boolean; readonly compatibleRunnerConnected: boolean }> {
+  const serverExecutable = !requiresDeviceOnly(securityProfile);
+  if (serverExecutable) return { serverExecutable, compatibleRunnerConnected: false };
+  const compatibleRunnerConnected = await isPrincipalConnected(db, repositoryId, principalId, now);
+  return { serverExecutable, compatibleRunnerConnected };
+}
+
+/**
  * Delete every runner row for this repository whose heartbeat has fallen out
  * of the grace window, and report which principals that leaves with no live
  * device left at all — the present-to-absent transition the scheduler cares
