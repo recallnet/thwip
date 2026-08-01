@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { CompactSign, SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
+import { latestVerification } from "./latest-verification.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import {
@@ -411,20 +412,8 @@ app.get("/v1/dashboard/projects", async (c) => {
             json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
             b.config_source AS config_source,
             (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
-            COALESCE(
-              (SELECT outcome FROM proof_verifications v
-                WHERE v.project_id = p.id AND v.status = 'completed'
-                ORDER BY completed_at DESC LIMIT 1),
-              (SELECT outcome FROM verification_observations o
-                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
-            ) AS last_outcome,
-            COALESCE(
-              (SELECT completed_at FROM proof_verifications v
-                WHERE v.project_id = p.id AND v.status = 'completed'
-                ORDER BY completed_at DESC LIMIT 1),
-              (SELECT observed_at FROM verification_observations o
-                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
-            ) AS last_observed_at
+            ${latestVerification("outcome")} AS last_outcome,
+            ${latestVerification("at")} AS last_observed_at
      FROM projects p LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
      WHERE p.organization_id = ? ORDER BY p.github_name`,
   )
