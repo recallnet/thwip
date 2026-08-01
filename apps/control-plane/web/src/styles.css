@@ -57,7 +57,7 @@
   max-width: none;
   text-wrap: balance;
 }
-.thwip-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+/* .thwip-actions is drawn in skin.css, on the shared spacing scale. */
 
 /* ---------- the proof slip ---------- */
 .thwip-slip {
@@ -172,9 +172,8 @@ footer.thwip-footer {
 }
 
 /* ---------- misc ---------- */
-.ok { color: var(--gp-green); font-family: var(--gp-sans); font-size: 0.82rem; }
-.bad { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.82rem; }
-.thwip-error { color: var(--gp-red); font-family: var(--gp-sans); font-size: 0.85rem; }
+/* .ok, .bad, .wait and .thwip-error are drawn in skin.css. Two definitions of
+   the same tone is how a status ends up looking different on two pages. */
 
 .thwip-device-card { max-width: 28rem; margin: 4rem auto; }
 .thwip-device-card input {
@@ -192,10 +191,9 @@ footer.thwip-footer {
 
 .thwip-add-repos {
   display: flex;
-  gap: 0.7rem;
+  gap: var(--s3);
   align-items: baseline;
   flex-wrap: wrap;
-  margin-bottom: 0.9rem;
 }
 .thwip-add-repos .gp-btn { flex-shrink: 0; }
 .thwip-add-repos .gp-panel__meta { flex: 1; min-width: 18rem; }
