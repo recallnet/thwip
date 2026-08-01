@@ -32,6 +32,7 @@ import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
+  authorizationFor,
   readAttestation,
   readChain,
   reuseEvidenceFor,
@@ -681,6 +682,59 @@ function failure(error: unknown): {
   };
 }
 
+/**
+ * What a repository-scoped path requires of its caller, keyed by the segment
+ * after the repository id.
+ *
+ * Membership is the default, and the gate below applies it, so a route added to
+ * this file is guarded before its first line runs. Thirteen routes each
+ * remembering to check for themselves is how a signed-in member of one
+ * organization came to be able to pause, rebaseline and reconcile another
+ * organization's queue: every one of them called `authenticate`, which says the
+ * caller holds a session somewhere and has never said anything about the
+ * repository in the path. It is the same shape that produced twelve copies of a
+ * queue-key guard carrying the same wrong message.
+ *
+ * A route that establishes access some other way is listed here, in one place,
+ * with the reason. Forgetting to list a route makes it stricter, never weaker.
+ */
+const REPOSITORY_ACCESS: Readonly<Record<string, "workflow" | "either" | "route">> = {
+  // The pinned workflow's own calls. Each verifies a GitHub Actions OIDC token
+  // and refuses one minted for another repository, which binds the repository
+  // harder than a membership row does. A workflow holds no session and belongs
+  // to no organization, so asking it for membership would refuse it outright.
+  authorize: "workflow",
+  "candidate-result": "workflow",
+  merged: "workflow",
+  "not-merged": "workflow",
+  // Either identity. The merge workflow polls these with the token it
+  // authorizes with; a person or the CLI arrives with a session, and that half
+  // still has to be a member. `nudge` had no authentication of any kind, and it
+  // drives GitHub Actions on the repository it names.
+  candidate: "either",
+  nudge: "either",
+  // The route decides, because the answer turns on a `chain_public` row and the
+  // order of its refusals is what stops a caller walking the numeric repository
+  // id space. See the route, and `chain-route.test.ts`, which pins that order.
+  chain: "route",
+};
+
+/**
+ * The caller the gate established, for the handlers that name them.
+ *
+ * `isAdmin` is only ever read after membership has been established, which is
+ * what makes it a claim about the organization that owns this repository.
+ * `authenticate` answers for whichever organization the session selected, so
+ * read before membership it said an administrator of one organization was an
+ * administrator of every other.
+ */
+interface QueueCaller {
+  readonly principalId: string;
+  readonly githubUserId: string;
+  readonly isAdmin: boolean;
+  readonly operator?: boolean;
+}
+
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** Who the caller is, from the existing session or bearer auth. */
   authenticate(c: { req: { raw: Request } }, env: TEnv): Promise<
@@ -817,7 +871,43 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
-  const app = new Hono<{ Bindings: TEnv }>();
+  const app = new Hono<{ Bindings: TEnv; Variables: { caller: QueueCaller } }>();
+
+  /**
+   * Establish that the caller may act on the repository in the path, before any
+   * handler runs.
+   *
+   * Registered once, over everything under `/v1/queue`, so access is a property
+   * of the prefix rather than a line each handler is trusted to copy. A path
+   * whose third segment is not a numeric repository id falls straight through:
+   * `/v1/queue/records/:digest` names no repository, and a malformed id is the
+   * handler's 400 to give rather than a refusal that hides it.
+   */
+  app.use("/v1/queue/*", async (c, next) => {
+    const segments = c.req.path.split("/");
+    const repositoryId = decimal(segments[3]);
+    if (repositoryId === null) return next();
+
+    const mode = REPOSITORY_ACCESS[segments[4] ?? ""] ?? "member";
+    if (mode === "workflow" || mode === "route") return next();
+
+    if (mode === "either") {
+      const claims = await deps.verifyOidc(c, c.env);
+      if (claims !== null && String(claims["repository_id"] ?? "") === repositoryId) return next();
+    }
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    // One refusal for a repository this caller is not in and one for a
+    // repository nobody has onboarded. Two answers would be the enumeration
+    // the chain route's ordering already exists to prevent, arriving through a
+    // different door.
+    if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
+      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+    }
+    c.set("caller", who);
+    return next();
+  });
 
   /**
    * Every mutating route, with the turn check wired in.
@@ -853,8 +943,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const { store } = await readQueue(c.env, repositoryId, baseRef);
     const report = diagnose(store, Number(c.req.query("events") ?? 25));
@@ -885,9 +973,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     // Served from the projection, not the object.
     //
@@ -929,8 +1014,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
 
     const body = (await c.req.json().catch(() => ({}))) as {
       pullRequestNumber?: number;
@@ -975,8 +1059,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
     const entryId = c.req.param("entryId");
@@ -1004,9 +1087,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const key = idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`);
     const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
@@ -1039,13 +1119,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const repositoryId = decimal(c.req.param("repositoryId"));
     if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-
+    const who = c.get("caller");
     const db = c.env.DB as unknown as D1Like;
-    if (!(await mayActOnRepository(db, repositoryId, who))) {
-      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
-    }
 
     const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: unknown };
     if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
@@ -1116,8 +1191,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
@@ -1140,8 +1218,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     // A refusal here means a rebaseline is still required after external movement.
@@ -1159,8 +1240,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as { baseSha?: string };
@@ -1419,18 +1503,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof tree !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) {
       return c.json({ error: "tree must be a lowercase hex object id" }, 400);
     }
-    // Either identity. The merge workflow polls this with an Actions OIDC token,
-    // the same one it authorizes with; a person or the CLI arrives with a session
-    // or an operator token. Accepting only the latter meant the workflow got a 401
-    // on every poll, never saw its verdict, and spun until its deadline while the
-    // verdict sat here accepted.
-    const claims = await deps.verifyOidc(c, c.env);
-    const fromWorkflow = claims !== null && String(claims["repository_id"] ?? "") === repositoryId;
-    if (!fromWorkflow) {
-      const who = await deps.authenticate(c, c.env);
-      if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-    }
-
     const verdict = await readCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, tree);
     if (verdict === null) return c.json({ verified: false, candidateTreeOid: tree });
     return c.json({
@@ -1993,8 +2065,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const chain = await readProjectedChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
@@ -2014,8 +2089,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * queue certify the same integration twice.
    */
   app.post("/v1/queue/:repositoryId/reconcile", async (c) => {
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const selected = requestedQueue(c);
@@ -2184,6 +2262,250 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     return c.json({
       resolved: resolved.status,
       attemptId,
+      actor: who.principalId,
+      reason,
+    });
+  });
+
+  /**
+   * Record a merge the queue authorized, that landed, and that nobody wrote down.
+   *
+   * `reconcile` is the repair tool and it refuses unless an attempt still holds
+   * the lane. The failure it exists for takes the lane away first: the queue read
+   * GitHub before GitHub's read caught up with its own write, concluded
+   * CONFIRMED_NOT_MERGED, and terminated the attempt. Four merges landed that
+   * way and the chain has no link for any of them, and by the time anyone noticed
+   * `reconcile` answered 409 for every one. A repair tool that only works while
+   * the failure is still in progress is not a repair tool.
+   *
+   * So this needs nothing from the attempt. The signed merge intent is what
+   * survives it, and it holds everything a transition record cites. The operator
+   * supplies one thing, a commit sha, and every claim the record makes is read
+   * from that commit or from the intent.
+   *
+   * Three things stop this writing a record for a merge nobody authorized.
+   * The commit's tree and parents come from GitHub, never from the caller.
+   * `authorizationFor` will only return an intent whose pinned tree and pinned
+   * parents are exactly that commit's, so a commit the queue never pinned has
+   * nothing to build a record from. And the transition record schema itself
+   * refuses a record whose merged tree is not the candidate tree and whose first
+   * and second parents are not the base and head the intent names, so a record
+   * that got past the first two would not sign.
+   *
+   * Where the record goes is decided by the chain, not by when the merge
+   * happened. The chain is hash-linked and append-only: a record's position and
+   * the digest of the record before it are inside the bytes that were signed, so
+   * putting a merge back where it belongs would mean re-signing every record
+   * after it under new digests. That is a rewrite, and refusing to rewrite is the
+   * whole claim. A repair links the current head and takes the next sequence, and
+   * the chain then holds a record for the merge in an order that is not the order
+   * it landed in.
+   */
+  app.post("/v1/queue/:repositoryId/repair", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      mergeSha?: string;
+      reason?: string;
+      /** Names the attempt where two of them authorized the same commit. */
+      attemptId?: string;
+    };
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+    if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+      return c.json({ error: "mergeSha required" }, 400);
+    }
+    const mergeSha = body.mergeSha;
+    const reason = body.reason.trim();
+
+    const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
+    if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+
+    const db = c.env.DB as unknown as D1Like;
+    const authorization = await authorizationFor(db, {
+      repositoryId,
+      baseRef,
+      treeOid: facts.treeOid,
+      parentShas: facts.parentShas,
+      ...(typeof body.attemptId === "string" ? { attemptId: body.attemptId } : {}),
+    });
+    if ("refused" in authorization) {
+      return c.json({ error: authorization.refused, code: "MERGE_NOT_AUTHORIZED" }, 409);
+    }
+    const intent = authorization.intent;
+    // A verified merge's record binds an Actions run id, which the intent does
+    // not carry, and an override binds an authorization this must not reissue.
+    // Neither can be rebuilt from what survives, so neither is guessed at.
+    if (intent.kind !== "reused" && intent.kind !== "candidate-verified") {
+      return c.json(
+        { error: `a ${intent.kind} merge cannot be rebuilt from its intent alone`, code: "MERGE_NOT_AUTHORIZED" },
+        409,
+      );
+    }
+    const attemptId = intent.attemptId;
+
+    const already = await transitionRecordFor(db, attemptId);
+    if (already !== null) {
+      return c.json({
+        recorded: "already",
+        attemptId,
+        pullRequestNumber: intent.pullRequestNumber,
+        transitionDigest: already,
+      });
+    }
+
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    if (snapshot.activeAttemptId === attemptId) {
+      return c.json(
+        { error: "that attempt still holds the lane; reconcile it instead", code: "ATTEMPT_STILL_LIVE" },
+        409,
+      );
+    }
+
+    // The tree the branch had before this merge, from the commit itself. A
+    // record that is not first in its epoch has to say where it started.
+    const before = await deps.commitFacts(c.env, repositoryId, intent.git.baseSha);
+    if (before === null) return c.json({ error: "could not read the base this merge started from" }, 404);
+
+    const head = snapshot.transitions.at(-1);
+    const transitionSequence = (head?.transitionSequence ?? 0) + 1;
+    const priorDigest = head?.digest ?? null;
+
+    // The policy the intent bound, not whatever is active now: the record says
+    // what this merge rested on, and the policy may have changed since.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const verified = intent.kind === "candidate-verified";
+    const signed = await signReusedRecord({
+      attemptId,
+      mergeMethod: intent.mergeMethod,
+      git: {
+        ...intent.git,
+        candidateSha: mergeSha,
+        candidateTreeOid: facts.treeOid,
+        candidateParentOids: [...facts.parentShas],
+      },
+      position: {
+        queueEpoch: snapshot.queueEpoch,
+        turnSequence: intent.turnSequence,
+        transitionSequence,
+        previousTransitionDigest: priorDigest as Sha256 | null,
+      },
+      pullRequestNumber: intent.pullRequestNumber,
+      evidence: {
+        workReceiptDigest: intent.evidence.workReceiptDigest,
+        organizationId: policy?.organizationId ?? "",
+        policyDigest: intent.policyDigest,
+        pipelineDigest: intent.evidence.pipelineDigest,
+        requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
+        proofCheckRunId: intent.evidence.proofCheckRunId,
+        ...(verified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
+      },
+      mergeIntentDigest: authorization.intentDigest,
+      before: { baseSha: intent.git.baseSha, treeOid: before.treeOid },
+      final: { sha: mergeSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
+      observedAt: new Date().toISOString(),
+      signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
+    });
+    if ("error" in signed) {
+      return c.json({ error: `the queue refused to sign its own record: ${signed.error}` }, 409);
+    }
+
+    const stored = await storeAttestation(db, {
+      digest: signed.digest,
+      kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
+      repositoryId,
+      baseRef,
+      transitionSequence,
+      attemptId,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy === null
+        ? {}
+        : {
+            organizationId: policy.organizationId,
+            mirror: (mirrored: {
+              organizationId: string;
+              repositoryId: string;
+              kind: "merge-intent" | "transition-record";
+              digest: string;
+              bytes: Uint8Array;
+            }) =>
+              storeEvidence(c.env, {
+                organizationId: mirrored.organizationId,
+                repositoryId: mirrored.repositoryId,
+                kind: mirrored.kind,
+                digest: mirrored.digest as `sha256:${string}`,
+                bytes: mirrored.bytes,
+              }).then(() => undefined),
+          }),
+    });
+    if (!stored.stored) {
+      return c.json({
+        recorded: "already",
+        attemptId,
+        pullRequestNumber: intent.pullRequestNumber,
+        transitionDigest: stored.digest,
+      });
+    }
+
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const tail = store.state().transitions.at(-1);
+      // The position this record claims is inside the bytes that were signed,
+      // and signing is not inside the transaction. A link recorded at a
+      // position its own record does not claim is exactly the break the
+      // verifier reports, so the record is dropped rather than misplaced.
+      if ((tail?.transitionSequence ?? 0) + 1 !== transitionSequence || (tail?.digest ?? null) !== priorDigest) {
+        return { moved: true as const };
+      }
+      return {
+        moved: false as const,
+        transition: commands.recordTransition({
+          idempotencyKey: `repair:${attemptId}`,
+          kind: verified ? "verified" : "reused",
+          transitionSequence,
+          priorDigest,
+          digest: signed.digest,
+          baseSha: mergeSha,
+          // The reducer chains an attempt only where it can see one whose phase
+          // is MERGED, and this attempt was terminated and has since been
+          // compacted away. The attempt is inside the signed record and on the
+          // row that holds it, which is where a reader looks for it.
+          attemptId: null,
+          witnessPrincipalIds: [who.principalId],
+        }),
+      };
+    });
+
+    if (result.moved) {
+      // The chain grew between reading the head and recording. The bytes stay:
+      // the queue really did sign them, and destroying signed evidence to tidy
+      // up is a worse habit than keeping a row nothing points at. What goes is
+      // the claim to a position, so the chain never serves a record whose own
+      // sequence disagrees with the one it was served at.
+      await db
+        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
+        .bind(signed.digest)
+        .run();
+      return c.json(
+        { error: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" },
+        409,
+      );
+    }
+
+    return c.json({
+      recorded: result.transition.status,
+      attemptId,
+      pullRequestNumber: intent.pullRequestNumber,
+      mergeSha,
+      sequence: transitionSequence,
+      transitionDigest: signed.digest,
+      mergeIntentDigest: authorization.intentDigest,
       actor: who.principalId,
       reason,
     });

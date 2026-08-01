@@ -1,5 +1,5 @@
-import { requiredSuitesDigest } from "@thwip/queue-protocol";
-import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
+import { parseMergeIntent, requiredSuitesDigest } from "@thwip/queue-protocol";
+import type { GitSubject, MergeIntentV1, Sha256 } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
   buildReusedProofRecord,
@@ -453,6 +453,116 @@ export async function transitionRecordFor(db: D1Like, attemptId: string): Promis
     .bind(attemptId)
     .first<{ digest: string }>();
   return row === null ? null : row.digest;
+}
+
+/**
+ * The signed merge intent that authorizes exactly this commit.
+ *
+ * A merge is recorded from the attempt that authorized it, and an attempt does
+ * not last: it is terminated when its outcome is settled and compacted out of
+ * the queue document some twenty entries later. The intent does last. It is
+ * signed before the branch is written, stored by digest, and it names the base,
+ * the head, the tree the queue verified, the pull request, the policy and the
+ * evidence. Everything a transition record cites is in it.
+ *
+ * The match is the whole safeguard. An operator names a commit; this finds the
+ * intent whose candidate tree is that commit's tree and whose candidate parents
+ * are that commit's parents, in order. A commit the queue never authorized has
+ * no such intent, so there is nothing for a record to be built from, and an
+ * operator who names one gets a refusal rather than a record. Nothing here is
+ * taken on the caller's word: both halves of the comparison come from
+ * elsewhere, the tree and parents from GitHub and the authorization from bytes
+ * the queue signed.
+ *
+ * `attemptId` narrows it. Two attempts on the same base and head produce
+ * intents that authorize the same commit, and rather than pick one this
+ * refuses and asks which.
+ */
+export interface AuthorizedMerge {
+  readonly intentDigest: Sha256;
+  readonly intent: MergeIntentV1;
+}
+
+export async function authorizationFor(
+  db: D1Like,
+  input: {
+    readonly repositoryId: string;
+    readonly baseRef: string;
+    readonly treeOid: string;
+    readonly parentShas: readonly string[];
+    readonly attemptId?: string;
+  },
+): Promise<AuthorizedMerge | { refused: string }> {
+  const rows = await db
+    .prepare(
+      `SELECT digest, bytes FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND kind = 'merge-intent'
+          AND json_extract(bytes, '$.git.candidateTreeOid') = ?
+          AND (? IS NULL OR attempt_id = ?)
+        ORDER BY created_at, digest`,
+    )
+    .bind(
+      input.repositoryId,
+      input.baseRef,
+      input.treeOid,
+      input.attemptId ?? null,
+      input.attemptId ?? null,
+    )
+    .all<{ digest: string; bytes: string }>();
+
+  const matched: AuthorizedMerge[] = [];
+  for (const row of rows.results) {
+    const parsed = parseMergeIntent(JSON.parse(row.bytes) as unknown);
+    if (!parsed.ok) continue;
+    const git = parsed.value.git;
+    if (git.repositoryId !== input.repositoryId || git.baseRef !== input.baseRef) continue;
+    if (git.candidateParentOids.length !== input.parentShas.length) continue;
+    if (git.candidateParentOids.some((oid, at) => oid !== input.parentShas[at])) continue;
+    matched.push({ intentDigest: row.digest as Sha256, intent: parsed.value });
+  }
+
+  if (matched.length === 0) {
+    return {
+      refused:
+        "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
+    };
+  }
+  const attempts = [...new Set(matched.map((m) => m.intent.attemptId))];
+  if (attempts.length > 1) {
+    return { refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}` };
+  }
+
+  // One attempt can sign its intent more than once: a merge run that restarts
+  // asks to be authorized again, and each call stamps a fresh `createdAt` and
+  // rebuilds the candidate commit, so two rows authorize the same merge under
+  // different digests. That is not an ambiguity about what was authorized, and
+  // refusing it would leave a merge unrecordable for a reason that says nothing
+  // about the merge. What would be an ambiguity is two intents that disagree
+  // about anything the record repeats, so that is what is compared, and the
+  // earliest of a set that agrees is cited: it is the authorization that was in
+  // force when the merge was asked for.
+  const first = matched[0]!;
+  if (matched.some((m) => cited(m.intent) !== cited(first.intent))) {
+    return { refused: "this commit's merge intents disagree about what they authorized" };
+  }
+  return first;
+}
+
+/** Everything a transition record repeats from the intent it cites. */
+function cited(intent: MergeIntentV1): string {
+  return JSON.stringify([
+    intent.kind,
+    intent.attemptId,
+    intent.pullRequestNumber,
+    intent.mergeMethod,
+    intent.policyDigest,
+    intent.turnSequence,
+    intent.git.baseSha,
+    intent.git.headSha,
+    intent.git.candidateTreeOid,
+    intent.git.candidateParentOids,
+    Object.entries(intent.evidence).sort(),
+  ]);
 }
 
 export async function readAttestation(

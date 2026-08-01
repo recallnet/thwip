@@ -8,6 +8,7 @@ import {
 import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 import type { MergeAttemptOutcome } from "./turn.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
+import { carriesQueueAttribution, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
 /**
  * The real GitHub side of an integration turn.
@@ -153,6 +154,13 @@ export async function resolveCandidate(
 /**
  * The merge (plan.md §18.3). Returns the raw response so the caller can classify
  * it; this function deliberately makes no decision about retrying.
+ *
+ * This is the only place the control plane asks GitHub to write a merge commit,
+ * so it is where the attribution is enforced. A message that does not name the
+ * operation lands a merge the push webhook cannot tell from an outsider's push,
+ * and the queue then appends an `external` chain link for its own work — a
+ * record of something that never happened. Refusing before the request means a
+ * merge path that forgets the trailer fails a test instead of forging a link.
  */
 export async function mergePullRequest(
   http: GitHubHttp,
@@ -165,6 +173,11 @@ export async function mergePullRequest(
     readonly commitMessage: string;
   },
 ): Promise<RawResponse> {
+  if (!carriesQueueAttribution(input.commitMessage)) {
+    throw new Error(
+      `refusing to merge pull request #${input.pullRequestNumber}: the commit message carries no ${QUEUE_MERGE_TRAILER} trailer, so the merge would be read back as an external push`,
+    );
+  }
   return http.raw(`/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}/merge`, {
     method: "PUT",
     body: JSON.stringify({

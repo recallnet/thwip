@@ -128,6 +128,9 @@ const deps: VerifyDeps = {
   verifySshSignature: async ({ signatureBase64 }) => signatureBase64 === "GOOD",
 };
 
+/** Tests read GitHub as many times as production does, without the backoff. */
+const noSleep = async (): Promise<void> => undefined;
+
 async function run(args?: {
   statement?: InTotoStatementV1;
   envelope?: DsseEnvelope;
@@ -333,7 +336,7 @@ describe("hybrid: remote suites proven by GitHub", () => {
     expect(r.code).toBe("PASS");
   });
 
-  it("fails when the remote suite has no check on this commit", async () => {
+  it("waits rather than failing when the remote suite has no check on this commit", async () => {
     const r = await verifyProof(
       {
         commitMessage: commitMessageFor(envelopeFor(makeStatement())),
@@ -341,12 +344,12 @@ describe("hybrid: remote suites proven by GitHub", () => {
         bundle: withRemote(),
         now: NOW,
       },
-      { ...deps, remoteCheckConclusions: async () => new Map() },
+      { ...deps, sleep: noSleep, remoteCheckConclusions: async () => new Map() },
     );
-    expect(r.code).toBe("SUITE_MISSING");
+    expect(r.code).toBe("VERIFICATION_PENDING");
   });
 
-  it("fails when the remote suite's check failed", async () => {
+  it("fails when every read agrees the remote suite's check failed", async () => {
     const r = await verifyProof(
       {
         commitMessage: commitMessageFor(envelopeFor(makeStatement())),
@@ -354,9 +357,94 @@ describe("hybrid: remote suites proven by GitHub", () => {
         bundle: withRemote(),
         now: NOW,
       },
-      { ...deps, remoteCheckConclusions: async () => new Map([["build-darwin", "failure"]]) },
+      { ...deps, sleep: noSleep, remoteCheckConclusions: async () => new Map([["build-darwin", "failure"]]) },
     );
     expect(r.code).toBe("SUITE_NOT_PASSED");
+  });
+
+  /**
+   * The bug this covers: one read of GitHub's check list decided the proof, so a
+   * check that had not finished was written down as a failure the developer then
+   * read as "your tests failed". The merge path lost three merges to the same
+   * shape (.superpowers/sdd/not-merged-report.md).
+   */
+  it("passes when the check reports pending on the first read and success after", async () => {
+    const answers = [
+      new Map([["thwip / build-darwin", "pending"]]),
+      new Map([["thwip / build-darwin", "success"]]),
+    ];
+    let reads = 0;
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      {
+        ...deps,
+        sleep: noSleep,
+        remoteCheckConclusions: async () => answers[Math.min(reads++, answers.length - 1)]!,
+      },
+    );
+    expect(r.code).toBe("PASS");
+    expect(reads).toBeGreaterThan(1);
+  });
+
+  it("waits while the check is still running rather than calling it a failure", async () => {
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      { ...deps, sleep: noSleep, remoteCheckConclusions: async () => new Map([["build-darwin", "in_progress"]]) },
+    );
+    expect(r.code).toBe("VERIFICATION_PENDING");
+    expect(r.detail).toContain("build-darwin");
+  });
+
+  it("waits when GitHub will not say which checks ran", async () => {
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      {
+        ...deps,
+        sleep: noSleep,
+        remoteCheckConclusions: async () => {
+          throw new Error("GitHub /check-runs -> 502");
+        },
+      },
+    );
+    expect(r.code).toBe("VERIFICATION_PENDING");
+  });
+
+  it("does not call a failure durable when the reads disagree about it", async () => {
+    const answers = [
+      new Map([["build-darwin", "failure"]]),
+      new Map([["build-darwin", "in_progress"]]),
+      new Map([["build-darwin", "failure"]]),
+    ];
+    let reads = 0;
+    const r = await verifyProof(
+      {
+        commitMessage: commitMessageFor(envelopeFor(makeStatement())),
+        facts: makeFacts(),
+        bundle: withRemote(),
+        now: NOW,
+      },
+      {
+        ...deps,
+        sleep: noSleep,
+        remoteCheckConclusions: async () => answers[Math.min(reads++, answers.length - 1)]!,
+      },
+    );
+    expect(r.code).toBe("VERIFICATION_PENDING");
   });
 });
 

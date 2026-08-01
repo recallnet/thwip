@@ -12,6 +12,7 @@ import {
   type ReasonCode,
   type VerificationBundleV1,
 } from "@thwip/protocol";
+import { settleRemoteSuites } from "./remote-suite-settlement.js";
 
 /** Facts the Action derives independently from GitHub. Never taken from the proof. */
 export interface GithubFacts {
@@ -79,6 +80,12 @@ export interface VerifyDeps {
     statement: InTotoStatementV1;
     facts: GithubFacts;
   }): Promise<{ agrees: boolean; detail?: string }>;
+  /**
+   * Waiting between reads of a source that is eventually consistent with its
+   * own writes. Injected so tests read as many times as production does without
+   * spending the backoff.
+   */
+  sleep?(ms: number): Promise<void>;
 }
 
 export interface VerifyResult {
@@ -292,22 +299,31 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     if (suite.status !== "passed") return res("SUITE_NOT_PASSED", required, { statement });
   }
 
-  // 10. Remote suites: proven by GitHub's own run, not by the signer.
+  // 10. Remote suites: proven by GitHub's own run, not by the signer. A check
+  // GitHub has not concluded is not a failed check, and a read GitHub would not
+  // answer says nothing at all, so both wait rather than rejecting work that is
+  // fine. `settleRemoteSuites` holds that rule.
   const remoteSuites = bundle.policy.pipeline.remoteSuites ?? [];
   if (remoteSuites.length > 0) {
-    if (!deps.remoteCheckConclusions) {
+    const read = deps.remoteCheckConclusions;
+    if (!read) {
       return res("SUITE_MISSING", "remote suites declared but no check reader available", { statement });
     }
-    const conclusions = await deps.remoteCheckConclusions(facts.headSha);
-    for (const id of remoteSuites) {
-      const conclusion = conclusions.get(id) ?? conclusions.get(`thwip / ${id}`);
-      if (conclusion === undefined) {
-        return res("SUITE_MISSING", `remote suite '${id}' has no check on this commit`, { statement });
-      }
-      if (conclusion !== "success") {
-        return res("SUITE_NOT_PASSED", `remote suite '${id}' concluded ${conclusion}`, { statement });
-      }
-    }
+    const settlement = await settleRemoteSuites(
+      remoteSuites,
+      {
+        readConclusions: async () => {
+          try {
+            return await read(facts.headSha);
+          } catch {
+            return null;
+          }
+        },
+      },
+      deps.sleep !== undefined ? { sleep: deps.sleep } : {},
+    );
+    if (settlement.kind === "failed") return res("SUITE_NOT_PASSED", settlement.reason, { statement });
+    if (settlement.kind === "unsettled") return res("VERIFICATION_PENDING", settlement.reason, { statement });
   }
 
   // 11. Run window and proof age. A run that finished after now, or before it

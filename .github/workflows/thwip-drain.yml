@@ -25,6 +25,10 @@ on:
 permissions:
   contents: read
   actions: write
+  # The nudge endpoint drives GitHub Actions on the repository it names, so it
+  # asks who is calling. A scheduled job holds no session; an Actions OIDC token
+  # is the identity it does have, and it names this repository.
+  id-token: write
 
 concurrency:
   group: thwip-drain
@@ -58,7 +62,13 @@ jobs:
           # inside the object, which cannot reach GitHub, so without this the turn
           # sits idle until an unrelated request happens to move it. Reads the
           # projection and wakes no object, so it is free to call every half hour.
-          n=$(curl -sS -X POST "$THWIP_ENDPOINT/v1/queue/$REPO_ID/nudge?ref=refs%2Fheads%2Fmain" || true)
+          oidc() {
+            curl -sS -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${THWIP_ENDPOINT}/api/github-actions" | jq -r .value
+          }
+
+          n=$(curl -sS -X POST -H "authorization: Bearer $(oidc)" \
+            "$THWIP_ENDPOINT/v1/queue/$REPO_ID/nudge?ref=refs%2Fheads%2Fmain" || true)
           echo "nudge: $n"
 
           # The Actions API only. GITHUB_TOKEN cannot reach the pull request API

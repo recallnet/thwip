@@ -4,6 +4,7 @@ import { classifyMergeResponse, decideMergeWrite, finalGuard, type GuardObservat
 import { validateMergeResult, type CommitFacts } from "./candidate.js";
 import { buildCheck, mayGate, type ActivationState } from "./check.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
+import { mergeOperationId, queueAttributionTrailer } from "./merge-commit.js";
 
 /**
  * One integration turn, from a claimed offer to a recorded transition.
@@ -276,7 +277,7 @@ export async function runTurn(
   /* 5. Sign the intent, then declare the write started — before the request. */
   const commitMessage = mergeCommitMessage(ctx, git, assignment.digest);
   const intentDoc = await buildMergeIntent({
-    operationId: `merge_${ctx.attemptId}`,
+    operationId: mergeOperationId(ctx.attemptId),
     attemptId: ctx.attemptId,
     git,
     queueEpoch: ctx.queueEpoch,
@@ -338,7 +339,7 @@ export async function runTurn(
     return { outcome: "abandoned", reason: `observing: would have merged ${git.candidateSha}` };
   }
 
-  const operationId = `merge_${ctx.attemptId}`;
+  const operationId = mergeOperationId(ctx.attemptId);
   const begun = await queue.beginMergeWrite({
     idempotencyKey: `merge-requested:${ctx.attemptId}`,
     attemptId: ctx.attemptId,
@@ -505,6 +506,11 @@ function guardOutcome(reason: string): string {
  * The generated merge commit message, ending in the reserved trailer block
  * (plan.md §22). The digests let anyone reading the branch history find the
  * evidence for a merge without asking the control plane.
+ *
+ * The last trailer is the attribution. Without it the push webhook reads this
+ * merge as somebody pushing around the queue and appends an `external` chain
+ * link for work the queue itself did, so the message must name the operation
+ * before it names anything else about it.
  */
 export function mergeCommitMessage(
   ctx: Pick<TurnContext, "attemptId" | "transitionSequence" | "pullRequestNumber">,
@@ -518,5 +524,6 @@ export function mergeCommitMessage(
     `thwip-queue-transition: ${ctx.transitionSequence}`,
     `thwip-queue-assignment: ${assignmentDigest}`,
     `thwip-queue-tree: ${git.candidateTreeOid}`,
+    queueAttributionTrailer(mergeOperationId(ctx.attemptId)),
   ].join("\n");
 }

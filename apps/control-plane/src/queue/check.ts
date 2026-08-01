@@ -1,4 +1,4 @@
-import type { BlockingReason } from "@thwip/queue-domain";
+import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 
 /**
@@ -41,51 +41,19 @@ export interface QueueCheckState {
 }
 
 /**
- * Plain-language next actions for every blocking reason.
+ * Plain-language next actions come from @thwip/vocabulary, which the CLI and the
+ * dashboard read too. They were written out here as well, copied by hand, and a
+ * developer could be told one thing by a red check and another by their
+ * terminal for the same event.
  *
- * Keyed by the domain's own union, so adding a reason without writing its
- * sentence fails to compile. It used to be keyed by string, and a reason with
- * no entry fell through to "Blocked: MERGE_REJECTED.", which is a code shown to
- * a person, not an instruction.
+ * The shared table is a `Record` over the closed union the queue's vocabulary
+ * feeds, so a blocking reason added without a sentence still fails to compile.
+ * An unrecognized reason is named rather than explained, because inventing
+ * guidance for a code this build does not know is worse than quoting it.
  */
-const NEXT_ACTION: Record<BlockingReason, string> = {
-  REVIEW_REQUIRED: "Ask for a review. The queue holds your place while you wait.",
-  CODEOWNER_REVIEW_REQUIRED: "A code owner for the files you touched still needs to approve.",
-  APPROVAL_AFTER_PUSH_REQUIRED: "You pushed after the last approval, so it needs approving again.",
-  CONVERSATION_UNRESOLVED: "Resolve the open review conversations.",
-  REQUIRED_CHECK_PENDING: "A required check is still running.",
-  REQUIRED_CHECK_FAILED: "A required check failed. Fix it and push again; your place is kept.",
-  VERIFICATION_REJECTED:
-    "The verifier refused this candidate. Run thwip verify to see why; your place is kept.",
-  MERGE_CONFLICT: "Rebase or merge the base branch to clear the conflict.",
-  LOCAL_RECEIPT_MISSING: "Run thwip run on this commit and push, so the head carries a proof.",
-  LOCAL_RECEIPT_REJECTED: "The proof on this commit was not accepted. thwip verify explains why.",
-  AGENT_OFFLINE:
-    "No machine of yours is connected to run the integration. Start thwip ship, or leave it queued and it will be offered again.",
-  NO_COMPATIBLE_RUNNER: "No connected machine can run this project's pipeline.",
-  PR_DRAFT: "Mark the pull request ready for review.",
-  PR_CLOSED: "The pull request is closed.",
-  BASE_NOT_MANAGED:
-    "This pull request targets a branch the queue does not manage. Retarget it, or ask an admin to enable the queue for that branch.",
-  OWNER_UNAUTHORIZED: "You no longer have the repository permission this queue requires.",
-  SPONSOR_REQUIRED: "A bot pull request needs a human sponsor before it can queue.",
-  COOLDOWN_ACTIVE: "A turn was offered and not claimed, so there is a short cooldown before the next one.",
-  NEEDS_REPAIR: "The integration failed. Push a fix; your place in line is kept.",
-  POLICY_CHANGED: "The project policy changed. The queue will re-evaluate on the new policy.",
-  RULESET_DRIFT: "The repository ruleset no longer matches what the queue expects. An admin needs to look.",
-  APP_PERMISSION_DRIFT: "The Thwip App is missing a permission it needs. An admin needs to reinstall it.",
-  PROJECT_DISABLED: "This project is not enabled for the queue.",
-  QUEUE_PAUSED: "The queue is paused.",
-  MERGE_REJECTED: "GitHub refused the merge. Read the branch protection rules on the base branch.",
-  MERGE_OUTCOME_UNKNOWN:
-    "The queue cannot tell whether the merge landed. It is reconciling and will not write again. Check the pull request before doing anything.",
-  ADMIN_CANCELLED: "An administrator cancelled this attempt. Ask them why before queueing again.",
-  INTERNAL_FAILURE: "The queue failed internally. Send this output to whoever runs the queue.",
-};
-
 export function nextAction(reason: string | null): string | null {
   if (reason === null) return null;
-  return NEXT_ACTION[reason as BlockingReason] ?? `Blocked: ${reason}.`;
+  return isReasonCode(reason) ? nextActionFor(reason, "check") : `Blocked: ${reason}.`;
 }
 
 /**
