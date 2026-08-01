@@ -24,15 +24,17 @@ function d1(): D1Like {
   const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
   for (const file of readdirSync(dir).sort()) {
     if (!file.endsWith(".sql")) continue;
-    for (const statement of readFileSync(join(dir, file), "utf8").split(";")) {
-      // Drop comment lines rather than the whole chunk: a statement that follows
-      // a comment block lives in the same chunk as the comment, and skipping on
-      // a leading "--" silently threw away the statement with it.
-      const sql = statement
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("--"))
-        .join("\n")
-        .trim();
+    // Comments come out before the file is split into statements, not after.
+    // A comment can contain a semicolon of its own — "the Durable Object is
+    // live authority; these tables serve organization-wide reads" — and
+    // splitting first cut a comment mid-sentence, leaving a fragment that
+    // is not SQL in the same chunk as the statement that followed it.
+    const withoutComments = readFileSync(join(dir, file), "utf8")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+    for (const statement of withoutComments.split(";")) {
+      const sql = statement.trim();
       if (sql.length === 0) continue;
       try {
         db.exec(sql);

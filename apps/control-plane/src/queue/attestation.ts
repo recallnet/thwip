@@ -156,12 +156,27 @@ export async function signReusedRecord(input: {
   return signTransitionRecord(doc, input.signer);
 }
 
+function isOneRecordPerAttemptViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /UNIQUE constraint failed/i.test(message) && /attempt_id/i.test(message);
+}
+
 /**
  * Keep the exact bytes that were signed.
  *
  * Stored verbatim rather than re-serialised from the parsed record: the digest
  * is computed over these bytes and names nothing else, so a rebuild would
  * produce a record that means the same and verifies differently.
+ *
+ * Two simultaneous first reports of the same merge can both find nothing
+ * recorded yet, both sign, and both reach this insert — the check in
+ * `transitionRecordFor` narrows that window but cannot close it.
+ * `idx_queue_attestations_one_record_per_attempt` closes it: the second
+ * insert for a transition record fails rather than giving the attempt two
+ * links in the chain. That failure is not this attempt's error, it is a
+ * race it lost, so it is caught here and reported as such rather than
+ * thrown — the caller uses the record that won instead of losing the merge
+ * confirmation to an unhandled exception.
  */
 export async function storeAttestation(
   db: D1Like,
@@ -175,25 +190,35 @@ export async function storeAttestation(
     readonly bytes: Uint8Array;
     readonly jws: string;
   },
-): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(digest) DO NOTHING`,
-    )
-    .bind(
-      row.digest,
-      row.kind,
-      row.repositoryId,
-      row.baseRef,
-      row.transitionSequence,
-      row.attemptId,
-      new TextDecoder().decode(row.bytes),
-      row.jws,
-    )
-    .run();
+): Promise<{ stored: true } | { stored: false; digest: string }> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO queue_attestations
+           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(digest) DO NOTHING`,
+      )
+      .bind(
+        row.digest,
+        row.kind,
+        row.repositoryId,
+        row.baseRef,
+        row.transitionSequence,
+        row.attemptId,
+        new TextDecoder().decode(row.bytes),
+        row.jws,
+      )
+      .run();
+    return { stored: true };
+  } catch (error) {
+    if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
+    const winner = await transitionRecordFor(db, row.attemptId);
+    // The constraint only fires because a row for this attempt already holds a
+    // position, so the record that won the race is there to be read back.
+    if (winner === null) throw error;
+    return { stored: false, digest: winner };
+  }
 }
 
 /**
