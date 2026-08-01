@@ -54,6 +54,24 @@ export const TRANSITION_KINDS = [
   "candidate-verified-merge",
   "override-merge",
   "external-transition",
+  /**
+   * A record that names the record it corrects and states the sha that record
+   * should have named.
+   *
+   * Record 54 said pull request 107's merge left the base at the throwaway test
+   * merge GitHub computes for an open pull request. That commit is on no branch.
+   * Its bytes cannot change: its digest is the next record's predecessor and six
+   * records chain from it, so editing it means re-signing seven records under
+   * new digests, which replaces the chain rather than repairing it.
+   *
+   * So a correction is appended and the walk substitutes its edge for the one it
+   * corrects. What it may change is exactly one field. It restates the record's
+   * `before` and the record's tree and parents unchanged, and the verifier
+   * refuses it if any of those differ, because a correction that could move
+   * where a merge began, or what tree it certified, would be the licence to
+   * rewrite the past that this design exists to withhold.
+   */
+  "base-correction",
   "genesis",
 ] as const;
 export type TransitionRecordKind = (typeof TRANSITION_KINDS)[number];
@@ -178,6 +196,27 @@ export interface ExternalFacts {
   readonly confirmingDeliveryId?: string;
 }
 
+/**
+ * What a correction cites, and what it may not touch.
+ *
+ * `correctedBaseSha` is the sha the cited record named. Carrying it inside the
+ * signed bytes is what lets a reader tell a correction from an ordinary record
+ * without holding the record it corrects, and what lets the verifier refuse a
+ * correction whose target does not say what the correction claims it says.
+ *
+ * `attemptId` is the attempt the corrected record cites. A correction that named
+ * a different one would be reattributing a merge to a turn that did not ask for
+ * it, so it is bound here and checked against the target.
+ */
+export interface BaseCorrectionFacts {
+  readonly correctsTransitionDigest: Sha256;
+  readonly correctsTransitionSequence: number;
+  readonly correctedBaseSha: string;
+  readonly attemptId: string;
+  readonly actorPrincipalId: string;
+  readonly reason: string;
+}
+
 export interface GenesisFacts {
   readonly policyDigest: Sha256;
   readonly configDigest: Sha256;
@@ -197,6 +236,7 @@ export type TransitionRecordV1 =
     })
   | (TransitionRecordBaseV1 & { readonly kind: "override-merge"; readonly override: OverrideMergeFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "external-transition"; readonly external: ExternalFacts })
+  | (TransitionRecordBaseV1 & { readonly kind: "base-correction"; readonly correction: BaseCorrectionFacts })
   | (TransitionRecordBaseV1 & { readonly kind: "genesis"; readonly genesis: GenesisFacts });
 
 const BASE_KEYS = [
@@ -218,6 +258,7 @@ const FACTS_KEY: Record<TransitionRecordKind, string> = {
   "candidate-verified-merge": "candidateVerified",
   "override-merge": "override",
   "external-transition": "external",
+  "base-correction": "correction",
   genesis: "genesis",
 };
 
@@ -518,7 +559,7 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
       if (!authShape.ok) return authShape;
       const actor = decimalId(auth["actorGithubId"], "transition.override.authorization.actorGithubId");
       if (!actor.ok) return actor;
-      const reason = boundedReason(auth["reason"]);
+      const reason = boundedReason(auth["reason"], "transition.override.authorization.reason");
       if (!reason.ok) return reason;
       const omission = auth["omission"];
       if (!isRecord(omission)) return fail("transition.override.authorization.omission must be an object");
@@ -599,6 +640,64 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
       });
     }
 
+    case "base-correction": {
+      const raw = v[factsKey];
+      if (!isRecord(raw)) return fail("transition.correction must be an object");
+      const shapeCorrection = exactKeys(raw, "transition.correction", [
+        "correctsTransitionDigest",
+        "correctsTransitionSequence",
+        "correctedBaseSha",
+        "attemptId",
+        "actorPrincipalId",
+        "reason",
+      ]);
+      if (!shapeCorrection.ok) return shapeCorrection;
+      const corrects = sha256(raw["correctsTransitionDigest"], "transition.correction.correctsTransitionDigest");
+      if (!corrects.ok) return corrects;
+      const correctsSequence = positiveCounter(
+        raw["correctsTransitionSequence"],
+        "transition.correction.correctsTransitionSequence",
+      );
+      if (!correctsSequence.ok) return correctsSequence;
+      const correctedBaseSha = gitOid(raw["correctedBaseSha"], "transition.correction.correctedBaseSha");
+      if (!correctedBaseSha.ok) return correctedBaseSha;
+      const correctedAttempt = opaqueId(raw["attemptId"], "transition.correction.attemptId");
+      if (!correctedAttempt.ok) return correctedAttempt;
+      const actor = opaqueId(raw["actorPrincipalId"], "transition.correction.actorPrincipalId");
+      if (!actor.ok) return actor;
+      const why = boundedReason(raw["reason"], "transition.correction.reason");
+      if (!why.ok) return why;
+
+      // Appended, never inserted: a correction is written after the record it
+      // corrects, and one that claimed otherwise would be claiming a position it
+      // could not have held.
+      if (correctsSequence.value >= base.value.transitionSequence) {
+        return fail("a correction must come after the record it corrects");
+      }
+      // The chain opens with a genesis. A correction is a second record by
+      // definition, so it can never be the first one.
+      if (base.value.before.baseSha === null) {
+        return fail("a correction may not open an epoch");
+      }
+      // Correcting a sha to itself corrects nothing, and would leave two records
+      // asserting the same move off the same base.
+      if (correctedBaseSha.value === base.value.after.baseSha) {
+        return fail("a correction must name a different sha than the one it corrects");
+      }
+      return ok({
+        ...base.value,
+        kind: "base-correction",
+        correction: {
+          correctsTransitionDigest: corrects.value,
+          correctsTransitionSequence: correctsSequence.value,
+          correctedBaseSha: correctedBaseSha.value,
+          attemptId: correctedAttempt.value,
+          actorPrincipalId: actor.value,
+          reason: why.value,
+        },
+      });
+    }
+
     case "genesis": {
       const raw = v[factsKey];
       if (!isRecord(raw)) return fail("transition.genesis must be an object");
@@ -630,12 +729,10 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
   }
 }
 
-function boundedReason(v: unknown): ParseResult<string> {
-  if (typeof v !== "string" || v.trim().length === 0) {
-    return fail("transition.override.authorization.reason is required");
-  }
+function boundedReason(v: unknown, label: string): ParseResult<string> {
+  if (typeof v !== "string" || v.trim().length === 0) return fail(`${label} is required`);
   const bytes = new TextEncoder().encode(v.normalize("NFC")).length;
-  if (bytes > BOUNDS.reason) return fail(`transition.override.authorization.reason exceeds ${BOUNDS.reason} bytes`);
+  if (bytes > BOUNDS.reason) return fail(`${label} exceeds ${BOUNDS.reason} bytes`);
   return ok(v.normalize("NFC"));
 }
 

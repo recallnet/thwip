@@ -1,4 +1,4 @@
-import type { AttemptOutcome, BlockingReason, ExecutionMode } from "@thwip/queue-domain";
+import type { AttemptOutcome, BlockingReason, ExecutionMode, TransitionKind } from "@thwip/queue-domain";
 import { isSyntheticExecutionMode } from "@thwip/queue-domain";
 import type { AppendResult, Deadline, QueueStateStore } from "./store.js";
 
@@ -492,7 +492,7 @@ export class QueueCommands {
 
   recordTransition(input: {
     idempotencyKey: string;
-    kind: "genesis" | "verified" | "reused" | "override" | "external";
+    kind: TransitionKind;
     transitionSequence: number;
     priorDigest: string | null;
     digest: string;
