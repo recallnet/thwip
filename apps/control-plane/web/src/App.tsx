@@ -3,6 +3,7 @@ import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
 import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { QueuePanel } from "./Queue.js";
+import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
 
 /* ---------- shared API helpers ---------- */
 
@@ -344,12 +345,12 @@ function OrgSwitcher({ me }: { me: Me }) {
 function Dashboard({
   me,
   tab,
-  projectId,
+  projectName,
   projectSection,
 }: {
   me: Me;
   tab: string;
-  projectId?: string;
+  projectName?: string;
   projectSection?: string;
 }) {
   const org = me.organization;
@@ -404,8 +405,8 @@ function Dashboard({
         )}
         {tab === "overview" && <Overview />}
         {tab === "projects" &&
-          (projectId ? (
-            <ProjectPage projectId={projectId} section={projectSection ?? "overview"} me={me} />
+          (projectName ? (
+            <ProjectPage githubName={projectName} section={projectSection ?? "overview"} me={me} />
           ) : (
             <Projects me={me} />
           ))}
@@ -743,7 +744,7 @@ function Projects({ me }: { me: Me }) {
           {data.projects.map((p) => (
             <tr key={p.id}>
               <td>
-                <a href={`/dashboard/projects/${p.id}`}>
+                <a href={projectPath(p.github_name)}>
                   <code>{p.github_name}</code>
                 </a>
                 <div className="gp-panel__meta">
@@ -799,7 +800,7 @@ function Projects({ me }: { me: Me }) {
                   how to set it up — lives on its own page rather than as another
                   button in a table cell.
                 */}
-                <a className="gp-btn gp-btn--sm" href={`/dashboard/projects/${p.id}`}>
+                <a className="gp-btn gp-btn--sm" href={projectPath(p.github_name)}>
                   Open
                 </a>{" "}
                 <button
@@ -928,19 +929,22 @@ const PROJECT_SECTIONS = [
  * The organization tabs keep what is genuinely organization-wide — people,
  * policies, billing, plan limits. What belongs to one repository lives here.
  */
-function ProjectPage({ projectId, section, me }: { projectId: string; section: string; me: Me }) {
+function ProjectPage({ githubName, section, me }: { githubName: string; section: string; me: Me }) {
   const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
 
-  const project = data.projects.find((p) => p.id === projectId);
+  const project = findProjectByGithubName(data.projects, githubName);
   if (!project) {
     return (
       <>
         <p style={{ marginBottom: "0.8rem" }}>
           <a href="/dashboard/projects">← Projects</a>
         </p>
-        <p className="thwip-error">No project here. It may have been removed from the organization.</p>
+        <p className="thwip-error">
+          No project at <code>{githubName}</code>. Check the spelling, or it may have been removed from the
+          organization.
+        </p>
       </>
     );
   }
@@ -962,7 +966,7 @@ function ProjectPage({ projectId, section, me }: { projectId: string; section: s
         {PROJECT_SECTIONS.map(([key, label]) => (
           <li key={key}>
             <NavLink
-              to={`/dashboard/projects/${project.id}${key === "overview" ? "" : `/${key}`}`}
+              to={projectPath(project.github_name, key)}
               className={section === key ? "is-active" : ""}
             >
               {label}
@@ -1707,7 +1711,7 @@ function QueueTab() {
 export function App() {
   const me = useMe();
   const path = usePath();
-  const projectMatch = /^\/dashboard\/projects\/([A-Za-z0-9_]+)(?:\/([a-z]+))?/.exec(path);
+  const projectMatch = parseProjectPath(path);
   const dashMatch = /^\/dashboard(?:\/([a-z]+))?/.exec(path);
 
   if (path.startsWith("/device")) return <DevicePage me={me} />;
@@ -1752,8 +1756,8 @@ export function App() {
         <Dashboard
           me={me}
           tab="projects"
-          projectId={projectMatch[1]!}
-          projectSection={projectMatch[2] ?? "overview"}
+          projectName={projectMatch.githubName}
+          projectSection={projectMatch.section}
         />
       );
     }
