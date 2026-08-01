@@ -1,8 +1,24 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
+import type { Env } from "../env.js";
+
+// `../index.js` statically re-exports the Durable Object class, which needs
+// `cloudflare:workers` and only resolves under the Workers pool. Stubbing that
+// one export lets `queueFromPullRequest` load under plain node, the same way
+// every other control-plane unit test avoids the Workers pool.
+vi.mock("./BranchQueue.js", () => ({ BranchQueue: class {} }));
+// `driveTurnFor` (the webhook's own dispatcher, module-level in `../index.js`)
+// signs a real GitHub App JWT before it ever reaches `fetch`. Stubbing
+// `installationToken` lets a test that only cares whether the dispatch was
+// attempted skip carrying a real private key.
+vi.mock("../github-app.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../github-app.js")>();
+  return { ...actual, installationToken: async () => "test-installation-token" };
+});
+const { queueFromPullRequest } = await import("../index.js");
 
 /**
  * The queue under the conditions that actually broke it.
@@ -166,6 +182,215 @@ describe("the pull request holding the lane goes away", () => {
   });
 });
 
+/**
+ * A pull request that has left must not keep taking turns.
+ *
+ * Twice in production a merged pull request was still an entry, was offered the
+ * turn, and starved the queue behind it until an operator ejected it by hand.
+ * The `closed` webhook does cancel an entry, so what matters is the case it was
+ * missing: the entry holding a live attempt when its pull request goes away.
+ */
+describe("a pull request that leaves while holding the lane", () => {
+  it("frees the lane instead of holding it", async () => {
+    const e = env();
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/entries/entry_${REPO}_59?ref=${encodeURIComponent(REF)}&reason=${encodeURIComponent("the pull request was closed")}`,
+      { method: "DELETE" },
+      e,
+    );
+    expect(response.status).toBe(200);
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+});
+
+/**
+ * The actual `closed` webhook, not the DELETE route it drives.
+ *
+ * Three times in one night a merged pull request — 78, 96 and 97 — stayed an
+ * entry, was offered the turn, and starved the queue behind it. The reducer
+ * cancels a live attempt fine (see above); what stopped the cancel from
+ * reaching it was `queueFromPullRequest` itself. It gated the cancel behind
+ * two lookups that exist to decide whether a *new* entry may be placed — a
+ * configured project row and the author's activated principal — neither of
+ * which a pull request that is only leaving needs. When either lookup came up
+ * empty after the entry was already placed, the whole handler returned early
+ * and the cancel it should have issued never ran.
+ */
+describe("the closed webhook itself, once the project or principal it looked up is gone", () => {
+  const org = "org_1";
+  const authorGithubUserId = "59";
+
+  function seed(raw: import("better-sqlite3").Database) {
+    raw
+      .prepare(
+        "INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)",
+      )
+      .run(org, "1", "acme");
+    raw
+      .prepare(
+        "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
+      )
+      .run("qp_1", org, REPO, REF);
+    raw
+      .prepare(
+        "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+      )
+      .run("principal_59", org, authorGithubUserId, "author59");
+  }
+
+  function closedPayload() {
+    return {
+      action: "closed",
+      pull_request: {
+        number: 59,
+        draft: false,
+        state: "closed",
+        base: { ref: "main", repo: { id: Number(REPO) } },
+        head: { sha: String(59).padStart(40, "a") },
+        user: { id: 59, login: "author59", type: "User" },
+      },
+    };
+  }
+
+  it("still cancels the entry when the project row has since gone missing", async () => {
+    const e = env();
+    seed(raw);
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    // The project row that placed this entry is gone by the time it closes —
+    // disabled, reconfigured, whatever the reason. The entry it already
+    // placed still exists and still needs to leave.
+    raw.prepare("DELETE FROM queue_projects WHERE id = 'qp_1'").run();
+
+    const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+    expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+
+  it("still cancels the entry when the author's principal has since gone missing", async () => {
+    const e = env();
+    seed(raw);
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    // The author's principal that placed this entry is gone by the time it
+    // closes. The entry it already placed still exists and still needs to
+    // leave; cancelling it never needed to know who the author was.
+    raw.prepare("DELETE FROM principals WHERE id = 'principal_59'").run();
+
+    const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+    expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+
+  /**
+   * The same family as the eject route and the queue-result callback: freeing
+   * the lane is only half of it. `queueFromPullRequest`'s `closed` branch
+   * cancels the entry through `commands.cancel` directly, bypassing the
+   * `driveLane` every route uses, so a pull request closed while it held the
+   * lane never told whoever was offered it next.
+   */
+  it("drives whoever gets the turn after the closed webhook frees the lane", async () => {
+    const e = env();
+    seed(raw);
+    raw
+      .prepare("UPDATE organizations SET installation_id = ? WHERE id = ?")
+      .run("inst_1", org);
+    raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+      )
+      .run("proj_1", org, REPO, "acme/repo");
+    const app = routes();
+    await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    await authorize(app, e, 61);
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+      expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+      // The lane moved to 61, so something has to tell it. Nothing did, and
+      // the offer expired unclaimed.
+      const dispatch = fetch.mock.calls.find(([url]) => String(url).includes("/dispatches"));
+      expect(dispatch).toBeDefined();
+      const body = JSON.parse(String(dispatch![1]?.body));
+      expect(body.client_payload.pullRequestNumber).toBe(61);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+});
+
+describe("ejecting an entry", () => {
+  it("drives whoever gets the turn after an eject", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 60);
+
+    driven.length = 0;
+    await app.request(
+      `/v1/queue/${REPO}/entries/entry_${REPO}_59?ref=${encodeURIComponent(REF)}`,
+      { method: "DELETE" },
+      e,
+    );
+
+    // The lane moved, so something has to tell the new holder. Nothing did, and
+    // the offer expired unclaimed.
+    expect(driven).toContain(60);
+  });
+});
+
 describe("GitHub refuses the merge", () => {
   it("releases the lane and does not record the pull request as merged", async () => {
     const e = env();
@@ -235,6 +460,185 @@ describe("GitHub refuses the merge", () => {
     const after = await liveState(app, e);
     expect(stateOf(after, 59)).toBe("Deferred");
     expect(stateOf(after, 61)).toBe("Offered");
+  });
+});
+
+describe("a losing merge run reports GitHub's refusal", () => {
+  /**
+   * `not-merged` is the path a losing merge run takes when GitHub refuses its
+   * merge, so it fires in normal operation. `mergeOutcomeUnknown` plus
+   * `confirmNotMerged` frees the lane exactly like a cancel or a merge does,
+   * and nothing was telling the next holder about the offer that followed.
+   */
+  it("drives whoever gets the turn after not-merged frees the lane", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    const attemptId = holder.operationId!.replace("merge_", "");
+
+    driven.length = 0;
+    await app.request(
+      `/v1/queue/${REPO}/not-merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseRef: REF, attemptId, operationId: holder.operationId }),
+      },
+      e,
+    );
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
+  });
+});
+
+describe("an operator reconciles a lane that never merged", () => {
+  /**
+   * Reconciliation ends the held attempt the same way a cancel or a merge
+   * does. All three `observed` branches free the lane, so one is enough to
+   * prove the route drives the next holder rather than leaving the offer for
+   * somebody to notice. `merged-outside-the-turn` needs no prior deadline, so
+   * it is the branch that can be reached from a plain held attempt.
+   */
+  it("drives whoever gets the turn after reconciling merged-outside-the-turn", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+
+    driven.length = 0;
+    const response = await app.request(
+      `/v1/queue/${REPO}/reconcile?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          observed: "merged-outside-the-turn",
+          reason: "operator found it merged by hand",
+          mergeSha: "d".repeat(40),
+        }),
+      },
+      e,
+    );
+    expect(response.status).toBe(200);
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
+  });
+});
+
+describe("a verifier rejects the candidate", () => {
+  /**
+   * `queue-result` is the verifier's callback. A rejected verdict terminates
+   * the attempt and frees the lane exactly like an eject, a reconcile or a
+   * not-merged does, and nothing was telling the next holder about the offer
+   * that followed.
+   */
+  it("drives whoever gets the turn after a rejected verdict frees the lane", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const pinned = {
+      repositoryId: REPO,
+      repositoryOwnerId: "162603603",
+      workflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+      workflowSha: null,
+      reusableWorkflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify-impl.yml@refs/heads/main",
+      reusableWorkflowSha: null,
+      expectedEventName: "repository_dispatch" as const,
+      defaultBranchRef: "refs/heads/main",
+    };
+    const claims = {
+      repository_id: REPO,
+      repository_owner_id: "162603603",
+      workflow_ref: pinned.workflowRef,
+      workflow_sha: "5".repeat(40),
+      job_workflow_ref: pinned.reusableWorkflowRef,
+      job_workflow_sha: "6".repeat(40),
+      run_id: "998877",
+      run_attempt: "1",
+      event_name: "repository_dispatch",
+      ref: "refs/heads/main",
+      jti: "jti-1",
+    };
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+    });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+
+    const held = await liveState(app, e);
+    const attemptId = held.activeAttemptId;
+    expect(attemptId).not.toBeNull();
+
+    // Walk the attempt to "verification started" through the domain commands
+    // directly. This is the path a real runner takes outside the fast-reuse
+    // shortcut `authorize` itself exercises, and it is the only way to reach a
+    // live nonce a verifier's callback could plausibly answer.
+    const { result: nonce } = await runOnQueue(e, REPO, REF, ({ commands }) => {
+      commands.candidatePrepared({
+        idempotencyKey: "prep",
+        attemptId: attemptId!,
+        baseSha: "b".repeat(40),
+        headSha: String(59).padStart(40, "a"),
+        candidateSha: "c".repeat(40),
+        candidateTree: TREE,
+        policyDigest: `sha256:${"b".repeat(64)}`,
+        runner: "dagger",
+      });
+      commands.submitReceipt({
+        idempotencyKey: "receipt",
+        attemptId: attemptId!,
+        receiptDigest: `sha256:${"d".repeat(64)}`,
+      });
+      const started = commands.startVerification({ idempotencyKey: "verify", attemptId: attemptId! });
+      return "nonce" in started ? started.nonce : undefined;
+    });
+    expect(nonce).toBeDefined();
+
+    driven.length = 0;
+    const response = await app.request(
+      "/api/github-actions/queue-result",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repositoryId: REPO,
+          baseRef: REF,
+          attemptId,
+          nonce,
+          accepted: false,
+          resultDigest: `sha256:${"e".repeat(64)}`,
+        }),
+      },
+      e,
+    );
+    expect(response.status).toBe(202);
+
+    // The rejection blocks 59 and frees the lane; the queue immediately offers
+    // it to 61.
+    const after = await liveState(app, e);
+    expect(stateOf(after, 59)).toBe("Blocked");
+    expect(stateOf(after, 61)).toBe("Offered");
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
   });
 });
 
