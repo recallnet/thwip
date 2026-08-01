@@ -237,6 +237,13 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       baseRef: string,
     ): Promise<{ mergeMethod: MergeMethod } | null>;
     proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
+    /**
+     * Whether the base branch already contains a commit, from git ancestry.
+     *
+     * Required here, not optional: a record that cannot be checked is a record
+     * that does not get signed.
+     */
+    baseContainsSha(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
   /**
    * Publish the candidate verdict as a check on the pull request head.
    *
@@ -290,6 +297,25 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   snapshot: QueueSnapshot | null;
 }> {
   const skip = (detail: string) => ({ status: "skipped", sequence: null, digest: null, detail, snapshot: null });
+
+  // The record about to be built says the base branch became this commit. That
+  // is a claim about a branch, and GitHub can be asked about it, and nothing
+  // asked. Pull request 107's losing merge run reported the test merge GitHub
+  // computes for an open pull request; it has the real merge's parents and the
+  // real merge's tree, so every consistency check the queue had passed it, and
+  // chain record 54 says main became a commit that is an ancestor of nothing.
+  //
+  // Asked before the replay lookup, so a report naming a commit that is not on
+  // the branch never takes the chain position that the correct report of the
+  // same merge would then be deduplicated against.
+  const onBase = await deps.baseContainsSha(env, input.repositoryId, input.baseRef, input.mergeSha);
+  if (onBase !== true) {
+    return skip(
+      onBase === false
+        ? `${input.baseRef} does not contain ${input.mergeSha}, so no record may say it became that`
+        : `${input.baseRef} could not be asked whether it contains ${input.mergeSha}`,
+    );
+  }
 
   // One merge, one signed record. The domain layer already deduplicates the
   // transition itself by attempt id, but signing used to run again on every
@@ -866,8 +892,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * Whether the base branch already contains a commit, from git ancestry rather
    * than from the pull request's own flag. Null when it cannot be read.
+   *
+   * Two questions, one read. It settles whether a merge the pull request denies
+   * really did land, and it settles whether the commit a record is about to name
+   * as the branch's new state is on the branch at all.
    */
-  baseContainsSha?(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
+  baseContainsSha(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
@@ -2326,6 +2356,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
     if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+
+    // A commit that exists is not a commit that landed. The record would say the
+    // base branch became this, so the branch is asked, exactly as the merge
+    // report path asks. Without it an operator repairing by hand could name the
+    // test merge of an open pull request and get it signed, which is how record
+    // 54 reached the chain by another route.
+    const reachable = await deps.baseContainsSha(c.env, repositoryId, baseRef, mergeSha);
+    if (reachable !== true) {
+      return c.json(
+        {
+          error:
+            reachable === false
+              ? `${baseRef} does not contain ${mergeSha}`
+              : `${baseRef} could not be asked whether it contains ${mergeSha}`,
+          code: "MERGE_NOT_ON_BASE",
+        },
+        409,
+      );
+    }
 
     const db = c.env.DB as unknown as D1Like;
     const authorization = await authorizationFor(db, {

@@ -90,7 +90,11 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     // not contain the head. Every test that reports a refusal means this one,
     // and the tests that mean a stale read say so themselves.
     pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
-    baseContainsSha: async () => false,
+    // Two questions reach this. The head has not landed, which is the refusal
+    // above; the commit a test reports as merged has, which is what lets its
+    // record be signed. Head shas here are a pull request number padded with
+    // "a" and no test reports one as its merge, so the prefix separates them.
+    baseContainsSha: async (_e, _r, _ref, sha) => !sha.startsWith("a"),
     sleep: async () => {},
     ...over,
   });
@@ -1624,5 +1628,102 @@ describe("an accepted candidate verdict", () => {
     const response = await postVerdict(app, e, 59);
     expect(response.status).toBe(202);
     expect(driven).toEqual([59]);
+  });
+});
+
+/**
+ * The commit a record says the base branch became.
+ *
+ * Pull request 107 merged as 0b207610. Chain record 54 says main became
+ * ff6ea882, the test merge GitHub computes for an open pull request: same
+ * parents, same tree, different commit, on no branch. Every consistency check
+ * the queue had compares trees and parents, so all of them passed, and the
+ * chain carried a base state that never existed until the next record began
+ * somewhere else and the verifier found a discontinuity nothing could close.
+ *
+ * A record asserting a base state is a claim GitHub can be asked about. These
+ * make it ask.
+ */
+describe("the sha a record says the base branch became", () => {
+  const BASE = "a5f50bacb82ee5fc16de2efc73d320c7deff30fe";
+  const HEAD = "8089c282d8d486af6e3b0465f7d2e0c6a4bde28b";
+  /** What main actually became. */
+  const LANDED = "0b2076107aa20f8b365d3b510de4838b05d12622";
+  /** GitHub's test merge for the open pull request. An ancestor of nothing. */
+  const CANDIDATE = "ff6ea882feefd64c4e9f4dff909209e7adb281e3";
+  const MERGED_TREE = "febb37430f3fd96c8b11e1b0f60ec0697b9f7cb6";
+
+  /** Only the commit that is on main. The candidate is on no branch. */
+  const onMain = async (_e: QueueRouteEnv, _r: string, _ref: string, sha: string) => sha === LANDED;
+
+  async function report(app: App, e: QueueRouteEnv, mergeSha: string) {
+    const holder = await authorize(app, e, 107, {
+      headSha: HEAD,
+      prepare: true,
+      candidate: {
+        baseSha: BASE,
+        candidateSha: CANDIDATE,
+        candidateTreeOid: MERGED_TREE,
+        parentShas: [BASE, HEAD],
+      },
+    });
+    const response = await app.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: holder.operationId!.replace("merge_", ""),
+          operationId: holder.operationId,
+          mergeSha,
+          mergeTree: MERGED_TREE,
+          parentShas: [BASE, HEAD],
+        }),
+      },
+      e,
+    );
+    return (await response.json()) as { transition: string; transitionDigest: string | null; detail?: string };
+  }
+
+  function links(): number {
+    return (
+      raw
+        .prepare("SELECT COUNT(*) AS c FROM queue_transitions_index WHERE github_repository_id = ?")
+        .get(REPO) as { c: number }
+    ).c;
+  }
+
+  it("refuses to sign a record for a commit the base branch does not contain", async () => {
+    const e = env();
+    const app = routes({ baseContainsSha: onMain, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+
+    const reported = await report(app, e, CANDIDATE);
+
+    expect(reported.transitionDigest).toBeNull();
+    expect(reported.detail).toMatch(/does not contain/);
+    expect(links()).toBe(0);
+  });
+
+  it("signs the record for the commit that is on the base branch", async () => {
+    const e = env();
+    const app = routes({ baseContainsSha: onMain, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+
+    const reported = await report(app, e, LANDED);
+
+    expect(reported.transition).toBe("applied");
+    expect(reported.transitionDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(links()).toBe(1);
+  });
+
+  it("does not sign when GitHub cannot be asked, rather than signing an unchecked claim", async () => {
+    const e = env();
+    const app = routes({ baseContainsSha: async () => null, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+
+    const reported = await report(app, e, LANDED);
+
+    expect(reported.transitionDigest).toBeNull();
+    expect(reported.detail).toMatch(/could not be asked/);
+    expect(links()).toBe(0);
   });
 });

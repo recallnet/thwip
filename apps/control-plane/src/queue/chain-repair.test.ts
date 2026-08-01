@@ -150,7 +150,7 @@ const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
   [UNAUTHORIZED.mergeSha]: { treeOid: UNAUTHORIZED.treeOid, parentShas: UNAUTHORIZED.parentShas },
 };
 
-function routes(isAdmin = true) {
+function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   return queueRoutes({
     authenticate: async () => ({ ok: true, principalId: "prn_acme", githubUserId: "11", isAdmin }),
     verifyOidc: async () => null,
@@ -168,8 +168,12 @@ function routes(isAdmin = true) {
     principalFor: async () => null,
     driveTurn: async () => {},
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
+    // Every commit these tests name is on main, which is what makes them
+    // repairs. The one that is not has a test of its own.
+    baseContainsSha: async () => true,
     proofCheckRunId: async () => "91289436271",
     signRecordBytes: async () => "jws-record",
+    ...over,
   });
 }
 
@@ -278,6 +282,39 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "MERGE_NOT_AUTHORIZED" });
+    expect(await chainLinks(app, e)).toEqual([]);
+  });
+
+  /**
+   * A commit that exists is not a commit that landed. The test merge GitHub
+   * computes for an open pull request has the real merge's parents and the real
+   * merge's tree, so it satisfies the authorization check exactly, and it is on
+   * no branch. Chain record 54 is what that produces. An operator repairing by
+   * hand must not be able to reach the same end by a shorter road.
+   */
+  it("refuses a commit the base branch does not contain", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    const app = routes(true, { baseContainsSha: async () => false });
+
+    const response = await repair(app, e, { mergeSha: FIRST.mergeSha, reason: REASON });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "MERGE_NOT_ON_BASE" });
+    expect(await chainLinks(app, e)).toEqual([]);
+  });
+
+  it("refuses when the base branch cannot be asked", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    const app = routes(true, { baseContainsSha: async () => null });
+
+    const response = await repair(app, e, { mergeSha: FIRST.mergeSha, reason: REASON });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "MERGE_NOT_ON_BASE" });
     expect(await chainLinks(app, e)).toEqual([]);
   });
 
