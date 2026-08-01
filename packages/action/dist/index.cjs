@@ -1355,7 +1355,14 @@ function res(code, detail, extra) {
 async function verifyProof(input, deps) {
   const { facts, bundle } = input;
   const nowMs = Date.parse(input.now);
-  if (Date.parse(bundle.expiresAt) < nowMs)
+  if (!Number.isFinite(nowMs)) {
+    return res("BUNDLE_UNAVAILABLE", "the verifier was given a clock reading it cannot parse; pass an ISO-8601 timestamp as `now`");
+  }
+  const bundleExpiry = Date.parse(bundle.expiresAt);
+  if (!Number.isFinite(bundleExpiry)) {
+    return res("BUNDLE_UNAVAILABLE", "the bundle carries an expiry this verifier cannot read, so its freshness cannot be judged");
+  }
+  if (bundleExpiry < nowMs)
     return res("BUNDLE_EXPIRED");
   const carrier = extractCarrier(input.commitMessage);
   if (!carrier.ok) {
@@ -1421,6 +1428,18 @@ async function verifyProof(input, deps) {
   }
   if (pred.git.baseSha !== facts.baseSha)
     return res("SUBJECT_BASE_MISMATCH", void 0, { statement });
+  if (bundle.policy.evaluationMode === "merge-tree") {
+    const claimed = pred.git.mergeTreeOid;
+    if (claimed === void 0) {
+      return res("SUBJECT_TREE_MISMATCH", "this project verifies the merged tree and the proof does not name one; upgrade the thwip CLI and run the tests again on the merge of your branch with the base", { statement });
+    }
+    if (facts.mergeTreeOid === void 0) {
+      return res("SUBJECT_TREE_MISMATCH", "this project verifies the merged tree and the checker could not read the merge of this branch with the base from GitHub; retry once GitHub has computed the merge", { statement });
+    }
+    if (claimed !== facts.mergeTreeOid) {
+      return res("SUBJECT_TREE_MISMATCH", `the proof names merge tree ${claimed} and GitHub merges this branch into the base as ${facts.mergeTreeOid}; run the tests again on the current merge`, { statement });
+    }
+  }
   const policyEligible = pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
   if (!policyEligible)
     return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
@@ -1444,6 +1463,23 @@ async function verifyProof(input, deps) {
   }
   if (!bundle.policy.allowAuthorAsSigner && facts.prAuthorGithubUserId === key.githubUserId) {
     return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
+  }
+  if (bundle.policy.requireGithubKeyPresence) {
+    if (!deps.githubUserSigningKeys) {
+      return res("SIGNER_KEY_UNKNOWN", "this project requires the signing key to be published on the signer's GitHub account and the checker cannot read GitHub's key list", { statement });
+    }
+    let published;
+    try {
+      published = await deps.githubUserSigningKeys(key.githubUserId);
+    } catch {
+      return res("SIGNER_KEY_UNKNOWN", "GitHub did not answer when asked which keys this signer publishes; try again", {
+        statement
+      });
+    }
+    const wanted = sshKeyBody(key.publicKey);
+    if (wanted === void 0 || !published.some((line) => sshKeyBody(line) === wanted)) {
+      return res("SIGNER_KEY_UNKNOWN", `key ${key.keyId} is not among the SSH keys ${key.githubUserId} publishes on GitHub; add it to the GitHub account or enroll the key that is there`, { statement });
+    }
   }
   const seen = /* @__PURE__ */ new Set();
   for (const s of pred.run.suites) {
@@ -1474,16 +1510,179 @@ async function verifyProof(input, deps) {
       }
     }
   }
+  const started = Date.parse(pred.run.startedAt);
   const finished = Date.parse(pred.run.finishedAt);
   if (!Number.isFinite(finished))
     return res("PROOF_MALFORMED", "finishedAt unparseable", { statement });
+  if (!Number.isFinite(started))
+    return res("PROOF_MALFORMED", "startedAt unparseable", { statement });
+  if (finished < started) {
+    return res("PROOF_MALFORMED", `the proof says the run finished at ${pred.run.finishedAt}, before it started at ${pred.run.startedAt}; check the clock on the machine that ran the tests and sign again`, { statement });
+  }
+  if (finished > nowMs + CLOCK_SKEW_TOLERANCE_MS) {
+    return res("PROOF_MALFORMED", `the proof says the run finished at ${pred.run.finishedAt}, which is in the future; check the clock on the machine that ran the tests and sign again`, { statement });
+  }
   if (nowMs - finished > bundle.policy.proofMaxAgeSeconds * 1e3) {
     return res("PROOF_EXPIRED", void 0, { statement });
   }
-  if (bundle.policy.lease.required && pred.run.lease === void 0) {
-    return res("LEASE_REQUIRED", void 0, { statement });
+  if (bundle.policy.lease.required) {
+    const lease = pred.run.lease;
+    if (lease === void 0) {
+      return res("LEASE_REQUIRED", "this project requires a run lease and the proof carries none; run `thwip run` so the tests execute inside a lease", { statement });
+    }
+    const verdict = await checkLease({ lease, bundle, facts, pred, nowMs, deps });
+    if (verdict !== void 0)
+      return { ...verdict, statement };
+  }
+  const audit = bundle.policy.audit;
+  const mandatoryPaths = audit.mandatoryPaths ?? [];
+  const basisPoints = audit.basisPoints ?? 0;
+  if (mandatoryPaths.length > 0 || basisPoints > 0) {
+    if (mandatoryPaths.length > 0 && facts.changedPaths === void 0) {
+      return res("AUDIT_REQUIRED", "this project audits changes under protected paths and the checker could not read which paths this branch changes; retry, and if it persists ask an administrator to check the GitHub App's contents permission", { statement });
+    }
+    const touchesProtected = (facts.changedPaths ?? []).some((path) => mandatoryPaths.some((prefix) => path === prefix || path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)));
+    if (touchesProtected || sampledForAudit(facts.treeOid, basisPoints)) {
+      if (!deps.auditProof) {
+        return res("AUDIT_REQUIRED", "this project audits a share of proofs by re-running them and no auditor is available to this checker; ask an administrator to enable the audit runner or lower the audit rate", { statement });
+      }
+      let outcome;
+      try {
+        outcome = await deps.auditProof({ statement, facts });
+      } catch {
+        return res("AUDIT_REQUIRED", "the audit re-run did not complete, so this proof is unaudited; run it again", {
+          statement
+        });
+      }
+      if (!outcome.agrees) {
+        return res("AUDIT_DISAGREED", outcome.detail ?? "an independent re-run of this pipeline disagreed with the proof; run the tests again and look at what differs", { statement });
+      }
+    }
   }
   return res("PASS", void 0, { statement, signerKey: key });
+}
+var CLOCK_SKEW_TOLERANCE_MS = 6e4;
+var LEASE_AUDIENCE = "urn:thwip:ci-run:v1";
+var LEASE_ALGORITHMS = /* @__PURE__ */ new Set(["ES256", "EdDSA"]);
+function sampledForAudit(treeOid, basisPoints) {
+  if (basisPoints <= 0)
+    return false;
+  if (basisPoints >= 1e4)
+    return true;
+  const bucket = Number.parseInt(treeOid.slice(0, 8), 16);
+  if (!Number.isFinite(bucket))
+    return true;
+  return bucket % 1e4 < basisPoints;
+}
+function sshKeyBody(line) {
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < 2)
+    return void 0;
+  return `${parts[0]} ${parts[1]}`;
+}
+function b64urlDecode2(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+  return b64stdDecode(padded + "=".repeat((4 - padded.length % 4) % 4));
+}
+async function checkLease(input) {
+  const { lease, bundle, facts, pred, nowMs, deps } = input;
+  const jwks = bundle.leaseIssuerJwks;
+  if (jwks.length === 0) {
+    return res("LEASE_INVALID", "this project requires a run lease and carries no issuer keys to check one against; ask an administrator to reload the project's verification keys");
+  }
+  if (!deps.verifyLeaseSignature) {
+    return res("LEASE_INVALID", "this project requires a run lease and this checker cannot verify lease signatures; update the thwip Action or App to a version that does");
+  }
+  const parts = lease.split(".");
+  if (parts.length !== 3)
+    return res("LEASE_INVALID", "the lease in this proof is not a signed token; run `thwip run` again");
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(utf8Decode(b64urlDecode2(parts[0])));
+    claims = JSON.parse(utf8Decode(b64urlDecode2(parts[1])));
+  } catch {
+    return res("LEASE_INVALID", "the lease in this proof cannot be read; run `thwip run` again to get a fresh one");
+  }
+  const alg = typeof header.alg === "string" ? header.alg : "";
+  if (!LEASE_ALGORITHMS.has(alg)) {
+    return res("LEASE_INVALID", `the lease is signed with ${alg || "no algorithm"}, which this project does not accept`);
+  }
+  const signingInput = utf8Encode(`${parts[0]}.${parts[1]}`);
+  let signature;
+  try {
+    signature = b64urlDecode2(parts[2]);
+  } catch {
+    return res("LEASE_INVALID", "the lease signature is not readable; run `thwip run` again to get a fresh lease");
+  }
+  const kid = typeof header.kid === "string" ? header.kid : void 0;
+  const candidates = jwks.filter((jwk) => {
+    if (kid === void 0)
+      return true;
+    const id = jwk?.kid;
+    return typeof id !== "string" || id === kid;
+  });
+  let signatureOk = false;
+  for (const jwk of candidates) {
+    try {
+      if (await deps.verifyLeaseSignature({ jwk, algorithm: alg, signingInput, signature })) {
+        signatureOk = true;
+        break;
+      }
+    } catch {
+    }
+  }
+  if (!signatureOk) {
+    return res("LEASE_INVALID", "the lease in this proof was not signed by this project's lease issuer; run `thwip run` again so thwip mints the lease");
+  }
+  const iat = typeof claims["iat"] === "number" ? claims["iat"] * 1e3 : void 0;
+  if (iat === void 0) {
+    return res("LEASE_INVALID", "the lease does not say when it was issued, so its age cannot be judged; run `thwip run` again");
+  }
+  const maxAgeMs = bundle.policy.lease.maxAgeSeconds * 1e3;
+  if (nowMs - iat > maxAgeMs) {
+    return res("LEASE_EXPIRED", `this project accepts leases up to ${bundle.policy.lease.maxAgeSeconds} seconds old and this one was issued at ${new Date(iat).toISOString()}; run the tests again`);
+  }
+  if (iat > nowMs + CLOCK_SKEW_TOLERANCE_MS) {
+    return res("LEASE_INVALID", "the lease says it was issued in the future; check the clock on this machine and run the tests again");
+  }
+  const exp = typeof claims["exp"] === "number" ? claims["exp"] * 1e3 : void 0;
+  if (exp === void 0) {
+    return res("LEASE_INVALID", "the lease does not say when it expires; run `thwip run` again to get one that does");
+  }
+  if (exp < nowMs) {
+    return res("LEASE_EXPIRED", `the lease expired at ${new Date(exp).toISOString()}; run the tests again to open a new window`);
+  }
+  const nbf = typeof claims["nbf"] === "number" ? claims["nbf"] * 1e3 : void 0;
+  if (nbf !== void 0 && nbf > nowMs + CLOCK_SKEW_TOLERANCE_MS) {
+    return res("LEASE_EXPIRED", "the lease is not valid yet; check the clock on this machine and run the tests again");
+  }
+  const finished = Date.parse(pred.run.finishedAt);
+  if (Number.isFinite(finished) && finished < iat - CLOCK_SKEW_TOLERANCE_MS) {
+    return res("LEASE_CONTEXT_MISMATCH", `the run finished at ${pred.run.finishedAt}, before the lease was issued at ${new Date(iat).toISOString()}; run the tests again inside the lease`);
+  }
+  const mismatch = (what, claimed, expected) => res("LEASE_CONTEXT_MISMATCH", `the lease was issued for ${what} ${String(claimed)} and this proof is for ${expected}; run the tests again on this branch`);
+  if (claims["aud"] !== LEASE_AUDIENCE)
+    return mismatch("audience", claims["aud"], LEASE_AUDIENCE);
+  if (claims["repositoryId"] !== facts.repositoryId) {
+    return mismatch("repository", claims["repositoryId"], facts.repositoryId);
+  }
+  if (claims["treeOid"] !== facts.treeOid)
+    return mismatch("tree", claims["treeOid"], facts.treeOid);
+  if (claims["baseSha"] !== null && claims["baseSha"] !== void 0 && claims["baseSha"] !== facts.baseSha) {
+    return mismatch("base", claims["baseSha"], facts.baseSha);
+  }
+  const leaseParents = claims["parentOids"];
+  if (Array.isArray(leaseParents) && leaseParents.length > 0 && (leaseParents.length !== facts.parentOids.length || leaseParents.some((p, i) => p !== facts.parentOids[i]))) {
+    return mismatch("parents", leaseParents.join(","), facts.parentOids.join(","));
+  }
+  if (claims["policyDigest"] !== void 0 && claims["policyDigest"] !== pred.policy.digest) {
+    return mismatch("policy", claims["policyDigest"], pred.policy.digest);
+  }
+  if (claims["deviceKeyId"] !== void 0 && claims["deviceKeyId"] !== pred.signer.keyId) {
+    return mismatch("device key", claims["deviceKeyId"], pred.signer.keyId);
+  }
+  return void 0;
 }
 
 // service-public.jwk.json
