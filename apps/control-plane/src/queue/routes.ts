@@ -29,6 +29,7 @@ import {
   signReusedIntent,
   signReusedRecord,
   storeAttestation,
+  transitionRecordFor,
 } from "./attestation.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
@@ -251,6 +252,39 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 }> {
   const skip = (detail: string) => ({ status: "skipped", sequence: null, digest: null, detail, snapshot: null });
 
+  // One merge, one signed record. The domain layer already deduplicates the
+  // transition itself by attempt id, but signing used to run again on every
+  // call regardless: a fresh `observedAt` made a fresh digest every time, so
+  // two racing reports of the same merge each got their own signed record and
+  // the chain carried two links claiming one position. Checked first, before
+  // anything is built or signed, so a second report of a merge this attempt
+  // already produced is idempotent all the way through rather than only at
+  // the transition.
+  const db = env.DB as unknown as D1Like;
+  const existingDigest = await transitionRecordFor(db, input.attemptId);
+  if (existingDigest !== null) {
+    // Read back what was actually stored: a plain replay stored a
+    // "reused-proof-merge" record, but a process that died between storing
+    // the record and recording the transition on a first report leaves a
+    // "candidate-verified-merge" record here too, and hardcoding "reused"
+    // would misreport that merge as a reuse forever.
+    const existing = await readAttestation(db, existingDigest);
+    const existingKind = existing?.kind === "candidate-verified-merge" ? "verified" : "reused";
+    const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
+      recordOnly(commands, store, {
+        attemptId: input.attemptId,
+        // Ignored on replay: the domain layer's idempotency key is keyed on
+        // attempt id alone, so this call can only ever return the transition
+        // this attempt already recorded.
+        kind: existingKind,
+        digest: existingDigest,
+        baseSha: input.mergeSha,
+        witnessPrincipalIds: input.witnessPrincipalIds,
+      }),
+    );
+    return { status: result.transition.status, sequence: result.sequence, digest: existingDigest, snapshot };
+  }
+
   const attempt = input.attempt;
   if (attempt?.headSha == null || attempt.baseSha == null || attempt.receiptDigest == null) {
     return skip("the attempt no longer holds what the record would cite");
@@ -304,7 +338,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
-  await storeAttestation(env.DB as unknown as D1Like, {
+  const stored = await storeAttestation(db, {
     digest: signed.digest,
     kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
     repositoryId: input.repositoryId,
@@ -315,16 +349,28 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     jws: signed.jws,
   });
 
+  // Lost a simultaneous race with another report of the same merge: the
+  // index refused this attempt a second chain position. The record that won
+  // is already stored and is what the transition has to cite — this call's
+  // own signed bytes never occupy a link and are not persisted.
+  let digest = signed.digest;
+  let kind = evidence.verifierResultDigest === undefined ? "reused" : "verified";
+  if (!stored.stored) {
+    digest = stored.digest as Sha256;
+    const winner = await readAttestation(db, stored.digest);
+    kind = winner?.kind === "candidate-verified-merge" ? "verified" : "reused";
+  }
+
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
     recordOnly(commands, store, {
       attemptId: input.attemptId,
-      kind: evidence.verifierResultDigest === undefined ? "reused" : "verified",
-      digest: signed.digest,
+      kind: kind as "verified" | "reused",
+      digest,
       baseSha: input.mergeSha,
       witnessPrincipalIds: input.witnessPrincipalIds,
     }),
   );
-  return { status: result.transition.status, sequence: result.sequence, digest: signed.digest, snapshot };
+  return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
 }
 
 async function driveLane(
