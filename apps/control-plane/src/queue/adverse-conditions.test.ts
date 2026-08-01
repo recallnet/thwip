@@ -116,6 +116,26 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
   return (await response.json()) as Verdict;
 }
 
+/** A device id shaped the way `thwip queue work` sends one: a signing key fingerprint. */
+const DEVICE = `SHA256:${"a".repeat(43)}`;
+
+/** The repository's organization, its project row, and one principal in it. */
+function seedMembership(principalId: string, githubUserId: string): void {
+  raw
+    .prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
+    .run("org_1", "1", "acme");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+    )
+    .run("proj_1", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+    )
+    .run(principalId, "org_1", githubUserId, `author${githubUserId}`);
+}
+
 /**
  * Post a heartbeat as `principalId`, the way a connected device does before a
  * device-only entry can ever become scheduler-eligible. `routes()`'s own
@@ -123,8 +143,11 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
  * connected principal — `principalFor` maps a pull request's author to
  * `principal_<githubUserId>`, not to the session's principal — must build
  * their own app with `authenticate` overridden to match.
+ *
+ * The route also refuses a principal who is not in the organization that owns
+ * the repository, so a test that heartbeats calls `seedMembership` first.
  */
-async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = "d1") {
+async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = DEVICE) {
   return app.request(
     `/v1/queue/${REPO}/runners/heartbeat`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
@@ -1271,6 +1294,7 @@ describe("nudging a held lane", () => {
       // scheduler-eligible at all.
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    seedMembership("principal_59", "59");
     await heartbeat(app, e);
     await authorize(app, e, 59);
 
@@ -1373,6 +1397,7 @@ describe("an accepted candidate verdict", () => {
       // scheduler-eligible at all.
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    seedMembership("principal_59", "59");
     await heartbeat(app, e);
     await authorize(app, e, 59);
 

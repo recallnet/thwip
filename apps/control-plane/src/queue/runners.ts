@@ -94,6 +94,54 @@ export function requiresDeviceOnly(securityProfile: string | null): boolean {
 }
 
 /**
+ * The two shapes a device id can have in this deployment.
+ *
+ * `thwip queue work` sends the fingerprint of the signing key it also signs
+ * proofs with, and `verification-bundle.ts` caches GitHub-published keys with
+ * `key_id = fingerprint`, so `SHA256:` plus 43 base64 characters is the shape
+ * a real runner carries. `key_` plus 32 hex is the legacy enrollment id that
+ * `/v1/devices/enroll` mints (`randomId("key")`), still valid for a machine
+ * enrolled before keys came from GitHub.
+ *
+ * This is a bound on damage, not an authorization check. A device id becomes
+ * part of `queue_runners`'s primary key, so every distinct string the route
+ * accepts is a row somebody can create; refusing anything that could not have
+ * been issued keeps that to a namespace with a plausible owner instead of the
+ * whole of string.
+ */
+const DEVICE_KEY_ID = /^(SHA256:[A-Za-z0-9+/]{43}|key_[0-9a-f]{32})$/;
+
+export function wellFormedDeviceKeyId(value: unknown): value is string {
+  return typeof value === "string" && DEVICE_KEY_ID.test(value);
+}
+
+/**
+ * Whether this device id is one the control plane has already seen bound to
+ * somebody other than the caller, or one that has been revoked.
+ *
+ * `device_keys` is a cache of keys seen in proofs plus a revocation deny list
+ * (migration 0004), not a directory: GitHub owns the key-to-identity binding,
+ * and a row appears only once a verification bundle has read that key or the
+ * legacy enrollment endpoint minted it. Absence therefore cannot mean "not
+ * yours" — a developer whose first action is `thwip queue work` has no row at
+ * all, and refusing them would break the feature rather than protect it. What
+ * absence can never excuse is a contradiction, so a row that names a different
+ * GitHub user, or a revocation, refuses.
+ */
+export async function deviceKeyClaimedByAnother(
+  db: D1Like,
+  deviceKeyId: string,
+  githubUserId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT github_user_id AS githubUserId, revoked_at AS revokedAt FROM device_keys WHERE key_id = ?")
+    .bind(deviceKeyId)
+    .first<{ githubUserId: string; revokedAt: string | null }>();
+  if (row === null) return false;
+  return row.revokedAt !== null || row.githubUserId !== githubUserId;
+}
+
+/**
  * Record that a device is here, and report whether its principal was absent a
  * moment ago. One bounded write per connected runner per interval — the shape
  * the free tier can absorb where a per-connection Durable Object could not.

@@ -31,6 +31,16 @@ afterEach(() => {
 
 const REPO = "1315419165";
 const REF = "refs/heads/main";
+const ORG = "org_1";
+
+/**
+ * Device ids shaped the way `thwip queue work` sends them — the fingerprint of
+ * the signing key it also signs proofs with. The route refuses anything it
+ * could not have issued, because every distinct string it accepts becomes a
+ * row in `queue_runners`'s primary key.
+ */
+const DEVICE = `SHA256:${"a".repeat(43)}`;
+const SECOND_DEVICE = `SHA256:${"b".repeat(43)}`;
 
 function routes(principalId = "alice") {
   return queueRoutes({
@@ -46,7 +56,7 @@ function routes(principalId = "alice") {
   });
 }
 
-function heartbeat(app: ReturnType<typeof routes>, e: QueueRouteEnv, deviceKeyId = "d1") {
+function heartbeat(app: ReturnType<typeof routes>, e: QueueRouteEnv, deviceKeyId = DEVICE) {
   return app.request(
     `/v1/queue/${REPO}/runners/heartbeat`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
@@ -75,13 +85,36 @@ async function readyButOffline(db: D1Like, entryId: string, principal: string, p
   });
 }
 
+/**
+ * The repository, its organization, and the principals that belong to it.
+ *
+ * The project and principal rows are not decoration: the route refuses a
+ * caller whose principal is not in the organization that owns the repository,
+ * because the path it guards writes the queue document and dispatches Actions.
+ */
 function queueProject(): void {
+  raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run(ORG, "1", "acme");
   raw
     .prepare(
       `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced')`,
+       VALUES ('qp_1', ?, ?, ?, 1, 'enforced')`,
     )
-    .run(REPO, REF);
+    .run(ORG, REPO, REF);
+  raw
+    .prepare(
+      "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+    )
+    .run("proj_1", ORG, REPO, "acme/repo");
+  for (const [id, githubUserId, login] of [
+    ["alice", "1", "alice"],
+    ["bob", "2", "bob"],
+  ]) {
+    raw
+      .prepare(
+        "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+      )
+      .run(id, ORG, githubUserId, login);
+  }
 }
 
 describe("the heartbeat endpoint", () => {
@@ -144,7 +177,7 @@ describe("the heartbeat endpoint", () => {
     // offered the lane in the same call that made it eligible.
     expect(first.holdsOffer).toBe(true);
 
-    const second = (await (await heartbeat(app, e, "d2")).json()) as { holdsOffer: boolean };
+    const second = (await (await heartbeat(app, e, SECOND_DEVICE)).json()) as { holdsOffer: boolean };
     expect(second.holdsOffer).toBe(true);
   });
 

@@ -46,12 +46,30 @@ function routes(authOk: boolean) {
   });
 }
 
+/**
+ * A project, the organization that owns it, and alice's membership of that
+ * organization. Membership is what the route checks for an unpublished chain,
+ * so a principal with no row in the owning organization is a stranger.
+ */
 async function seedProject(e: QueueRouteEnv, repositoryId: string, chainPublic: 0 | 1): Promise<void> {
+  await e.DB.prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
+    .bind("org_1", "1", "acme")
+    .run();
   await e.DB.prepare(
     `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public)
      VALUES (?, 'org_1', ?, ?, 1, 'enforced', ?)`,
   )
     .bind(`qp_${repositoryId}`, repositoryId, REF, chainPublic)
+    .run();
+  await e.DB.prepare(
+    "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, 'org_1', ?, ?, 1)",
+  )
+    .bind(`proj_${repositoryId}`, repositoryId, `acme/repo-${repositoryId}`)
+    .run();
+  await e.DB.prepare(
+    "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, 'org_1', ?, ?, datetime('now'))",
+  )
+    .bind("alice", "1", "alice")
     .run();
 }
 
@@ -99,9 +117,28 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
     expect(body.links).toEqual([]);
   });
 
-  it("404s for a branch with no queue project at all", async () => {
+  /**
+   * 404 is a member's answer, not a stranger's. It says the branch this member
+   * asked about has no queue, and saying that to anyone who asked is what let
+   * an unauthenticated caller enumerate onboarded private repositories.
+   */
+  it("404s for a member asking about a branch with no queue project at all", async () => {
     const e = env();
-    const response = await routes(false).request(
+    await e.DB.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_1', '1', 'acme')")
+      .bind()
+      .run();
+    await e.DB.prepare(
+      "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('proj_1', 'org_1', ?, 'acme/repo', 1)",
+    )
+      .bind(PRIVATE_REPO)
+      .run();
+    await e.DB.prepare(
+      "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES ('alice', 'org_1', '1', 'alice', datetime('now'))",
+    )
+      .bind()
+      .run();
+
+    const response = await routes(true).request(
       `/v1/queue/${PRIVATE_REPO}/chain?ref=${encodeURIComponent(REF)}`,
       {},
       e,

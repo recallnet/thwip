@@ -20,7 +20,14 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { capabilityFor, recordHeartbeat, requiresDeviceOnly } from "./runners.js";
+import {
+  capabilityFor,
+  deviceKeyClaimedByAnother,
+  recordHeartbeat,
+  requiresDeviceOnly,
+  wellFormedDeviceKeyId,
+} from "./runners.js";
+import { mayActOnRepository, REPOSITORY_FORBIDDEN } from "./repository-access.js";
 import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
@@ -581,7 +588,19 @@ function failure(error: unknown): {
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** Who the caller is, from the existing session or bearer auth. */
   authenticate(c: { req: { raw: Request } }, env: TEnv): Promise<
-    { ok: true; principalId: string; githubUserId: string; isAdmin: boolean } | { ok: false; status: 401 | 403 }
+    | {
+        ok: true;
+        principalId: string;
+        githubUserId: string;
+        isAdmin: boolean;
+        /**
+         * The deployment's operator token rather than a person's session. It
+         * is not a principal in any organization, so it has no membership to
+         * compare — see `repository-access.ts`.
+         */
+        operator?: boolean;
+      }
+    | { ok: false; status: 401 | 403 }
   >;
   /** Verify a GitHub Actions OIDC token and return its claims. */
   verifyOidc(c: { req: { raw: Request } }, env: TEnv): Promise<Record<string, unknown> | null>;
@@ -889,6 +908,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * absent-to-present transition does this touch any queue document, so a
    * runner polling every fifteen seconds costs one row write per call and a
    * queue write only the first time it shows up.
+   *
+   * Being signed in is not enough to reach it. That absent-to-present
+   * transition compare-and-swaps the repository's queue document and then
+   * drives the lane, which fires a `repository_dispatch` on the repository, so
+   * a stranger who could pass this gate could spend another organization's
+   * Actions minutes once per grace window for as long as they cared to keep
+   * calling. Membership is checked before anything is written.
    */
   app.post("/v1/queue/:repositoryId/runners/heartbeat", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
@@ -897,17 +923,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
-    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: string };
-    if (typeof body.deviceKeyId !== "string" || body.deviceKeyId.length === 0) {
-      return c.json({ error: "deviceKeyId required" }, 400);
+    const db = c.env.DB as unknown as D1Like;
+    if (!(await mayActOnRepository(db, repositoryId, who))) {
+      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
     }
 
-    const db = c.env.DB as unknown as D1Like;
+    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: unknown };
+    if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
+      return c.json({ error: "deviceKeyId must be a device key id this deployment issues" }, 400);
+    }
+    const deviceKeyId = body.deviceKeyId;
+    if (await deviceKeyClaimedByAnother(db, deviceKeyId, who.githubUserId)) {
+      return c.json({ error: "that device key belongs to somebody else, or has been revoked" }, 403);
+    }
+
     const now = new Date().toISOString();
     const { wasOffline } = await recordHeartbeat(db, {
       repositoryId,
       principalId: who.principalId,
-      deviceKeyId: body.deviceKeyId,
+      deviceKeyId,
       now,
     });
 
@@ -2204,9 +2238,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * numbers, head and base SHAs, tree oids, actor GitHub ids and free-text
    * override reasons — public for a public repository, and nobody else's
    * business for a private one. A caller cannot make it public just by
-   * knowing the numeric repository id, so a private project is served the
-   * same way every other authenticated queue route is: the caller has to be
-   * a member.
+   * knowing the numeric repository id, so a private project is served only to
+   * a member of the organization that owns the repository.
+   *
+   * Nothing about the project is disclosed before that decision. The 404 for
+   * an unknown branch used to come out first, which let a caller with no
+   * session walk the numeric repository id space, read 404 against 401, and
+   * learn which private repositories are onboarded and which base refs they
+   * queue. A caller who has not proved membership now gets the same answer
+   * either way, and the 404 waits until it is a member asking.
    */
   app.get("/v1/queue/:repositoryId/chain", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
@@ -2218,12 +2258,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     )
       .bind(repositoryId, baseRef)
       .first<{ epoch: number; chainPublic: number }>();
-    if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
-    if (project.chainPublic !== 1) {
+    if (project === null || project.chainPublic !== 1) {
       const who = await deps.authenticate(c, c.env);
       if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+      if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
+        return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+      }
     }
+    if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
     const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
     const decoder = new TextDecoder();
