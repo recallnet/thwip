@@ -46,7 +46,10 @@
       "vars": {
         "THWIP_ENV": "staging",
         "PUBLIC_ORIGIN": "https://thwip.recall.net",
-        "BUILD_SHA": "dev",
+        // Overridden per deploy by scripts/build-sha.mjs. If this value ever
+        // reaches /health or a proof's verifierVersion, the deploy skipped the
+        // stamp and nothing can say which code produced that result.
+        "BUILD_SHA": "unstamped",
         "STRIPE_PRICE_MONTHLY": "price_1TyISWLWdKonGktl1HFOwBIU",
         "STRIPE_PRICE_ANNUAL": "price_1TyISXLWdKonGktlMUXHk6DB",
         "GITHUB_APP_ID": "4419870",
