@@ -179,6 +179,43 @@ function terminate(state: BranchQueueState, attempt: Attempt, outcome: AttemptOu
 }
 
 /**
+ * Whether the queue may still commit to a merge write.
+ *
+ * The two conditions live here rather than at the callers because a merge write
+ * is the one thing the queue does that nothing can take back, and every guard
+ * this codebase has left to a caller has eventually been forgotten by one of
+ * them. The route that authorizes a turn already refuses both, and the merge
+ * callback reaches the log without passing through that route.
+ *
+ * A pause refuses the merge outright. It is the single lever an operator has
+ * during an incident, the attempt holding the lane is usually the one they are
+ * trying to stop, and the `Thwip / Merge` check already tells whoever reads it
+ * that nothing merges through a paused queue. Refusing here is what makes that
+ * sentence true.
+ *
+ * A pending rebaseline refuses it too: the candidate was integrated against a
+ * base that no longer exists, so a `verified` transition for it would name a
+ * base the queue never saw. The caller terminates the attempt BASE_MOVED and the
+ * pull request takes a fresh turn once the queue is rebaselined.
+ *
+ * Confirmation is deliberately outside this gate. `MergeConfirmed` and
+ * `MergeConfirmedNotMerged` report what GitHub already did, and refusing a fact
+ * would leave the log denying a merge that exists and an unknown outcome that
+ * nothing could ever resolve. The stop belongs on the write, not on the news.
+ */
+function requireMergeable(state: BranchQueueState, attempt: Attempt): void {
+  if (state.rebaselineRequired) {
+    fail(`BASE_MOVED: the base moved outside the queue; attempt ${attempt.attemptId} may not merge onto it`);
+  }
+  if (state.paused) {
+    fail(
+      `QUEUE_PAUSED: the queue is paused (${state.pauseReason ?? "no reason recorded"}); ` +
+        `attempt ${attempt.attemptId} may not merge`,
+    );
+  }
+}
+
+/**
  * Every state but Blocked. Blocking goes through `blockEntry` so the reason is a
  * parameter rather than something a caller may forget: a live queue once held a
  * merged pull request in Blocked with a null reason, which every reader rendered
@@ -494,6 +531,23 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.verificationNonce !== event.nonce) {
         fail(`verifier nonce mismatch for attempt ${attempt.attemptId}`);
       }
+      // The nonce stays valid for the life of the attempt, so at-least-once
+      // delivery hands the same verdict back long after it was acted on. Once
+      // the attempt is verified, the merge gate has read the result and the
+      // intent may already be signed over it, so a later verdict has nothing
+      // left to decide.
+      //
+      // A repeat acceptance asks for nothing, so it is dropped: applying it
+      // would rewrite verifierResultDigest, and the transition record cites that
+      // field, so the chain could name evidence the gate never read. A late
+      // rejection asks the queue to unwind a commitment it has already made —
+      // terminating an attempt whose merge may be landing on GitHub, and handing
+      // the lane to the next pull request while it lands — so it is refused
+      // loudly rather than obeyed.
+      if (phaseRank(attempt.phase) >= phaseRank("VERIFIED")) {
+        if (event.accepted) return previous;
+        fail(`VERDICT_TOO_LATE: attempt ${attempt.attemptId} is already ${attempt.phase}; the verdict cannot be revised`);
+      }
       if (!event.accepted) {
         terminate(state, attempt, "VERIFICATION_FAILED");
         blockEntry(requireEntry(state, attempt.entryId), "VERIFICATION_REJECTED");
@@ -517,6 +571,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.phase !== "VERIFIED") {
         fail(`attempt ${attempt.attemptId} is not verified; no merge intent may exist`);
       }
+      requireMergeable(state, attempt);
       advancePhase(attempt, "MERGE_INTENT_CREATED");
       attempt.intentDigest = event.intentDigest;
       break;
@@ -527,6 +582,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (attempt.outcomeUnknown) fail("merge outcome is unknown; a second write is forbidden");
       if (attempt.intentDigest === null) fail("no signed merge intent for this attempt");
       if (attempt.phase === "MERGE_REQUESTED") return previous;
+      requireMergeable(state, attempt);
       advancePhase(attempt, "MERGE_REQUESTED");
       setEntryState(requireEntry(state, attempt.entryId), "Merging");
       break;
