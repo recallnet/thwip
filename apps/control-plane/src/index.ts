@@ -2013,38 +2013,44 @@ export default {
 
     // Copy anything the mirror missed. Idempotent, bounded, and it reports zero
     // once the backlog is gone.
-    const backfill = await backfillAttestations(env.DB as unknown as D1Like, {
-      organizationIdFor: async (repositoryId) => {
-        const row = await env.DB.prepare(
-          "SELECT organization_id AS id FROM projects WHERE github_repository_id = ?",
-        )
-          .bind(repositoryId)
-          .first<{ id: string }>();
-        return row?.id ?? null;
-      },
-      has: async (input) =>
-        env.EVIDENCE === undefined
-          ? true
-          : hasEvidence(env.EVIDENCE as unknown as R2Like, {
-              organizationId: input.organizationId,
-              repositoryId: input.repositoryId,
-              kind: input.kind as never,
-              digest: input.digest as `sha256:${string}`,
-            }),
-      put: async (input) => {
-        if (env.EVIDENCE === undefined) return;
-        await putEvidence(env.EVIDENCE as unknown as R2Like, {
-          organizationId: input.organizationId,
-          repositoryId: input.repositoryId,
-          kind: input.kind,
-          digest: input.digest as `sha256:${string}`,
-          bytes: input.bytes,
-        });
-      },
-    });
-    console.log(
-      `[attestation backfill] copied=${backfill.copied} alreadyThere=${backfill.alreadyThere} skipped=${backfill.skipped}`,
-    );
+    try {
+      const backfill = await backfillAttestations(env.DB as unknown as D1Like, {
+        organizationIdFor: async (repositoryId) => {
+          const row = await env.DB.prepare(
+            "SELECT organization_id AS id FROM projects WHERE github_repository_id = ?",
+          )
+            .bind(repositoryId)
+            .first<{ id: string }>();
+          return row?.id ?? null;
+        },
+        has: async (input) =>
+          env.EVIDENCE === undefined
+            ? true
+            : hasEvidence(env.EVIDENCE as unknown as R2Like, {
+                organizationId: input.organizationId,
+                repositoryId: input.repositoryId,
+                kind: input.kind as never,
+                digest: input.digest as `sha256:${string}`,
+              }),
+        put: async (input) => {
+          if (env.EVIDENCE === undefined) return;
+          await putEvidence(env.EVIDENCE as unknown as R2Like, {
+            organizationId: input.organizationId,
+            repositoryId: input.repositoryId,
+            kind: input.kind,
+            digest: input.digest as `sha256:${string}`,
+            bytes: input.bytes,
+          });
+        },
+      });
+      console.log(
+        `[attestation backfill] copied=${backfill.copied} alreadyThere=${backfill.alreadyThere} skipped=${backfill.skipped}`,
+      );
+    } catch (error) {
+      // wrangler tail is how this account observes the Worker. A backfill whose
+      // failure vanishes leaves the backlog it exists to drain silently stuck.
+      console.error(`[attestation backfill] run failed:`, error);
+    }
   },
 } satisfies ExportedHandler<Env>;
 
