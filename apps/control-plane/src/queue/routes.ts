@@ -947,7 +947,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Classified and applied in the same transaction. Split across two, the
     // attempt can move in between and the verdict lands against a revision that
     // was current when it was checked and is not when it is written.
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
       // A result for an older attempt is stale and harmless; one for the current
       // attempt at a stale revision is a conflict and must not be applied.
       if (typeof attemptRevision === "number") {
@@ -957,6 +957,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return { applied: commands.completeVerification(verdict) } as const;
     });
     if ("stale" in result) return c.json({ error: result.stale, code: result.stale }, 409);
+
+    // A rejected verdict terminates the attempt and frees the lane, same as an
+    // eject or a reconcile that gives up on one. An accepted verdict leaves the
+    // attempt live in MergeGuard, still holding the lane, so there is nothing to
+    // drive there — only the rejection path needs this.
+    if (!verdict.accepted) await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result: result.applied }, result.applied.status === "rejected" ? 409 : 202);
   });
 

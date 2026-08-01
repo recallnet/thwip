@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
 import type { Env } from "../env.js";
@@ -10,6 +10,14 @@ import type { Env } from "../env.js";
 // one export lets `queueFromPullRequest` load under plain node, the same way
 // every other control-plane unit test avoids the Workers pool.
 vi.mock("./BranchQueue.js", () => ({ BranchQueue: class {} }));
+// `driveTurnFor` (the webhook's own dispatcher, module-level in `../index.js`)
+// signs a real GitHub App JWT before it ever reaches `fetch`. Stubbing
+// `installationToken` lets a test that only cares whether the dispatch was
+// attempted skip carrying a real private key.
+vi.mock("../github-app.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../github-app.js")>();
+  return { ...actual, installationToken: async () => "test-installation-token" };
+});
 const { queueFromPullRequest } = await import("../index.js");
 
 /**
@@ -314,6 +322,52 @@ describe("the closed webhook itself, once the project or principal it looked up 
     expect(after.activeAttemptId).toBeNull();
     expect(stateOf(after, 59)).toBe("Cancelled");
   });
+
+  /**
+   * The same family as the eject route and the queue-result callback: freeing
+   * the lane is only half of it. `queueFromPullRequest`'s `closed` branch
+   * cancels the entry through `commands.cancel` directly, bypassing the
+   * `driveLane` every route uses, so a pull request closed while it held the
+   * lane never told whoever was offered it next.
+   */
+  it("drives whoever gets the turn after the closed webhook frees the lane", async () => {
+    const e = env();
+    seed(raw);
+    raw
+      .prepare("UPDATE organizations SET installation_id = ? WHERE id = ?")
+      .run("inst_1", org);
+    raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+      )
+      .run("proj_1", org, REPO, "acme/repo");
+    const app = routes();
+    await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    await authorize(app, e, 61);
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+      expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+      // The lane moved to 61, so something has to tell it. Nothing did, and
+      // the offer expired unclaimed.
+      const dispatch = fetch.mock.calls.find(([url]) => String(url).includes("/dispatches"));
+      expect(dispatch).toBeDefined();
+      const body = JSON.parse(String(dispatch![1]?.body));
+      expect(body.client_payload.pullRequestNumber).toBe(61);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
 });
 
 describe("ejecting an entry", () => {
@@ -480,6 +534,107 @@ describe("an operator reconciles a lane that never merged", () => {
       e,
     );
     expect(response.status).toBe(200);
+
+    // The lane moved to 61, so something has to tell it. Nothing did, and the
+    // offer expired unclaimed.
+    expect(driven).toContain(61);
+  });
+});
+
+describe("a verifier rejects the candidate", () => {
+  /**
+   * `queue-result` is the verifier's callback. A rejected verdict terminates
+   * the attempt and frees the lane exactly like an eject, a reconcile or a
+   * not-merged does, and nothing was telling the next holder about the offer
+   * that followed.
+   */
+  it("drives whoever gets the turn after a rejected verdict frees the lane", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const pinned = {
+      repositoryId: REPO,
+      repositoryOwnerId: "162603603",
+      workflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+      workflowSha: null,
+      reusableWorkflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify-impl.yml@refs/heads/main",
+      reusableWorkflowSha: null,
+      expectedEventName: "repository_dispatch" as const,
+      defaultBranchRef: "refs/heads/main",
+    };
+    const claims = {
+      repository_id: REPO,
+      repository_owner_id: "162603603",
+      workflow_ref: pinned.workflowRef,
+      workflow_sha: "5".repeat(40),
+      job_workflow_ref: pinned.reusableWorkflowRef,
+      job_workflow_sha: "6".repeat(40),
+      run_id: "998877",
+      run_attempt: "1",
+      event_name: "repository_dispatch",
+      ref: "refs/heads/main",
+      jti: "jti-1",
+    };
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+    });
+    await authorize(app, e, 59);
+    await authorize(app, e, 61);
+
+    const held = await liveState(app, e);
+    const attemptId = held.activeAttemptId;
+    expect(attemptId).not.toBeNull();
+
+    // Walk the attempt to "verification started" through the domain commands
+    // directly. This is the path a real runner takes outside the fast-reuse
+    // shortcut `authorize` itself exercises, and it is the only way to reach a
+    // live nonce a verifier's callback could plausibly answer.
+    const { result: nonce } = await runOnQueue(e, REPO, REF, ({ commands }) => {
+      commands.candidatePrepared({
+        idempotencyKey: "prep",
+        attemptId: attemptId!,
+        baseSha: "b".repeat(40),
+        headSha: String(59).padStart(40, "a"),
+        candidateSha: "c".repeat(40),
+        candidateTree: TREE,
+        policyDigest: `sha256:${"b".repeat(64)}`,
+        runner: "dagger",
+      });
+      commands.submitReceipt({
+        idempotencyKey: "receipt",
+        attemptId: attemptId!,
+        receiptDigest: `sha256:${"d".repeat(64)}`,
+      });
+      const started = commands.startVerification({ idempotencyKey: "verify", attemptId: attemptId! });
+      return "nonce" in started ? started.nonce : undefined;
+    });
+    expect(nonce).toBeDefined();
+
+    driven.length = 0;
+    const response = await app.request(
+      "/api/github-actions/queue-result",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repositoryId: REPO,
+          baseRef: REF,
+          attemptId,
+          nonce,
+          accepted: false,
+          resultDigest: `sha256:${"e".repeat(64)}`,
+        }),
+      },
+      e,
+    );
+    expect(response.status).toBe(202);
+
+    // The rejection blocks 59 and frees the lane; the queue immediately offers
+    // it to 61.
+    const after = await liveState(app, e);
+    expect(stateOf(after, 59)).toBe("Blocked");
+    expect(stateOf(after, 61)).toBe("Offered");
 
     // The lane moved to 61, so something has to tell it. Nothing did, and the
     // offer expired unclaimed.
