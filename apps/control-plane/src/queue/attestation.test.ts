@@ -279,6 +279,83 @@ describe("keeping the signed bytes", () => {
     expect(await readAttestation(store, signed.digest)).not.toBeNull();
   });
 
+  /**
+   * The residual race the previous commit left open: two simultaneous first
+   * reports of the same merge can both find nothing recorded and both sign,
+   * so the second insert reaches the database rather than being turned away
+   * earlier by the attempt-id check. The index is what has to refuse it.
+   */
+  it("refuses a second record for an attempt that already holds a chain position", async () => {
+    const store = db();
+    const first = await record(D("f"));
+    await storeAttestation(store, {
+      digest: first.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: first.bytes,
+      jws: first.jws,
+    });
+
+    // A second, independently-signed record for the same attempt and the
+    // same chain position — a different digest, because a fresh `observedAt`
+    // makes a fresh digest every time. Inserted directly, bypassing
+    // `storeAttestation`'s recovery, to prove the constraint itself holds
+    // rather than only the code that catches it.
+    await expect(
+      store
+        .prepare(
+          `INSERT INTO queue_attestations
+             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(D("f2"), "reused-proof-merge", "1315419165", "refs/heads/main", 9, "att-1", "{}", "j2")
+        .run(),
+    ).rejects.toThrow(/UNIQUE constraint failed/i);
+  });
+
+  /**
+   * The outcome that constraint has to produce in practice: the caller does
+   * not see the insert failure as an unhandled error, and it ends up with
+   * the digest that actually holds the position rather than the one it just
+   * signed and lost the race to store.
+   */
+  it("reports the record that won the race instead of throwing", async () => {
+    const store = db();
+    const first = await record(D("f"));
+    const firstResult = await storeAttestation(store, {
+      digest: first.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: first.bytes,
+      jws: first.jws,
+    });
+    expect(firstResult).toEqual({ stored: true });
+
+    const second = await record(D("f")); // same attempt, a distinct signature
+    const secondResult = await storeAttestation(store, {
+      digest: D("f2"),
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: second.bytes,
+      jws: second.jws,
+    });
+    expect(secondResult).toEqual({ stored: false, digest: first.digest });
+
+    // The record that lost the race was never persisted — reading it back by
+    // its own digest finds nothing.
+    expect(await readAttestation(store, D("f2"))).toBeNull();
+    expect(await readAttestation(store, first.digest)).not.toBeNull();
+  });
+
   it("hands back a whole branch's records in chain order", async () => {
     const store = db();
     const first = await record(D("f"));

@@ -41,19 +41,22 @@ function statements(sql: string): string[] {
     .filter((statement) => statement.length > 0);
 }
 
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+
+function migrationFiles(): string[] {
+  return readdirSync(migrationsDir)
+    .filter((file) => file.endsWith(".sql"))
+    .sort();
+}
+
 export function migrationStatements(): string[] {
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
   const all: string[] = [];
-  for (const file of readdirSync(dir).sort()) {
-    if (!file.endsWith(".sql")) continue;
-    all.push(...statements(readFileSync(join(dir, file), "utf8")));
-  }
+  for (const file of migrationFiles()) all.push(...statements(readFileSync(join(migrationsDir, file), "utf8")));
   return all;
 }
 
-export function testD1(): TestD1 {
-  const raw = new Database(":memory:");
-  for (const statement of migrationStatements()) {
+function runMigrationFile(raw: Database.Database, file: string): void {
+  for (const statement of statements(readFileSync(join(migrationsDir, file), "utf8"))) {
     try {
       raw.exec(statement);
     } catch (error) {
@@ -65,6 +68,32 @@ export function testD1(): TestD1 {
         throw new Error(`migration statement failed: ${message}\n${statement.slice(0, 200)}`);
       }
     }
+  }
+}
+
+/**
+ * Run one migration file's statements against an already-open database, with
+ * no swallowing: a test reaching for this wants to know whether that
+ * migration's own statements succeed or fail, not have a later one's
+ * "already exists" leniency mask it.
+ *
+ * For a migration that resolves bad data before adding a constraint, this is
+ * how a test builds the bad data first — with `testD1({ upTo })` stopping
+ * short of the file under test — and then runs exactly its statements to
+ * check what they do to that data, rather than keeping a fourth private copy
+ * of a migration loader.
+ */
+export function applyMigration(raw: Database.Database, file: string): void {
+  for (const statement of statements(readFileSync(join(migrationsDir, file), "utf8"))) {
+    raw.exec(statement);
+  }
+}
+
+export function testD1(options: { upTo?: string } = {}): TestD1 {
+  const raw = new Database(":memory:");
+  for (const file of migrationFiles()) {
+    if (options.upTo !== undefined && file >= options.upTo) break;
+    runMigrationFile(raw, file);
   }
 
   const db = {
