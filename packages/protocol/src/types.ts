@@ -8,6 +8,11 @@ export const PREDICATE_TYPE = "urn:thwip:attestation:ci-run:v1" as const;
 export const DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json" as const;
 export const SSH_SIGN_NAMESPACE = "thwip-ci-dsse-v1" as const;
 export const TRAILER_KEY = "thwip-proof" as const;
+/**
+ * The audience a run lease is minted for and checked against. One constant,
+ * because a minter and a verifier that disagree about it reject every lease.
+ */
+export const LEASE_AUDIENCE = "urn:thwip:ci-run:v1" as const;
 export const CARRIER_VERSION = "v1" as const;
 
 /** Encoded trailer value hard maximum (base64url chars). */

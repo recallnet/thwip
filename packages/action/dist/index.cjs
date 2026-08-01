@@ -1014,6 +1014,7 @@ var PREDICATE_TYPE = "urn:thwip:attestation:ci-run:v1";
 var DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
 var SSH_SIGN_NAMESPACE = "thwip-ci-dsse-v1";
 var TRAILER_KEY = "thwip-proof";
+var LEASE_AUDIENCE = "urn:thwip:ci-run:v1";
 var CARRIER_VERSION = "v1";
 var CARRIER_MAX_ENCODED = 32 * 1024;
 var ENVELOPE_MAX_DECODED = 24 * 1024;
@@ -1403,6 +1404,38 @@ async function settleRemoteSuites(suiteIds, reads, options = {}) {
   return { kind: "unsettled", reason: unsettled };
 }
 
+// ../verifier/dist/lease-signature.js
+var ALGORITHMS = {
+  ES256: {
+    importParams: { name: "ECDSA", namedCurve: "P-256" },
+    verifyParams: { name: "ECDSA", hash: "SHA-256" },
+    kty: "EC"
+  },
+  EdDSA: {
+    importParams: { name: "Ed25519" },
+    verifyParams: { name: "Ed25519" },
+    kty: "OKP"
+  }
+};
+async function verifyLeaseSignature(args) {
+  const spec = ALGORITHMS[args.algorithm];
+  if (spec === void 0)
+    return false;
+  const jwk = args.jwk;
+  if (typeof jwk !== "object" || jwk === null || jwk.kty !== spec.kty)
+    return false;
+  if (typeof jwk.alg === "string" && jwk.alg !== args.algorithm)
+    return false;
+  try {
+    const key = await crypto.subtle.importKey("jwk", { ...jwk, key_ops: ["verify"], ext: true }, spec.importParams, false, [
+      "verify"
+    ]);
+    return await crypto.subtle.verify(spec.verifyParams, key, args.signature, args.signingInput);
+  } catch {
+    return false;
+  }
+}
+
 // ../verifier/dist/index.js
 var PERMISSION_RANK = {
   none: 0,
@@ -1629,7 +1662,6 @@ async function verifyProof(input, deps) {
   return res("PASS", void 0, { statement, signerKey: key });
 }
 var CLOCK_SKEW_TOLERANCE_MS = 6e4;
-var LEASE_AUDIENCE = "urn:thwip:ci-run:v1";
 var LEASE_ALGORITHMS = /* @__PURE__ */ new Set(["ES256", "EdDSA"]);
 function sampledForAudit(treeOid, basisPoints) {
   if (basisPoints <= 0)
@@ -1657,9 +1689,7 @@ async function checkLease(input) {
   if (jwks.length === 0) {
     return res("LEASE_INVALID", "this project requires a run lease and carries no issuer keys to check one against; ask an administrator to reload the project's verification keys");
   }
-  if (!deps.verifyLeaseSignature) {
-    return res("LEASE_INVALID", "this project requires a run lease and this checker cannot verify lease signatures; update the thwip Action or App to a version that does");
-  }
+  const checkSignature = deps.verifyLeaseSignature ?? verifyLeaseSignature;
   const parts = lease.split(".");
   if (parts.length !== 3)
     return res("LEASE_INVALID", "the lease in this proof is not a signed token; run `thwip run` again");
@@ -1692,7 +1722,7 @@ async function checkLease(input) {
   let signatureOk = false;
   for (const jwk of candidates) {
     try {
-      if (await deps.verifyLeaseSignature({ jwk, algorithm: alg, signingInput, signature })) {
+      if (await checkSignature({ jwk, algorithm: alg, signingInput, signature })) {
         signatureOk = true;
         break;
       }

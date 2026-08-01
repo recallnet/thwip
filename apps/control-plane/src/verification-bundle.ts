@@ -1,7 +1,10 @@
 import type { SignerGrant, VerificationBundleV1 } from "@thwip/protocol";
 import { githubSigningKeys, installationToken } from "./github-app.js";
 import { projectPolicyState } from "./policy-state.js";
+import { verificationKeys } from "./service-keys.js";
+import { serviceKey } from "./service-signing.js";
 import { sha256Fingerprint } from "./sshsig-verify.js";
+import type { D1Like } from "./queue/projection.js";
 import type { Env } from "./env.js";
 
 export class VerificationBundleError extends Error {
@@ -224,6 +227,29 @@ export async function resolveVerificationBundle(
     }
   }
 
+  // Keys a verifier checks a run lease against. The service signs leases with
+  // its own key, so publishing the public half here is what lets anyone but
+  // the issuer judge one. Published before it is read, because a key that has
+  // signed and is not fetchable proves nothing to a reader.
+  let leaseIssuerJwks: unknown[];
+  try {
+    await serviceKey(env);
+    leaseIssuerJwks = await verificationKeys(env.DB as unknown as D1Like);
+  } catch {
+    throw new VerificationBundleError(503, "LEASE_KEYS_UNAVAILABLE", "cannot read the service lease issuer keys");
+  }
+  const policy = JSON.parse(policyRow.canonical_json) as VerificationBundleV1["policy"];
+  // A policy that requires a lease and a bundle with nothing to check one
+  // against is a project that can never merge. Say so here, where an operator
+  // can act on it, rather than shipping every developer a LEASE_INVALID.
+  if (policy.lease?.required === true && leaseIssuerJwks.length === 0) {
+    throw new VerificationBundleError(
+      503,
+      "LEASE_KEYS_UNAVAILABLE",
+      "this project requires a run lease and no lease issuer key is published",
+    );
+  }
+
   const now = new Date();
   const bundle: VerificationBundleV1 = {
     schemaVersion: "1",
@@ -232,10 +258,10 @@ export async function resolveVerificationBundle(
     ownerId: project.github_org_id,
     activePolicyDigest: policyRow.digest as VerificationBundleV1["activePolicyDigest"],
     gracePolicyDigests: grace.results.map((row) => row.digest as VerificationBundleV1["activePolicyDigest"]),
-    policy: JSON.parse(policyRow.canonical_json) as VerificationBundleV1["policy"],
+    policy,
     keys: githubKeys,
     grants: refreshed,
-    leaseIssuerJwks: [],
+    leaseIssuerJwks,
     issuedAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 60_000).toISOString(),
   };

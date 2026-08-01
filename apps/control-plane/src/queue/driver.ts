@@ -4,7 +4,7 @@ import { classifyMergeResponse, decideMergeWrite, finalGuard, type GuardObservat
 import { validateMergeResult, type CommitFacts } from "./candidate.js";
 import { buildCheck, mayGate, type ActivationState } from "./check.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
-import { mergeOperationId, queueAttributionTrailer } from "./merge-commit.js";
+import { mergeCommitTitle, mergeOperationId, queueAttributionTrailer } from "./merge-commit.js";
 
 /**
  * One integration turn, from a claimed offer to a recorded transition.
@@ -287,7 +287,7 @@ export async function runTurn(
     mergeMethod: ctx.mergeMethod,
     policyDigest: assignment.record.policy.digest,
     previousTransitionDigest: ctx.previousTransitionDigest,
-    commitTitle: `Merge pull request #${ctx.pullRequestNumber}`,
+    commitTitle: mergeCommitTitle(ctx.pullRequestNumber),
     commitMessage,
     createdAt: ctx.now,
     evidence: {
@@ -358,7 +358,7 @@ export async function runTurn(
     const response = await provider.merge({
       pullRequestNumber: ctx.pullRequestNumber,
       expectedHeadSha: git.headSha,
-      commitTitle: `Merge pull request #${ctx.pullRequestNumber}`,
+      commitTitle: mergeCommitTitle(ctx.pullRequestNumber),
       commitMessage,
     });
     first = classifyMergeResponse(response as never);

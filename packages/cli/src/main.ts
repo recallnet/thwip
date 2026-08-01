@@ -28,6 +28,7 @@ import { planQueueCommand } from "./queue-commands.js";
 import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "./ship-io.js";
 import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
+import { acquireRunLease, httpLeasePorts } from "./run-lease.js";
 import { executeCli, type CommandInvocation } from "./cli-args.js";
 import { cmdVerifyChain } from "./verify-chain.js";
 import { flag } from "./cli-flags.js";
@@ -161,6 +162,21 @@ async function cmdRun(argv: string[]): Promise<number> {
   const def = project.pipeline;
   const pDigest = project.pipelineDigest;
 
+  // The window opens before the suites do. A lease minted afterwards would be
+  // a fresh wrapper around a run that already happened, which is the reuse the
+  // lease exists to catch, so the verifier refuses one.
+  const lease = await acquireRunLease(
+    policy.lease.required,
+    {
+      repositoryId: policy.repositoryId,
+      treeOid: subject.treeOid,
+      parentOids: subject.parentOids,
+      baseSha: subject.baseSha,
+      deviceKeyId: key.fingerprint,
+    },
+    httpLeasePorts(endpoint, await apiAuthHeader()),
+  );
+
   const startedAt = new Date().toISOString();
   let suites;
   if (def.runner === "dagger") {
@@ -206,6 +222,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     keyId: key.fingerprint,
     githubUserId: identity.id,
     privateKeyPath: key.privateKeyPath,
+    ...(lease !== undefined ? { lease } : {}),
   });
   const envelope = await signStatement(statement, key.fingerprint, key.privateKeyPath);
 
