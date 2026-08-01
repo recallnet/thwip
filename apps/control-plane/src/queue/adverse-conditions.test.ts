@@ -166,6 +166,63 @@ describe("the pull request holding the lane goes away", () => {
   });
 });
 
+/**
+ * A pull request that has left must not keep taking turns.
+ *
+ * Twice in production a merged pull request was still an entry, was offered the
+ * turn, and starved the queue behind it until an operator ejected it by hand.
+ * The `closed` webhook does cancel an entry, so what matters is the case it was
+ * missing: the entry holding a live attempt when its pull request goes away.
+ */
+describe("a pull request that leaves while holding the lane", () => {
+  it("frees the lane instead of holding it", async () => {
+    const e = env();
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/entries/entry_${REPO}_59?ref=${encodeURIComponent(REF)}&reason=${encodeURIComponent("the pull request was closed")}`,
+      { method: "DELETE" },
+      e,
+    );
+    expect(response.status).toBe(200);
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+});
+
+describe("ejecting an entry", () => {
+  it("drives whoever gets the turn after an eject", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({ driveTurn: async (_e, _r, pr) => void driven.push(pr) });
+    await authorize(app, e, 59);
+    await authorize(app, e, 60);
+
+    driven.length = 0;
+    await app.request(
+      `/v1/queue/${REPO}/entries/entry_${REPO}_59?ref=${encodeURIComponent(REF)}`,
+      { method: "DELETE" },
+      e,
+    );
+
+    // The lane moved, so something has to tell the new holder. Nothing did, and
+    // the offer expired unclaimed.
+    expect(driven).toContain(60);
+  });
+});
+
 describe("GitHub refuses the merge", () => {
   it("releases the lane and does not record the pull request as merged", async () => {
     const e = env();

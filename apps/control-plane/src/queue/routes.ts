@@ -794,7 +794,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
     const entryId = c.req.param("entryId");
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.cancel({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `cancel:${entryId}`),
         entryId,
@@ -802,6 +802,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         reason,
       }),
     );
+
+    // Ejecting frees the lane, and a freed lane is offered to somebody else. That
+    // offer expires in ninety seconds, so telling nobody about it wastes a turn
+    // and, on a quiet queue, stalls it entirely.
+    await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
