@@ -188,6 +188,9 @@ export const REASON_CODES = [
   "BUNDLE_UNAVAILABLE",
   "BUNDLE_SIGNATURE_INVALID",
   "BUNDLE_EXPIRED",
+  // Not a verdict. The evidence has not settled, so nothing may be written down
+  // as a pass or a failure yet. Callers wait and ask again.
+  "VERIFICATION_PENDING",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
