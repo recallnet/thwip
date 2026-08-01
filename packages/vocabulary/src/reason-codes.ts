@@ -39,6 +39,10 @@ export const SERVICE_REASONS = [
   "CANDIDATE_SUITES_INCOMPLETE",
   "CANDIDATE_SUITE_DUPLICATE",
   "CANDIDATE_VERIFIER_NOT_PINNED",
+  // How the claim and receipt routes refuse a device under `fresh`
+  // (apps/control-plane/src/queue/routes.ts).
+  "ASSIGNMENT_MISMATCH",
+  "DEVICE_MISMATCH",
 ] as const;
 
 /** Codes the CLI raises about the local machine, before anything is sent. */
@@ -47,6 +51,11 @@ export const LOCAL_REASONS = [
   "DEVICE_NOT_ENROLLED",
   "UNCOMMITTED_CHANGES",
   "SUITE_FAILED",
+  // What this machine refuses on its own, before it runs anything a turn
+  // handed it (packages/cli/src/assignment.ts, candidate.ts).
+  "ASSIGNMENT_UNVERIFIED",
+  "ASSIGNMENT_EXPIRED",
+  "CANDIDATE_UNAVAILABLE",
   "MERGE_OUTCOME_UNKNOWN",
   "QUEUE_NOT_CONFIGURED",
   "SERVICE_UNAVAILABLE",

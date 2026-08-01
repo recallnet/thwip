@@ -111,6 +111,12 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   PROVIDER_FAILURE: EXIT.ambiguous,
 
   /* Evidence was refused. */
+  // The assignment or the receipt was refused, which is evidence being
+  // rejected rather than a suite failing: the run may well have passed, and
+  // nothing about it counted.
+  ASSIGNMENT_UNVERIFIED: EXIT.evidenceRejected,
+  ASSIGNMENT_MISMATCH: EXIT.evidenceRejected,
+  DEVICE_MISMATCH: EXIT.evidenceRejected,
   LOCAL_RECEIPT_MISSING: EXIT.evidenceRejected,
   LOCAL_RECEIPT_REJECTED: EXIT.evidenceRejected,
   RECEIPT_REJECTED: EXIT.evidenceRejected,
@@ -149,6 +155,7 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   QUEUE_PAUSED: EXIT.humanRequired,
   REBASELINE_REQUIRED: EXIT.humanRequired,
   MERGE_REJECTED: EXIT.humanRequired,
+  AUDIT_REQUIRED: EXIT.humanRequired,
 
   /* The branch needs work before it can integrate. */
   MERGE_CONFLICT: EXIT.repairRequired,
@@ -190,6 +197,9 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   // Pending evidence is not a failure. The caller waits and asks again, which is
   // what the unavailable class already means to an agent reading exit codes.
   VERIFICATION_PENDING: EXIT.unavailable,
+  // A candidate this machine cannot fetch is a reachability problem, and the
+  // same commit is very likely there on the next attempt.
+  CANDIDATE_UNAVAILABLE: EXIT.unavailable,
   SERVICE_UNAVAILABLE: EXIT.unavailable,
   NETWORK_UNAVAILABLE: EXIT.unavailable,
   BUNDLE_UNAVAILABLE: EXIT.unavailable,
@@ -204,6 +214,7 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   MERGE_EVIDENCE_INCOMPLETE: EXIT.invariant,
   MERGE_INTENT_INVALID: EXIT.invariant,
   CANDIDATE_DIGEST_MISMATCH: EXIT.invariant,
+  AUDIT_DISAGREED: EXIT.invariant,
   BUNDLE_SIGNATURE_INVALID: EXIT.invariant,
 };
 
