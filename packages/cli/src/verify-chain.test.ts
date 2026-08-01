@@ -26,6 +26,39 @@ describe("the verification summary", () => {
     expect(summarize(42, 42, [])).toContain("42 links verified");
   });
 
+  /**
+   * A chain that verifies because a record was corrected is not a chain that
+   * never got anything wrong. Both print the clean first line, so the second
+   * line is the only thing that keeps them apart, and it is printed on the
+   * clean run rather than filed as a problem: a correction is the chain
+   * accounting for a mistake, not another mistake.
+   */
+  it("says a clean chain holds and still says a record was corrected", () => {
+    const text = summarize(
+      61,
+      61,
+      [],
+      [
+        {
+          sequence: 61,
+          digest: "sha256:e",
+          correctsSequence: 54,
+          correctsDigest: "sha256:f919eeab",
+          from: "ff6ea882feefd64c4e9f4dff909209e7adb281e3",
+          to: "0b2076107aa20f8b365d3b510de4838b05d12622",
+          observedAt: "2026-08-02T09:00:00.000Z",
+          actorPrincipalId: "prn_amelia",
+          reason: "record 54 names the test merge for pull request 107",
+        },
+      ],
+    );
+    expect(text).toContain("61 links verified");
+    expect(text).toContain("1 record was corrected");
+    expect(text).toContain("link 61 corrects link 54");
+    expect(text).toContain("0b2076107aa20f8b365d3b510de4838b05d12622");
+    expect(text).toContain("ff6ea882feefd64c4e9f4dff909209e7adb281e3");
+  });
+
   it("separates pre-attestation history from real problems", () => {
     const text = summarize(3, 2, [
       { code: "PRE_ATTESTATION", sequence: null, digest: "sha256:a", detail: "written before signed records" },

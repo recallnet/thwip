@@ -43,7 +43,8 @@ import {
 } from "./attestation.js";
 import { DEFAULT_MERGE_METHOD, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
-import type { Sha256 } from "@thwip/queue-protocol";
+import { parseTransitionRecord, type Sha256, type TransitionRecordV1 } from "@thwip/queue-protocol";
+import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
@@ -75,6 +76,31 @@ export interface QueueRouteEnv {
   readonly PUBLIC_ORIGIN: string;
   /** Digest-addressed evidence. Absent in environments that have no bucket. */
   readonly EVIDENCE?: R2Bucket;
+}
+
+/**
+ * The attempt a record cites, where its kind cites one.
+ *
+ * A correction repeats it rather than inventing one, so a correction can never
+ * reattribute a merge to a turn that did not ask for it. A record with no
+ * attempt (a genesis, an observed external move) has nothing to repeat and is
+ * refused rather than given a blank.
+ */
+function correctedAttemptId(record: TransitionRecordV1): string | null {
+  switch (record.kind) {
+    case "verified-merge":
+      return record.verifiedMerge.attemptId;
+    case "reused-proof-merge":
+      return record.reusedProof.attemptId;
+    case "candidate-verified-merge":
+      return record.candidateVerified.attemptId;
+    case "override-merge":
+      return record.override.attemptId;
+    case "base-correction":
+      return record.correction.attemptId;
+    default:
+      return null;
+  }
 }
 
 /** Callers supply their own idempotency key, or the route derives a stable one. */
@@ -2555,6 +2581,273 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       sequence: transitionSequence,
       transitionDigest: signed.digest,
       mergeIntentDigest: authorization.intentDigest,
+      actor: who.principalId,
+      reason,
+    });
+  });
+
+  /**
+   * Correct a record that names a sha the branch does not have.
+   *
+   * Record 54 says pull request 107's merge left the base at the throwaway test
+   * merge GitHub computes for an open pull request. Main took a different commit
+   * with the same tree and the same parents. The cause is fixed; the record is
+   * not, and cannot be: its digest is the next record's predecessor and six
+   * records chain from it, so editing the bytes means re-signing seven records
+   * under new digests. That replaces the chain rather than repairing it, and
+   * refusing to replace it is the product.
+   *
+   * So the correction is appended. `verifyChain` follows the corrected edge in
+   * place of the original, and the original stays served, signed, and saying
+   * what it said.
+   *
+   * A correction that could be applied to any record is a licence to rewrite the
+   * past, which is worse than the bug. Four things hold the line, and none of
+   * them is the operator's word:
+   *
+   * 1. The record must actually be wrong, and GitHub says so. `baseContainsSha`
+   *    is asked whether the branch contains the sha the record names, and a
+   *    `true` is refused: a record whose sha is on the branch has nothing wrong
+   *    with it, whatever an administrator believes. A branch that cannot be
+   *    asked is refused too, because signing an unchecked claim is exactly what
+   *    produced record 54.
+   * 2. The sha it is corrected to must be on the branch, asked the same way.
+   * 3. That commit must be the same commit under another name. Its tree and its
+   *    parent vector come from GitHub and have to equal the ones the record
+   *    already certified, so no correction can reach a commit that integrates a
+   *    different tree or joins a different history.
+   * 4. Everything the record repeats is copied from the record, not supplied:
+   *    `before`, the tree, the parents, the attempt. The operator supplies a
+   *    digest, a sha and a reason, and the reason is the only free text.
+   *
+   * The verifier re-checks 3 and 4 from the bytes alone, so a chain served to an
+   * outside reader does not rest on this route having been honest. What it
+   * cannot re-check is 1 and 2, which need GitHub. The residue is stated in the
+   * report: a holder of the signing key could rename a merge commit to a
+   * different commit with the same tree, the same parents and the same starting
+   * point, and only where the branch really does contain the second and not the
+   * first — which is to say, only where the branch itself already says so.
+   */
+  app.post("/v1/queue/:repositoryId/correct", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      transitionDigest?: string;
+      mergeSha?: string;
+      reason?: string;
+    };
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+    if (typeof body.transitionDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(body.transitionDigest)) {
+      return c.json({ error: "transitionDigest required" }, 400);
+    }
+    if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+      return c.json({ error: "mergeSha required" }, 400);
+    }
+    const reason = body.reason.trim();
+    const mergeSha = body.mergeSha;
+    const correctsDigest = body.transitionDigest;
+
+    const db = c.env.DB as unknown as D1Like;
+    // From the chain this branch serves, not from the attestation table at
+    // large: a correction may only reach a record a reader of this chain can
+    // read, so that the substitution it asks for is one they can check.
+    const chain = await readChain(db, repositoryId, baseRef);
+    const link = chain.find((l) => l.digest === correctsDigest);
+    if (link === undefined) return c.json({ error: "this branch's chain does not serve that record" }, 404);
+
+    const parsed = parseTransitionRecord(JSON.parse(new TextDecoder().decode(link.bytes)) as unknown);
+    if (!parsed.ok) return c.json({ error: `that record does not parse: ${parsed.detail}` }, 409);
+    const corrected = parsed.value;
+    const attemptId = correctedAttemptId(corrected);
+    if (attemptId === null) {
+      return c.json(
+        { error: `a ${corrected.kind} record cites no attempt and cannot be corrected`, code: "NOT_CORRECTABLE" },
+        409,
+      );
+    }
+    if (corrected.before.baseSha === null || corrected.before.treeOid === null) {
+      return c.json({ error: "a record that opens an epoch cannot be corrected", code: "NOT_CORRECTABLE" }, 409);
+    }
+
+    // The gate. A record whose sha the branch contains is a record that is
+    // right, and no reason an operator can write changes that.
+    const recordedOnBase = await deps.baseContainsSha(c.env, repositoryId, baseRef, corrected.after.baseSha);
+    if (recordedOnBase === null) {
+      return c.json(
+        {
+          error: `${baseRef} could not be asked whether it contains ${corrected.after.baseSha}`,
+          code: "RECORD_BASE_UNREADABLE",
+        },
+        409,
+      );
+    }
+    if (recordedOnBase) {
+      return c.json(
+        {
+          error: `${baseRef} contains ${corrected.after.baseSha}; that record says nothing untrue`,
+          code: "RECORD_BASE_ON_BRANCH",
+        },
+        409,
+      );
+    }
+
+    const onBase = await deps.baseContainsSha(c.env, repositoryId, baseRef, mergeSha);
+    if (onBase !== true) {
+      return c.json(
+        {
+          error:
+            onBase === false
+              ? `${baseRef} does not contain ${mergeSha}`
+              : `${baseRef} could not be asked whether it contains ${mergeSha}`,
+          code: "MERGE_NOT_ON_BASE",
+        },
+        409,
+      );
+    }
+
+    // The same commit under another name, or nothing. GitHub describes it; the
+    // record it corrects says what that description has to be.
+    const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
+    if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+    const sameCommit =
+      facts.treeOid === corrected.after.treeOid &&
+      corrected.after.parentsComplete &&
+      facts.parentShas.length === corrected.after.parentCount &&
+      facts.parentShas.every((sha, i) => sha === corrected.after.parentOids[i]);
+    if (!sameCommit) {
+      return c.json(
+        {
+          error:
+            `${mergeSha} carries tree ${facts.treeOid} over parents ${facts.parentShas.join(", ")}; ` +
+            `record ${corrected.transitionSequence} certified tree ${corrected.after.treeOid} over ` +
+            `${corrected.after.parentOids.join(", ")}`,
+          code: "CORRECTION_NOT_THE_SAME_COMMIT",
+        },
+        409,
+      );
+    }
+
+    // One correction per record, held by the database rather than by this read:
+    // the partial unique index on attempt_id refuses a second row that claims a
+    // position, so two callers racing cannot both write one.
+    const correctionKey = `correction:${correctsDigest}`;
+    const already = await transitionRecordFor(db, correctionKey);
+    if (already !== null) {
+      return c.json({ corrected: "already", corrects: correctsDigest, transitionDigest: already });
+    }
+
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    const head = snapshot.transitions.at(-1);
+    const transitionSequence = (head?.transitionSequence ?? 0) + 1;
+    const priorDigest = (head?.digest ?? null) as Sha256 | null;
+    if (priorDigest === null) return c.json({ error: "there is no chain to append to" }, 409);
+
+    const document = await buildBaseCorrectionRecord({
+      repositoryId,
+      baseRef,
+      queueEpoch: snapshot.queueEpoch,
+      transitionSequence,
+      previousTransitionDigest: priorDigest,
+      corrected: {
+        digest: correctsDigest as Sha256,
+        transitionSequence: corrected.transitionSequence,
+        before: { baseSha: corrected.before.baseSha, treeOid: corrected.before.treeOid },
+        after: corrected.after,
+        attemptId,
+      },
+      baseSha: mergeSha,
+      actorPrincipalId: who.principalId,
+      reason,
+      observedAt: new Date().toISOString(),
+    });
+    const signed = await signTransitionRecord(document, {
+      sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ),
+    });
+    if ("error" in signed) {
+      return c.json({ error: `the queue refused to sign its own record: ${signed.error}` }, 409);
+    }
+
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const stored = await storeAttestation(db, {
+      digest: signed.digest,
+      kind: "base-correction",
+      repositoryId,
+      baseRef,
+      transitionSequence,
+      attemptId: correctionKey,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy === null
+        ? {}
+        : {
+            organizationId: policy.organizationId,
+            mirror: (mirrored: {
+              organizationId: string;
+              repositoryId: string;
+              kind: "merge-intent" | "transition-record";
+              digest: string;
+              bytes: Uint8Array;
+            }) =>
+              storeEvidence(c.env, {
+                organizationId: mirrored.organizationId,
+                repositoryId: mirrored.repositoryId,
+                kind: mirrored.kind,
+                digest: mirrored.digest as `sha256:${string}`,
+                bytes: mirrored.bytes,
+              }).then(() => undefined),
+          }),
+    });
+    if (!stored.stored) {
+      return c.json({ corrected: "already", corrects: correctsDigest, transitionDigest: stored.digest });
+    }
+
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const tail = store.state().transitions.at(-1);
+      if ((tail?.transitionSequence ?? 0) + 1 !== transitionSequence || (tail?.digest ?? null) !== priorDigest) {
+        return { moved: true as const };
+      }
+      return {
+        moved: false as const,
+        transition: commands.recordTransition({
+          idempotencyKey: `correct:${correctsDigest}`,
+          kind: "correction",
+          transitionSequence,
+          priorDigest,
+          digest: signed.digest,
+          // Where the branch really went, which is the whole claim.
+          baseSha: mergeSha,
+          attemptId: null,
+          witnessPrincipalIds: [who.principalId],
+        }),
+      };
+    });
+
+    if (result.moved) {
+      await db
+        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
+        .bind(signed.digest)
+        .run();
+      return c.json(
+        { error: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" },
+        409,
+      );
+    }
+
+    return c.json({
+      corrected: result.transition.status,
+      corrects: correctsDigest,
+      correctsSequence: corrected.transitionSequence,
+      correctedBaseSha: corrected.after.baseSha,
+      baseSha: mergeSha,
+      sequence: transitionSequence,
+      transitionDigest: signed.digest,
       actor: who.principalId,
       reason,
     });

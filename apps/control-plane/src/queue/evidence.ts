@@ -386,6 +386,70 @@ export async function buildReusedProofRecord(input: {
 }
 
 /**
+ * Build the record that corrects an earlier record's base sha.
+ *
+ * Nothing here is composed from the caller's description of the commit. The
+ * tree, the parents and the parent count are copied from the record being
+ * corrected, and the route has already made GitHub agree that the commit it
+ * names carries exactly those. `before` is copied too. One field differs from
+ * the record it corrects, and that is the point: a correction that could change
+ * anything else would be a rewrite wearing a different name.
+ */
+export async function buildBaseCorrectionRecord(input: {
+  readonly repositoryId: string;
+  readonly baseRef: string;
+  readonly queueEpoch: number;
+  readonly transitionSequence: number;
+  readonly previousTransitionDigest: Sha256;
+  readonly corrected: {
+    readonly digest: Sha256;
+    readonly transitionSequence: number;
+    readonly before: { readonly baseSha: string; readonly treeOid: string };
+    readonly after: {
+      readonly baseSha: string;
+      readonly treeOid: string;
+      readonly parentOids: readonly string[];
+      readonly parentCount: number;
+      readonly parentOidsDigest: Sha256;
+      readonly parentsComplete: boolean;
+    };
+    readonly attemptId: string;
+  };
+  readonly baseSha: string;
+  readonly actorPrincipalId: string;
+  readonly reason: string;
+  readonly observedAt: string;
+}): Promise<Record<string, unknown>> {
+  return {
+    schemaVersion: "1",
+    kind: "base-correction",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    queueEpoch: input.queueEpoch,
+    transitionSequence: input.transitionSequence,
+    previousTransitionDigest: input.previousTransitionDigest,
+    before: input.corrected.before,
+    after: {
+      baseSha: input.baseSha,
+      treeOid: input.corrected.after.treeOid,
+      parentOids: [...input.corrected.after.parentOids],
+      parentCount: input.corrected.after.parentCount,
+      parentOidsDigest: input.corrected.after.parentOidsDigest,
+      parentsComplete: input.corrected.after.parentsComplete,
+    },
+    observedAt: input.observedAt,
+    correction: {
+      correctsTransitionDigest: input.corrected.digest,
+      correctsTransitionSequence: input.corrected.transitionSequence,
+      correctedBaseSha: input.corrected.after.baseSha,
+      attemptId: input.corrected.attemptId,
+      actorPrincipalId: input.actorPrincipalId,
+      reason: input.reason,
+    },
+  };
+}
+
+/**
  * The equivalence digests a fast-path reuse claim binds (plan.md §21.5). Exposed
  * so the verifier and the scheduler compute them the same way; a difference here
  * would let reuse certify a tree nobody integrated.
