@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import type { QueueRouteEnv } from "./routes.js";
+import type { D1Like } from "./projection.js";
 
 /**
  * The queue moves when something calls it, and nothing called it on a timer.
@@ -26,6 +27,30 @@ function env(): QueueRouteEnv {
 afterEach(() => {
   while (open.length > 0) open.pop()!.close();
 });
+
+/**
+ * Wraps a real D1Like so that any statement bound with `repositoryId` among its
+ * parameters rejects, while every other statement runs against the real
+ * database untouched. Used to make one repository's work fail for real, rather
+ * than stubbing `driveTurn` in a way the code under test never reaches.
+ */
+function withFailingRepository(db: D1Like, repositoryId: string): D1Like {
+  return {
+    prepare: (query: string) => ({
+      bind: (...values: unknown[]) => {
+        const fails = values.includes(repositoryId);
+        const real = db.prepare(query).bind(...values);
+        const failure = () => Promise.reject(new Error(`database unavailable for repository ${repositoryId}`));
+        return {
+          run: () => (fails ? failure() : real.run()),
+          first: <T,>() => (fails ? (failure() as Promise<T | null>) : real.first<T>()),
+          all: <T,>() => (fails ? (failure() as Promise<{ results: T[] }>) : real.all<T>()),
+        };
+      },
+    }),
+    batch: (statements: unknown[]) => db.batch(statements),
+  };
+}
 
 function queue(repositoryId: string, enabled: number) {
   raw
@@ -71,10 +96,12 @@ describe("the queue heartbeat", () => {
     const e = env();
     queue("1", 1);
     queue("2", 1);
-    const result = await tickAllQueues(e, {
-      driveTurn: async () => {
-        throw new Error("github is down");
-      },
+    // Repository "1" is unreachable at the database, not merely undriven: this
+    // is the seam that actually throws inside the per-queue try block, unlike
+    // stubbing driveTurn, which is never called when no lane is held.
+    const failingEnv = { ...e, DB: withFailingRepository(e.DB as unknown as D1Like, "1") } as unknown as QueueRouteEnv;
+    const result = await tickAllQueues(failingEnv, {
+      driveTurn: async () => {},
       onQueueTicked: () => {},
     });
     expect(result.ticked).toBe(2);
