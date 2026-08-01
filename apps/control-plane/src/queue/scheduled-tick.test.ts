@@ -70,6 +70,7 @@ describe("the queue heartbeat", () => {
     const result = await tickAllQueues(e, {
       driveTurn: async () => {},
       onQueueTicked: (repositoryId) => visited.push(repositoryId),
+      onQueueFailed: () => {},
     });
     expect(visited.sort()).toEqual(["1", "2"]);
     expect(result.ticked).toBe(2);
@@ -78,7 +79,11 @@ describe("the queue heartbeat", () => {
   it("leaves a disabled queue alone", async () => {
     const e = env();
     queue("1", 0);
-    const result = await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {} });
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
     expect(result.ticked).toBe(0);
   });
 
@@ -87,12 +92,20 @@ describe("the queue heartbeat", () => {
     const e = env();
     queue("1", 1);
     let drives = 0;
-    await tickAllQueues(e, { driveTurn: async () => void drives++, onQueueTicked: () => {} });
+    await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
     expect(drives).toBe(0);
   });
 
-  /** One queue failing must not stop the rest from being ticked. */
-  it("keeps going when one queue throws", async () => {
+  /**
+   * One queue failing must not stop the rest from being ticked, and it must
+   * not be counted as ticked: a heartbeat that reports the same number
+   * whether it worked or failed cannot show a fleet-wide outage.
+   */
+  it("keeps going when one queue throws, and counts the throw as failed rather than ticked", async () => {
     const e = env();
     queue("1", 1);
     queue("2", 1);
@@ -100,10 +113,17 @@ describe("the queue heartbeat", () => {
     // is the seam that actually throws inside the per-queue try block, unlike
     // stubbing driveTurn, which is never called when no lane is held.
     const failingEnv = { ...e, DB: withFailingRepository(e.DB as unknown as D1Like, "1") } as unknown as QueueRouteEnv;
+    const failures: Array<{ repositoryId: string; error: unknown }> = [];
+    const ticked: string[] = [];
     const result = await tickAllQueues(failingEnv, {
       driveTurn: async () => {},
-      onQueueTicked: () => {},
+      onQueueTicked: (repositoryId) => ticked.push(repositoryId),
+      onQueueFailed: (repositoryId, error) => failures.push({ repositoryId, error }),
     });
-    expect(result.ticked).toBe(2);
+    expect(result.ticked).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(ticked).toEqual(["2"]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.repositoryId).toBe("1");
   });
 });
