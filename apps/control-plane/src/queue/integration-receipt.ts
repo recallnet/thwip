@@ -14,6 +14,43 @@
  * never see, so it stays with the caller.
  */
 
+import { canonicalBytes, envelopeDigest, type Sha256 } from "@thwip/queue-protocol";
+
+/**
+ * The namespace the device signs a receipt under.
+ *
+ * Separate from the proof namespace on purpose. A signature is only evidence of
+ * what it was made for, and reusing `thwip-ci-dsse-v1` would let a proof
+ * signature be replayed as a receipt for whatever assignment happened to hash
+ * the same way.
+ */
+export const INTEGRATION_RECEIPT_NAMESPACE = "thwip-integration-receipt-v1";
+
+/**
+ * The exact bytes a device signs and the queue verifies.
+ *
+ * Built from the five fields that decide the receipt and nothing else, with
+ * object keys in a fixed order, so the signer and the verifier cannot disagree
+ * about what was signed. The suites keep the order the device sent them in:
+ * that is part of its account, and reordering would verify a different message.
+ */
+export function integrationReceiptBytes(receipt: SubmittedReceipt): Uint8Array {
+  return canonicalBytes(
+    JSON.stringify({
+      assignmentDigest: receipt.assignmentDigest,
+      assignmentId: receipt.assignmentId,
+      candidateTreeOid: receipt.candidateTreeOid,
+      deviceKeyId: receipt.deviceKeyId,
+      suites: receipt.suites.map((s) => ({ name: s.name, outcome: s.outcome })),
+    }),
+  );
+}
+
+/** The digest of those bytes, which is what a merge record cites. */
+export function integrationReceiptDigest(receipt: SubmittedReceipt): Promise<Sha256> {
+  return envelopeDigest(integrationReceiptBytes(receipt));
+}
+
 export interface SubmittedReceiptSuite {
   readonly name: string;
   readonly outcome: string;
