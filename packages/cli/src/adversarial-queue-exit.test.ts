@@ -75,12 +75,20 @@ describe("ADVERSARIAL: what the CLI makes of the answers the service gives", () 
     );
   });
 
+  /**
+   * This test used to assert `exitCodeFor("HEAD_MOVED")` equalled
+   * `exitCodeFor("NEEDS_REPAIR")`, which stated the bug as the requirement:
+   * satisfying it would have made a real merge conflict report as "the source
+   * changed". The CLI's side was never the broken one.
+   *
+   * The defect was in the queue, which blocked a moved head as NEEDS_REPAIR so
+   * the dashboard said "Push a fix" about a branch that was fine. That mapping
+   * is fixed in queue-domain and asserted there, where both surfaces read it
+   * from. What remains true here is the CLI's own half.
+   */
   it("does not classify a head that moved as a branch that needs repair", () => {
-    // The CLI classes HEAD_MOVED as exit 33, sourceChanged, and that is right.
-    // The queue blocks the entry with NEEDS_REPAIR for the same fact, which the
-    // CLI classes as exit 31 and the dashboard renders as "Push a fix". Whichever
-    // surface the developer looks at, they get a different instruction.
-    expect(exitCodeFor("HEAD_MOVED")).toBe(exitCodeFor("NEEDS_REPAIR"));
+    expect(exitCodeFor("HEAD_MOVED")).toBe(EXIT.sourceChanged);
+    expect(exitCodeFor("HEAD_MOVED")).not.toBe(EXIT.repairRequired);
   });
 });
 
