@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { ATTEMPT_OUTCOMES, BLOCKING_REASONS } from "@thwip/queue-domain";
 import { REASON_CODES } from "@thwip/protocol";
-import { EXIT, exitCodeFor, humanSummary, isRetryable, knownReasonCodes, line, OUTCOMES } from "./queue-exit.js";
+import {
+  EXIT,
+  exitCodeFor,
+  humanSummary,
+  isRetryable,
+  knownReasonCodes,
+  line,
+  LOCAL_REASONS,
+  nextActionFor,
+  OUTCOMES,
+  SERVICE_REASONS,
+} from "./queue-exit.js";
 
 /**
  * The exit-code contract is what an agent branches on, so the dangerous failure
@@ -45,6 +56,24 @@ describe("exhaustiveness", () => {
       ].includes(code),
     );
     for (const code of surfaced) expect(known, `unmapped verifier code ${code}`).toContain(code);
+  });
+
+  it("classifies every code the control plane writes on the wire", () => {
+    const known = knownReasonCodes();
+    for (const reason of [...SERVICE_REASONS, ...LOCAL_REASONS]) {
+      expect(known, `unmapped wire reason ${reason}`).toContain(reason);
+    }
+  });
+
+  it("has a sentence for every code it classifies", () => {
+    // The classification and the sentence are Records over the same union, so
+    // this cannot drift without the build failing. The test is here for a reader.
+    for (const reason of knownReasonCodes()) {
+      const action = nextActionFor(reason);
+      expect(action.length, `${reason} has no next action`).toBeGreaterThan(0);
+      expect(action, `${reason} ends without a full stop`).toMatch(/[.]$/);
+      expect(action, `${reason} was written with an em dash`).not.toContain("—");
+    }
   });
 });
 
@@ -132,10 +161,16 @@ describe("NDJSON output", () => {
 });
 
 describe("humanSummary", () => {
-  it("leads with the reason a person needs to act on", () => {
+  it("leads with the reason a person needs to act on, then says what to do", () => {
     expect(humanSummary({ event: "blocked", reasonCode: "REVIEW_REQUIRED" })).toBe(
-      "blocked: REVIEW_REQUIRED",
+      "blocked: REVIEW_REQUIRED. Ask for a review. The queue holds your place while you wait.",
     );
+  });
+
+  it("names a code it does not know instead of guessing at it", () => {
+    const summary = humanSummary({ event: "blocked", reasonCode: "A_NEWER_SERVICE_KNOWS_THIS" });
+    expect(summary).toContain("A_NEWER_SERVICE_KNOWS_THIS");
+    expect(summary).toContain("Update thwip");
   });
 
   it("does not shout PASS at someone whose work succeeded", () => {

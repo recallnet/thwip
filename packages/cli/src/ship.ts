@@ -1,4 +1,4 @@
-import { EXIT, exitCodeFor, isRetryable, type ExitCode, type Outcome } from "./queue-exit.js";
+import { EXIT, exitCodeFor, isRetryable, nextActionFor, type ExitCode, type Outcome } from "./queue-exit.js";
 
 /**
  * `thwip ship` (plan.md §30.1, §30.4.1).
@@ -56,7 +56,7 @@ export function nextShipStep(state: ShipState): ShipDecision {
       kind: "stop",
       reasonCode: "LOGIN_REQUIRED",
       exitCode: EXIT.authRequired,
-      why: "run `thwip login` in your own terminal; it needs your browser",
+      why: nextActionFor("LOGIN_REQUIRED"),
     };
   }
 
@@ -67,7 +67,7 @@ export function nextShipStep(state: ShipState): ShipDecision {
       kind: "stop",
       reasonCode: "UNCOMMITTED_CHANGES",
       exitCode: EXIT.usage,
-      why: "commit or stash your changes; a proof binds the committed tree",
+      why: nextActionFor("UNCOMMITTED_CHANGES"),
     };
   }
 
@@ -140,30 +140,10 @@ export function reactToReason(reasonCode: string, options: { wait: boolean }): S
     return { kind: "keep-waiting", reasonCode, why: "transient; the queue will offer another turn" };
   }
 
-  return { kind: "stop", reasonCode, exitCode, why: stopExplanation(reasonCode, exitCode) };
-}
-
-function stopExplanation(reasonCode: string, exitCode: ExitCode): string {
-  switch (exitCode) {
-    case EXIT.humanRequired:
-      return "a person has to act; retrying will not help";
-    case EXIT.repairRequired:
-      return `fix the branch, then run \`thwip ship --wait\` again (${reasonCode})`;
-    case EXIT.sourceChanged:
-      return "the source changed; a new turn needs a new proof";
-    case EXIT.ambiguous:
-      return "the merge outcome is unknown; the queue is reconciling and will not write again";
-    case EXIT.evidenceRejected:
-      return "the evidence was refused; `thwip verify` explains why";
-    case EXIT.suiteFailed:
-      return "a required suite failed";
-    case EXIT.invariant:
-      return "an invariant disagreed; this needs a human, not a retry";
-    case EXIT.rateLimited:
-      return "rate limited by the provider";
-    default:
-      return reasonCode;
-  }
+  // One sentence per reason, from the same table the summary line uses. The old
+  // text here was one sentence per exit class, so nine different endings arrived
+  // as "an invariant disagreed" and a failed test suite read as a Thwip bug.
+  return { kind: "stop", reasonCode, exitCode, why: nextActionFor(reasonCode) };
 }
 
 /**
