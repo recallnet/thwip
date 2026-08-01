@@ -10,6 +10,14 @@ const D = (label: string) => {
 const BASE = "1".repeat(40);
 const HEAD = "2".repeat(40);
 
+const VERIFIER = {
+  workflowRef: "recallnet/thwip/.github/workflows/verify.yml@refs/heads/main",
+  workflowSha: "5".repeat(40),
+  reusableWorkflowRef: "recallnet/thwip/.github/workflows/reusable.yml@refs/heads/main",
+  reusableWorkflowSha: "6".repeat(40),
+  verifierDigest: D("v"),
+};
+
 function assignment(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: "1",
@@ -24,6 +32,9 @@ function assignment(over: Record<string, unknown> = {}): Record<string, unknown>
       sponsorPrincipalId: "alice",
       queueDecisionDigest: D("d"),
     },
+    // `fresh` on a command pipeline: a local run against a developer's own
+    // machine, with no Dagger module or engine and no GitHub verifier — the
+    // shape every live policy actually produces.
     execution: { mode: "run", profile: "fresh", runnerPrincipalId: "alice", deviceKeyId: "key-1" },
     git: {
       objectFormat: "sha1",
@@ -40,18 +51,10 @@ function assignment(over: Record<string, unknown> = {}): Record<string, unknown>
       digest: D("p"),
       version: 4,
       securityProfile: "fresh",
-      daggerModuleDigest: D("m"),
-      daggerEngineDigest: D("e"),
+      runner: "command",
       requiredSuites: ["lint", "typecheck", "test"],
     },
     evidence: { workReceiptDigest: D("w"), previousTransitionDigest: D("t") },
-    verifier: {
-      workflowRef: "recallnet/thwip/.github/workflows/verify.yml@refs/heads/main",
-      workflowSha: "5".repeat(40),
-      reusableWorkflowRef: "recallnet/thwip/.github/workflows/reusable.yml@refs/heads/main",
-      reusableWorkflowSha: "6".repeat(40),
-      verifierDigest: D("v"),
-    },
     timing: {
       issuedAt: "2026-07-29T12:00:00Z",
       notBefore: "2026-07-29T12:00:00Z",
@@ -63,8 +66,40 @@ function assignment(over: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 describe("parseIntegrationAssignment", () => {
-  it("accepts a well-formed fresh assignment", () => {
+  it("accepts a well-formed fresh assignment against a command pipeline, with no Dagger digests and no verifier", () => {
     expect(parseIntegrationAssignment(assignment())).toMatchObject({ ok: true });
+  });
+
+  it("refuses a command-pipeline assignment that carries Dagger digests nobody produced", () => {
+    const fabricated = assignment({
+      policy: {
+        ...(assignment()["policy"] as Record<string, unknown>),
+        daggerModuleDigest: D("m"),
+        daggerEngineDigest: D("e"),
+      },
+    });
+    expect(parseIntegrationAssignment(fabricated)).toMatchObject({ ok: false });
+  });
+
+  it("refuses a local-run assignment that carries a verifier nobody pinned", () => {
+    const fabricated = assignment({ verifier: VERIFIER });
+    expect(parseIntegrationAssignment(fabricated)).toMatchObject({ ok: false });
+  });
+
+  it("accepts a dagger-runner assignment carrying its module and engine digests", () => {
+    const dagger = assignment({
+      policy: {
+        digest: D("p"),
+        version: 4,
+        securityProfile: "audited",
+        runner: "dagger",
+        daggerModuleDigest: D("m"),
+        daggerEngineDigest: D("e"),
+        requiredSuites: ["lint", "typecheck", "test"],
+      },
+      execution: { mode: "run", profile: "audited", runnerPrincipalId: "alice", deviceKeyId: "key-1" },
+    });
+    expect(parseIntegrationAssignment(dagger)).toMatchObject({ ok: true });
   });
 
   it("accepts a fast reuse assignment", () => {
@@ -75,7 +110,21 @@ describe("parseIntegrationAssignment", () => {
     expect(parseIntegrationAssignment(fast)).toMatchObject({ ok: true });
   });
 
-  it("accepts a remote assignment", () => {
+  it("accepts a remote assignment, which requires its pinned verifier", () => {
+    const remote = assignment({
+      policy: { ...(assignment()["policy"] as Record<string, unknown>), securityProfile: "remote" },
+      execution: {
+        mode: "remote",
+        provider: "github-actions",
+        workflowRef: "recallnet/thwip/.github/workflows/remote.yml@refs/heads/main",
+        workflowSha: "7".repeat(40),
+      },
+      verifier: VERIFIER,
+    });
+    expect(parseIntegrationAssignment(remote)).toMatchObject({ ok: true });
+  });
+
+  it("refuses a remote assignment with no pinned verifier", () => {
     const remote = assignment({
       policy: { ...(assignment()["policy"] as Record<string, unknown>), securityProfile: "remote" },
       execution: {
@@ -85,7 +134,7 @@ describe("parseIntegrationAssignment", () => {
         workflowSha: "7".repeat(40),
       },
     });
-    expect(parseIntegrationAssignment(remote)).toMatchObject({ ok: true });
+    expect(parseIntegrationAssignment(remote)).toMatchObject({ ok: false });
   });
 
   describe("execution mode must match the profile", () => {
@@ -217,7 +266,14 @@ describe("parseIntegrationAssignment", () => {
 
   it("requires the verifier workflow to be a pinned path, not a bare name", () => {
     const loose = assignment({
-      verifier: { ...(assignment()["verifier"] as Record<string, unknown>), workflowRef: "verify.yml" },
+      policy: { ...(assignment()["policy"] as Record<string, unknown>), securityProfile: "remote" },
+      execution: {
+        mode: "remote",
+        provider: "github-actions",
+        workflowRef: "recallnet/thwip/.github/workflows/remote.yml@refs/heads/main",
+        workflowSha: "7".repeat(40),
+      },
+      verifier: { ...VERIFIER, workflowRef: "verify.yml" },
     });
     expect(parseIntegrationAssignment(loose)).toMatchObject({ ok: false });
   });

@@ -41,6 +41,46 @@ export type AssignmentExecution =
   | { readonly mode: "reuse"; readonly originalReceiptDigest: Sha256; readonly originalSignerKeyId: string }
   | { readonly mode: "remote"; readonly provider: "github-actions"; readonly workflowRef: string; readonly workflowSha: string };
 
+/**
+ * The pipeline's own execution digests exist only when it is a Dagger
+ * pipeline. A command pipeline — what every live policy resolves to today —
+ * has no module and no engine to name, and fabricating one would bind the
+ * assignment to a Dagger run that never happens. So the two digests are
+ * refused for `runner: "command"`, not merely optional, in the same style the
+ * transition-record kinds refuse fields they cannot honestly hold.
+ */
+export type AssignmentPolicy =
+  | {
+      readonly digest: Sha256;
+      readonly version: number;
+      readonly securityProfile: SecurityProfile;
+      readonly runner: "command";
+      readonly requiredSuites: readonly string[];
+    }
+  | {
+      readonly digest: Sha256;
+      readonly version: number;
+      readonly securityProfile: SecurityProfile;
+      readonly runner: "dagger";
+      readonly daggerModuleDigest: Sha256;
+      readonly daggerEngineDigest: Sha256;
+      readonly requiredSuites: readonly string[];
+    };
+
+/**
+ * A GitHub Actions verifier exists only when the assignment actually runs
+ * one — mode `remote`. A local `run` assignment (`fresh`, `audited`) executes
+ * on a developer's own machine, where there is no GitHub workflow to pin, so
+ * this block is refused rather than filled in with something nobody pinned.
+ */
+export interface AssignmentVerifier {
+  readonly workflowRef: string;
+  readonly workflowSha: string;
+  readonly reusableWorkflowRef: string;
+  readonly reusableWorkflowSha: string;
+  readonly verifierDigest: Sha256;
+}
+
 export interface IntegrationAssignmentV1 {
   readonly schemaVersion: "1";
   readonly assignmentId: string;
@@ -56,27 +96,15 @@ export interface IntegrationAssignmentV1 {
   };
   readonly execution: AssignmentExecution;
   readonly git: GitSubject;
-  readonly policy: {
-    readonly digest: Sha256;
-    readonly version: number;
-    readonly securityProfile: SecurityProfile;
-    readonly daggerModuleDigest: Sha256;
-    readonly daggerEngineDigest: Sha256;
-    readonly requiredSuites: readonly string[];
-  };
+  readonly policy: AssignmentPolicy;
   readonly evidence: { readonly workReceiptDigest: Sha256; readonly previousTransitionDigest: Sha256 | null };
-  readonly verifier: {
-    readonly workflowRef: string;
-    readonly workflowSha: string;
-    readonly reusableWorkflowRef: string;
-    readonly reusableWorkflowSha: string;
-    readonly verifierDigest: Sha256;
-  };
+  /** Present only when `execution.mode` is `remote`; see {@link AssignmentVerifier}. */
+  readonly verifier?: AssignmentVerifier;
   readonly timing: { readonly issuedAt: string; readonly notBefore: string; readonly expiresAt: string };
   readonly nonce: string;
 }
 
-const KEYS = [
+const BASE_KEYS = [
   "schemaVersion",
   "assignmentId",
   "attemptId",
@@ -86,9 +114,19 @@ const KEYS = [
   "git",
   "policy",
   "evidence",
-  "verifier",
   "timing",
   "nonce",
+] as const;
+
+const POLICY_KEYS_COMMON = ["digest", "version", "securityProfile", "runner", "requiredSuites"] as const;
+const POLICY_KEYS_DAGGER = [...POLICY_KEYS_COMMON, "daggerModuleDigest", "daggerEngineDigest"] as const;
+
+const VERIFIER_KEYS = [
+  "workflowRef",
+  "workflowSha",
+  "reusableWorkflowRef",
+  "reusableWorkflowSha",
+  "verifierDigest",
 ] as const;
 
 /** A workflow ref must name an immutable path, not a floating branch. */
@@ -159,11 +197,101 @@ function parseExecution(v: unknown, profile: SecurityProfile): ParseResult<Assig
   }
 }
 
+function parsePolicy(v: unknown): ParseResult<AssignmentPolicy> {
+  if (!isRecord(v)) return fail("assignment.policy must be an object");
+  const runner = literal(v["runner"], "assignment.policy.runner", ["command", "dagger"] as const);
+  if (!runner.ok) return runner;
+
+  const shape = exactKeys(v, "assignment.policy", runner.value === "dagger" ? POLICY_KEYS_DAGGER : POLICY_KEYS_COMMON);
+  if (!shape.ok) return shape;
+  const present = requireKeys(
+    v,
+    "assignment.policy",
+    runner.value === "dagger" ? POLICY_KEYS_DAGGER : POLICY_KEYS_COMMON,
+  );
+  if (!present.ok) return present;
+
+  const digest = sha256(v["digest"], "assignment.policy.digest");
+  if (!digest.ok) return digest;
+  const version = positiveCounter(v["version"], "assignment.policy.version");
+  if (!version.ok) return version;
+  const securityProfile = literal(v["securityProfile"], "assignment.policy.securityProfile", SECURITY_PROFILES);
+  if (!securityProfile.ok) return securityProfile;
+  const requiredSuites = array(v["requiredSuites"], "assignment.policy.requiredSuites", BOUNDS.suiteEntries, (item, i) => {
+    if (typeof item !== "string" || item.length === 0) return fail(`suite ${i} must be a string`);
+    if (new TextEncoder().encode(item).length > BOUNDS.suiteName) return fail(`suite ${i} exceeds ${BOUNDS.suiteName} bytes`);
+    return ok(item);
+  });
+  if (!requiredSuites.ok) return requiredSuites;
+  if (requiredSuites.value.length === 0) return fail("assignment.policy.requiredSuites must name at least one suite");
+  if (new Set(requiredSuites.value).size !== requiredSuites.value.length) {
+    return fail("assignment.policy.requiredSuites must not repeat a suite");
+  }
+
+  if (runner.value === "command") {
+    return ok({
+      digest: digest.value,
+      version: version.value,
+      securityProfile: securityProfile.value,
+      runner: "command",
+      requiredSuites: requiredSuites.value,
+    });
+  }
+
+  const moduleDigest = sha256(v["daggerModuleDigest"], "assignment.policy.daggerModuleDigest");
+  if (!moduleDigest.ok) return moduleDigest;
+  const engineDigest = sha256(v["daggerEngineDigest"], "assignment.policy.daggerEngineDigest");
+  if (!engineDigest.ok) return engineDigest;
+  return ok({
+    digest: digest.value,
+    version: version.value,
+    securityProfile: securityProfile.value,
+    runner: "dagger",
+    daggerModuleDigest: moduleDigest.value,
+    daggerEngineDigest: engineDigest.value,
+    requiredSuites: requiredSuites.value,
+  });
+}
+
+function parseVerifier(v: unknown): ParseResult<AssignmentVerifier> {
+  if (!isRecord(v)) return fail("assignment.verifier must be an object");
+  const shape = exactKeys(v, "assignment.verifier", VERIFIER_KEYS);
+  if (!shape.ok) return shape;
+  const present = requireKeys(v, "assignment.verifier", VERIFIER_KEYS);
+  if (!present.ok) return present;
+  const verifierWorkflowRef = workflowRef(v["workflowRef"], "assignment.verifier.workflowRef");
+  if (!verifierWorkflowRef.ok) return verifierWorkflowRef;
+  const verifierWorkflowSha = gitOid(v["workflowSha"], "assignment.verifier.workflowSha");
+  if (!verifierWorkflowSha.ok) return verifierWorkflowSha;
+  const reusableWorkflowRef = workflowRef(v["reusableWorkflowRef"], "assignment.verifier.reusableWorkflowRef");
+  if (!reusableWorkflowRef.ok) return reusableWorkflowRef;
+  const reusableWorkflowSha = gitOid(v["reusableWorkflowSha"], "assignment.verifier.reusableWorkflowSha");
+  if (!reusableWorkflowSha.ok) return reusableWorkflowSha;
+  const verifierDigest = sha256(v["verifierDigest"], "assignment.verifier.verifierDigest");
+  if (!verifierDigest.ok) return verifierDigest;
+  return ok({
+    workflowRef: verifierWorkflowRef.value,
+    workflowSha: verifierWorkflowSha.value,
+    reusableWorkflowRef: reusableWorkflowRef.value,
+    reusableWorkflowSha: reusableWorkflowSha.value,
+    verifierDigest: verifierDigest.value,
+  });
+}
+
 export function parseIntegrationAssignment(v: unknown): ParseResult<IntegrationAssignmentV1> {
   if (!isRecord(v)) return fail("assignment must be an object");
-  const shape = exactKeys(v, "assignment", KEYS);
+
+  // A verifier names a GitHub Actions workflow, which exists only when the
+  // assignment actually dispatches one. Peeking the mode before the key check
+  // lets a `remote` assignment carry the field and refuses it for every other
+  // mode, rather than accepting it everywhere and hoping nobody fabricates one.
+  const executionPeek = isRecord(v["execution"]) ? v["execution"]["mode"] : undefined;
+  const verifierAllowed = executionPeek === "remote";
+  const allowedKeys = verifierAllowed ? [...BASE_KEYS, "verifier"] : BASE_KEYS;
+
+  const shape = exactKeys(v, "assignment", allowedKeys);
   if (!shape.ok) return shape;
-  const present = requireKeys(v, "assignment", KEYS);
+  const present = requireKeys(v, "assignment", verifierAllowed ? [...BASE_KEYS, "verifier"] : BASE_KEYS);
   if (!present.ok) return present;
   if (v["schemaVersion"] !== "1") return fail('assignment.schemaVersion must be "1"');
 
@@ -209,39 +337,10 @@ export function parseIntegrationAssignment(v: unknown): ParseResult<IntegrationA
   const queueDecisionDigest = sha256(queue["queueDecisionDigest"], "assignment.queue.queueDecisionDigest");
   if (!queueDecisionDigest.ok) return queueDecisionDigest;
 
-  const policy = v["policy"];
-  if (!isRecord(policy)) return fail("assignment.policy must be an object");
-  const policyShape = exactKeys(policy, "assignment.policy", [
-    "digest",
-    "version",
-    "securityProfile",
-    "daggerModuleDigest",
-    "daggerEngineDigest",
-    "requiredSuites",
-  ]);
-  if (!policyShape.ok) return policyShape;
-  const policyDigest = sha256(policy["digest"], "assignment.policy.digest");
-  if (!policyDigest.ok) return policyDigest;
-  const policyVersion = positiveCounter(policy["version"], "assignment.policy.version");
-  if (!policyVersion.ok) return policyVersion;
-  const securityProfile = literal(policy["securityProfile"], "assignment.policy.securityProfile", SECURITY_PROFILES);
-  if (!securityProfile.ok) return securityProfile;
-  const moduleDigest = sha256(policy["daggerModuleDigest"], "assignment.policy.daggerModuleDigest");
-  if (!moduleDigest.ok) return moduleDigest;
-  const engineDigest = sha256(policy["daggerEngineDigest"], "assignment.policy.daggerEngineDigest");
-  if (!engineDigest.ok) return engineDigest;
-  const requiredSuites = array(policy["requiredSuites"], "assignment.policy.requiredSuites", BOUNDS.suiteEntries, (item, i) => {
-    if (typeof item !== "string" || item.length === 0) return fail(`suite ${i} must be a string`);
-    if (new TextEncoder().encode(item).length > BOUNDS.suiteName) return fail(`suite ${i} exceeds ${BOUNDS.suiteName} bytes`);
-    return ok(item);
-  });
-  if (!requiredSuites.ok) return requiredSuites;
-  if (requiredSuites.value.length === 0) return fail("assignment.policy.requiredSuites must name at least one suite");
-  if (new Set(requiredSuites.value).size !== requiredSuites.value.length) {
-    return fail("assignment.policy.requiredSuites must not repeat a suite");
-  }
+  const policy = parsePolicy(v["policy"]);
+  if (!policy.ok) return policy;
 
-  const execution = parseExecution(v["execution"], securityProfile.value);
+  const execution = parseExecution(v["execution"], policy.value.securityProfile);
   if (!execution.ok) return execution;
 
   const git = parseGitSubject(v["git"], "assignment.git");
@@ -265,26 +364,12 @@ export function parseIntegrationAssignment(v: unknown): ParseResult<IntegrationA
   );
   if (!previousTransitionDigest.ok) return previousTransitionDigest;
 
-  const verifier = v["verifier"];
-  if (!isRecord(verifier)) return fail("assignment.verifier must be an object");
-  const verifierShape = exactKeys(verifier, "assignment.verifier", [
-    "workflowRef",
-    "workflowSha",
-    "reusableWorkflowRef",
-    "reusableWorkflowSha",
-    "verifierDigest",
-  ]);
-  if (!verifierShape.ok) return verifierShape;
-  const verifierWorkflowRef = workflowRef(verifier["workflowRef"], "assignment.verifier.workflowRef");
-  if (!verifierWorkflowRef.ok) return verifierWorkflowRef;
-  const verifierWorkflowSha = gitOid(verifier["workflowSha"], "assignment.verifier.workflowSha");
-  if (!verifierWorkflowSha.ok) return verifierWorkflowSha;
-  const reusableWorkflowRef = workflowRef(verifier["reusableWorkflowRef"], "assignment.verifier.reusableWorkflowRef");
-  if (!reusableWorkflowRef.ok) return reusableWorkflowRef;
-  const reusableWorkflowSha = gitOid(verifier["reusableWorkflowSha"], "assignment.verifier.reusableWorkflowSha");
-  if (!reusableWorkflowSha.ok) return reusableWorkflowSha;
-  const verifierDigest = sha256(verifier["verifierDigest"], "assignment.verifier.verifierDigest");
-  if (!verifierDigest.ok) return verifierDigest;
+  let verifier: AssignmentVerifier | undefined;
+  if (verifierAllowed) {
+    const parsedVerifier = parseVerifier(v["verifier"]);
+    if (!parsedVerifier.ok) return parsedVerifier;
+    verifier = parsedVerifier.value;
+  }
 
   const timing = v["timing"];
   if (!isRecord(timing)) return fail("assignment.timing must be an object");
@@ -324,25 +409,12 @@ export function parseIntegrationAssignment(v: unknown): ParseResult<IntegrationA
     },
     execution: execution.value,
     git: git.value,
-    policy: {
-      digest: policyDigest.value,
-      version: policyVersion.value,
-      securityProfile: securityProfile.value,
-      daggerModuleDigest: moduleDigest.value,
-      daggerEngineDigest: engineDigest.value,
-      requiredSuites: requiredSuites.value,
-    },
+    policy: policy.value,
     evidence: {
       workReceiptDigest: workReceiptDigest.value,
       previousTransitionDigest: previousTransitionDigest.value,
     },
-    verifier: {
-      workflowRef: verifierWorkflowRef.value,
-      workflowSha: verifierWorkflowSha.value,
-      reusableWorkflowRef: reusableWorkflowRef.value,
-      reusableWorkflowSha: reusableWorkflowSha.value,
-      verifierDigest: verifierDigest.value,
-    },
+    ...(verifier !== undefined ? { verifier } : {}),
     timing: { issuedAt: issuedAt.value, notBefore: notBefore.value, expiresAt: expiresAt.value },
     nonce: nonce.value,
   });

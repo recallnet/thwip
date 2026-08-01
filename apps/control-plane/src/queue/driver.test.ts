@@ -48,18 +48,13 @@ function context(over: Partial<TurnContext> = {}): TurnContext {
     policy: {
       version: 4,
       securityProfile: "fresh",
+      runner: "dagger",
       daggerModuleDigest: D("c"),
       daggerEngineDigest: D("d"),
       requiredSuites: ["lint", "test"],
       document: { profile: "fresh" },
     },
-    verifier: {
-      workflowRef: "recallnet/thwip/.github/workflows/verify.yml@refs/heads/main",
-      workflowSha: "6".repeat(40),
-      reusableWorkflowRef: "recallnet/thwip/.github/workflows/impl.yml@refs/heads/main",
-      reusableWorkflowSha: "7".repeat(40),
-      verifierDigest: D("a"),
-    },
+    // A local `run` assignment pins no GitHub workflow, so it carries no verifier.
     execution: { mode: "run", profile: "fresh", runnerPrincipalId: "alice", deviceKeyId: "key-1" },
     now: "2026-07-29T12:00:00Z",
     executionSeconds: 20 * 60,
