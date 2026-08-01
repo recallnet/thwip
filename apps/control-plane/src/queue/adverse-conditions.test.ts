@@ -116,6 +116,22 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
   return (await response.json()) as Verdict;
 }
 
+/**
+ * Post a heartbeat as `principalId`, the way a connected device does before a
+ * device-only entry can ever become scheduler-eligible. `routes()`'s own
+ * `authenticate` stub is fixed to "alice", so callers that need a different
+ * connected principal — `principalFor` maps a pull request's author to
+ * `principal_<githubUserId>`, not to the session's principal — must build
+ * their own app with `authenticate` overridden to match.
+ */
+async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = "d1") {
+  return app.request(
+    `/v1/queue/${REPO}/runners/heartbeat`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
+    e,
+  );
+}
+
 async function liveState(app: App, e: QueueRouteEnv) {
   const response = await app.request(`/v1/queue/${REPO}?ref=${encodeURIComponent(REF)}&live=1`, {}, e);
   return (await response.json()) as {
@@ -1250,7 +1266,12 @@ describe("nudging a held lane", () => {
     const app = routes({
       driveTurn: async (_e, _r, pr) => void driven.push(pr),
       activePolicy: policyNamed("fresh"),
+      // `principalFor` maps pull request 59's author to "principal_59"; that is
+      // the principal that has to be connected for a device-only entry to be
+      // scheduler-eligible at all.
+      authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    await heartbeat(app, e);
     await authorize(app, e, 59);
 
     const response = await app.request(
@@ -1347,7 +1368,12 @@ describe("an accepted candidate verdict", () => {
       verifyOidc: async () => claims,
       pinnedVerifier: async () => pinned,
       activePolicy: policyNamed("fresh"),
+      // `principalFor` maps pull request 59's author to "principal_59"; that is
+      // the principal that has to be connected for a device-only entry to be
+      // scheduler-eligible at all.
+      authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    await heartbeat(app, e);
     await authorize(app, e, 59);
 
     const response = await postVerdict(app, e, 59);

@@ -114,13 +114,53 @@ function collect(facts: ReadinessFacts): BlockingReason[] {
   return reasons;
 }
 
+/**
+ * Capability inputs on their own, apart from every other readiness check.
+ *
+ * `serverExecutable` makes presence irrelevant rather than merely true: a
+ * `fast` or `remote` repository has no runners, and must not be gated on one.
+ */
+export interface CapabilityFacts {
+  readonly compatibleRunnerConnected: boolean;
+  readonly serverExecutable: boolean;
+}
+
+function hasCapability(facts: CapabilityFacts): boolean {
+  return facts.serverExecutable || facts.compatibleRunnerConnected;
+}
+
+/**
+ * Fold capability into an otherwise-decided readiness, without recomputing
+ * the other checks.
+ *
+ * This is the one place `schedulerEligible` is decided from runner presence.
+ * Every writer of `schedulerEligible` — `/authorize`, the pull-request
+ * webhook, the heartbeat route, and the scheduled tick — calls this rather
+ * than each carrying its own copy of "and is a runner connected", which is
+ * how eligibility ended up written by whichever of them ran last instead of
+ * derived (plan.md §452).
+ */
+export function foldCapability(
+  base: { readonly ready: boolean; readonly primaryReason: BlockingReason | null },
+  capability: CapabilityFacts,
+): { readonly schedulerEligible: boolean; readonly primaryReason: BlockingReason | null } {
+  if (!base.ready) return { schedulerEligible: false, primaryReason: base.primaryReason };
+  if (hasCapability(capability)) return { schedulerEligible: true, primaryReason: base.primaryReason };
+  // Capability is reported last: an offline machine does not make the entry
+  // unready, it only withholds the offer, so this must not override an
+  // earlier, more actionable reason — but `base.ready` is true here, so there
+  // is no earlier reason to preserve.
+  return { schedulerEligible: false, primaryReason: "AGENT_OFFLINE" };
+}
+
 export function deriveReadiness(facts: ReadinessFacts): Readiness {
   const blocking = collect(facts);
 
-  // Capability is evaluated separately: it suppresses scheduling without making
-  // the entry unready, so the entry keeps its fairness identity (§7.1, §7.2).
-  const capability: BlockingReason[] = [];
-  if (!facts.serverExecutable && !facts.compatibleRunnerConnected) capability.push("AGENT_OFFLINE");
+  // Capability is evaluated independently of every other check — even a
+  // blocked entry reports whether a machine is there, so the dashboard can
+  // say both things at once — and only ever suppresses scheduling, never
+  // readiness itself, so the entry keeps its fairness identity (§7.1, §7.2).
+  const capability: BlockingReason[] = hasCapability(facts) ? [] : ["AGENT_OFFLINE"];
 
   const ready = blocking.length === 0;
   const schedulerEligible = ready && capability.length === 0;

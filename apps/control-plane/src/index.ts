@@ -14,8 +14,10 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
-import { requiresDeviceOnly } from "./queue/runners.js";
+import { capabilityFor, requiresDeviceOnly } from "./queue/runners.js";
+import { foldCapability } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
+import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
@@ -1388,6 +1390,26 @@ export async function queueFromPullRequest(env: Env, payload: {
 
   const draft = pr?.draft === true;
   const open = pr?.state === "open";
+  const ready = !draft && open;
+  const basePrimaryReason: BlockingReason | null = draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : null;
+
+  // A developer who is already heartbeating when the pull request is opened
+  // must not need an absent-to-present transition to become eligible — the
+  // heartbeat route only fires on that transition, so if this webhook wrote
+  // AGENT_OFFLINE unconditionally here, a machine that showed up first would
+  // never be corrected. Read before the transaction for the same reason
+  // `/authorize` does: `runOnQueue`'s callback is synchronous.
+  const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
+  const capability = ready
+    ? await capabilityFor(
+        env.DB as unknown as D1Like,
+        String(repositoryId),
+        principal.id,
+        new Date().toISOString(),
+        policy?.securityProfile ?? null,
+      )
+    : { serverExecutable: true, compatibleRunnerConnected: false };
+  const folded = foldCapability({ ready, primaryReason: basePrimaryReason }, capability);
 
   await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
     commands.requestQueue({
@@ -1404,9 +1426,9 @@ export async function queueFromPullRequest(env: Env, payload: {
     commands.evaluateReadiness({
       idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
       entryId,
-      ready: !draft && open,
-      schedulerEligible: false,
-      primaryReason: draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : "AGENT_OFFLINE",
+      ready,
+      schedulerEligible: folded.schedulerEligible,
+      primaryReason: folded.primaryReason,
     });
   });
 
