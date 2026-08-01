@@ -2,6 +2,7 @@ import {
   ATTEMPT_OUTCOMES,
   BLOCKING_REASONS,
   TRANSITION_KINDS,
+  TERMINAL_ENTRY_STATES,
   isCapabilityReason,
   phaseRank,
   type AttemptOutcome,
@@ -216,16 +217,32 @@ function requireMergeable(state: BranchQueueState, attempt: Attempt): void {
 }
 
 /**
+ * Merged and Cancelled are endings, not stages. A merged pull request has a
+ * signed transition record naming it, so moving its entry anywhere else leaves
+ * the queue contradicting the chain: `buildCheck` publishes "Removed from the
+ * queue" for a pull request that is in `main`. The guard sits on the two
+ * functions that write `state` so that no event handler has to remember it, and
+ * an event that would move a finished entry is refused rather than applied.
+ */
+function requireOpen(entry: Entry, next: EntryState): void {
+  if ((TERMINAL_ENTRY_STATES as readonly string[]).includes(entry.state)) {
+    fail(`ENTRY_TERMINAL: entry ${entry.entryId} is ${entry.state}; it cannot become ${next}`);
+  }
+}
+
+/**
  * Every state but Blocked. Blocking goes through `blockEntry` so the reason is a
  * parameter rather than something a caller may forget: a live queue once held a
  * merged pull request in Blocked with a null reason, which every reader rendered
  * as though nothing were wrong.
  */
 function setEntryState(entry: Entry, next: Exclude<EntryState, "Blocked">): void {
+  requireOpen(entry, next);
   entry.state = next;
 }
 
 function blockEntry(entry: Entry, reason: BlockingReason): void {
+  requireOpen(entry, "Blocked");
   entry.state = "Blocked";
   entry.primaryReason = reason;
 }
@@ -294,6 +311,20 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
     case "QueueRequested": {
       const existing = state.entries.get(event.entryId);
       if (existing !== undefined && event.resetOrdinal !== true) return previous;
+      // Closing and reopening a pull request re-requests it with a fresh
+      // ordinal while its turn is still held. The rebuilt entry owns no attempt,
+      // so the live one kept the lane and no entry could give it back: every
+      // later offer failed on "lane is occupied by another attempt" until the
+      // deadline sweep reaped it. The reset ends that turn instead.
+      if (existing?.currentAttemptId != null) {
+        const held = state.attempts.get(existing.currentAttemptId);
+        if (held !== undefined && held.outcome === null) {
+          // A merge write already sent to GitHub cannot be superseded: nothing
+          // here knows whether it landed, and only confirmation may say.
+          if (held.outcomeUnknown) fail("cannot re-request an entry while a merge outcome is unknown");
+          terminate(state, held, "SUPERSEDED");
+        }
+      }
       state.ordinalSequence += 1n;
       state.entries.set(event.entryId, {
         entryId: event.entryId,
@@ -420,7 +451,19 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
     case "OfferClaimed": {
       const attempt = requireLive(requireAttempt(state, event.attemptId));
-      if (attempt.executionMode !== null) return previous;
+      // Two runners for the same sponsor can race one offer. Swallowing the
+      // loser's claim told it nothing, so it went on believing it held the turn
+      // and everything it sent afterwards was ignored or credited to the winner.
+      // The same claim arriving twice is a redelivery and stays a no-op.
+      if (attempt.executionMode !== null) {
+        const sameClaim =
+          attempt.executionMode === event.executionMode && attempt.deviceId === (event.deviceId ?? null);
+        if (sameClaim) return previous;
+        fail(
+          `OFFER_ALREADY_CLAIMED: attempt ${attempt.attemptId} was already claimed by ` +
+            `${attempt.deviceId ?? attempt.executionMode}`,
+        );
+      }
       if (event.executionMode === "device" && event.deviceId === undefined) {
         fail("a device claim requires a device id");
       }
@@ -726,6 +769,11 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
     case "EntryCancelled": {
       const entry = requireEntry(state, event.entryId);
+      // An administrator ejecting an entry a second after it merged, or a close
+      // webhook replayed against a merged pull request, is late rather than
+      // wrong. There is nothing left to cancel, so the cancel does nothing. A
+      // second cancel of a cancelled entry is the same story.
+      if ((TERMINAL_ENTRY_STATES as readonly string[]).includes(entry.state)) return previous;
       if (entry.currentAttemptId !== null) {
         const attempt = state.attempts.get(entry.currentAttemptId);
         if (attempt !== undefined && attempt.outcome === null) {

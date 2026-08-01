@@ -377,10 +377,16 @@ describe("reducer", () => {
       expect(() => applyEvent(state, rewrite)).toThrow(/immutable/i);
     });
 
-    it("treats a duplicate claim as a no-op rather than a second share", () => {
+    it("treats a redelivered claim as a no-op rather than a second share", () => {
       const state = applyEvents(base(), happyPath().slice(0, 8));
-      const again = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d2" });
+      const again = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d1" });
       expect(applyEvent(state, again).attempts.get("a1")!.deviceId).toBe("d1");
+    });
+
+    it("refuses a claim from a second device rather than letting it believe it won", () => {
+      const state = applyEvents(base(), happyPath().slice(0, 8));
+      const other = ev({ type: "OfferClaimed", attemptId: "a1", executionMode: "device", deviceId: "d2" });
+      expect(() => applyEvent(state, other)).toThrow(/OFFER_ALREADY_CLAIMED/);
     });
 
     it("ignores a heartbeat that lands after the receipt", () => {
