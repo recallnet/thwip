@@ -176,17 +176,48 @@ jobs:
             # So ask GitHub what became of the pull request instead of reading it
             # off the response to our own call. Both racing runs then report the
             # same merge under the same idempotency key, which is harmless.
-            state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
-              --jq '{merged:(.merged // false), sha:(.merge_commit_sha // "")}' 2>/dev/null || echo '{}')
-            if [ "$(printf '%s' "$state" | jq -r '.merged // false')" = "true" ]; then
-              landed=$(printf '%s' "$state" | jq -r '.sha // empty')
+            #
+            # And ask more than once. GitHub's reads are eventually consistent
+            # with GitHub's own writes: pull request 105 merged at 16:41:38 and
+            # answered `merged: false` at 16:41:39, so the single re-read below
+            # reported a refusal for a merge that was already on main. Every read
+            # has to agree, over a backoff, and git has to agree too — if the
+            # base branch contains the head commit then the merge landed whatever
+            # the pull request says about itself.
+            confirm_landed() {
+              unreadable=0
+              for wait in 0 2 4; do
+                [ "$wait" = "0" ] || sleep "$wait"
+                state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
+                  --jq '{merged:(.merged // false), sha:(.merge_commit_sha // "")}' 2>/dev/null || echo '{}')
+                if [ "$(printf '%s' "$state" | jq -r '.merged // false')" = "true" ]; then
+                  printf '%s' "$(printf '%s' "$state" | jq -r '.sha // empty')"
+                  return 0
+                fi
+                cmp=$(gh api "repos/$GITHUB_REPOSITORY/compare/${BASE_REF#refs/heads/}...$HEAD_SHA" \
+                  --jq '.status // empty' 2>/dev/null || echo "")
+                if [ "$cmp" = "behind" ] || [ "$cmp" = "identical" ]; then
+                  printf '%s' "$(printf '%s' "$state" | jq -r '.sha // empty')"
+                  return 0
+                fi
+                if [ -z "$cmp" ] || [ "$state" = "{}" ]; then unreadable=1; fi
+              done
+              [ "$unreadable" = "1" ] && return 2
+              return 1
+            }
+
+            landed=$(confirm_landed)
+            confirmation=$?
+
+            if [ "$confirmation" = "0" ]; then
               echo "::notice::this run did not perform the merge ($mcode: $reason), but the pull request is merged; recording it"
-            else
+            elif [ "$confirmation" = "1" ]; then
               case "$mcode" in
                 405|409|422)
-                  # A refusal, and the pull request really is unmerged. Tell the
-                  # queue so the lane frees now rather than waiting for a
-                  # deadline and then needing an operator.
+                  # A refusal, and every read agrees the pull request is unmerged.
+                  # Tell the queue so the lane frees now rather than waiting for a
+                  # deadline and then needing an operator. The queue confirms this
+                  # for itself before it records anything.
                   curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
                     -H "content-type: application/json" \
                     -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" --arg detail "$mcode $reason" \
@@ -199,6 +230,11 @@ jobs:
                   echo "::error::merge outcome unclear ($mcode: $reason); leaving it to reconciliation"
                   ;;
               esac
+              exit 1
+            else
+              # Could not read GitHub well enough to say either way. Unknown is
+              # never reported as a refusal.
+              echo "::error::could not confirm what became of #$PR ($mcode: $reason); leaving it to reconciliation"
               exit 1
             fi
           fi

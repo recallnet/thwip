@@ -41,6 +41,7 @@ import {
   transitionRecordFor,
 } from "./attestation.js";
 import { DEFAULT_MERGE_METHOD, type MergeMethod } from "./merge-commit.js";
+import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
@@ -427,6 +428,67 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
 }
 
+/** What a caller may read to settle whether a merge landed. */
+export interface MergeAbsenceDeps {
+  /**
+   * What GitHub says the pull request is now, or null when it could not be read.
+   * Null is not a negative.
+   */
+  pullRequestMergeState?(
+    env: QueueRouteEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
+  /** Whether the base branch already contains a commit, from git ancestry. */
+  baseContainsSha?(
+    env: QueueRouteEnv,
+    repositoryId: string,
+    baseRef: string,
+    sha: string,
+  ): Promise<boolean | null>;
+  /** The backoff between reads. Overridden in tests so they do not wait it out. */
+  sleep?(ms: number): Promise<void>;
+}
+
+/**
+ * Confirm, from GitHub, that an attempt's merge really did not happen.
+ *
+ * Unknown whenever the queue has no way to read: a service that cannot check
+ * must not certify a negative on somebody else's single read, which is the whole
+ * reason the chain lost pull requests 96, 97 and 105.
+ */
+async function confirmAbsenceFor(
+  env: QueueRouteEnv,
+  deps: MergeAbsenceDeps,
+  repositoryId: string,
+  baseRef: string,
+  attemptId: string,
+): Promise<AbsenceVerdict> {
+  const readPullState = deps.pullRequestMergeState;
+  const containsSha = deps.baseContainsSha;
+  if (readPullState === undefined || containsSha === undefined) {
+    return { kind: "unknown", reason: "this deployment cannot read GitHub to confirm a merge did not happen" };
+  }
+
+  const { store } = await readQueue(env, repositoryId, baseRef);
+  const state = store.state();
+  const attempt = state.attempts.get(attemptId);
+  const entry = attempt === undefined ? undefined : state.entries.get(attempt.entryId);
+  if (attempt?.headSha === undefined || attempt.headSha === null || entry === undefined) {
+    return { kind: "unknown", reason: "no pinned attempt to read a merge outcome for" };
+  }
+  const headSha = attempt.headSha;
+  const pullRequestNumber = entry.pullRequestNumber;
+
+  return confirmMergeAbsence(
+    {
+      readPull: () => readPullState(env, repositoryId, pullRequestNumber),
+      baseContainsHead: () => containsSha(env, repositoryId, baseRef, headSha),
+    },
+    deps.sleep === undefined ? {} : { sleep: deps.sleep },
+  );
+}
+
 /**
  * Why a lane was, or was not, driven through Actions.
  *
@@ -735,6 +797,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * mean the same.
    */
   signRecordBytes(env: TEnv, bytes: Uint8Array, typ: string): Promise<string>;
+  /**
+   * What GitHub says the pull request is now, or null when it could not be read.
+   *
+   * The queue reads this itself before it will record that a merge did not
+   * happen. A caller that saw one refusal saw one call's result, not the fate of
+   * the pull request.
+   */
+  pullRequestMergeState?(
+    env: TEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
+  /**
+   * Whether the base branch already contains a commit, from git ancestry rather
+   * than from the pull request's own flag. Null when it cannot be read.
+   */
+  baseContainsSha?(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
+  /** The backoff between confirmation reads. Overridden in tests. */
+  sleep?(ms: number): Promise<void>;
 }) {
   const app = new Hono<{ Bindings: TEnv }>();
 
@@ -2109,12 +2190,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * Report that an authorized merge definitely did not happen.
+   * Report that an authorized merge did not happen.
    *
    * Without this the lane stays held: the operation was persisted before the write,
    * the write was refused, and the queue is left reconciling until an operator
-   * intervenes. GitHub refusing outright is knowledge, not ambiguity, so the caller
-   * that saw the refusal is the right one to resolve it.
+   * intervenes.
+   *
+   * The caller's word is not enough on its own. A merge run reports what one read
+   * of GitHub told it, and GitHub's reads lag GitHub's own writes: pull request
+   * 105 merged at 16:41:38 and read back as unmerged at 16:41:39, which is how a
+   * merge that is on main came to be recorded as CONFIRMED_NOT_MERGED with no
+   * transition record behind it. So the queue confirms the negative itself,
+   * across several reads and against git ancestry, before writing it down.
+   * Anything it cannot confirm is unknown, and unknown reconciles.
    */
   app.post("/v1/queue/:repositoryId/not-merged", async (c) => {
     const claims = await deps.verifyOidc(c, c.env);
@@ -2138,6 +2226,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const attemptId = body.attemptId;
     const operationId = body.operationId;
+
+    const evidence = await confirmAbsenceFor(c.env, deps, repositoryId, baseRef, attemptId);
+    if (evidence.kind !== "not-merged") {
+      // Not a refusal the queue can stand behind. The attempt goes to
+      // reconciliation, which reads rather than writes and can still end in a
+      // confirmed merge with a record behind it.
+      const { snapshot: reconciling } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+        commands.mergeOutcomeUnknown({ idempotencyKey: `not-merged:unknown:${attemptId}`, attemptId }),
+      );
+      await driveLane(c.env, deps, repositoryId, reconciling);
+      return c.json({
+        resolved: "reconciling",
+        reason: evidence.reason,
+        detail: body.detail ?? null,
+        note: "the queue could not confirm that this merge did not happen",
+      });
+    }
+
     const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
       // An outcome already in doubt has to be declared unknown before it can be
       // resolved, which is the reducer refusing to skip reconciliation.

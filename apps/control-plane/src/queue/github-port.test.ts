@@ -248,7 +248,63 @@ describe("observeMergeResult", () => {
     ).toMatchObject({ kind: "merged", mergeTree: TREE });
   });
 
-  it("reports a proven non-merge as rejected, which ends the attempt cleanly", async () => {
+  it("reports a non-merge every read agrees on as rejected, which ends the attempt cleanly", async () => {
+    const { impl } = fakeFetch({
+      "/repos/recallnet/thwip/pulls/42": () => json(pull({ merged: false })),
+      [`/repos/recallnet/thwip/compare/main...${HEAD}`]: () => json({ status: "ahead" }),
+    });
+    expect(
+      await observeMergeResult(githubHttp("t", impl), REPO, {
+        pullRequestNumber: 42,
+        assigned,
+        mergeMethod: "merge",
+        sleep: async () => {},
+      }),
+    ).toMatchObject({ kind: "rejected" });
+  });
+
+  /**
+   * The read that lost pull request 105 from the chain. GitHub answered
+   * `merged: false` for a pull request it had merged a second and a half
+   * earlier, and one read was enough to end the attempt as CONFIRMED_NOT_MERGED.
+   */
+  it("does not report a non-merge from a read that has not caught up", async () => {
+    const mergeSha = "m".repeat(40);
+    let reads = 0;
+    const { impl } = fakeFetch({
+      "/repos/recallnet/thwip/pulls/42": () => {
+        reads += 1;
+        return json(reads === 1 ? pull({ merged: false }) : pull({ merged: true, merge_commit_sha: mergeSha }));
+      },
+      [`/repos/recallnet/thwip/compare/main...${HEAD}`]: () => json({ status: "ahead" }),
+      [`/repos/recallnet/thwip/git/commits/${mergeSha}`]: () => json(commit(mergeSha, TREE, [BASE, HEAD])),
+    });
+    expect(
+      await observeMergeResult(githubHttp("t", impl), REPO, {
+        pullRequestNumber: 42,
+        assigned,
+        mergeMethod: "merge",
+        sleep: async () => {},
+      }),
+    ).toMatchObject({ kind: "merged", mergeSha });
+  });
+
+  it("does not report a non-merge when the base already contains the head", async () => {
+    const { impl } = fakeFetch({
+      "/repos/recallnet/thwip/pulls/42": () => json(pull({ merged: false })),
+      [`/repos/recallnet/thwip/compare/main...${HEAD}`]: () => json({ status: "behind" }),
+    });
+    expect(
+      await observeMergeResult(githubHttp("t", impl), REPO, {
+        pullRequestNumber: 42,
+        assigned,
+        mergeMethod: "merge",
+        sleep: async () => {},
+      }),
+    ).toMatchObject({ kind: "unknown" });
+  });
+
+  it("does not report a non-merge when git cannot be asked", async () => {
     const { impl } = fakeFetch({
       "/repos/recallnet/thwip/pulls/42": () => json(pull({ merged: false })),
     });
@@ -257,8 +313,9 @@ describe("observeMergeResult", () => {
         pullRequestNumber: 42,
         assigned,
         mergeMethod: "merge",
+        sleep: async () => {},
       }),
-    ).toMatchObject({ kind: "rejected" });
+    ).toMatchObject({ kind: "unknown" });
   });
 
   it("refuses to call a merge successful when the landed tree differs", async () => {
