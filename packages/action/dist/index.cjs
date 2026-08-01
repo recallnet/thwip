@@ -1340,6 +1340,69 @@ function extractCarrier(commitMessage) {
 // ../protocol/dist/digest.js
 var import_canonicalize = __toESM(require_canonicalize(), 1);
 
+// ../verifier/dist/remote-suite-settlement.js
+var SETTLEMENT_ATTEMPTS = 3;
+var SETTLEMENT_DELAYS_MS = [1e3, 2e3, 4e3];
+var NOT_CONCLUDED = /* @__PURE__ */ new Set(["pending", "queued", "in_progress", "waiting", "requested", "none", ""]);
+var wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function settleRemoteSuites(suiteIds, reads, options = {}) {
+  const attempts = options.attempts ?? SETTLEMENT_ATTEMPTS;
+  const delays = options.delaysMs ?? SETTLEMENT_DELAYS_MS;
+  const sleep = options.sleep ?? wait;
+  let agreed = 0;
+  let agreedNegative = null;
+  let unsettled = "no read of GitHub's checks was attempted";
+  for (let i = 0; i < attempts; i += 1) {
+    if (i > 0)
+      await sleep(delays[Math.min(i - 1, delays.length - 1)] ?? 1e3);
+    const conclusions = await reads.readConclusions();
+    if (conclusions === null) {
+      unsettled = "GitHub did not answer when asked which checks ran on this commit; thwip reads again and decides then";
+      continue;
+    }
+    let waiting = null;
+    let negative = null;
+    for (const suiteId of suiteIds) {
+      const conclusion = conclusions.get(suiteId) ?? conclusions.get(`thwip / ${suiteId}`);
+      if (conclusion === void 0) {
+        waiting ??= `\`${suiteId}\` has no check on this commit yet; thwip verifies the proof once GitHub reports one`;
+        continue;
+      }
+      if (conclusion === "success")
+        continue;
+      if (NOT_CONCLUDED.has(conclusion)) {
+        waiting ??= `GitHub is still running \`${suiteId}\` on this commit; thwip verifies the proof once that check reports`;
+        continue;
+      }
+      negative ??= { suiteId, conclusion };
+    }
+    if (negative === null && waiting === null)
+      return { kind: "passed" };
+    if (negative === null) {
+      agreed = 0;
+      agreedNegative = null;
+      unsettled = waiting;
+      continue;
+    }
+    if (agreedNegative !== null && agreedNegative.suiteId === negative.suiteId && agreedNegative.conclusion === negative.conclusion) {
+      agreed += 1;
+    } else {
+      agreedNegative = negative;
+      agreed = 1;
+    }
+    unsettled = `GitHub's reads disagree about \`${negative.suiteId}\`; thwip reads again and decides then`;
+  }
+  if (agreedNegative !== null && agreed === attempts) {
+    return {
+      kind: "failed",
+      suiteId: agreedNegative.suiteId,
+      conclusion: agreedNegative.conclusion,
+      reason: `GitHub's check for \`${agreedNegative.suiteId}\` concluded ${agreedNegative.conclusion} on this commit, and ${attempts} reads agree; fix that check and push again`
+    };
+  }
+  return { kind: "unsettled", reason: unsettled };
+}
+
 // ../verifier/dist/index.js
 var PERMISSION_RANK = {
   none: 0,
@@ -1496,19 +1559,23 @@ async function verifyProof(input, deps) {
   }
   const remoteSuites = bundle.policy.pipeline.remoteSuites ?? [];
   if (remoteSuites.length > 0) {
-    if (!deps.remoteCheckConclusions) {
+    const read = deps.remoteCheckConclusions;
+    if (!read) {
       return res("SUITE_MISSING", "remote suites declared but no check reader available", { statement });
     }
-    const conclusions = await deps.remoteCheckConclusions(facts.headSha);
-    for (const id of remoteSuites) {
-      const conclusion = conclusions.get(id) ?? conclusions.get(`thwip / ${id}`);
-      if (conclusion === void 0) {
-        return res("SUITE_MISSING", `remote suite '${id}' has no check on this commit`, { statement });
+    const settlement = await settleRemoteSuites(remoteSuites, {
+      readConclusions: async () => {
+        try {
+          return await read(facts.headSha);
+        } catch {
+          return null;
+        }
       }
-      if (conclusion !== "success") {
-        return res("SUITE_NOT_PASSED", `remote suite '${id}' concluded ${conclusion}`, { statement });
-      }
-    }
+    }, deps.sleep !== void 0 ? { sleep: deps.sleep } : {});
+    if (settlement.kind === "failed")
+      return res("SUITE_NOT_PASSED", settlement.reason, { statement });
+    if (settlement.kind === "unsettled")
+      return res("VERIFICATION_PENDING", settlement.reason, { statement });
   }
   const started = Date.parse(pred.run.startedAt);
   const finished = Date.parse(pred.run.finishedAt);
