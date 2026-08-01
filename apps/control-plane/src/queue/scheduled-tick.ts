@@ -1,9 +1,10 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
-import { retireStaleRunners } from "./runners.js";
+import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import type { D1Like } from "./projection.js";
 import type { QueueRouteEnv } from "./routes.js";
+import { readActivePolicy } from "../active-policy.js";
 
 /**
  * Move every queue's clock forward on a timer.
@@ -39,6 +40,9 @@ export async function tickAllQueues(
   // try block, so a repository whose retirement read fails only fails that
   // repository's queues, the same as any other per-queue failure below.
   const offlinePrincipalsByRepo = new Map<string, readonly string[]>();
+  // Same shape, same reason: the security profile is a repository setting, so
+  // it is looked up once per repository per tick, not once per queue row.
+  const deviceOnlyByRepo = new Map<string, boolean>();
 
   let ticked = 0;
   let driven = 0;
@@ -49,6 +53,12 @@ export async function tickAllQueues(
       if (offlinePrincipals === undefined) {
         offlinePrincipals = await retireStaleRunners(db, row.repositoryId, now);
         offlinePrincipalsByRepo.set(row.repositoryId, offlinePrincipals);
+      }
+      let deviceOnly = deviceOnlyByRepo.get(row.repositoryId);
+      if (deviceOnly === undefined) {
+        const policy = await readActivePolicy(db, row.repositoryId);
+        deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+        deviceOnlyByRepo.set(row.repositoryId, deviceOnly);
       }
       const snapshot = await withQueueState(db, row.repositoryId, row.baseRef, (store) => {
         const commands = commandsFor(store);
@@ -76,9 +86,12 @@ export async function tickAllQueues(
       ports.onQueueTicked(row.repositoryId);
 
       // Only a held lane needs driving. Dispatching for an idle queue would
-      // spend a CI run to be told there is nothing to do.
+      // spend a CI run to be told there is nothing to do — and under `fresh`
+      // or `audited` there is no Actions fallback at all, so a held lane
+      // there is not this tick's to drive; the connected device claims it
+      // itself, over the heartbeat response (plan.md §5.0).
       const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-      if (holder !== undefined) {
+      if (holder !== undefined && !deviceOnly) {
         await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
         driven += 1;
       }

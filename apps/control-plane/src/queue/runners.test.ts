@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
+import { DEFAULT_TIMINGS } from "./commands.js";
 import {
   GRACE_SECONDS,
   HEARTBEAT_INTERVAL_SECONDS,
+  SWEEP_INTERVAL_SECONDS,
   isPrincipalConnected,
   recordHeartbeat,
   retireStaleRunners,
@@ -34,6 +36,21 @@ const T0 = "2026-07-31T00:00:00.000Z";
 describe("the interval and the grace window", () => {
   it("gives a runner room for a couple of missed beats before it is considered gone", () => {
     expect(GRACE_SECONDS).toBeGreaterThan(HEARTBEAT_INTERVAL_SECONDS);
+  });
+});
+
+describe("the cooldown and the sweep", () => {
+  // plan.md:1208 permits exactly one bounded lost turn to a dead runner, not
+  // a repeating one. A dead runner's entry keeps its stale eligibility until
+  // the next sweep, so an offer can still reach it inside that window; once
+  // that offer expires unclaimed, the cooldown `commands.ts` sets on it has
+  // to outlast the wait for the sweep that finally retires the runner, or
+  // the queue can offer it again before it is gone. Asserting the inequality
+  // directly — not restating today's `300 >= 300` as two literals — is what
+  // makes moving one constant without the other fail here instead of only
+  // in production, on a queue that keeps losing turns to a dead machine.
+  it("holds a runner's unclaimed offer in cooldown at least until the sweep can retire it", () => {
+    expect(DEFAULT_TIMINGS.noClaimCooldownSeconds).toBeGreaterThanOrEqual(SWEEP_INTERVAL_SECONDS);
   });
 });
 

@@ -64,6 +64,25 @@ function queue(repositoryId: string, enabled: number) {
     .run(`qp_${repositoryId}`, repositoryId, enabled);
 }
 
+/** An active policy bundle naming `securityProfile`, for `readActivePolicy`. */
+function activePolicy(repositoryId: string, securityProfile: string) {
+  const digest = `sha256:${"b".repeat(64)}`;
+  raw
+    .prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES ('org_1', '1', 'recallnet')")
+    .run();
+  raw
+    .prepare(
+      `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch, enabled, active_policy_digest, security_profile)
+       VALUES (?, 'org_1', ?, 'recallnet/thwip', 'main', 1, ?, ?)`,
+    )
+    .run(`prj_${repositoryId}`, repositoryId, digest, securityProfile);
+  raw
+    .prepare(
+      "INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status) VALUES (?, ?, 4, ?, 'active')",
+    )
+    .run(digest, `prj_${repositoryId}`, JSON.stringify({ schemaVersion: "1", securityProfile, version: 4 }));
+}
+
 describe("the queue heartbeat", () => {
   it("visits every enabled queue", async () => {
     const e = env();
@@ -161,6 +180,35 @@ async function readyEntry(
   });
 }
 
+/** A Ready, eligible entry, offered the lane — a held turn the tick could drive. */
+async function offeredEntry(
+  db: D1Like,
+  repositoryId: string,
+  entryId: string,
+  principal: string,
+  pr: number,
+): Promise<void> {
+  await withQueueState(db, repositoryId, REF, (store) => {
+    const commands = commandsFor(store);
+    commands.requestQueue({
+      idempotencyKey: `req-${entryId}`,
+      entryId,
+      pullRequestNumber: pr,
+      sponsorPrincipalId: principal,
+      sponsorGithubUserId: pr.toString(),
+      headSha: "h".repeat(40),
+    });
+    commands.evaluateReadiness({
+      idempotencyKey: `ready-${entryId}`,
+      entryId,
+      ready: true,
+      schedulerEligible: true,
+      primaryReason: null,
+    });
+    commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+  });
+}
+
 function entryFrom(snapshot: ReturnType<typeof buildSnapshot>, entryId: string) {
   return snapshot.entries.find((e) => e.entryId === entryId);
 }
@@ -237,5 +285,50 @@ describe("stale-runner retirement on the tick", () => {
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(entryFrom(after, "entry_a")?.schedulerEligible).toBe(true);
+  });
+});
+
+describe("driving a held lane against the active profile", () => {
+  // A `fresh` or `audited` lane has no fallback to GitHub Actions at all
+  // (plan.md §5.0): the connected device claims the offer itself, over the
+  // heartbeat response. Dispatching Actions for it spends a whole run to be
+  // told there is nothing to do — which is exactly what a previous change
+  // made reachable by letting a connected runner clear `AGENT_OFFLINE`.
+  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    activePolicy("1", "fresh");
+    await offeredEntry(db, "1", "entry_a", "alice", 41);
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(after, "entry_a")?.state).toBe("Offered");
+    expect(drives).toBe(0);
+    expect(result.driven).toBe(0);
+  });
+
+  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    activePolicy("1", "fast");
+    await offeredEntry(db, "1", "entry_a", "alice", 41);
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
   });
 });
