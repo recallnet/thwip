@@ -14,7 +14,7 @@
         "directory": "apps/control-plane/dist/client",
         "binding": "ASSETS",
         "not_found_handling": "single-page-application",
-        "run_worker_first": ["/api/*", "/v1/*", "/admin/*", "/health"]
+        "run_worker_first": ["/api/*", "/v1/*", "/admin/*", "/health", "/.well-known/*"]
       },
       "durable_objects": {
         "bindings": [{ "name": "BRANCH_QUEUE", "class_name": "BranchQueue" }]
