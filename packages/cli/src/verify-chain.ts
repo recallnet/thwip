@@ -144,6 +144,7 @@ export async function verifyPublishedChain(
   jwks: JSONWebKeySet,
   subject?: { readonly repositoryId: string; readonly baseRef: string },
   epochStartsAt?: number,
+  head?: { readonly baseSha: string },
 ): Promise<{ totalLinks: number; signaturesChecked: number; findings: readonly ChainFinding[] }> {
   const keys = createLocalJWKSet(jwks);
   const encoder = new TextEncoder();
@@ -164,6 +165,7 @@ export async function verifyPublishedChain(
     // silent shift from passing unnoticed.
     epochStartsAt: epochStartsAt ?? chain.epochStartsAt,
     ...(subject === undefined ? {} : { subject }),
+    ...(head === undefined ? {} : { head }),
     async verifySignature(jws, bytes) {
       try {
         const { payload } = await compactVerify(jws, keys);
@@ -199,6 +201,25 @@ export async function resolveRepositoryIdFromGithub(repo: string): Promise<strin
   if (!res.ok) return null;
   const { id } = (await res.json()) as { id: number };
   return String(id);
+}
+
+/**
+ * Where the branch actually stands, asked of GitHub rather than of thwip.
+ *
+ * Merges that landed after the last record leave nothing inside the chain to
+ * compare against, so the chain cannot report itself behind. Asking the service
+ * for the head it is behind would answer that with the head it recorded, which
+ * is no answer. GitHub serves this for any public repository with no
+ * credentials, which is exactly the position an outside auditor is in.
+ */
+export async function resolveBranchHeadFromGithub(repo: string, branch: string): Promise<string | null> {
+  const res = await fetch(`https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
+  });
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { commit?: { sha?: unknown } } | null;
+  const sha = body?.commit?.sha;
+  return typeof sha === "string" && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -288,11 +309,22 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
   // checked must be visible, not just resistant to being missed.
   process.stdout.write(`epoch: ${epochStartsAt}${pinnedEpoch !== undefined ? " (pinned)" : ""}\n`);
 
+  // Only when the repository was named as owner/name: a run given a bare
+  // --repository-id has nothing to ask GitHub about. Printed either way, so a
+  // run that could not compare the head does not read as one that did.
+  const head = /^[\w.-]+\/[\w.-]+$/.test(repo) ? await resolveBranchHeadFromGithub(repo, branch).catch(() => null) : null;
+  process.stdout.write(
+    head === null
+      ? "head: not checked; a merge landing after the last record would not be visible\n"
+      : `head: ${head} (from github)\n`,
+  );
+
   const { totalLinks, signaturesChecked, findings } = await verifyPublishedChain(
     chain,
     jwks,
     { repositoryId, baseRef },
     epochStartsAt,
+    head === null ? undefined : { baseSha: head },
   );
   process.stdout.write(summarize(totalLinks, signaturesChecked, findings) + "\n");
   if (findings.some((f) => f.code !== "PRE_ATTESTATION")) return EXIT.evidenceRejected;
