@@ -351,6 +351,16 @@ const ADMIN_ROUTES = [
     path: (id: string) => `/v1/queue/${id}/repair?ref=${encodeURIComponent(REF)}`,
     body: { mergeSha: "c".repeat(40), reason: "the merge is on main with no record" },
   },
+  {
+    name: "correct a record that names a sha the branch does not have",
+    method: "POST",
+    path: (id: string) => `/v1/queue/${id}/correct?ref=${encodeURIComponent(REF)}`,
+    body: {
+      transitionDigest: `sha256:${"d".repeat(64)}`,
+      mergeSha: "c".repeat(40),
+      reason: "the record names a test merge that is on no branch",
+    },
+  },
 ] as const;
 
 type Route = { name: string; method: string; path: (id: string) => string; body?: Record<string, unknown> };
