@@ -681,6 +681,59 @@ function failure(error: unknown): {
   };
 }
 
+/**
+ * What a repository-scoped path requires of its caller, keyed by the segment
+ * after the repository id.
+ *
+ * Membership is the default, and the gate below applies it, so a route added to
+ * this file is guarded before its first line runs. Thirteen routes each
+ * remembering to check for themselves is how a signed-in member of one
+ * organization came to be able to pause, rebaseline and reconcile another
+ * organization's queue: every one of them called `authenticate`, which says the
+ * caller holds a session somewhere and has never said anything about the
+ * repository in the path. It is the same shape that produced twelve copies of a
+ * queue-key guard carrying the same wrong message.
+ *
+ * A route that establishes access some other way is listed here, in one place,
+ * with the reason. Forgetting to list a route makes it stricter, never weaker.
+ */
+const REPOSITORY_ACCESS: Readonly<Record<string, "workflow" | "either" | "route">> = {
+  // The pinned workflow's own calls. Each verifies a GitHub Actions OIDC token
+  // and refuses one minted for another repository, which binds the repository
+  // harder than a membership row does. A workflow holds no session and belongs
+  // to no organization, so asking it for membership would refuse it outright.
+  authorize: "workflow",
+  "candidate-result": "workflow",
+  merged: "workflow",
+  "not-merged": "workflow",
+  // Either identity. The merge workflow polls these with the token it
+  // authorizes with; a person or the CLI arrives with a session, and that half
+  // still has to be a member. `nudge` had no authentication of any kind, and it
+  // drives GitHub Actions on the repository it names.
+  candidate: "either",
+  nudge: "either",
+  // The route decides, because the answer turns on a `chain_public` row and the
+  // order of its refusals is what stops a caller walking the numeric repository
+  // id space. See the route, and `chain-route.test.ts`, which pins that order.
+  chain: "route",
+};
+
+/**
+ * The caller the gate established, for the handlers that name them.
+ *
+ * `isAdmin` is only ever read after membership has been established, which is
+ * what makes it a claim about the organization that owns this repository.
+ * `authenticate` answers for whichever organization the session selected, so
+ * read before membership it said an administrator of one organization was an
+ * administrator of every other.
+ */
+interface QueueCaller {
+  readonly principalId: string;
+  readonly githubUserId: string;
+  readonly isAdmin: boolean;
+  readonly operator?: boolean;
+}
+
 export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** Who the caller is, from the existing session or bearer auth. */
   authenticate(c: { req: { raw: Request } }, env: TEnv): Promise<
@@ -817,7 +870,43 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
-  const app = new Hono<{ Bindings: TEnv }>();
+  const app = new Hono<{ Bindings: TEnv; Variables: { caller: QueueCaller } }>();
+
+  /**
+   * Establish that the caller may act on the repository in the path, before any
+   * handler runs.
+   *
+   * Registered once, over everything under `/v1/queue`, so access is a property
+   * of the prefix rather than a line each handler is trusted to copy. A path
+   * whose third segment is not a numeric repository id falls straight through:
+   * `/v1/queue/records/:digest` names no repository, and a malformed id is the
+   * handler's 400 to give rather than a refusal that hides it.
+   */
+  app.use("/v1/queue/*", async (c, next) => {
+    const segments = c.req.path.split("/");
+    const repositoryId = decimal(segments[3]);
+    if (repositoryId === null) return next();
+
+    const mode = REPOSITORY_ACCESS[segments[4] ?? ""] ?? "member";
+    if (mode === "workflow" || mode === "route") return next();
+
+    if (mode === "either") {
+      const claims = await deps.verifyOidc(c, c.env);
+      if (claims !== null && String(claims["repository_id"] ?? "") === repositoryId) return next();
+    }
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    // One refusal for a repository this caller is not in and one for a
+    // repository nobody has onboarded. Two answers would be the enumeration
+    // the chain route's ordering already exists to prevent, arriving through a
+    // different door.
+    if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
+      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+    }
+    c.set("caller", who);
+    return next();
+  });
 
   /**
    * Every mutating route, with the turn check wired in.
@@ -853,8 +942,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const { store } = await readQueue(c.env, repositoryId, baseRef);
     const report = diagnose(store, Number(c.req.query("events") ?? 25));
@@ -885,9 +972,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     // Served from the projection, not the object.
     //
@@ -929,8 +1013,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
 
     const body = (await c.req.json().catch(() => ({}))) as {
       pullRequestNumber?: number;
@@ -975,8 +1058,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
     const entryId = c.req.param("entryId");
@@ -1004,9 +1086,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
-
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
 
     const key = idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`);
     const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
@@ -1039,13 +1118,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const repositoryId = decimal(c.req.param("repositoryId"));
     if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-
+    const who = c.get("caller");
     const db = c.env.DB as unknown as D1Like;
-    if (!(await mayActOnRepository(db, repositoryId, who))) {
-      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
-    }
 
     const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: unknown };
     if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
@@ -1116,8 +1190,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
@@ -1140,8 +1217,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     // A refusal here means a rebaseline is still required after external movement.
@@ -1159,8 +1239,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as { baseSha?: string };
@@ -1419,18 +1502,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof tree !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) {
       return c.json({ error: "tree must be a lowercase hex object id" }, 400);
     }
-    // Either identity. The merge workflow polls this with an Actions OIDC token,
-    // the same one it authorizes with; a person or the CLI arrives with a session
-    // or an operator token. Accepting only the latter meant the workflow got a 401
-    // on every poll, never saw its verdict, and spun until its deadline while the
-    // verdict sat here accepted.
-    const claims = await deps.verifyOidc(c, c.env);
-    const fromWorkflow = claims !== null && String(claims["repository_id"] ?? "") === repositoryId;
-    if (!fromWorkflow) {
-      const who = await deps.authenticate(c, c.env);
-      if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-    }
-
     const verdict = await readCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, tree);
     if (verdict === null) return c.json({ verified: false, candidateTreeOid: tree });
     return c.json({
@@ -1993,8 +2064,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const chain = await readProjectedChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
@@ -2014,8 +2088,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * queue certify the same integration twice.
    */
   app.post("/v1/queue/:repositoryId/reconcile", async (c) => {
-    const who = await deps.authenticate(c, c.env);
-    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const who = c.get("caller");
+    // The administrator of the organization that owns this repository, because
+    // the gate has already established that this caller belongs to it. Read
+    // before membership, `isAdmin` was a claim about whichever organization the
+    // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
     const selected = requestedQueue(c);
