@@ -7,8 +7,8 @@ import type { D1Like } from "./projection.js";
  * session as some principal in some organization, and that is all it has ever
  * said. Thirteen queue routes read it as though it also said the caller may
  * see the repository in the path, which it does not, and two routes added on
- * 2026-07-31 inherited the same reading — one of them on a path that writes
- * the queue document and dispatches GitHub Actions on the repository named.
+ * 2026-07-31 inherited the same reading. One of them writes the queue document
+ * and dispatches GitHub Actions on the repository named.
  *
  * The relation this walks is the whole of the model:
  *
@@ -30,11 +30,16 @@ import type { D1Like } from "./projection.js";
  * answering from the less trustworthy of two disagreeing sources. No project
  * row means no answer, which means refused.
  *
- * Only the heartbeat and chain routes call this today. It exists to be adopted
- * by the other queue routes — every `deps.authenticate` call site in
- * `routes.ts` needs it — which is a larger change, tracked separately, kept
- * out of the commit that fixes the write-and-dispatch path so that commit can
- * be read.
+ * One caller now: the gate `routes.ts` registers over `/v1/queue/*`, which runs
+ * before any handler and refuses a caller who cannot be placed in the owning
+ * organization. Calling it per route is what let thirteen routes each forget,
+ * so a handler that calls it for itself is a handler that should be reading the
+ * caller the gate already established. The chain route is the exception, and it
+ * says why.
+ *
+ * `isAdmin` depends on this running first. `authenticate` reports the role the
+ * session's selected organization gave the caller, so read before membership it
+ * made an administrator of one organization an administrator of every other.
  */
 export interface RepositoryCaller {
   readonly principalId: string;
