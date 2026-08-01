@@ -1,4 +1,4 @@
-import { QUEUE_PREDICATE_TYPES, QUEUE_SIGN_NAMESPACE, canonicalRecordBytes, queueSigningBytes } from "@thwip/queue-protocol";
+import { QUEUE_SIGN_NAMESPACE, integrationReceiptSigningBytes } from "@thwip/queue-protocol";
 import { signSsh } from "@thwip/sshsig";
 
 /**
@@ -53,7 +53,9 @@ export function unsignedReceipt(
 }
 
 export function receiptSigningBytes(receipt: UnsignedReceipt): Uint8Array {
-  return queueSigningBytes(QUEUE_PREDICATE_TYPES.integrationRun, canonicalRecordBytes(receipt));
+  // The queue verifies these bytes from another package, so the shape they are
+  // built from lives in the protocol rather than here.
+  return integrationReceiptSigningBytes(receipt);
 }
 
 export async function signReceipt(receipt: UnsignedReceipt, privateKeyPath: string): Promise<SignedReceipt> {

@@ -17,9 +17,9 @@
 import {
   canonicalRecordBytes,
   envelopeDigest,
-  QUEUE_PREDICATE_TYPES,
+  integrationReceiptContent,
+  integrationReceiptSigningBytes,
   QUEUE_SIGN_NAMESPACE,
-  queueSigningBytes,
   type Sha256,
 } from "@thwip/queue-protocol";
 
@@ -39,24 +39,17 @@ export const INTEGRATION_RECEIPT_NAMESPACE = QUEUE_SIGN_NAMESPACE;
  * the receipt without its signature, wrapped in that encoding.
  */
 export function integrationReceiptBytes(receipt: SubmittedReceipt): Uint8Array {
-  return queueSigningBytes(QUEUE_PREDICATE_TYPES.integrationRun, canonicalRecordBytes(receiptPayload(receipt)));
+  // The device builds these bytes from the same function, in the protocol
+  // package, because a shape picked out by hand on each side agrees only until
+  // one of them gains a field.
+  return integrationReceiptSigningBytes(receipt);
 }
 
 /** The digest of the receipt as content, which is what a merge record cites. */
 export function integrationReceiptDigest(receipt: SubmittedReceipt): Promise<Sha256> {
-  return envelopeDigest(canonicalRecordBytes(receiptPayload(receipt)));
+  return envelopeDigest(canonicalRecordBytes(integrationReceiptContent(receipt)));
 }
 
-/** The five fields that are the receipt, and nothing the caller sent alongside. */
-function receiptPayload(receipt: SubmittedReceipt): Record<string, unknown> {
-  return {
-    assignmentId: receipt.assignmentId,
-    assignmentDigest: receipt.assignmentDigest,
-    candidateTreeOid: receipt.candidateTreeOid,
-    deviceKeyId: receipt.deviceKeyId,
-    suites: receipt.suites.map((s) => ({ name: s.name, outcome: s.outcome })),
-  };
-}
 
 export interface SubmittedReceiptSuite {
   readonly name: string;
