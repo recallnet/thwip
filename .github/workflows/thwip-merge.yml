@@ -184,6 +184,21 @@ jobs:
             # has to agree, over a backoff, and git has to agree too — if the
             # base branch contains the head commit then the merge landed whatever
             # the pull request says about itself.
+            #
+            # And take the sha off the branch when git is what settled it. A
+            # pull request that has not caught up with its own merge still
+            # answers `merge_commit_sha` with the test merge GitHub computes for
+            # an open pull request: the real merge's parents, the real merge's
+            # tree, a different commit, and on no branch. Pull request 107's
+            # losing run reported that sha and chain record 54 says main became
+            # a commit main never was. The merge is the commit on the base
+            # branch whose parents include the head, and that is what gets
+            # reported.
+            merge_on_base() {
+              gh api "repos/$GITHUB_REPOSITORY/commits?sha=${BASE_REF#refs/heads/}&per_page=100" \
+                --jq "[.[] | select(any(.parents[]; .sha == \"$HEAD_SHA\"))][0].sha // empty" 2>/dev/null || echo ""
+            }
+
             confirm_landed() {
               unreadable=0
               for wait in 0 2 4; do
@@ -197,8 +212,15 @@ jobs:
                 cmp=$(gh api "repos/$GITHUB_REPOSITORY/compare/${BASE_REF#refs/heads/}...$HEAD_SHA" \
                   --jq '.status // empty' 2>/dev/null || echo "")
                 if [ "$cmp" = "behind" ] || [ "$cmp" = "identical" ]; then
-                  printf '%s' "$(printf '%s' "$state" | jq -r '.sha // empty')"
-                  return 0
+                  onbase=$(merge_on_base)
+                  if [ -n "$onbase" ]; then
+                    printf '%s' "$onbase"
+                    return 0
+                  fi
+                  # Git says it landed and the branch will not name the commit,
+                  # which is the one case where guessing writes a false record.
+                  unreadable=1
+                  continue
                 fi
                 if [ -z "$cmp" ] || [ "$state" = "{}" ]; then unreadable=1; fi
               done
