@@ -20,6 +20,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
+import { recordHeartbeat } from "./runners.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
@@ -842,6 +843,82 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     );
     await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result });
+  });
+
+  /**
+   * A runner says it is here (plan.md §5.0).
+   *
+   * The principal comes from the session, never the body, so a runner cannot
+   * claim to be somebody else. Upserts the heartbeat row; only on the
+   * absent-to-present transition does this touch any queue document, so a
+   * runner polling every fifteen seconds costs one row write per call and a
+   * queue write only the first time it shows up.
+   */
+  app.post("/v1/queue/:repositoryId/runners/heartbeat", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+
+    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: string };
+    if (typeof body.deviceKeyId !== "string" || body.deviceKeyId.length === 0) {
+      return c.json({ error: "deviceKeyId required" }, 400);
+    }
+
+    const db = c.env.DB as unknown as D1Like;
+    const now = new Date().toISOString();
+    const { wasOffline } = await recordHeartbeat(db, {
+      repositoryId,
+      principalId: who.principalId,
+      deviceKeyId: body.deviceKeyId,
+      now,
+    });
+
+    const projects = await db
+      .prepare("SELECT base_ref AS baseRef FROM queue_projects WHERE github_repository_id = ? AND enabled = 1")
+      .bind(repositoryId)
+      .all<{ baseRef: string }>();
+
+    let holdsOffer = false;
+    for (const { baseRef } of projects.results) {
+      if (wasOffline) {
+        // A heartbeat names a repository, not a branch: the principal's Ready
+        // entry could sit on any base ref this repository queues, so every
+        // enabled one is checked.
+        const { snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+          for (const entry of buildSnapshot(store).entries) {
+            if (
+              entry.sponsorPrincipalId === who.principalId &&
+              !entry.schedulerEligible &&
+              entry.primaryReason === "AGENT_OFFLINE"
+            ) {
+              commands.evaluateReadiness({
+                idempotencyKey: `runner-online:${entry.entryId}:${now}`,
+                entryId: entry.entryId,
+                ready: true,
+                schedulerEligible: true,
+                primaryReason: null,
+              });
+            }
+          }
+        });
+        await driveLane(c.env, deps, repositoryId, snapshot);
+        if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
+          holdsOffer = true;
+        }
+      } else {
+        // No write on the common case: read the document as it stands rather
+        // than run it through the compare-and-swap just to answer a question.
+        const loaded = await loadQueueState(db, repositoryId, baseRef);
+        const snapshot = buildSnapshot(loaded.store);
+        if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
+          holdsOffer = true;
+        }
+      }
+    }
+
+    return c.json({ holdsOffer });
   });
 
   /** Administrative pause, resume, and rebaseline (plan.md §28.5). */

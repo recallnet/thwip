@@ -4,6 +4,9 @@ import { testD1 } from "../../test/d1.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import type { QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
+import { commandsFor, buildSnapshot } from "./queue-operations.js";
+import { withQueueState } from "./queue-state.js";
+import { recordHeartbeat } from "./runners.js";
 
 /**
  * The queue moves when something calls it, and nothing called it on a timer.
@@ -125,5 +128,114 @@ describe("the queue heartbeat", () => {
     expect(ticked).toEqual(["2"]);
     expect(failures).toHaveLength(1);
     expect(failures[0]?.repositoryId).toBe("1");
+  });
+});
+
+const REF = "refs/heads/main";
+
+/** A Ready, eligible entry sponsored by `principal`, as if a runner already claimed it. */
+async function readyEntry(
+  db: D1Like,
+  repositoryId: string,
+  entryId: string,
+  principal: string,
+  pr: number,
+): Promise<void> {
+  await withQueueState(db, repositoryId, REF, (store) => {
+    const commands = commandsFor(store);
+    commands.requestQueue({
+      idempotencyKey: `req-${entryId}`,
+      entryId,
+      pullRequestNumber: pr,
+      sponsorPrincipalId: principal,
+      sponsorGithubUserId: pr.toString(),
+      headSha: "h".repeat(40),
+    });
+    commands.evaluateReadiness({
+      idempotencyKey: `ready-${entryId}`,
+      entryId,
+      ready: true,
+      schedulerEligible: true,
+      primaryReason: null,
+    });
+  });
+}
+
+function entryFrom(snapshot: ReturnType<typeof buildSnapshot>, entryId: string) {
+  return snapshot.entries.find((e) => e.entryId === entryId);
+}
+
+/** Age every heartbeat in `queue_runners` past the grace window. */
+function ageHeartbeats(raw: import("better-sqlite3").Database): void {
+  raw.prepare("UPDATE queue_runners SET last_heartbeat_at = '2000-01-01T00:00:00.000Z'").run();
+}
+
+describe("stale-runner retirement on the tick", () => {
+  it("retires a runner that stopped heartbeating, makes its entries ineligible, and keeps their fairness ordinal", async () => {
+    const e = env();
+    queue("1", 1);
+    const db = e.DB as unknown as D1Like;
+
+    await readyEntry(db, "1", "entry_a", "alice", 41);
+    const before = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    const ordinalBefore = entryFrom(before, "entry_a")?.fairnessOrdinal;
+    expect(ordinalBefore).toBeDefined();
+
+    await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
+    ageHeartbeats(raw);
+
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    const entry = entryFrom(after, "entry_a");
+    expect(entry?.schedulerEligible).toBe(false);
+    expect(entry?.primaryReason).toBe("AGENT_OFFLINE");
+    expect(entry?.fairnessOrdinal).toBe(ordinalBefore);
+  });
+
+  it("an offline entry does not block a Ready entry behind it", async () => {
+    const e = env();
+    queue("1", 1);
+    const db = e.DB as unknown as D1Like;
+
+    // alice joined first (an earlier fairness ordinal), then went offline.
+    await readyEntry(db, "1", "entry_a", "alice", 41);
+    await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
+    ageHeartbeats(raw);
+
+    // bob joined after alice, and is connected.
+    await readyEntry(db, "1", "entry_b", "bob", 42);
+    await recordHeartbeat(db, { repositoryId: "1", principalId: "bob", deviceKeyId: "d1", now: new Date().toISOString() });
+
+    // The tick retires alice's stale runner. It does not itself offer a new
+    // turn to a lane sitting idle (only a held lane needs driving, per the
+    // tick's own doc comment); that happens on whatever next touches the
+    // queue, exactly as it already does for every other route. Simulate that
+    // next touch directly rather than adding a second way to offer a turn.
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+
+    const after = await withQueueState(db, "1", REF, (store) => {
+      const commands = commandsFor(store);
+      commands.tick({ idempotencyKey: "next", decisionDigest: `sha256:${"0".repeat(64)}` });
+      return buildSnapshot(store);
+    });
+
+    expect(entryFrom(after, "entry_a")?.state).toBe("Ready");
+    expect(entryFrom(after, "entry_a")?.schedulerEligible).toBe(false);
+    expect(entryFrom(after, "entry_b")?.state).toBe("Offered");
+  });
+
+  it("leaves a runner still inside the grace window alone", async () => {
+    const e = env();
+    queue("1", 1);
+    const db = e.DB as unknown as D1Like;
+
+    await readyEntry(db, "1", "entry_a", "alice", 41);
+    await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
+
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(after, "entry_a")?.schedulerEligible).toBe(true);
   });
 });
