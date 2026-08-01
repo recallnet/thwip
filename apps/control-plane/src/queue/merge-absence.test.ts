@@ -11,6 +11,8 @@ import { confirmMergeAbsence, type AbsenceReads } from "./merge-absence.js";
  */
 
 const MERGE = "a1fe3e7e32aed7eaeefe799174d5c4962331ac40";
+/** The test merge GitHub computed for pull request 107 while it was still open. */
+const CANDIDATE = "ff6ea882feefd64c4e9f4dff909209e7adb281e3";
 
 function reads(over: Partial<AbsenceReads> = {}): AbsenceReads & { pulls: number; compares: number } {
   const counts = { pulls: 0, compares: 0 };
@@ -59,6 +61,26 @@ describe("confirmMergeAbsence", () => {
     );
     expect(verdict.kind).toBe("merged");
     expect(verdict.reason).toMatch(/base branch already contains/);
+  });
+
+  /**
+   * The sha the pull request offers while it is open is the test merge GitHub
+   * computes for it, not the commit that landed. Pull request 107 answered
+   * `merged: false` with `merge_commit_sha` of ff6ea882, a commit whose parents
+   * and tree match the real merge 0b207610 and which is an ancestor of nothing.
+   * Carrying that out of this arm is how chain record 54 came to say main became
+   * a commit main never was.
+   */
+  it("names no merge commit when only git says the merge landed", async () => {
+    const verdict = await confirmMergeAbsence(
+      reads({
+        readPull: async () => ({ merged: false, mergeCommitSha: CANDIDATE }),
+        baseContainsHead: async () => true,
+      }),
+      instant,
+    );
+    expect(verdict.kind).toBe("merged");
+    expect(verdict.kind === "merged" && verdict.mergeSha).toBeNull();
   });
 
   it("concludes not merged only when every read agrees", async () => {
