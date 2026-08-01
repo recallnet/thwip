@@ -345,6 +345,12 @@ const ADMIN_ROUTES = [
     path: (id: string) => `/v1/queue/${id}/reconcile?ref=${encodeURIComponent(REF)}`,
     body: { observed: "not-merged", reason: "looked at the pull request" },
   },
+  {
+    name: "repair a merge that was never recorded",
+    method: "POST",
+    path: (id: string) => `/v1/queue/${id}/repair?ref=${encodeURIComponent(REF)}`,
+    body: { mergeSha: "c".repeat(40), reason: "the merge is on main with no record" },
+  },
 ] as const;
 
 type Route = { name: string; method: string; path: (id: string) => string; body?: Record<string, unknown> };
