@@ -1,8 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
+import type { Env } from "../env.js";
+
+// `../index.js` statically re-exports the Durable Object class, which needs
+// `cloudflare:workers` and only resolves under the Workers pool. Stubbing that
+// one export lets `queueFromPullRequest` load under plain node, the same way
+// every other control-plane unit test avoids the Workers pool.
+vi.mock("./BranchQueue.js", () => ({ BranchQueue: class {} }));
+const { queueFromPullRequest } = await import("../index.js");
 
 /**
  * The queue under the conditions that actually broke it.
@@ -195,6 +203,112 @@ describe("a pull request that leaves while holding the lane", () => {
       e,
     );
     expect(response.status).toBe(200);
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+});
+
+/**
+ * The actual `closed` webhook, not the DELETE route it drives.
+ *
+ * Three times in one night a merged pull request — 78, 96 and 97 — stayed an
+ * entry, was offered the turn, and starved the queue behind it. The reducer
+ * cancels a live attempt fine (see above); what stopped the cancel from
+ * reaching it was `queueFromPullRequest` itself. It gated the cancel behind
+ * two lookups that exist to decide whether a *new* entry may be placed — a
+ * configured project row and the author's activated principal — neither of
+ * which a pull request that is only leaving needs. When either lookup came up
+ * empty after the entry was already placed, the whole handler returned early
+ * and the cancel it should have issued never ran.
+ */
+describe("the closed webhook itself, once the project or principal it looked up is gone", () => {
+  const org = "org_1";
+  const authorGithubUserId = "59";
+
+  function seed(raw: import("better-sqlite3").Database) {
+    raw
+      .prepare(
+        "INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)",
+      )
+      .run(org, "1", "acme");
+    raw
+      .prepare(
+        "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
+      )
+      .run("qp_1", org, REPO, REF);
+    raw
+      .prepare(
+        "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+      )
+      .run("principal_59", org, authorGithubUserId, "author59");
+  }
+
+  function closedPayload() {
+    return {
+      action: "closed",
+      pull_request: {
+        number: 59,
+        draft: false,
+        state: "closed",
+        base: { ref: "main", repo: { id: Number(REPO) } },
+        head: { sha: String(59).padStart(40, "a") },
+        user: { id: 59, login: "author59", type: "User" },
+      },
+    };
+  }
+
+  it("still cancels the entry when the project row has since gone missing", async () => {
+    const e = env();
+    seed(raw);
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    // The project row that placed this entry is gone by the time it closes —
+    // disabled, reconfigured, whatever the reason. The entry it already
+    // placed still exists and still needs to leave.
+    raw.prepare("DELETE FROM queue_projects WHERE id = 'qp_1'").run();
+
+    const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+    expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+    const after = await liveState(app, e);
+    expect(after.activeAttemptId).toBeNull();
+    expect(stateOf(after, 59)).toBe("Cancelled");
+  });
+
+  it("still cancels the entry when the author's principal has since gone missing", async () => {
+    const e = env();
+    seed(raw);
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+
+    // The author's principal that placed this entry is gone by the time it
+    // closes. The entry it already placed still exists and still needs to
+    // leave; cancelling it never needed to know who the author was.
+    raw.prepare("DELETE FROM principals WHERE id = 'principal_59'").run();
+
+    const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+    expect(result).toEqual({ handled: true, detail: "entry cancelled" });
 
     const after = await liveState(app, e);
     expect(after.activeAttemptId).toBeNull();
