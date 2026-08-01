@@ -35,6 +35,7 @@ const git: GitSubject = {
 
 const evidence = {
   workReceiptDigest: D("a"),
+  organizationId: "org_1",
   policyDigest: D("b"),
   pipelineDigest: D("c"),
   requiredSuitesDigest: D("d"),
@@ -356,6 +357,47 @@ describe("keeping the signed bytes", () => {
     expect(await readAttestation(store, first.digest)).not.toBeNull();
   });
 
+  /**
+   * The loser is still a genuine signed record — the queue really did sign
+   * it — and content-addressed storage puts it under its own digest, which
+   * collides with nothing. So the mirror on the losing path carries the
+   * loser's own digest and bytes, not the winner's, even though the caller
+   * is handed back the winner's digest for the chain position.
+   */
+  it("mirrors the losing record under its own digest, not the winner's", async () => {
+    const store = db();
+    const first = await record(D("f"));
+    await storeAttestation(store, {
+      digest: first.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: first.bytes,
+      jws: first.jws,
+      organizationId: "org_1",
+    });
+
+    const second = await record(D("f")); // same attempt, a distinct signature
+    const puts: Array<{ kind: string; digest: string; bytes: Uint8Array }> = [];
+    const secondResult = await storeAttestation(store, {
+      digest: D("f2"),
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: second.bytes,
+      jws: second.jws,
+      organizationId: "org_1",
+      mirror: async (input) => void puts.push({ kind: input.kind, digest: input.digest, bytes: input.bytes }),
+    });
+
+    expect(secondResult).toEqual({ stored: false, digest: first.digest });
+    expect(puts).toEqual([{ kind: "transition-record", digest: D("f2"), bytes: second.bytes }]);
+  });
+
   it("hands back a whole branch's records in chain order", async () => {
     const store = db();
     const first = await record(D("f"));
@@ -385,5 +427,47 @@ describe("keeping the signed bytes", () => {
     expect(chain).toHaveLength(1);
     expect(chain[0]?.digest).toBe(first.digest);
     expect(new TextDecoder().decode(chain[0]!.bytes)).toBe(new TextDecoder().decode(first.bytes));
+  });
+
+  it("mirrors the signed bytes into the bucket it is given", async () => {
+    const store = db();
+    const signed = await record(D("f"));
+    const puts: Array<{ kind: string; digest: string }> = [];
+
+    await storeAttestation(store, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      mirror: async (input) => void puts.push({ kind: input.kind, digest: input.digest }),
+      organizationId: "org_1",
+    });
+
+    expect(puts).toEqual([{ kind: "transition-record", digest: signed.digest }]);
+  });
+
+  /** A bucket that is down must never cost the record itself. */
+  it("keeps the record when the mirror fails", async () => {
+    const store = db();
+    const signed = await record(D("f"));
+    await storeAttestation(store, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      organizationId: "org_1",
+      mirror: async () => {
+        throw new Error("bucket unavailable");
+      },
+    });
+    expect(await readAttestation(store, signed.digest)).not.toBeNull();
   });
 });

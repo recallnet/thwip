@@ -24,6 +24,8 @@ import type { D1Like } from "./projection.js";
 
 export interface ReuseEvidence {
   readonly workReceiptDigest: Sha256;
+  /** Tenant scope, threaded through so a signed record can be mirrored under it. */
+  readonly organizationId: string;
   readonly policyDigest: Sha256;
   readonly pipelineDigest: Sha256;
   readonly requiredSuitesDigest: Sha256;
@@ -47,7 +49,12 @@ export interface ReuseEvidence {
  */
 export async function reuseEvidenceFor(
   workReceiptDigest: Sha256,
-  policy: { policyDigest: string; pipelineDigest: string | null; requiredSuites: readonly string[] } | null,
+  policy: {
+    policyDigest: string;
+    pipelineDigest: string | null;
+    requiredSuites: readonly string[];
+    organizationId: string;
+  } | null,
   proofCheckRunId: string | null,
   verifierResultDigest: string | null,
 ): Promise<ReuseEvidence | { missing: string }> {
@@ -58,6 +65,7 @@ export async function reuseEvidenceFor(
   }
   return {
     workReceiptDigest,
+    organizationId: policy.organizationId,
     policyDigest: policy.policyDigest as Sha256,
     pipelineDigest: policy.pipelineDigest as Sha256,
     requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
@@ -189,36 +197,95 @@ export async function storeAttestation(
     readonly attemptId: string;
     readonly bytes: Uint8Array;
     readonly jws: string;
+    /** Tenant scope for the durable copy. */
+    readonly organizationId?: string;
+    /**
+     * Where the second copy goes.
+     *
+     * D1 is the only home a record has, and the queue document that references
+     * it is compacted. A signed record is meant to outlive the queue that made
+     * it, so it is written to content-addressed storage as well. The D1 row
+     * below is written first and this is attempted after: a bucket write can be
+     * retried by a backfill, but a lost merge record cannot, so failing to
+     * mirror must never cost the record.
+     */
+    readonly mirror?: (input: {
+      organizationId: string;
+      repositoryId: string;
+      kind: "merge-intent" | "transition-record";
+      digest: string;
+      bytes: Uint8Array;
+    }) => Promise<void>;
   },
 ): Promise<{ stored: true } | { stored: false; digest: string }> {
-  try {
-    await db
-      .prepare(
-        `INSERT INTO queue_attestations
-           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(digest) DO NOTHING`,
-      )
-      .bind(
-        row.digest,
-        row.kind,
-        row.repositoryId,
-        row.baseRef,
-        row.transitionSequence,
-        row.attemptId,
-        new TextDecoder().decode(row.bytes),
-        row.jws,
-      )
-      .run();
-    return { stored: true };
-  } catch (error) {
-    if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
-    const winner = await transitionRecordFor(db, row.attemptId);
-    // The constraint only fires because a row for this attempt already holds a
-    // position, so the record that won the race is there to be read back.
-    if (winner === null) throw error;
-    return { stored: false, digest: winner };
+  const result = await (async (): Promise<{ stored: true } | { stored: false; digest: string }> => {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO queue_attestations
+             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(digest) DO NOTHING`,
+        )
+        .bind(
+          row.digest,
+          row.kind,
+          row.repositoryId,
+          row.baseRef,
+          row.transitionSequence,
+          row.attemptId,
+          new TextDecoder().decode(row.bytes),
+          row.jws,
+        )
+        .run();
+      return { stored: true };
+    } catch (error) {
+      if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
+      const winner = await transitionRecordFor(db, row.attemptId);
+      // The constraint only fires because a row for this attempt already holds a
+      // position, so the record that won the race is there to be read back.
+      if (winner === null) throw error;
+      return { stored: false, digest: winner };
+    }
+  })();
+
+  // The row above is already committed by the time this runs. A bucket that is
+  // down loses nothing that D1 does not already hold, so the failure is
+  // swallowed here rather than thrown: the durable copy is retried by backfill,
+  // but a merge record thrown away for a storage hiccup is not recoverable.
+  //
+  // This runs on the losing path too, mirroring the loser's own digest and
+  // bytes rather than the winner's. The loser is a genuine signed record —
+  // the queue really did sign it — and storage is content-addressed, so it
+  // lands under its own digest and collides with nothing. That matches what
+  // the schema migration chose for D1: the losing row is demoted out of the
+  // chain but its bytes and signature are kept rather than deleted.
+  // Destroying signed evidence to tidy up is a worse habit than keeping a
+  // blob nobody references.
+  if (row.mirror !== undefined && row.organizationId !== undefined) {
+    try {
+      await row.mirror({
+        organizationId: row.organizationId,
+        repositoryId: row.repositoryId,
+        kind: row.kind === "merge-intent" ? "merge-intent" : "transition-record",
+        digest: row.digest,
+        bytes: row.bytes,
+      });
+      // Stamped here rather than left to the backfill: a row this mirror already
+      // wrote a durable copy for has no reason to sit in the backlog it exists to
+      // drain. Digest is content-addressed, so this is the same digest the row
+      // above was inserted under whether this call won or lost the race in
+      // storeAttestation's own insert.
+      await db
+        .prepare(`UPDATE queue_attestations SET mirrored_at = ? WHERE digest = ?`)
+        .bind(new Date().toISOString(), row.digest)
+        .run();
+    } catch {
+      /* the record is stored; the durable copy is retried by the backfill */
+    }
   }
+
+  return result;
 }
 
 /**
