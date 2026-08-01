@@ -42,11 +42,29 @@ describe("the verification summary", () => {
     expect(text).toMatch(/link 7/);
   });
 
-  it("reports a gap as a merge that landed without a record", () => {
+  it("reports a gap as records that were written and not served", () => {
     const text = summarize(2, 2, [
-      { code: "SEQUENCE_GAP", sequence: 48, digest: "sha256:c", detail: "a merge landed without a record" },
+      {
+        code: "SEQUENCE_GAP",
+        sequence: 48,
+        digest: "sha256:c",
+        detail: "link 48 follows 46; the records in between were written and not served",
+      },
     ]);
-    expect(text).toContain("landed without a record");
+    expect(text).toContain("the records in between were written and not served");
+  });
+
+  it("names a base that moved with no record and fails", () => {
+    const text = summarize(2, 2, [
+      {
+        code: "BASE_DISCONTINUITY",
+        sequence: 53,
+        digest: "sha256:d",
+        detail: "begins at a1fe3e7, but the record before it left the base at 7059839",
+      },
+    ]);
+    expect(text).toMatch(/BASE_DISCONTINUITY/);
+    expect(text).toMatch(/link 53/);
   });
 
   /**
@@ -498,6 +516,110 @@ describe("cmdVerifyChain when every link is an empty record", () => {
     expect(code).not.toBe(EXIT.ok);
     expect(output).not.toMatch(/links verified/);
     expect(output).toMatch(/nothing was verified/);
+    vi.restoreAllMocks();
+  });
+});
+
+/**
+ * The last unrecorded merge is the one the records cannot catch. A record is
+ * written after the merge it describes, so a crash in between leaves a chain
+ * that ends one merge short and is internally perfect. GitHub is asked where
+ * the branch stands, because thwip cannot be: a service asked to report the
+ * head it is behind would report a head that matches.
+ */
+describe("cmdVerifyChain against the branch head", () => {
+  const LAST_RECORDED = "3".repeat(40);
+  const BRANCH_HEAD = "a1fe3e7e32aed7eaeefe799174d5c4962331ac40";
+
+  async function servedChain() {
+    const record = {
+      schemaVersion: "1",
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      queueEpoch: 1,
+      transitionSequence: 1,
+      previousTransitionDigest: null,
+      before: { baseSha: null, treeOid: null },
+      after: {
+        baseSha: LAST_RECORDED,
+        treeOid: "4".repeat(40),
+        parentOids: [LAST_RECORDED],
+        parentCount: 1,
+        parentOidsDigest: `sha256:${"7".repeat(64)}`,
+        parentsComplete: true,
+      },
+      observedAt: "2026-07-31T12:00:00Z",
+      reusedProof: {
+        attemptId: "att-1",
+        mergeIntentDigest: `sha256:${"1".repeat(64)}`,
+        pullRequestNumber: 1,
+        headSha: "2".repeat(40),
+        candidateSha: LAST_RECORDED,
+        candidateTreeOid: "4".repeat(40),
+        mergeMethod: "squash",
+        workReceiptDigest: `sha256:${"2".repeat(64)}`,
+        policyDigest: `sha256:${"6".repeat(64)}`,
+        pipelineDigest: `sha256:${"8".repeat(64)}`,
+        requiredSuitesDigest: `sha256:${"9".repeat(64)}`,
+        checkRunId: "778899",
+      },
+    };
+    const { canonicalBytes, envelopeDigest } = await import("@thwip/queue-protocol");
+    const bytes = canonicalBytes(JSON.stringify(record));
+    return {
+      epochStartsAt: 1,
+      links: [
+        { digest: await envelopeDigest(bytes), record: new TextDecoder().decode(bytes), jws: "not-a-real-signature", sequence: 1 },
+      ],
+    };
+  }
+
+  function stub(chain: unknown, branchHead: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/branches/")) return Response.json({ commit: { sha: branchHead } });
+        if (u.includes("api.github.com/repos/")) return Response.json({ id: 1315419165 });
+        if (u.includes("thwip-keys")) {
+          return Response.json({ keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] });
+        }
+        return Response.json(chain);
+      }),
+    );
+  }
+
+  it("reports a chain that ends before the branch does", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    stub(await servedChain(), BRANCH_HEAD);
+
+    const code = await cmdVerifyChain(["--repo", "recallnet/thwip"]);
+    const output = writes.join("");
+
+    expect(code).toBe(EXIT.evidenceRejected);
+    expect(output).toMatch(/CHAIN_BEHIND_HEAD/);
+    expect(output).toContain(BRANCH_HEAD);
+    vi.restoreAllMocks();
+  });
+
+  it("says so when the head could not be read, instead of implying it was checked", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    stub(await servedChain(), BRANCH_HEAD);
+
+    await cmdVerifyChain(["--repository-id", "1315419165"]);
+    const output = writes.join("");
+
+    expect(output).toMatch(/head: not checked/);
+    expect(output).not.toMatch(/CHAIN_BEHIND_HEAD/);
     vi.restoreAllMocks();
   });
 });
