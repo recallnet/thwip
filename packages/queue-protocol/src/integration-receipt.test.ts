@@ -32,8 +32,7 @@ function receipt(over: Record<string, unknown> = {}): Record<string, unknown> {
     },
     policy: {
       digest: D("c"),
-      daggerModuleDigest: D("d"),
-      daggerEngineDigest: D("e"),
+      runner: "command",
       requiredSuites: ["lint", "test"],
     },
     runner: {
@@ -147,7 +146,7 @@ describe("parseIntegrationReceipt", () => {
 
   it("rejects more than thirty-two suites", () => {
     const many = receipt({
-      policy: { ...(receipt()["policy"] as Record<string, unknown>), requiredSuites: ["lint"] },
+      policy: { digest: D("c"), runner: "command", requiredSuites: ["lint"] },
       run: run({
         suites: Array.from({ length: 33 }, (_, i) => ({
           name: `s${i}`,
@@ -157,6 +156,45 @@ describe("parseIntegrationReceipt", () => {
       }),
     });
     expect(parseIntegrationReceipt(many)).toMatchObject({ ok: false });
+  });
+});
+
+describe("parseIntegrationReceipt policy.runner", () => {
+  it("parses a command-pipeline receipt without Dagger digests", () => {
+    expect(parseIntegrationReceipt(receipt())).toMatchObject({ ok: true });
+  });
+
+  it("refuses a command-pipeline receipt that carries Dagger digests it cannot honestly hold", () => {
+    const withDagger = receipt({
+      policy: {
+        digest: D("c"),
+        runner: "command",
+        daggerModuleDigest: D("d"),
+        daggerEngineDigest: D("e"),
+        requiredSuites: ["lint", "test"],
+      },
+    });
+    expect(parseIntegrationReceipt(withDagger)).toMatchObject({ ok: false });
+  });
+
+  it("accepts a dagger-runner receipt carrying Dagger digests", () => {
+    const daggerReceipt = receipt({
+      policy: {
+        digest: D("c"),
+        runner: "dagger",
+        daggerModuleDigest: D("d"),
+        daggerEngineDigest: D("e"),
+        requiredSuites: ["lint", "test"],
+      },
+    });
+    expect(parseIntegrationReceipt(daggerReceipt)).toMatchObject({ ok: true });
+  });
+
+  it("refuses a dagger-runner receipt missing its Dagger digests", () => {
+    const daggerReceipt = receipt({
+      policy: { digest: D("c"), runner: "dagger", requiredSuites: ["lint", "test"] },
+    });
+    expect(parseIntegrationReceipt(daggerReceipt)).toMatchObject({ ok: false });
   });
 });
 
