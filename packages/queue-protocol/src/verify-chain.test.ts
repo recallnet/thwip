@@ -186,6 +186,113 @@ describe("verifying a chain", () => {
   });
 
   /**
+   * The repaired chain, taken from the live staging chain.
+   *
+   * Four merges landed with no record. They were recorded afterwards by a route
+   * that appends, and the chain is hash-linked, so the four could only land at
+   * the head as 55, 56, 57 and 58, never back where the merges happened. Log
+   * order stopped being history order at that moment.
+   *
+   * Following the shas instead of the numbers gives one unbroken path: 46 ends
+   * at 3aa327e, 55 and 56 carry it to de6c17b where 47 begins, 51 ends at
+   * a8d9874 where 57 begins, 57 hands 797c695 to 52, and 58 carries 52's
+   * 7059839 to a1fe3e7 where 53 begins. Every edge exists.
+   */
+  describe("a chain repaired at the head", () => {
+    const atEpoch = { verifySignature: async () => true, epochStartsAt: 46 };
+    const fortySixBefore = "ff6ea882feefd64c4e9f4dff909209e7adb281e3";
+    const fortySixAfter = "3aa327edeedf758f73fc7feb74a903818932e808";
+    const fiftyFiveAfter = "5ce265c39c1a6ec0f6a0c0c7e5f5bb0b1c4b4a20";
+    const fortySevenBefore = "de6c17b4aff35fc1cca82a18e1d3d4df24eb5876";
+    const fiftyOneAfter = "a8d9874941bc5cbaabd52c3f7e18489dab206400";
+    const fiftyTwoBefore = "797c695e4f7965b5592802a4e513fbd9e5982fa2";
+    const fiftyTwoAfter = "7059839f29bf1aa0c0dd55e4e004cd64c155ba99";
+    const fiftyThreeBefore = "a1fe3e7e32aed7eaeefe799174d5c4962331ac40";
+
+    /**
+     * Records 46 to 58 in the order the log holds them, with the live shas at
+     * every seam the repair touched and `baseAt` filling the stretches it did
+     * not. Each link names the digest of the link before it in log order,
+     * because that is how they were written.
+     */
+    async function repaired(): Promise<ChainLink[]> {
+      const shape = (sequence: number, before: string, after: string) => ({ sequence, before, after });
+      const shapes = [
+        shape(46, fortySixBefore, fortySixAfter),
+        shape(47, fortySevenBefore, baseAt(47)),
+        shape(48, baseAt(47), baseAt(48)),
+        shape(49, baseAt(48), baseAt(49)),
+        shape(50, baseAt(49), baseAt(50)),
+        shape(51, baseAt(50), fiftyOneAfter),
+        shape(52, fiftyTwoBefore, fiftyTwoAfter),
+        shape(53, fiftyThreeBefore, baseAt(53)),
+        shape(54, baseAt(53), baseAt(54)),
+        shape(55, fortySixAfter, fiftyFiveAfter),
+        shape(56, fiftyFiveAfter, fortySevenBefore),
+        shape(57, fiftyOneAfter, fiftyTwoBefore),
+        shape(58, fiftyTwoAfter, fiftyThreeBefore),
+      ];
+      const links: ChainLink[] = [];
+      let previous = D("a");
+      for (const s of shapes) {
+        const built = await makeLink({ ...s, previous });
+        previous = built.digest;
+        links.push({ ...built, sequence: s.sequence });
+      }
+      return links;
+    }
+
+    it("accepts the repaired chain, whose edges form one unbroken path", async () => {
+      const { findings } = await verifyChain(await repaired(), atEpoch);
+      expect(findings).toEqual([]);
+    });
+
+    it("still reports the hole when the record for PR 105 is not there", async () => {
+      const links = (await repaired()).filter((l) => l.sequence !== 58);
+      const { findings } = await verifyChain(links, atEpoch);
+      expect(findings.map((f) => f.code)).toEqual(["BASE_DISCONTINUITY"]);
+      expect(findings[0]?.sequence).toBe(53);
+      expect(findings[0]?.detail).toContain(fiftyTwoAfter);
+      expect(findings[0]?.detail).toContain(fiftyThreeBefore);
+    });
+
+    it("reports every hole when more than one record is missing", async () => {
+      const links = (await repaired()).filter((l) => l.sequence !== 57 && l.sequence !== 58);
+      const { findings } = await verifyChain(links, atEpoch);
+      expect(findings.map((f) => f.code)).toEqual(["BASE_DISCONTINUITY", "BASE_DISCONTINUITY"]);
+      expect(findings.map((f) => f.sequence)).toEqual([52, 53]);
+    });
+
+    it("judges the branch head against where the path ends, not the last link written", async () => {
+      const links = await repaired();
+      const clean = await verifyChain(links, { ...atEpoch, head: { baseSha: baseAt(54) } });
+      expect(clean.findings).toEqual([]);
+      const behind = await verifyChain(links, { ...atEpoch, head: { baseSha: fortySixAfter } });
+      expect(behind.findings.map((f) => f.code)).toEqual(["CHAIN_BEHIND_HEAD"]);
+      expect(behind.findings[0]?.detail).toContain(baseAt(54));
+    });
+  });
+
+  /**
+   * What the edge view can see that a walk down the log could not. Two records
+   * leaving the same base is a fork: the branch cannot have moved off one sha
+   * two different ways, so one of the two records is describing a merge that
+   * did not happen on this branch. Following the shas has to pick one of the
+   * two to continue from, and there is no honest way to pick, so the ambiguity
+   * itself is what gets reported.
+   */
+  describe("two records leaving the same base", () => {
+    it("reports a fork instead of choosing a side", async () => {
+      const one = await makeLink({ sequence: 1, previous: null });
+      const two = await makeLink({ sequence: 2, previous: one.digest });
+      const rival = await makeLink({ sequence: 3, previous: two.digest, before: baseAt(1), after: baseAt(9) });
+      const { findings } = await verifyChain([one, two, rival], signedOk);
+      expect(findings.map((f) => f.code)).toEqual(["FORKED_BASE"]);
+      expect(findings[0]?.detail).toContain(baseAt(1));
+    });
+  });
+
+  /**
    * A chain that simply stops cannot be caught from the records alone: the last
    * record is consistent with everything before it, and the merges after it left
    * no trace inside the chain. Only the branch's current base, which the caller
