@@ -215,16 +215,17 @@ const SEQUENCE: Array<{ step: string; asks: string; codes: string[] }> = [
   },
 ];
 
+/**
+ * Two profiles, because two profiles are what @thwip/policy derives. A third,
+ * "Fresh", was described here as though you could pick it. Picking it fails: it
+ * needs an integration receipt signed where the suites ran, and nothing issues
+ * one. A page that lists software we do not have is a page that lies.
+ */
 const PROFILES = [
   {
     name: "Fast",
-    body: "The run signs its own network and cache modes along with the result.",
+    body: "The run signs its own network and cache modes along with the result, and the check reads that.",
     fact: "Reuses the run you already did",
-  },
-  {
-    name: "Fresh",
-    body: "The run claims its window before it starts, so it cannot be back-dated.",
-    fact: "Pins when the run happened",
   },
   {
     name: "Remote",

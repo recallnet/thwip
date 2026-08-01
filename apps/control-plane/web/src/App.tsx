@@ -1,34 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
 import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { QueuePanel } from "./Queue.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
-
-/* ---------- shared API helpers ---------- */
-
-function selectedOrg(): string | null {
-  return localStorage.getItem("thwip.org");
-}
-
-function withOrg(path: string): string {
-  const org = selectedOrg();
-  if (!org) return path;
-  return path + (path.includes("?") ? "&" : "?") + "org=" + encodeURIComponent(org);
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(withOrg(path), {
-    credentials: "include",
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
+import { api, selectedOrg, useFetch } from "./api.js";
+import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
+import { activationText, configSourceText, policyStatusText, proofCheckModeText, whenText } from "./vocabulary.js";
 
 async function signInWithGitHub(callbackURL: string): Promise<void> {
   const res = await api<{ url?: string }>("/api/auth/sign-in/social", {
@@ -131,22 +109,6 @@ function useMe() {
   return me;
 }
 
-function useFetch<T>(path: string, deps: unknown[] = []) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const reload = useCallback(() => {
-    api<T>(path)
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, ...deps]);
-  useEffect(reload, [reload]);
-  return { data, error, reload };
-}
-
 function FaqPage({ me }: { me: Me | null | undefined }) {
   return (
     <div className="nt">
@@ -182,29 +144,32 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           </dd>
           <dt>How does this map to SLSA?</dt>
           <dd>
-            The remote profile is SLSA Build L3: GitHub Actions performs the build and GitHub signs the provenance
-            with an identity the workflow can't forge. fast and fresh are deliberately not L3 — they're attributed
-            assertions plus the controls SLSA's original L4 asked for and v1.0 dropped as impractical: hermetic
-            execution, reproducible outputs, and optional two-party agreement. Those are cheap here because the
-            pipeline runs as a content-addressed graph, so identical inputs must produce identical digests on any
-            machine. Pick per path: L3 where a rerun is worth the minutes, reproducibility-backed assertions
-            everywhere else.
+            The remote profile is SLSA Build L3. GitHub Actions performs the build and GitHub signs the provenance
+            with an identity the workflow cannot forge. Fast is deliberately not L3. It is an attributed assertion
+            plus the controls SLSA's original L4 asked for and v1.0 dropped as impractical: hermetic execution,
+            reproducible outputs, and optional two-party agreement. Those are cheap here because the pipeline runs
+            as a content-addressed graph, so identical inputs must produce identical digests on any machine. Pick
+            per path: L3 where a rerun is worth the minutes, a reproducibility-backed assertion everywhere else.
           </dd>
-          <dt>What are the security profiles: fast, fresh, audited, remote?</dt>
+          <dt>Which security profiles can I pick?</dt>
           <dd>
-            <b>Fast</b>: a signed local proof with no pre-run contact with the control plane. Works fully offline
-            before push. <b>Fresh</b>: the CLI first requests a short-lived lease bound to the exact tree, signer,
-            and policy, so the proof also carries a trusted issuance window. <b>Audited</b>: fresh, plus a random or
-            risk-triggered independent rerun of the pipeline in GitHub Actions to deter false assertions.{" "}
-            <b>Remote</b>: the pipeline runs in GitHub for every required check, which is conventional remote CI.
-            Pick organization defaults in the dashboard; use <code>thwip.yaml</code> only where a repository needs
-            to override them.
+            Two. <b>Fast</b> is a signed local proof with no pre-run contact with the control plane, so it works
+            offline before push. <b>Remote</b> runs the pipeline in GitHub for every required check, which is
+            conventional remote CI. Pick organization defaults in the dashboard, and use <code>thwip.yaml</code>{" "}
+            only where a repository needs to override them.
+          </dd>
+          <dt>The schema mentions fresh and audited. Can I use them?</dt>
+          <dd>
+            No, and the CLI refuses them by name rather than quietly delivering something else. Both are defined as
+            issuing an assignment and requiring an integration receipt signed where the suites ran. Nothing issues
+            one and nothing signs one yet, so a repository that asked for either would get what remote gives under
+            a name claiming more than happened.
           </dd>
           <dt>What does a proof actually prove?</dt>
           <dd>
             That an enrolled signing key asserted the approved pipeline and required suites passed for this exact
-            repository, Git tree, ancestry, base, and policy version. In fast and fresh profiles the execution claim
-            is the signer's assertion; audited and remote add independent execution evidence.
+            repository, Git tree, ancestry, base, and policy version. Under fast, the execution claim is the
+            signer's own assertion. Under remote, GitHub ran the required suites and signed for them.
           </dd>
           <dt>How does a teammate join?</dt>
           <dd>
@@ -319,7 +284,7 @@ function OrgSwitcher({ me }: { me: Me }) {
   const current = selectedOrg() ?? me.organization?.github_login ?? "";
   return (
     <select
-      className="gp-btn gp-btn--sm"
+      className="gp-btn gp-btn--sm gp-btn--quiet"
       aria-label="Organization"
       value={current}
       onChange={(e) => {
@@ -371,7 +336,7 @@ function Dashboard({
             {me.principal?.github_login ?? me.viewer.githubUserId}
           </a>
           <button
-            className="gp-btn gp-btn--sm"
+            className="gp-btn gp-btn--sm gp-btn--quiet"
             onClick={() =>
               void api("/api/auth/sign-out", { method: "POST", body: "{}" }).then(() => (window.location.href = "/"))
             }
@@ -380,7 +345,7 @@ function Dashboard({
           </button>
         </span>
       </nav>
-      <ul className="tab-nav" role="tablist" style={{ marginTop: "1rem" }}>
+      <ul className="tab-nav" role="tablist">
         {TABS.map(([key, label]) => (
           <li key={key}>
             <NavLink to={`/dashboard/${key}`} className={tab === key ? "is-active" : ""}>
@@ -391,17 +356,12 @@ function Dashboard({
       </ul>
       <main className="gp-workspace__content">
         {!org && (
-          <div className="gp-panel" style={{ marginBottom: "1rem" }}>
-            <div className="gp-panel__header">
-              <h3 className="gp-panel__title">Connect your GitHub organization</h3>
-            </div>
-            <div className="gp-panel__body">
-              <p>
-                Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
-                the organization, then run a sync from Operations.
-              </p>
-            </div>
-          </div>
+          <Panel title="Connect your GitHub organization">
+            <p>
+              Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
+              the organization, then run a sync from Operations.
+            </p>
+          </Panel>
         )}
         {tab === "overview" && <Overview />}
         {tab === "projects" &&
@@ -421,26 +381,13 @@ function Dashboard({
   );
 }
 
-function Panel({ title, meta, children }: { title: string; meta?: string; children: React.ReactNode }) {
-  return (
-    <div className="gp-panel" style={{ marginBottom: "1rem" }}>
-      <div className="gp-panel__header">
-        <h3 className="gp-panel__title">{title}</h3>
-        {meta && <span className="gp-panel__meta">{meta}</span>}
-      </div>
-      <div className="gp-panel__body">{children}</div>
-    </div>
-  );
-}
-
-
 /** First thing a developer needs: a machine that can sign. */
 function StartUsingThwip() {
   const [copied, setCopied] = useState(false);
   const prompt = developerSetupPrompt();
   return (
     <Panel title="Start using thwip" meta="developer setup · paste into your coding agent">
-      <p style={{ marginBottom: "0.7rem" }}>
+      <p>
         Before you can sign a proof, this machine needs the CLI, a signed-in session, and an ed25519 key that GitHub
         lists as a <b>signing</b> key for your account. The prompt below walks an agent through all three and hands
         you the browser and terminal steps rather than doing them for you. Your private key is never read.
@@ -452,24 +399,12 @@ function StartUsingThwip() {
         >
           {copied ? "Copied" : "Copy setup prompt"}
         </button>
-        <a className="gp-btn gp-btn--sm" href="/install">
+        <a className="gp-btn gp-btn--sm gp-btn--quiet" href="/install">
           Read it first
         </a>
       </div>
     </Panel>
   );
-}
-
-/** "2h ago" beats an ISO instant for a reader scanning a list. */
-function relativeTime(iso: string): string {
-  const at = Date.parse(iso.endsWith("Z") ? iso : `${iso}Z`);
-  if (!Number.isFinite(at)) return iso;
-  const minutes = Math.floor((Date.now() - at) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return new Date(at).toLocaleDateString();
 }
 
 function Overview() {
@@ -501,13 +436,18 @@ function Overview() {
       <div className="metric-strip">
         <a className="metric-strip__item" href="/dashboard/billing" title="Projects you may verify on this plan">
           <span className="metric-strip__label">enabled projects</span>
-          <span className={`metric-strip__value${atProjectLimit ? " bad" : ""}`}>
+          {/*
+            At the limit changes the colour of the number and nothing else. It
+            used to also take the `bad` utility, which retyped a 26px numeral as
+            11.5px mono, so the number that mattered read smallest in the row.
+          */}
+          <span className={`metric-strip__value${atProjectLimit ? " is-limit" : ""}`}>
             {data.enabledProjects}/{data.limits.projects}
           </span>
         </a>
         <a className="metric-strip__item" href="/dashboard/billing" title="People who may sign proofs on this plan">
           <span className="metric-strip__label">signers</span>
-          <span className={`metric-strip__value${atUserLimit ? " bad" : ""}`}>
+          <span className={`metric-strip__value${atUserLimit ? " is-limit" : ""}`}>
             {data.activatedUsers}/{data.limits.users}
           </span>
         </a>
@@ -524,11 +464,11 @@ function Overview() {
             {atUserLimit ? "Every signer seat is in use. " : ""}
             Enabling another needs a larger plan, or disabling one you no longer verify.
           </p>
-          <p>
+          <div className="thwip-actions">
             <a className="gp-btn gp-btn--sm" href="/dashboard/billing">
               See plans
             </a>
-          </p>
+          </div>
         </Panel>
       )}
 
@@ -561,8 +501,10 @@ function Overview() {
                       {o.head_sha.slice(0, 8)}
                     </a>
                   </td>
-                  <td className={o.outcome === "PASS" ? "ok" : "bad"}>{o.outcome}</td>
-                  <td className="gp-panel__meta">{relativeTime(o.observed_at)}</td>
+                  <td>
+                    <OutcomeText code={o.outcome} />
+                  </td>
+                  <td className="gp-panel__meta">{whenText(o.observed_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -572,12 +514,19 @@ function Overview() {
 
       <StartUsingThwip />
       <Panel title="Ship a change">
-        <p style={{ fontFamily: "var(--gp-mono, monospace)", fontSize: "0.82rem" }}>
+        <p className="gp-mono">
           git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
         </p>
+        {/*
+          This said "under a profile stronger than fast", which described a rung
+          on a ladder that does not exist. Two profiles ship: fast reuses the
+          proof already on the head, remote runs the required suites in GitHub
+          Actions against the merge candidate. Naming the one that does the work
+          is both shorter and true.
+        */}
         <p className="gp-panel__meta">
-          The queue verifies the proof on your head commit, and under a profile stronger than fast it also runs
-          the required suites against the merge commit before it merges.
+          The queue verifies the proof on your head commit. Under the remote profile it also runs the required
+          suites in GitHub Actions against the merge commit before anything lands.
         </p>
       </Panel>
     </>
@@ -644,16 +593,16 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
     >
       {error && <p className="thwip-error">{error}</p>}
       <textarea
+        className="thwip-json-field"
         aria-label="Organization proof defaults"
         value={text}
         disabled={!canEdit || saving}
         onChange={(event) => setText(event.target.value)}
         rows={9}
-        style={{ width: "100%", fontFamily: "var(--gp-mono, monospace)", fontSize: "0.8rem" }}
       />
       {saveError && <p className="thwip-error">{saveError}</p>}
       {canEdit ? (
-        <p>
+        <div className="thwip-actions">
           <button
             className="gp-btn gp-btn--sm"
             disabled={saving}
@@ -666,11 +615,11 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
             }}
           >
             Save defaults
-          </button>{" "}
-          <button className="gp-btn gp-btn--sm" disabled={saving} onClick={() => void save(null)}>
+          </button>
+          <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => void save(null)}>
             Clear defaults
           </button>
-        </p>
+        </div>
       ) : (
         <p className="gp-panel__meta">Only a GitHub organization owner can change these defaults.</p>
       )}
@@ -678,8 +627,41 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+/**
+ * What the check last said about a repository.
+ *
+ * The project row carries its own `last_outcome`, and for repositories whose
+ * verifications were recorded before the row was linked it is null, so the
+ * column printed an em dash while the Overview page listed those same
+ * verifications by name one screen earlier. Two readings of one fact, and the
+ * emptier one won. The observations feed is the same feed Overview reads, so it
+ * answers here too when the row has nothing.
+ */
+interface LastVerification {
+  outcome: string | null;
+  at: string | null;
+}
+
+function useLastVerifications(): (project: ProjectRow) => LastVerification {
+  const ops = useFetch<{
+    observations: Array<{ github_name: string; outcome: string; observed_at: string }>;
+  }>("/v1/dashboard/operations");
+  const latest = new Map<string, { outcome: string; observed_at: string }>();
+  for (const o of ops.data?.observations ?? []) {
+    if (!latest.has(o.github_name)) latest.set(o.github_name, o);
+  }
+  return (project) => {
+    if (project.last_outcome !== null) {
+      return { outcome: project.last_outcome, at: project.last_observed_at };
+    }
+    const seen = latest.get(project.github_name);
+    return seen === undefined ? { outcome: null, at: null } : { outcome: seen.outcome, at: seen.observed_at };
+  };
+}
+
 function Projects({ me }: { me: Me }) {
   const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  const lastVerification = useLastVerifications();
   const installUrl = me.organization?.installation_id
     ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
     : null;
@@ -690,21 +672,6 @@ function Projects({ me }: { me: Me }) {
     setActionError(null);
     try {
       await api(`/v1/dashboard/projects/${p.id}/${action}`, { method: "POST", body: "{}" });
-      reload();
-    } catch (e) {
-      setActionError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-  const setProofMode = async (p: ProjectRow, mode: "observe" | "enforced") => {
-    setBusy(p.id);
-    setActionError(null);
-    try {
-      await api(`/v1/dashboard/projects/${p.id}/proof-mode`, {
-        method: "POST",
-        body: JSON.stringify({ mode }),
-      });
       reload();
     } catch (e) {
       setActionError((e as Error).message);
@@ -741,83 +708,80 @@ function Projects({ me }: { me: Me }) {
           </tr>
         </thead>
         <tbody>
-          {data.projects.map((p) => (
-            <tr key={p.id}>
-              <td>
-                <a href={projectPath(p.github_name)}>
-                  <code>{p.github_name}</code>
-                </a>
-                <div className="gp-panel__meta">
-                  {p.collaborators} with access · {p.default_branch} · App check {p.proof_check_mode}
-                </div>
-              </td>
-              <td>
-                {p.activation_state === "active" ? (
-                  <span className="gp-chip is-active">enabled · active</span>
-                ) : p.activation_state === "awaiting_policy" ? (
-                  <span className="gp-chip is-active">enabled · awaiting policy</span>
-                ) : (
-                  <span className="gp-chip">imported · disabled</span>
-                )}
-              </td>
-              <td title={p.active_policy_digest ?? undefined}>
-                {p.policy_version ? (
-                  <>
-                    v{p.policy_version} · {p.policy_profile ?? "fast"}
-                    <div className="gp-panel__meta">
-                      {p.config_source === "global"
-                        ? "from organization defaults"
-                        : p.config_source === "repository-override"
-                          ? "repository override over organization defaults"
-                          : "from thwip.yaml"}
-                    </div>
-                  </>
-                ) : (
-                  <span className="gp-panel__meta">
-                    {p.activation_state === "awaiting_policy"
-                      ? `add organization defaults or activate from canonical ${p.default_branch}`
-                      : "none activated"}
-                  </span>
-                )}
-              </td>
-              <td>
-                {p.last_outcome ? (
-                  <span
-                    className={
-                      p.last_outcome === "PASS" ? "ok" : p.last_outcome === "BOOTSTRAP_PENDING" ? undefined : "bad"
+          {data.projects.map((p) => {
+            const last = lastVerification(p);
+            return (
+              <tr key={p.id}>
+                <td>
+                  <a href={projectPath(p.github_name)}>
+                    <code>{p.github_name}</code>
+                  </a>
+                  <Facts
+                    items={[
+                      `${p.collaborators} with access`,
+                      p.default_branch,
+                      proofCheckModeText(p.proof_check_mode),
+                    ]}
+                  />
+                </td>
+                <td>
+                  <StatusChip
+                    tone={
+                      p.activation_state === "active" ? "ok" : p.activation_state === "awaiting_policy" ? "wait" : "off"
                     }
                   >
-                    {p.last_outcome}
-                  </span>
-                ) : (
-                  <span className="gp-panel__meta">—</span>
-                )}
-              </td>
-              <td style={{ whiteSpace: "nowrap" }}>
-                {/*
-                  One way in, and the one action worth doing from a list.
-                  Everything else about a project — its queue, who can reach it,
-                  how to set it up — lives on its own page rather than as another
-                  button in a table cell.
-                */}
-                <a className="gp-btn gp-btn--sm" href={projectPath(p.github_name)}>
-                  Open
-                </a>{" "}
-                <button
-                  className={`gp-btn gp-btn--sm${p.enabled ? " gp-btn--quiet" : ""}`}
-                  disabled={busy === p.id}
-                  title={
-                    p.enabled
-                      ? "Stop verifying this repository. The check stops gating merges."
-                      : "Start verifying this repository. Uses one of your plan's project slots."
-                  }
-                  onClick={() => void act(p, p.enabled ? "disable" : "enable")}
-                >
-                  {p.enabled ? "Disable" : "Enable"}
-                </button>
-              </td>
-            </tr>
-          ))}
+                    {activationText(p.activation_state)}
+                  </StatusChip>
+                </td>
+                <td title={p.active_policy_digest ?? undefined}>
+                  {p.policy_version ? (
+                    <>
+                      v{p.policy_version} · {p.policy_profile ?? "fast"}
+                      <div className="gp-panel__meta">{configSourceText(p.config_source)}</div>
+                    </>
+                  ) : (
+                    <span className="gp-panel__meta">
+                      {p.activation_state === "awaiting_policy"
+                        ? `add organization defaults, or activate from canonical ${p.default_branch}`
+                        : "none activated"}
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <OutcomeText code={last.outcome} at={last.at} />
+                </td>
+                <td>
+                  {/*
+                    One way in, and the one action worth doing from a list.
+                    Everything else about a project — its queue, who can reach
+                    it, how to set it up — lives on its own page rather than as
+                    another button in a table cell.
+
+                    Enable gives something and is solid; Disable takes it away
+                    and is danger. The same two words carry the same two weights
+                    on the project's own page.
+                  */}
+                  <div className="thwip-row-actions">
+                    <a className="gp-btn gp-btn--sm gp-btn--quiet" href={projectPath(p.github_name)}>
+                      Open
+                    </a>
+                    <button
+                      className={`gp-btn gp-btn--sm${p.enabled ? " gp-btn--danger" : ""}`}
+                      disabled={busy === p.id}
+                      title={
+                        p.enabled
+                          ? "Stop verifying this repository. The check stops gating merges."
+                          : "Start verifying this repository. Uses one of your plan's project slots."
+                      }
+                      onClick={() => void act(p, p.enabled ? "disable" : "enable")}
+                    >
+                      {p.enabled ? "Disable" : "Enable"}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       </Panel>
@@ -858,13 +822,19 @@ function People({ me }: { me: Me }) {
                     <code>{m.github_login}</code>
                   </a>
                 </td>
-                <td>{m.github_org_role === "outside" ? <span className="gp-chip">outside collaborator</span> : (m.github_org_role ?? "member")}</td>
-                <td>{m.activated_at ? <span className="gp-chip is-active">active</span> : <span className="gp-chip">shadow</span>}</td>
+                <td>{m.github_org_role === "outside" ? <Chip>outside collaborator</Chip> : (m.github_org_role ?? "member")}</td>
+                <td>
+                  {m.activated_at ? (
+                    <StatusChip tone="ok">Signed in</StatusChip>
+                  ) : (
+                    <StatusChip tone="off">Never signed in</StatusChip>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-        <p className="gp-panel__meta" style={{ marginTop: "0.6rem" }}>
+        <p className="gp-panel__meta">
           There are no invitations. A member signs in with GitHub and gets exactly the access their GitHub role and
           repository permissions already grant. Outside collaborators invited to individual repositories on GitHub
           appear here too, marked as such, with the same per-repository standing.
@@ -938,7 +908,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
   if (!project) {
     return (
       <>
-        <p style={{ marginBottom: "0.8rem" }}>
+        <p className="thwip-back">
           <a href="/dashboard/projects">← Projects</a>
         </p>
         <p className="thwip-error">
@@ -951,18 +921,23 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
 
   return (
     <>
-      <p style={{ marginBottom: "0.6rem" }}>
+      <p className="thwip-back">
         <a href="/dashboard/projects">← Projects</a>
       </p>
-      <h2 style={{ margin: "0 0 0.2rem", fontSize: "1.15rem" }}>
+      <h2 className="thwip-page-title">
         <a href={`https://github.com/${project.github_name}`} target="_blank" rel="noreferrer">
           {project.github_name}
         </a>
       </h2>
-      <p className="gp-panel__meta" style={{ marginBottom: "0.9rem" }}>
-        {describeProject(project)}
-      </p>
-      <ul className="tab-nav" role="tablist" style={{ marginBottom: "1rem" }}>
+      {/*
+        Written as one string this line broke wherever the box ended, which put
+        the word "App" alone on a second line. Each fact is now its own
+        unbreakable run, so it can only break between facts.
+      */}
+      <div className="gp-panel__meta thwip-page-subtitle">
+        <Facts items={describeProject(project)} />
+      </div>
+      <ul className="tab-nav" role="tablist">
         {PROJECT_SECTIONS.map(([key, label]) => (
           <li key={key}>
             <NavLink
@@ -988,37 +963,35 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
   );
 }
 
-/** One line saying where this project stands, for the page header. */
-function describeProject(p: ProjectRow): string {
-  const parts: string[] = [];
+/** Where this project stands, one short fact at a time, for the page header. */
+function describeProject(p: ProjectRow): string[] {
+  const facts: string[] = [];
   // Enabled and disabled are the same fact, so it is stated once.
-  parts.push(
-    p.activation_state === "active"
-      ? `verifying · policy v${p.policy_version ?? "?"} · ${p.policy_profile ?? "unknown profile"}`
-      : p.activation_state === "awaiting_policy"
-        ? "enabled, waiting for a policy to activate"
-        : "not enabled",
-  );
-  parts.push(`default branch ${p.default_branch}`);
-  parts.push(`App check ${p.proof_check_mode}`);
-  return parts.join(" · ");
+  if (p.activation_state === "active") {
+    facts.push("verifying", `policy v${p.policy_version ?? "?"}`, p.policy_profile ?? "unknown profile");
+  } else if (p.activation_state === "awaiting_policy") {
+    facts.push("enabled, waiting for a policy");
+  } else {
+    facts.push("not enabled");
+  }
+  facts.push(`default branch ${p.default_branch}`);
+  facts.push(proofCheckModeText(p.proof_check_mode));
+  return facts;
 }
 
 function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const act = async (action: "enable" | "disable" | "enforce") => {
+  const lastVerification = useLastVerifications();
+  const last = lastVerification(project);
+  const setMode = async (mode: "observe" | "enforced") => {
     setBusy(true);
     setActionError(null);
     try {
-      if (action === "enforce") {
-        await api(`/v1/dashboard/projects/${project.id}/proof-mode`, {
-          method: "POST",
-          body: JSON.stringify({ mode: "enforced" }),
-        });
-      } else {
-        await api(`/v1/dashboard/projects/${project.id}/${action}`, { method: "POST", body: "{}" });
-      }
+      await api(`/v1/dashboard/projects/${project.id}/proof-mode`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      });
       reload();
     } catch (e) {
       setActionError((e as Error).message);
@@ -1026,6 +999,20 @@ function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () 
       setBusy(false);
     }
   };
+  const act = async (action: "enable" | "disable") => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api(`/v1/dashboard/projects/${project.id}/${action}`, { method: "POST", body: "{}" });
+      reload();
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enforced = project.proof_check_mode === "enforced";
 
   return (
     <>
@@ -1042,24 +1029,20 @@ function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () 
             </tr>
             <tr>
               <td>Where it came from</td>
-              <td>{describeConfigSource(project.config_source)}</td>
+              <td>{configSourceText(project.config_source)}</td>
             </tr>
             <tr>
               <td>Last verification</td>
               <td>
-                {project.last_outcome === null ? (
-                  <span className="gp-panel__meta">nothing verified yet</span>
-                ) : (
-                  <span className={project.last_outcome === "PASS" ? "ok" : "bad"}>{project.last_outcome}</span>
-                )}
+                <OutcomeText code={last.outcome} at={last.at} />
               </td>
             </tr>
             <tr>
               <td>App-owned check</td>
               <td>
-                {project.proof_check_mode === "enforced"
-                  ? "enforced"
-                  : "observing — it reports what it would have said, and blocks nothing"}
+                {enforced
+                  ? "Enforcing. A pull request cannot merge until the App verifies a proof on its head commit."
+                  : "Observing. It reports what it would have said, and blocks nothing."}
               </td>
             </tr>
           </tbody>
@@ -1068,38 +1051,73 @@ function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () 
 
       <Panel title="Actions" meta="enabling consumes plan quota; requires repository admin on GitHub">
         {actionError && <p className="thwip-error">{actionError}</p>}
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <div className="thwip-actions">
           {project.enabled === 1 ? (
-            <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("disable")}>
-              Disable
-            </button>
+            <ConfirmAction
+              label="Disable"
+              title="Stop verifying this repository?"
+              consequence={
+                <>
+                  <p>
+                    The thwip check stops reporting on <code>{project.github_name}</code>, and stops gating merges
+                    if it was enforcing. Its plan slot goes back to the pool.
+                  </p>
+                  <p>Enabling it again later is one click, and the policy history is kept either way.</p>
+                </>
+              }
+              confirmLabel="Stop verifying"
+              busy={busy}
+              onConfirm={() => void act("disable")}
+            />
           ) : (
             <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("enable")}>
               Enable
             </button>
           )}
-          {project.enabled === 1 && project.proof_check_mode === "observe" && (
-            <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void act("enforce")}>
-              Enforce App check
+          {/*
+            Enforcement was a plain solid button beside Disable, with no warning
+            and nothing said about what it does. It is the moment this project
+            starts blocking merges, so it asks first, in the same place, and says
+            what changes and how to walk it back.
+          */}
+          {project.enabled === 1 && !enforced && (
+            <ConfirmAction
+              label="Enforce App check"
+              title={`Let the App block merges on ${project.github_name}?`}
+              consequence={
+                <>
+                  <p>
+                    Right now the check observes: it says what it would have decided and lets everything through.
+                    Enforcing makes that decision binding. From the next event on, a pull request cannot merge until
+                    the thwip App verifies a proof on its head commit against policy v
+                    {project.policy_version ?? "?"}.
+                  </p>
+                  <p>
+                    Anything without a valid proof stays unmergeable, including work that is open right now. Only
+                    the App may publish this check, so no one can hand-wave it green.
+                  </p>
+                  <p>You can return to observing from this page at any time.</p>
+                </>
+              }
+              confirmLabel="Enforce it"
+              busy={busy}
+              onConfirm={() => void setMode("enforced")}
+            />
+          )}
+          {project.enabled === 1 && enforced && (
+            <button
+              className="gp-btn gp-btn--sm gp-btn--quiet"
+              disabled={busy}
+              title="The check keeps reporting, but stops blocking merges."
+              onClick={() => void setMode("observe")}
+            >
+              Return to observing
             </button>
           )}
         </div>
       </Panel>
     </>
   );
-}
-
-function describeConfigSource(source: ProjectRow["config_source"]): string {
-  switch (source) {
-    case "repository-override":
-      return "repository override over organization defaults";
-    case "repository":
-      return "committed thwip.yaml";
-    case "global":
-      return "organization defaults";
-    default:
-      return "add organization defaults or activate from the canonical default branch";
-  }
 }
 
 function ProjectSetup({ projectId }: { projectId: string }) {
@@ -1116,7 +1134,7 @@ function ProjectSetup({ projectId }: { projectId: string }) {
         title={`Set up ${p.github_name}`}
         meta="paste into your coding agent, in a checkout of this repository"
       >
-        <p style={{ marginBottom: "0.8rem" }}>
+        <p>
           The agent installs the CLI, signs you in, resolves organization defaults, proposes only the repository
           overrides this project needs, proves the App-owned check in observe mode, and guides a no-gap ruleset
           cutover before proposing which GitHub Actions jobs to retire. Re-running it is safe.
@@ -1127,7 +1145,7 @@ function ProjectSetup({ projectId }: { projectId: string }) {
         >
           {copied ? "Copied" : "Copy prompt"}
         </button>
-        <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.76rem", marginTop: "0.9rem" }}>{prompt}</pre>
+        <pre className="thwip-code-block">{prompt}</pre>
       </Panel>
     </>
   );
@@ -1170,15 +1188,15 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
                   </a>
                 </td>
                 <td>
-                  {g.github_org_role === "outside" ? (
-                    <span className="gp-chip">outside collaborator</span>
-                  ) : (
-                    (g.github_org_role ?? "member")
-                  )}
+                  {g.github_org_role === "outside" ? <Chip>outside collaborator</Chip> : (g.github_org_role ?? "member")}
                 </td>
                 <td>{g.permission}</td>
                 <td>
-                  {g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}
+                  {g.active ? (
+                    <StatusChip tone="ok">Current</StatusChip>
+                  ) : (
+                    <StatusChip tone="off">Removed on GitHub</StatusChip>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1278,18 +1296,22 @@ function Profile({ me }: { me: Me }) {
                   <tr key={k.fingerprint}>
                     <td>{k.title}</td>
                     <td>
-                      <code style={{ fontSize: "0.72rem" }}>{k.fingerprint}</code>
+                      <code className="gp-mono">{k.fingerprint}</code>
                     </td>
                     <td>
                       {cached?.revoked_at ? (
-                        <span className="gp-chip">denied here</span>
+                        <StatusChip tone="bad">Denied here</StatusChip>
                       ) : (
-                        <span className="gp-chip is-active">on GitHub</span>
+                        <StatusChip tone="ok">Live on GitHub</StatusChip>
                       )}
                     </td>
                     <td>
                       {cached && !cached.revoked_at && (
-                        <button className="gp-btn gp-btn--sm" onClick={() => void deny(cached.key_id)}>
+                        <button
+                          className="gp-btn gp-btn--sm gp-btn--danger"
+                          onClick={() => void deny(cached.key_id)}
+                          title="Stop accepting proofs signed by this key in this organization."
+                        >
                           Deny in this org
                         </button>
                       )}
@@ -1300,7 +1322,7 @@ function Profile({ me }: { me: Me }) {
             </tbody>
           </table>
         )}
-        <p className="gp-panel__meta" style={{ marginTop: "0.7rem" }}>
+        <p className="gp-panel__meta">
           Add or remove keys in{" "}
           <a href="https://github.com/settings/keys" target="_blank" rel="noreferrer">
             your GitHub settings
@@ -1310,7 +1332,7 @@ function Profile({ me }: { me: Me }) {
       </Panel>
 
       <Panel title="Add a device" meta="paste into the coding agent on that machine">
-        <p style={{ marginBottom: "0.7rem" }}>
+        <p>
           Setting up another machine means installing the CLI there, signing in, and registering that machine&apos;s
           key with GitHub as a <b>signing</b> key. The prompt below walks an agent through it and hands you the
           browser and terminal steps; your private key is never read. Existing devices keep working.
@@ -1322,13 +1344,11 @@ function Profile({ me }: { me: Me }) {
           >
             {copied ? "Copied" : "Copy prompt"}
           </button>
-          <button className="gp-btn gp-btn--sm" onClick={() => setShowPrompt((v) => !v)}>
+          <button className="gp-btn gp-btn--sm gp-btn--quiet" onClick={() => setShowPrompt((v) => !v)}>
             {showPrompt ? "Hide" : "Show"} prompt
           </button>
         </div>
-        {showPrompt && (
-          <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.76rem", marginTop: "0.8rem" }}>{prompt}</pre>
-        )}
+        {showPrompt && <pre className="thwip-code-block">{prompt}</pre>}
       </Panel>
 
       {data.seen.some((k) => k.source !== "github") && (
@@ -1341,9 +1361,11 @@ function Profile({ me }: { me: Me }) {
                   <tr key={k.key_id}>
                     <td>{k.device_label}</td>
                     <td>
-                      <code style={{ fontSize: "0.72rem" }}>{k.fingerprint}</code>
+                      <code className="gp-mono">{k.fingerprint}</code>
                     </td>
-                    <td className="gp-panel__meta">cannot sign</td>
+                    <td>
+                      <StatusChip tone="off">Cannot sign</StatusChip>
+                    </td>
                   </tr>
                 ))}
             </tbody>
@@ -1362,7 +1384,13 @@ function Profile({ me }: { me: Me }) {
                   </a>
                 </td>
                 <td>{g.permission}</td>
-                <td>{g.active ? <span className="gp-chip is-active">current</span> : <span className="gp-chip">removed</span>}</td>
+                <td>
+                  {g.active ? (
+                    <StatusChip tone="ok">Current</StatusChip>
+                  ) : (
+                    <StatusChip tone="off">Removed on GitHub</StatusChip>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1407,9 +1435,9 @@ function Policies() {
                 <code>{p.digest.slice(7, 23)}…</code>
               </td>
               <td>
-                <span className={`gp-chip ${p.status === "active" ? "is-active" : ""}`}>{p.status}</span>
+                <StatusChip tone={p.status === "active" ? "ok" : "off"}>{policyStatusText(p.status)}</StatusChip>
               </td>
-              <td className="gp-panel__meta">{p.activated_at?.slice(0, 10) ?? "—"}</td>
+              <td className="gp-panel__meta">{p.activated_at?.slice(0, 10) ?? "not activated"}</td>
             </tr>
           ))}
         </tbody>
@@ -1509,7 +1537,7 @@ function Billing() {
             <button className="gp-btn" disabled={working} onClick={() => void upgrade(false)}>
               Upgrade to Pro, $5/month
             </button>
-            <button className="gp-btn" disabled={working} onClick={() => void upgrade(true)}>
+            <button className="gp-btn gp-btn--quiet" disabled={working} onClick={() => void upgrade(true)}>
               Annual, $50/year
             </button>
           </div>
@@ -1558,7 +1586,7 @@ function Operations({ me }: { me: Me }) {
           <p className="gp-panel__meta">Org owners can trigger a full sync.</p>
         )}
         {note && (
-          <p className="gp-panel__meta" style={{ marginTop: "0.5rem" }}>
+          <p className="gp-panel__meta">
             <code>{note}</code>
           </p>
         )}
@@ -1576,9 +1604,9 @@ function Operations({ me }: { me: Me }) {
                   <code>{o.head_sha.slice(0, 12)}</code>
                 </td>
                 <td>
-                  <span className={o.outcome === "PASS" ? "ok" : "bad"}>{o.outcome}</span>
+                  <OutcomeText code={o.outcome} />
                 </td>
-                <td className="gp-panel__meta">{o.observed_at.slice(0, 19)}Z</td>
+                <td className="gp-panel__meta">{whenText(o.observed_at)}</td>
               </tr>
             ))}
           </tbody>
@@ -1682,13 +1710,11 @@ function QueueTab() {
   const enabled = data.projects.filter((p) => p.enabled === 1);
   if (enabled.length === 0) {
     return (
-      <div className="gp-panel">
-        <div className="gp-panel__body">
-          <p className="gp-panel__meta">
-            No project is enabled yet. Enable one under Projects, then run <code>thwip ship --wait</code>.
-          </p>
-        </div>
-      </div>
+      <Panel title="Queue">
+        <p className="gp-panel__meta">
+          No project is enabled yet. Enable one under Projects, then run <code>thwip ship --wait</code>.
+        </p>
+      </Panel>
     );
   }
 
@@ -1729,9 +1755,7 @@ export function App() {
             </a>
           </nav>
           <main className="gp-workspace__content">
-            <p className="gp-panel__meta" style={{ padding: "3rem 0" }}>
-              Loading your organization…
-            </p>
+            <p className="gp-panel__meta thwip-loading">Loading your organization…</p>
           </main>
         </div>
       );

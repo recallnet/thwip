@@ -1,4 +1,15 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { api, useFetch } from "./api.js";
+import { Panel } from "./ui.js";
+import {
+  blockedNextAction,
+  entryStateText,
+  entryStateTone,
+  ownerGithubUrl,
+  ownerName,
+  transitionKindText,
+  whenText,
+} from "./vocabulary.js";
 
 /**
  * The queue surfaces (plan.md §28.2, §28.3).
@@ -12,7 +23,8 @@ import React, { useCallback, useEffect, useState } from "react";
  *
  * Every blocked entry shows the action that clears it, not just its reason code.
  * A queue that says `CODEOWNER_REVIEW_REQUIRED` and stops has told a developer
- * nothing they can use.
+ * nothing they can use. Every word this view puts on screen comes from
+ * ./vocabulary.ts, which is the one place a code becomes a sentence.
  */
 
 export interface QueueEntryView {
@@ -52,88 +64,28 @@ export interface QueueSnapshot {
   readonly entries: readonly QueueEntryView[];
 }
 
+/** The state of an entry, said in words and toned by how worried to be. */
+function EntryState({ entry }: { entry: QueueEntryView }) {
+  const tone = entryStateTone(entry.state, entry.primaryReason !== null);
+  return <span className={tone}>{entryStateText(entry.state)}</span>;
+}
+
 /**
- * What a transition means, in the words a reader needs.
+ * The person whose pull request this is.
  *
- * The queue's own vocabulary leaked into the dashboard: a merge history read
- * "Transition 13 · sha256:003fbf43ede765da… · base 003fbf43ede7", which says
- * nothing about which pull request landed or when.
+ * The column showed `prn_gh_370259`, which is the row id of a principal. The
+ * organization projection already knows the login behind that id, so it is
+ * asked, and the id is never what a reader gets.
  */
-const TRANSITION_KIND: Record<string, string> = {
-  verified: "Merged by the queue",
-  // A merge accepted on the proof already carried by the head, where the policy
-  // asked for nothing more. Named apart from a verified merge because the two
-  // make different claims about what was checked.
-  reused: "Merged on the head's own proof",
-  override: "Merged with an override",
-  external: "Moved outside the queue",
-  genesis: "Queue opened here",
-};
-
-function whenText(iso: string | null): string {
-  if (iso === null) return "time not recorded";
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return "time not recorded";
-  const minutes = Math.floor((Date.now() - at) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return new Date(at).toLocaleDateString();
-}
-
-/**
- * The same guidance the check publishes, so a developer reading the dashboard and
- * a developer reading a red check are told the same thing.
- */
-const NEXT_ACTION: Record<string, string> = {
-  REVIEW_REQUIRED: "Ask for a review. The queue holds this place while it waits.",
-  CODEOWNER_REVIEW_REQUIRED: "A code owner for the changed files still needs to approve.",
-  APPROVAL_AFTER_PUSH_REQUIRED: "Pushed after the last approval, so it needs approving again.",
-  CONVERSATION_UNRESOLVED: "Resolve the open review conversations.",
-  REQUIRED_CHECK_PENDING: "A required check is still running.",
-  REQUIRED_CHECK_FAILED: "A required check failed. Fix and push; the place is kept.",
-  VERIFICATION_REJECTED: "The verifier refused the candidate. thwip verify explains why; the place is kept.",
-  MERGE_CONFLICT: "Rebase or merge the base branch to clear the conflict.",
-  LOCAL_RECEIPT_MISSING: "Run thwip run on this commit and push.",
-  LOCAL_RECEIPT_REJECTED: "The proof was not accepted. thwip verify explains why.",
-  AGENT_OFFLINE: "No machine is connected to run the integration.",
-  NO_COMPATIBLE_RUNNER: "No connected machine can run this project's pipeline.",
-  PR_DRAFT: "Mark the pull request ready for review.",
-  PR_CLOSED: "The pull request is closed.",
-  OWNER_UNAUTHORIZED: "The owner no longer has the required repository permission.",
-  SPONSOR_REQUIRED: "A bot pull request needs a human sponsor.",
-  COOLDOWN_ACTIVE: "A turn was offered and not claimed; short cooldown before the next.",
-  NEEDS_REPAIR: "Integration failed. Push a fix; the place in line is kept.",
-  POLICY_CHANGED: "The policy changed; the queue will re-evaluate against the new one.",
-  RULESET_DRIFT: "The repository ruleset no longer matches what the queue expects.",
-  APP_PERMISSION_DRIFT: "The Thwip App is missing a permission it needs.",
-  PROJECT_DISABLED: "This project is not enabled for the queue.",
-  QUEUE_PAUSED: "The queue is paused.",
-  BASE_NOT_MANAGED: "This pull request targets a branch the queue does not manage.",
-};
-
-function nextAction(reason: string | null): string | null {
-  if (reason === null) return null;
-  return NEXT_ACTION[reason] ?? reason;
-}
-
-const IN_FLIGHT = ["Offered", "Active", "ReconnectGrace", "Verifying", "MergeGuard", "Merging", "Reconciling"];
-
-function stateTone(entry: QueueEntryView): string {
-  if (entry.state === "Merged") return "ok";
-  if (IN_FLIGHT.includes(entry.state)) return "";
-  if (entry.state === "Cancelled") return "bad";
-  return entry.primaryReason === null ? "" : "bad";
-}
-
-async function api<T>(path: string): Promise<T> {
-  const res = await fetch(path, { credentials: "include" });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? String(res.status));
-  }
-  return (await res.json()) as T;
+function Owner({ principalId, logins }: { principalId: string; logins: ReadonlyMap<string, string> }) {
+  const name = ownerName(principalId, logins);
+  const url = ownerGithubUrl(principalId, logins);
+  if (url === null) return <span>{name}</span>;
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      {name}
+    </a>
+  );
 }
 
 export function QueuePanel({
@@ -147,6 +99,12 @@ export function QueuePanel({
 }) {
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Who each principal id stands for. The queue snapshot carries ids; the
+  // organization projection carries the names that go with them.
+  const people = useFetch<{ members: Array<{ github_user_id: string; github_login: string }> }>(
+    "/v1/dashboard/people",
+  );
+  const logins = new Map((people.data?.members ?? []).map((m) => [m.github_user_id, m.github_login]));
 
   const load = useCallback(() => {
     api<QueueSnapshot>(`/v1/queue/${repositoryId}?ref=${encodeURIComponent(baseRef)}`)
@@ -189,28 +147,21 @@ export function QueuePanel({
 
   if (error !== null) {
     return (
-      <div className="gp-panel">
-        <div className="gp-panel__header">
-          <h3 className="gp-panel__title">Queue</h3>
-        </div>
-        <div className="gp-panel__body">
-          <p className="thwip-error">{error}</p>
-          <p className="gp-panel__meta">
-            A queue exists per repository and base branch. If this branch has never been configured, there is
-            nothing to show yet.
-          </p>
-        </div>
-      </div>
+      <Panel title="Queue">
+        <p className="thwip-error">{error}</p>
+        <p className="gp-panel__meta">
+          A queue exists per repository and base branch. If this branch has never been configured, there is
+          nothing to show yet.
+        </p>
+      </Panel>
     );
   }
 
   if (snapshot === null) {
     return (
-      <div className="gp-panel">
-        <div className="gp-panel__body">
-          <p className="gp-panel__meta">Loading queue…</p>
-        </div>
-      </div>
+      <Panel title="Queue">
+        <p className="gp-panel__meta">Loading queue…</p>
+      </Panel>
     );
   }
 
@@ -228,19 +179,16 @@ export function QueuePanel({
   );
 
   return (
-    <div className="gp-panel">
-      <div className="gp-panel__header">
-        <h3 className="gp-panel__title">
-          Queue · {repositoryName} · {baseRef.replace(/^refs\/heads\//, "")}
-        </h3>
-        <span className="gp-panel__meta">
-          {snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
-        </span>
-      </div>
-      <div className="gp-panel__body">
+    <Panel
+      title={`Queue · ${repositoryName} · ${baseRef.replace(/^refs\/heads\//, "")}`}
+      meta={snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
+    >
+      <>
         {snapshot.paused && (
           <p className="thwip-error">
-            Paused{snapshot.pauseReason === null ? "" : `: ${snapshot.pauseReason}`}.
+            {snapshot.pauseReason === null
+              ? "Merging is paused."
+              : `Merging is paused: ${blockedNextAction(snapshot.pauseReason)}`}
             {snapshot.rebaselineRequired
               ? " The branch moved outside the queue, so an administrator has to rebaseline before merging resumes."
               : " An administrator can resume it."}
@@ -280,8 +228,12 @@ export function QueuePanel({
                         #{entry.pullRequestNumber}
                       </a>
                     </td>
-                    <td className="gp-mono">{entry.sponsorPrincipalId}</td>
-                    <td className={stateTone(entry)}>{entry.state}</td>
+                    <td>
+                      <Owner principalId={entry.sponsorPrincipalId} logins={logins} />
+                    </td>
+                    <td>
+                      <EntryState entry={entry} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -315,9 +267,13 @@ export function QueuePanel({
                         #{entry.pullRequestNumber}
                       </a>
                     </td>
-                    <td className="gp-mono">{entry.sponsorPrincipalId}</td>
-                    <td className={stateTone(entry)}>{entry.state}</td>
-                    <td>{nextAction(entry.primaryReason) ?? "Waiting for the scheduler."}</td>
+                    <td>
+                      <Owner principalId={entry.sponsorPrincipalId} logins={logins} />
+                    </td>
+                    <td>
+                      <EntryState entry={entry} />
+                    </td>
+                    <td>{blockedNextAction(entry.primaryReason) ?? "Waiting for the scheduler."}</td>
                   </tr>
                 ))}
               </tbody>
@@ -349,7 +305,7 @@ export function QueuePanel({
                       <td className="gp-mono">{t.transitionSequence}</td>
                       <td>
                         {pr === undefined ? (
-                          <span className="gp-panel__meta">—</span>
+                          <span className="gp-panel__meta">no pull request</span>
                         ) : (
                           <a
                             href={`https://github.com/${repositoryName}/pull/${pr}`}
@@ -360,8 +316,14 @@ export function QueuePanel({
                           </a>
                         )}
                       </td>
-                      <td className={t.kind === "verified" ? "gp-pass" : undefined}>
-                        {TRANSITION_KIND[t.kind] ?? t.kind}
+                      {/*
+                        This column is prose, so a verified merge is coloured
+                        and nothing else. Reaching for the `ok` utility here
+                        also retyped the sentence as 11.5px mono, which made one
+                        row of the column a different size from its neighbours.
+                      */}
+                      <td className={t.kind === "verified" ? "is-verified" : undefined}>
+                        {transitionKindText(t.kind)}
                       </td>
                       <td>
                         <a
@@ -397,11 +359,7 @@ export function QueuePanel({
             </table>
           </>
         )}
-      </div>
-    </div>
+      </>
+    </Panel>
   );
 }
-
-/** Exported for tests: the guidance table must cover what the queue can report. */
-export const QUEUE_NEXT_ACTIONS = NEXT_ACTION;
-export { nextAction as queueNextAction };
