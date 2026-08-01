@@ -1900,12 +1900,19 @@ async function main() {
       }
     );
     renderRichSummary(result, commit, facts);
+    if (result.code === "VERIFICATION_PENDING") {
+      console.log(
+        `[thwip] ${commit.sha.slice(0, 12)}: waiting for evidence. ${result.detail ?? ""} Nothing failed. Re-run this job once the checks it names have finished.`
+      );
+    }
     if (result.code !== "PASS") allPass = false;
     if (result.code === "PASS" && result.statement) {
       await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
       });
     }
-    await recordObservation(repositoryId, commit.sha, result.code);
+    if (result.code !== "VERIFICATION_PENDING") {
+      await recordObservation(repositoryId, commit.sha, result.code);
+    }
   }
   process.exit(allPass ? 0 : 1);
 }
