@@ -1,5 +1,5 @@
 import { envelopeDigest } from "./canonical.js";
-import { parseTransitionRecord } from "./transition-record.js";
+import { parseTransitionRecord, type TransitionRecordV1 } from "./transition-record.js";
 
 /**
  * Walking a branch's chain and saying whether it holds.
@@ -52,6 +52,8 @@ export interface ChainFinding {
     | "PRE_ATTESTATION"
     | "MISSING_RECORD"
     | "MISSING_PREFIX"
+    | "CORRECTION_UNANCHORED"
+    | "CORRECTION_OVERREACHES"
     | "WRONG_SUBJECT";
   readonly sequence: number | null;
   readonly digest: string;
@@ -107,6 +109,35 @@ export interface ChainVerifierPorts {
 export interface ChainVerification {
   readonly findings: readonly ChainFinding[];
   readonly signaturesChecked: number;
+  /**
+   * Every correction the walk followed, so a reader is told rather than left to
+   * notice.
+   *
+   * Not a finding, and that is a decision. A finding is a defect: something the
+   * chain cannot account for. A correction that stands is the chain accounting
+   * for a defect, out loud, in signed bytes that name the record, the sha it got
+   * wrong, the sha it should have said, who asked and when. Filing it as a
+   * problem would mean a chain can never be made whole, which is an argument for
+   * quietly rewriting instead. So the count of problems goes to zero and this
+   * list is what refuses to let the mistake disappear: the corrected record is
+   * still served, still signed, still says what it said.
+   */
+  readonly corrections: readonly ChainCorrection[];
+}
+
+/** One record correcting another, as the walk read it. */
+export interface ChainCorrection {
+  readonly sequence: number;
+  readonly digest: string;
+  readonly correctsSequence: number;
+  readonly correctsDigest: string;
+  /** The sha the corrected record named. */
+  readonly from: string;
+  /** The sha the branch actually took, as the correction states it. */
+  readonly to: string;
+  readonly observedAt: string;
+  readonly actorPrincipalId: string;
+  readonly reason: string;
 }
 
 export async function verifyChain(
@@ -118,6 +149,7 @@ export async function verifyChain(
   let previous: { digest: string; sequence: number | null; afterBaseSha: string | null } | null = null;
   let first = true;
   const edges: Edge[] = [];
+  const records = new Map<string, TransitionRecordV1>();
   let unreadable = 0;
 
   for (const link of links) {
@@ -154,6 +186,7 @@ export async function verifyChain(
     if (first) findings.push(...anchor(parsed.sequence, link.digest, ports));
     first = false;
     if (!parsed.readable) unreadable++;
+    if (parsed.record !== null) records.set(link.digest, parsed.record);
     if (parsed.readable && parsed.afterBaseSha !== null) {
       edges.push({
         sequence: parsed.sequence,
@@ -189,10 +222,160 @@ export async function verifyChain(
     previous = { digest: link.digest, sequence: parsed.sequence, afterBaseSha: parsed.afterBaseSha };
   }
 
-  const path = walk(edges, unreadable);
+  const corrected = substitute(records, edges);
+  findings.push(...corrected.findings);
+  const path = walk(corrected.edges, unreadable);
   findings.push(...path.findings);
   findings.push(...reachesHead(path.endsAt, unreadable, ports));
-  return { findings, signaturesChecked };
+  return { findings, signaturesChecked, corrections: corrected.corrections };
+}
+
+/**
+ * Replacing a record's edge with the one that corrects it.
+ *
+ * A correction is appended, never applied. The bytes of the record it names do
+ * not change, so the only place the substitution can happen is here: the
+ * corrected record's edge is dropped from the set of moves and the correction's
+ * edge stands in its place. Adding the correction's edge alongside would assert
+ * a second departure from the same base, which is a worse lie than the one it
+ * closes.
+ *
+ * What the verifier can enforce without asking anything of the network is the
+ * whole difference between a correction and a rewrite. A correction restates the
+ * cited record's `before`, its tree, its parent vector and its attempt exactly,
+ * and changes one field. Anything else and the substitution is refused and the
+ * chain reports whatever break it actually has. So the most a signing key can do
+ * through this mechanism is rename one commit to another commit that has the
+ * same tree, the same parents and the same starting point, and even then only
+ * where the route would first ask GitHub which of the two the branch contains.
+ *
+ * Two corrections of one record are two answers to one question, so neither is
+ * followed. A correction naming a record nobody served is unanchored: there is
+ * nothing to check it against, and taking its word would let a chain assert a
+ * base move on the strength of a record the reader never saw.
+ */
+function substitute(
+  records: ReadonlyMap<string, TransitionRecordV1>,
+  edges: readonly Edge[],
+): { edges: Edge[]; corrections: ChainCorrection[]; findings: ChainFinding[] } {
+  const claims = new Map<string, Array<{ digest: string; record: TransitionRecordV1 }>>();
+  for (const [digest, record] of records) {
+    if (record.kind !== "base-correction") continue;
+    const target = record.correction.correctsTransitionDigest;
+    claims.set(target, [...(claims.get(target) ?? []), { digest, record }]);
+  }
+  if (claims.size === 0) return { edges: [...edges], corrections: [], findings: [] };
+
+  const findings: ChainFinding[] = [];
+  const corrections: ChainCorrection[] = [];
+  const dropped = new Set<string>();
+
+  for (const [targetDigest, group] of claims) {
+    const refuse = (digest: string, sequence: number, detail: string): void => {
+      findings.push({ code: "CORRECTION_OVERREACHES", sequence, digest, detail });
+      dropped.add(digest);
+    };
+
+    if (group.length > 1) {
+      for (const c of group) {
+        refuse(
+          c.digest,
+          c.record.transitionSequence,
+          `records ${group.map((g) => g.record.transitionSequence).join(" and ")} both correct ${targetDigest}; ` +
+            `two answers to one question, so neither is followed`,
+        );
+      }
+      continue;
+    }
+
+    const { digest, record } = group[0] as { digest: string; record: TransitionRecordV1 };
+    if (record.kind !== "base-correction") continue;
+    const facts = record.correction;
+    const target = records.get(targetDigest);
+    if (target === undefined) {
+      findings.push({
+        code: "CORRECTION_UNANCHORED",
+        sequence: record.transitionSequence,
+        digest,
+        detail: `corrects ${targetDigest}, which is not a record this chain served; there is nothing to check it against`,
+      });
+      dropped.add(digest);
+      continue;
+    }
+
+    const complaint = overreach(record, facts, target);
+    if (complaint !== null) {
+      refuse(digest, record.transitionSequence, complaint);
+      continue;
+    }
+
+    dropped.add(targetDigest);
+    corrections.push({
+      sequence: record.transitionSequence,
+      digest,
+      correctsSequence: target.transitionSequence,
+      correctsDigest: targetDigest,
+      from: facts.correctedBaseSha,
+      to: record.after.baseSha,
+      observedAt: record.observedAt,
+      actorPrincipalId: facts.actorPrincipalId,
+      reason: facts.reason,
+    });
+  }
+
+  return { edges: edges.filter((e) => !dropped.has(e.digest)), corrections, findings };
+}
+
+/** Everything a correction is not allowed to change, said as the sentence it fails. */
+function overreach(
+  correction: TransitionRecordV1,
+  facts: { correctedBaseSha: string; attemptId: string; correctsTransitionSequence: number },
+  target: TransitionRecordV1,
+): string | null {
+  if (target.transitionSequence !== facts.correctsTransitionSequence) {
+    return `cites record ${facts.correctsTransitionSequence}, but that digest is record ${target.transitionSequence}`;
+  }
+  if (target.repositoryId !== correction.repositoryId || target.baseRef !== correction.baseRef) {
+    return "corrects a record from another repository or branch";
+  }
+  if (target.after.baseSha !== facts.correctedBaseSha) {
+    return `says record ${target.transitionSequence} names ${facts.correctedBaseSha}, and it names ${target.after.baseSha}`;
+  }
+  if (target.before.baseSha !== correction.before.baseSha || target.before.treeOid !== correction.before.treeOid) {
+    return "moves where the record it corrects began; a correction may only change the sha the base became";
+  }
+  if (
+    target.after.treeOid !== correction.after.treeOid ||
+    target.after.parentCount !== correction.after.parentCount ||
+    target.after.parentOidsDigest !== correction.after.parentOidsDigest ||
+    target.after.parentOids.length !== correction.after.parentOids.length ||
+    target.after.parentOids.some((oid, i) => oid !== correction.after.parentOids[i])
+  ) {
+    return "changes the tree or the parents the record certified; that is a different commit, not another name for one";
+  }
+  const attempt = attemptOf(target);
+  if (attempt !== null && attempt !== facts.attemptId) {
+    return `names attempt ${facts.attemptId}, and the record it corrects was merged by ${attempt}`;
+  }
+  return null;
+}
+
+/** The attempt a record cites, where its kind cites one. */
+function attemptOf(record: TransitionRecordV1): string | null {
+  switch (record.kind) {
+    case "verified-merge":
+      return record.verifiedMerge.attemptId;
+    case "reused-proof-merge":
+      return record.reusedProof.attemptId;
+    case "candidate-verified-merge":
+      return record.candidateVerified.attemptId;
+    case "override-merge":
+      return record.override.attemptId;
+    case "base-correction":
+      return record.correction.attemptId;
+    default:
+      return null;
+  }
 }
 
 /**
@@ -400,6 +583,7 @@ async function inspect(
   beforeBaseSha: string | null;
   afterBaseSha: string | null;
   signatureChecked: boolean;
+  record: TransitionRecordV1 | null;
   findings: ChainFinding[];
 }> {
   const findings: ChainFinding[] = [];
@@ -425,6 +609,7 @@ async function inspect(
       beforeBaseSha: null,
       afterBaseSha: null,
       signatureChecked: false,
+      record: null,
       findings,
     };
   }
@@ -439,6 +624,7 @@ async function inspect(
       beforeBaseSha: null,
       afterBaseSha: null,
       signatureChecked: false,
+      record: null,
       findings,
     };
   }
@@ -476,6 +662,7 @@ async function inspect(
     beforeBaseSha: record.value.before.baseSha,
     afterBaseSha: record.value.after.baseSha,
     signatureChecked,
+    record: record.value,
     findings,
   };
 }

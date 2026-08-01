@@ -149,7 +149,13 @@ export type ReconcilingResolution = (typeof RECONCILING_RESOLUTIONS)[number];
  * against the integrated candidate, and under that profile nothing did. A reader
  * auditing the chain has no other way to tell the two apart.
  */
-export const TRANSITION_KINDS = ["genesis", "verified", "reused", "override", "external"] as const;
+/**
+ * `correction` is a record that names an earlier record and states the sha that
+ * record should have named. It moves nothing on the branch: it is appended
+ * because the chain is hash-linked and the record it corrects cannot be edited
+ * without re-signing every record after it.
+ */
+export const TRANSITION_KINDS = ["genesis", "verified", "reused", "override", "external", "correction"] as const;
 
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
 

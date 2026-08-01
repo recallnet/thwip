@@ -1,5 +1,5 @@
 import { createLocalJWKSet, compactVerify, type JSONWebKeySet } from "jose";
-import { verifyChain, type ChainFinding, type ChainLink } from "@thwip/queue-protocol";
+import { verifyChain, type ChainCorrection, type ChainFinding, type ChainLink } from "@thwip/queue-protocol";
 import { flag } from "./cli-flags.js";
 import { EXIT } from "./queue-exit.js";
 
@@ -29,7 +29,12 @@ import { EXIT } from "./queue-exit.js";
  * An earlier attempt at this changed only the wording and left both the
  * arithmetic and the exit code alone.
  */
-export function summarize(totalLinks: number, signaturesChecked: number, findings: readonly ChainFinding[]): string {
+export function summarize(
+  totalLinks: number,
+  signaturesChecked: number,
+  findings: readonly ChainFinding[],
+  corrections: readonly ChainCorrection[] = [],
+): string {
   const history = findings.filter((f) => f.code === "PRE_ATTESTATION");
   const unreadable = findings.filter((f) => f.code === "UNPARSEABLE" || f.code === "MISSING_RECORD").length;
   const expectedChecks = totalLinks - history.length - unreadable;
@@ -55,6 +60,18 @@ export function summarize(totalLinks: number, signaturesChecked: number, finding
   }
   if (history.length > 0) {
     lines.push(`${history.length} link${history.length === 1 ? "" : "s"} predates signed records.`);
+  }
+  // Printed on a clean run as well as a dirty one. A chain that verifies
+  // because a record was corrected is not the same as a chain that never got
+  // anything wrong, and a reader who is not told cannot tell them apart.
+  if (corrections.length > 0) {
+    lines.push(`${corrections.length} record${corrections.length === 1 ? " was" : "s were"} corrected.`);
+    for (const k of corrections) {
+      lines.push(
+        `  link ${k.sequence} corrects link ${k.correctsSequence}: the base became ${k.to}, not ${k.from} ` +
+          `(${k.actorPrincipalId}, ${k.observedAt}): ${k.reason}`,
+      );
+    }
   }
   for (const p of problems) {
     const where = p.sequence === null ? p.digest.slice(0, 16) : `link ${p.sequence}`;
@@ -145,7 +162,12 @@ export async function verifyPublishedChain(
   subject?: { readonly repositoryId: string; readonly baseRef: string },
   epochStartsAt?: number,
   head?: { readonly baseSha: string },
-): Promise<{ totalLinks: number; signaturesChecked: number; findings: readonly ChainFinding[] }> {
+): Promise<{
+  totalLinks: number;
+  signaturesChecked: number;
+  findings: readonly ChainFinding[];
+  corrections: readonly ChainCorrection[];
+}> {
   const keys = createLocalJWKSet(jwks);
   const encoder = new TextEncoder();
   const links: ChainLink[] = chain.links.map((l) => ({
@@ -157,7 +179,7 @@ export async function verifyPublishedChain(
     sequence: l.sequence,
   }));
 
-  const { findings, signaturesChecked } = await verifyChain(links, {
+  const { findings, signaturesChecked, corrections } = await verifyChain(links, {
     // Pinned when the caller says so; otherwise whatever the server claims.
     // The server's claim is not trusted to be safe to use unpinned — a
     // caller that cares pins it — but an unpinned run still has to use
@@ -175,7 +197,7 @@ export async function verifyPublishedChain(
       }
     },
   });
-  return { totalLinks: links.length, signaturesChecked, findings };
+  return { totalLinks: links.length, signaturesChecked, findings, corrections };
 }
 
 /**
@@ -319,14 +341,14 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
       : `head: ${head} (from github)\n`,
   );
 
-  const { totalLinks, signaturesChecked, findings } = await verifyPublishedChain(
+  const { totalLinks, signaturesChecked, findings, corrections } = await verifyPublishedChain(
     chain,
     jwks,
     { repositoryId, baseRef },
     epochStartsAt,
     head === null ? undefined : { baseSha: head },
   );
-  process.stdout.write(summarize(totalLinks, signaturesChecked, findings) + "\n");
+  process.stdout.write(summarize(totalLinks, signaturesChecked, findings, corrections) + "\n");
   if (findings.some((f) => f.code !== "PRE_ATTESTATION")) return EXIT.evidenceRejected;
   // Nothing checked is not a pass. A gate scripted on this exit status is the
   // whole point of the command, and it used to succeed on a run that verified
