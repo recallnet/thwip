@@ -82,6 +82,12 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
+    // A refusal the queue can confirm: GitHub says not merged and the base does
+    // not contain the head. Every test that reports a refusal means this one,
+    // and the tests that mean a stale read say so themselves.
+    pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
+    baseContainsSha: async () => false,
+    sleep: async () => {},
     ...over,
   });
 }
@@ -481,6 +487,112 @@ describe("ejecting an entry", () => {
     // The lane moved, so something has to tell the new holder. Nothing did, and
     // the offer expired unclaimed.
     expect(driven).toContain(60);
+  });
+});
+
+describe("GitHub's read is behind GitHub's own write", () => {
+  /**
+   * Pull request 105 merged at 16:41:38 on 2026-08-01. The merge run read the
+   * pull request 1.5 seconds later, was told it was not merged, and reported a
+   * refusal. The queue believed it: the operation resolved CONFIRMED_NOT_MERGED,
+   * no transition record was written, and the entry went Deferred while the
+   * merge commit sat on main. Three pull requests were lost from the chain this
+   * way before anybody noticed, because a chain that stops early is the one
+   * break verifyChain cannot see.
+   */
+  async function heldTurn(app: App, e: QueueRouteEnv) {
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.operationId).not.toBeNull();
+    return { operationId: holder.operationId!, attemptId: holder.operationId!.replace("merge_", "") };
+  }
+
+  function report(app: App, e: QueueRouteEnv, held: { operationId: string; attemptId: string }) {
+    return app.request(
+      `/v1/queue/${REPO}/not-merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: held.attemptId,
+          operationId: held.operationId,
+          detail: "405 Merge already in progress",
+        }),
+      },
+      e,
+    );
+  }
+
+  async function outcomeOf(e: QueueRouteEnv, operationId: string) {
+    const { result } = await runOnQueue(e, REPO, REF, ({ store }) => store.mergeOperation(operationId));
+    return result?.outcome ?? null;
+  }
+
+  it("refuses to record a merge as not-merged when the next read says it merged", async () => {
+    const e = env();
+    let reads = 0;
+    const app = routes({
+      pullRequestMergeState: async () => {
+        reads += 1;
+        return reads === 1
+          ? { merged: false, mergeCommitSha: null }
+          : { merged: true, mergeCommitSha: "a".repeat(40) };
+      },
+    });
+    const held = await heldTurn(app, e);
+
+    const response = await report(app, e, held);
+    expect(response.status).toBe(200);
+
+    // The merge happened. Nothing durable may say otherwise.
+    expect(await outcomeOf(e, held.operationId)).not.toBe("CONFIRMED_NOT_MERGED");
+    const snapshot = await liveState(app, e);
+    expect(stateOf(snapshot, 59)).not.toBe("Deferred");
+    expect(stateOf(snapshot, 59)).toBe("Reconciling");
+  });
+
+  it("believes git over the pull request when the base already contains the head", async () => {
+    const e = env();
+    const app = routes({
+      pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
+      baseContainsSha: async () => true,
+    });
+    const held = await heldTurn(app, e);
+
+    await report(app, e, held);
+
+    expect(await outcomeOf(e, held.operationId)).not.toBe("CONFIRMED_NOT_MERGED");
+    expect(stateOf(await liveState(app, e), 59)).toBe("Reconciling");
+  });
+
+  it("does not conclude anything from a read that failed", async () => {
+    const e = env();
+    const app = routes({ pullRequestMergeState: async () => null, baseContainsSha: async () => null });
+    const held = await heldTurn(app, e);
+
+    await report(app, e, held);
+
+    expect(await outcomeOf(e, held.operationId)).not.toBe("CONFIRMED_NOT_MERGED");
+    expect(stateOf(await liveState(app, e), 59)).toBe("Reconciling");
+  });
+
+  it("still confirms a refusal every read agrees on", async () => {
+    const e = env();
+    const app = routes();
+    const held = await heldTurn(app, e);
+
+    await report(app, e, held);
+
+    expect(await outcomeOf(e, held.operationId)).toBe("CONFIRMED_NOT_MERGED");
+    expect(stateOf(await liveState(app, e), 59)).toBe("Deferred");
   });
 });
 

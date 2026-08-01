@@ -1805,6 +1805,71 @@ app.route(
       return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
     },
     /**
+     * What GitHub says the pull request is now.
+     *
+     * Read by the queue itself before it will record that a merge did not
+     * happen. Null when it cannot be read, which the caller treats as unknown
+     * rather than as a negative.
+     */
+    async pullRequestMergeState(env: Env, repositoryId: string, pullRequestNumber: number) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const res = await fetch(
+        `https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`,
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        },
+      );
+      if (!res.ok) return null;
+      const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
+      return {
+        merged: pull.merged === true,
+        mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
+      };
+    },
+    /**
+     * Whether the base branch already contains a commit, from git ancestry.
+     *
+     * The second opinion the queue needs before it may certify that a merge did
+     * not happen. The pull request's own flag lagged its own merge by seconds;
+     * the ancestry did not.
+     */
+    async baseContainsSha(env: Env, repositoryId: string, baseRef: string, sha: string) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const branch = baseRef.replace(/^refs\/heads\//, "");
+      const res = await fetch(
+        `https://api.github.com/repos/${project.github_name}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(sha)}`,
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        },
+      );
+      if (!res.ok) return null;
+      const compared = (await res.json()) as { status?: string };
+      if (typeof compared.status !== "string") return null;
+      // `behind` means the head is behind the base branch, which is to say the
+      // base already contains it.
+      return compared.status === "behind" || compared.status === "identical";
+    },
+    /**
      * Publish whose turn it is, as a check GitHub can require.
      *
      * Waiting is reported as still running rather than failed. A required check
