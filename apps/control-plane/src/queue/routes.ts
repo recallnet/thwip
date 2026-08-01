@@ -41,7 +41,7 @@ import {
   storeAttestation,
   transitionRecordFor,
 } from "./attestation.js";
-import { DEFAULT_MERGE_METHOD, type MergeMethod } from "./merge-commit.js";
+import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
 import { parseTransitionRecord, type Sha256, type TransitionRecordV1 } from "@thwip/queue-protocol";
 import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
@@ -1956,9 +1956,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           });
         }
 
-        const mergeOperationId = `merge_${attemptId}`;
         const signedIntent = await signReusedIntent({
-          operationId: mergeOperationId,
+          operationId: mergeOperationId(attemptId),
           attemptId,
           git: {
             objectFormat: "sha1",
@@ -2038,7 +2037,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             receiptDigest: workReceiptDigest,
             verifierResultDigest: verifiedResultDigest,
             intentDigest: signedIntent.digest,
-            operationId: mergeOperationId,
+            operationId: mergeOperationId(attemptId),
           });
         });
         operationId = walked.operationId;
@@ -2060,7 +2059,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // this, the second asker is told it holds the turn and given nothing to act on,
     // so nothing ever merges.
     if (operationId === null && snapshot.activeAttemptId !== null && entry?.state === "Merging") {
-      operationId = `merge_${snapshot.activeAttemptId}`;
+      operationId = mergeOperationId(snapshot.activeAttemptId);
     }
 
     // Holding the lane means this entry owns the one active attempt — not merely
@@ -2193,7 +2192,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         ({ commands, store }) =>
           confirmOnly(commands, store, {
             attemptId,
-            operationId: `merge_${attemptId}`,
+            operationId: mergeOperationId(attemptId),
             mergeSha,
             mergeTree: facts.treeOid,
             parentShas: facts.parentShas,
@@ -2307,7 +2306,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         commands.confirmNotMerged({
           idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
           attemptId,
-          operationId: `merge_${attemptId}`,
+          operationId: mergeOperationId(attemptId),
         }),
     );
 
