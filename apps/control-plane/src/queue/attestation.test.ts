@@ -35,6 +35,7 @@ const git: GitSubject = {
 
 const evidence = {
   workReceiptDigest: D("a"),
+  organizationId: "org_1",
   policyDigest: D("b"),
   pipelineDigest: D("c"),
   requiredSuitesDigest: D("d"),
@@ -385,5 +386,47 @@ describe("keeping the signed bytes", () => {
     expect(chain).toHaveLength(1);
     expect(chain[0]?.digest).toBe(first.digest);
     expect(new TextDecoder().decode(chain[0]!.bytes)).toBe(new TextDecoder().decode(first.bytes));
+  });
+
+  it("mirrors the signed bytes into the bucket it is given", async () => {
+    const store = db();
+    const signed = await record(D("f"));
+    const puts: Array<{ kind: string; digest: string }> = [];
+
+    await storeAttestation(store, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      mirror: async (input) => void puts.push({ kind: input.kind, digest: input.digest }),
+      organizationId: "org_1",
+    });
+
+    expect(puts).toEqual([{ kind: "transition-record", digest: signed.digest }]);
+  });
+
+  /** A bucket that is down must never cost the record itself. */
+  it("keeps the record when the mirror fails", async () => {
+    const store = db();
+    const signed = await record(D("f"));
+    await storeAttestation(store, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      organizationId: "org_1",
+      mirror: async () => {
+        throw new Error("bucket unavailable");
+      },
+    });
+    expect(await readAttestation(store, signed.digest)).not.toBeNull();
   });
 });
