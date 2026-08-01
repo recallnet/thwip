@@ -9,6 +9,7 @@ import {
   verifyPublishedChain,
   type ChainResponse,
 } from "./verify-chain.js";
+import type { ChainFinding } from "@thwip/queue-protocol";
 import { EXIT } from "./queue-exit.js";
 
 afterEach(() => {
@@ -53,6 +54,24 @@ describe("the verification summary", () => {
    * signature check produced zero findings and a bare "N links verified" —
    * indistinguishable from a chain that was actually checked.
    */
+  /**
+   * The arithmetic hole: history links were subtracted from the expected
+   * count, so a response where every link predates signed records reached
+   * "0 of 0 checked" and printed the clean line. Nothing was established, and
+   * the summary has to say so.
+   */
+  it("does not call a chain of nothing but history verified", () => {
+    const history: ChainFinding = {
+      code: "PRE_ATTESTATION",
+      sequence: null,
+      digest: "sha256:a",
+      detail: "before signed records",
+    };
+    const text = summarize(3, 0, [history, history, history]);
+    expect(text).not.toMatch(/links verified/);
+    expect(text).toContain("nothing was verified");
+  });
+
   it("never prints a bare 'links verified' when fewer signatures were checked than links", () => {
     const text = summarize(42, 0, []);
     expect(text).not.toMatch(/^42 links verified\.?$/m);
@@ -429,14 +448,56 @@ describe("cmdVerifyChain with no --epoch, server claims a huge epochStartsAt", (
     const code = await cmdVerifyChain(["--repository-id", "123"]);
     const output = writes.join("");
 
-    // The bug: no --epoch means the huge server value is trusted, the link's
-    // signature is never checked, no finding fires, and the exit code alone
-    // reads as success.
-    expect(code).toBe(EXIT.ok);
+    // The bug this closes: no --epoch means the huge server value is trusted,
+    // the link's signature is never checked, no finding fires, and the exit
+    // code read as success. A CI gate scripted on the exit status passed a
+    // chain nobody had checked a single signature of.
+    expect(code).not.toBe(EXIT.ok);
+    expect(code).toBe(EXIT.evidenceRejected);
     // What must not happen: a bare "1 links verified." that a reader would
     // take as "the signature checked out."
     expect(output).not.toMatch(/^1 links verified\.?$/m);
     expect(output).toMatch(/0 of 1 signatures checked/);
+    vi.restoreAllMocks();
+  });
+});
+
+/**
+ * A chain whose links are all empty records used to arrive at "0 of 0
+ * signatures checked", which the summary read as a clean pass and the exit
+ * code reported as success. A server returning a high epoch and no records at
+ * all could therefore be scripted against as if it had proved something.
+ */
+describe("cmdVerifyChain when every link is an empty record", () => {
+  it("says nothing was verified and exits non-zero", async () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("thwip-keys")) {
+          return Response.json({ keys: [{ kty: "EC", crv: "P-256", x: "x", y: "y", kid: "k1" }] });
+        }
+        return Response.json({
+          epochStartsAt: 999_999_999,
+          links: [
+            { digest: "sha256:a", sequence: 1, record: "", jws: "" },
+            { digest: "sha256:b", sequence: 2, record: "", jws: "" },
+            { digest: "sha256:c", sequence: 3, record: "", jws: "" },
+          ],
+        });
+      }),
+    );
+
+    const code = await cmdVerifyChain(["--repository-id", "123"]);
+    const output = writes.join("");
+
+    expect(code).not.toBe(EXIT.ok);
+    expect(output).not.toMatch(/links verified/);
+    expect(output).toMatch(/nothing was verified/);
     vi.restoreAllMocks();
   });
 });

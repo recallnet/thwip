@@ -112,6 +112,32 @@ describe("verifying a chain", () => {
     expect(result.signaturesChecked).toBe(0);
   });
 
+  /**
+   * The hole this closes: nothing anchored the first link, so a server could
+   * serve a real chain from its second link and the walk had nothing to compare
+   * the start against. Three real links served as links 2 and 3 returned no
+   * findings at all, which is how every merge before a chosen point gets
+   * suppressed without leaving a trace.
+   */
+  it("reports a chain served from its second link as a missing prefix", async () => {
+    const one = await link(1, null);
+    const two = await link(2, one.digest);
+    const three = await link(3, two.digest);
+    const result = await verifyChain([two, three], signedOk);
+    expect(result.findings.map((f) => f.code)).toContain("MISSING_PREFIX");
+    expect(one.digest).not.toBe(two.digest);
+  });
+
+  it("accepts a first link that sits at the epoch and names pre-attestation history", async () => {
+    const twentyTwo = await link(22, D("a"));
+    const twentyThree = await link(23, twentyTwo.digest);
+    const { findings } = await verifyChain([twentyTwo, twentyThree], {
+      verifySignature: async () => true,
+      epochStartsAt: 22,
+    });
+    expect(findings).toEqual([]);
+  });
+
   it("reports bytes that are not a record at all", async () => {
     const junk: ChainLink = {
       digest: await envelopeDigest(canonicalBytes("{}")),
@@ -154,7 +180,10 @@ describe("verifying a chain", () => {
   it("reports a missing record for an empty link inside the attested range", async () => {
     const gone: ChainLink = { digest: D("a"), bytes: new Uint8Array(), jws: "", sequence: 47 };
     const { findings } = await verifyChain([gone], { verifySignature: async () => true, epochStartsAt: 42 });
-    expect(findings.map((f) => f.code)).toEqual(["MISSING_RECORD"]);
+    // Two separate facts: no record sits where one belongs, and the chain was
+    // served starting five links into the attested range.
+    expect(findings.map((f) => f.code)).toContain("MISSING_RECORD");
+    expect(findings.map((f) => f.code)).toContain("MISSING_PREFIX");
   });
 
   it("does not invent a gap across a link whose position is unknown", async () => {
