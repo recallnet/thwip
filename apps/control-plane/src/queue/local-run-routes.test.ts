@@ -13,6 +13,12 @@ import {
   type SubmittedReceipt,
 } from "./integration-receipt.js";
 import { sha256Fingerprint } from "../sshsig-verify.js";
+import {
+  canonicalRecordBytes,
+  QUEUE_PREDICATE_TYPES,
+  QUEUE_SIGN_NAMESPACE,
+  queueSigningBytes,
+} from "@thwip/queue-protocol";
 import { buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
@@ -476,5 +482,37 @@ describe("the receipt the machine signs", () => {
 
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
     expect(driven).toEqual([PR]);
+  });
+});
+
+/**
+ * The one thing the device and the service have to agree on without ever
+ * talking: which bytes the signature covers. They are written out here rather
+ * than taken from the function under test, so a change to that function fails
+ * this instead of silently rejecting every receipt a released CLI signs.
+ */
+describe("the bytes a receipt is signed over", () => {
+  const receipt = {
+    assignmentId: "asg_att_1",
+    assignmentDigest: `sha256:${"1".repeat(64)}`,
+    candidateTreeOid: TREE,
+    deviceKeyId: `SHA256:${"a".repeat(43)}`,
+    suites: [{ name: "lint", outcome: "passed" }],
+  };
+
+  it("are the queue's own pre-authentication encoding of the receipt, under the queue namespace", () => {
+    expect(INTEGRATION_RECEIPT_NAMESPACE).toBe(QUEUE_SIGN_NAMESPACE);
+    expect(integrationReceiptBytes(receipt)).toEqual(
+      queueSigningBytes(
+        QUEUE_PREDICATE_TYPES.integrationRun,
+        canonicalRecordBytes({
+          assignmentId: receipt.assignmentId,
+          assignmentDigest: receipt.assignmentDigest,
+          candidateTreeOid: receipt.candidateTreeOid,
+          deviceKeyId: receipt.deviceKeyId,
+          suites: receipt.suites,
+        }),
+      ),
+    );
   });
 });

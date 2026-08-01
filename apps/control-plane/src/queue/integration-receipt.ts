@@ -14,41 +14,48 @@
  * never see, so it stays with the caller.
  */
 
-import { canonicalBytes, envelopeDigest, type Sha256 } from "@thwip/queue-protocol";
+import {
+  canonicalRecordBytes,
+  envelopeDigest,
+  QUEUE_PREDICATE_TYPES,
+  QUEUE_SIGN_NAMESPACE,
+  queueSigningBytes,
+  type Sha256,
+} from "@thwip/queue-protocol";
 
 /**
- * The namespace the device signs a receipt under.
+ * The namespace and the domain separation a device signs a receipt under.
  *
- * Separate from the proof namespace on purpose. A signature is only evidence of
- * what it was made for, and reusing `thwip-ci-dsse-v1` would let a proof
- * signature be replayed as a receipt for whatever assignment happened to hash
- * the same way.
+ * Both come from the protocol package rather than being restated here, because
+ * the signer and the verifier live in different packages and a constant written
+ * twice is a constant that drifts. The pre-authentication encoding names the
+ * integration-run predicate, which is what stops a signature over one kind of
+ * thwip record being replayed as another.
  */
-export const INTEGRATION_RECEIPT_NAMESPACE = "thwip-integration-receipt-v1";
+export const INTEGRATION_RECEIPT_NAMESPACE = QUEUE_SIGN_NAMESPACE;
 
 /**
- * The exact bytes a device signs and the queue verifies.
- *
- * Built from the five fields that decide the receipt and nothing else, with
- * object keys in a fixed order, so the signer and the verifier cannot disagree
- * about what was signed. The suites keep the order the device sent them in:
- * that is part of its account, and reordering would verify a different message.
+ * The exact bytes a device signs and the queue verifies: the canonical JSON of
+ * the receipt without its signature, wrapped in that encoding.
  */
 export function integrationReceiptBytes(receipt: SubmittedReceipt): Uint8Array {
-  return canonicalBytes(
-    JSON.stringify({
-      assignmentDigest: receipt.assignmentDigest,
-      assignmentId: receipt.assignmentId,
-      candidateTreeOid: receipt.candidateTreeOid,
-      deviceKeyId: receipt.deviceKeyId,
-      suites: receipt.suites.map((s) => ({ name: s.name, outcome: s.outcome })),
-    }),
-  );
+  return queueSigningBytes(QUEUE_PREDICATE_TYPES.integrationRun, canonicalRecordBytes(receiptPayload(receipt)));
 }
 
-/** The digest of those bytes, which is what a merge record cites. */
+/** The digest of the receipt as content, which is what a merge record cites. */
 export function integrationReceiptDigest(receipt: SubmittedReceipt): Promise<Sha256> {
-  return envelopeDigest(integrationReceiptBytes(receipt));
+  return envelopeDigest(canonicalRecordBytes(receiptPayload(receipt)));
+}
+
+/** The five fields that are the receipt, and nothing the caller sent alongside. */
+function receiptPayload(receipt: SubmittedReceipt): Record<string, unknown> {
+  return {
+    assignmentId: receipt.assignmentId,
+    assignmentDigest: receipt.assignmentDigest,
+    candidateTreeOid: receipt.candidateTreeOid,
+    deviceKeyId: receipt.deviceKeyId,
+    suites: receipt.suites.map((s) => ({ name: s.name, outcome: s.outcome })),
+  };
 }
 
 export interface SubmittedReceiptSuite {
