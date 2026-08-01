@@ -37,6 +37,10 @@ function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  // Every session-authenticated queue route establishes membership before it
+  // acts, so the session this file's `routes()` stub holds has to belong to the
+  // organization that owns the repository or nothing here reaches its subject.
+  seedMembership("alice", "1");
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -283,7 +287,7 @@ describe("the closed webhook itself, once the project or principal it looked up 
   function seed(raw: import("better-sqlite3").Database) {
     raw
       .prepare(
-        "INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)",
       )
       .run(org, "1", "acme");
     raw
@@ -383,7 +387,9 @@ describe("the closed webhook itself, once the project or principal it looked up 
       .run("inst_1", org);
     raw
       .prepare(
-        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+        // Replace: the environment already seeded this project row so the
+        // session has a membership to be checked against.
+        "INSERT OR REPLACE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
       )
       .run("proj_1", org, REPO, "acme/repo");
     const app = routes();
@@ -431,7 +437,9 @@ describe("the closed webhook itself, once the project or principal it looked up 
       .run("inst_1", org);
     raw
       .prepare(
-        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled, active_policy_digest) VALUES (?, ?, ?, ?, 1, ?)",
+        // Replace: the environment already seeded this project row so the
+        // session has a membership to be checked against.
+        "INSERT OR REPLACE INTO projects (id, organization_id, github_repository_id, github_name, enabled, active_policy_digest) VALUES (?, ?, ?, ?, 1, ?)",
       )
       .run("proj_1", org, REPO, "acme/repo", `sha256:${"d".repeat(64)}`);
     raw

@@ -19,7 +19,33 @@ function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  seedSessionMembership("alice", "1");
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
+}
+
+/**
+ * The organization that owns the repository, its project row, and the session's
+ * own membership of it.
+ *
+ * Every session-authenticated queue route establishes membership before it acts,
+ * so a test whose caller belongs to no organization is refused before it reaches
+ * the behaviour it is about. Seeded with the environment rather than per test,
+ * because the caller belonging somewhere is a precondition of all of them.
+ */
+function seedSessionMembership(principalId: string, githubUserId: string): void {
+  raw
+    .prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
+    .run("org_1", "1", "acme");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+    )
+    .run("proj_session", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+    )
+    .run(principalId, "org_1", githubUserId, principalId);
 }
 
 afterEach(() => {
