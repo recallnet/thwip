@@ -32,6 +32,7 @@ import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
+  authorizationFor,
   readAttestation,
   readChain,
   reuseEvidenceFor,
@@ -2261,6 +2262,250 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     return c.json({
       resolved: resolved.status,
       attemptId,
+      actor: who.principalId,
+      reason,
+    });
+  });
+
+  /**
+   * Record a merge the queue authorized, that landed, and that nobody wrote down.
+   *
+   * `reconcile` is the repair tool and it refuses unless an attempt still holds
+   * the lane. The failure it exists for takes the lane away first: the queue read
+   * GitHub before GitHub's read caught up with its own write, concluded
+   * CONFIRMED_NOT_MERGED, and terminated the attempt. Four merges landed that
+   * way and the chain has no link for any of them, and by the time anyone noticed
+   * `reconcile` answered 409 for every one. A repair tool that only works while
+   * the failure is still in progress is not a repair tool.
+   *
+   * So this needs nothing from the attempt. The signed merge intent is what
+   * survives it, and it holds everything a transition record cites. The operator
+   * supplies one thing, a commit sha, and every claim the record makes is read
+   * from that commit or from the intent.
+   *
+   * Three things stop this writing a record for a merge nobody authorized.
+   * The commit's tree and parents come from GitHub, never from the caller.
+   * `authorizationFor` will only return an intent whose pinned tree and pinned
+   * parents are exactly that commit's, so a commit the queue never pinned has
+   * nothing to build a record from. And the transition record schema itself
+   * refuses a record whose merged tree is not the candidate tree and whose first
+   * and second parents are not the base and head the intent names, so a record
+   * that got past the first two would not sign.
+   *
+   * Where the record goes is decided by the chain, not by when the merge
+   * happened. The chain is hash-linked and append-only: a record's position and
+   * the digest of the record before it are inside the bytes that were signed, so
+   * putting a merge back where it belongs would mean re-signing every record
+   * after it under new digests. That is a rewrite, and refusing to rewrite is the
+   * whole claim. A repair links the current head and takes the next sequence, and
+   * the chain then holds a record for the merge in an order that is not the order
+   * it landed in.
+   */
+  app.post("/v1/queue/:repositoryId/repair", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      mergeSha?: string;
+      reason?: string;
+      /** Names the attempt where two of them authorized the same commit. */
+      attemptId?: string;
+    };
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+    if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
+      return c.json({ error: "mergeSha required" }, 400);
+    }
+    const mergeSha = body.mergeSha;
+    const reason = body.reason.trim();
+
+    const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
+    if (facts === null) return c.json({ error: "could not read that commit" }, 404);
+
+    const db = c.env.DB as unknown as D1Like;
+    const authorization = await authorizationFor(db, {
+      repositoryId,
+      baseRef,
+      treeOid: facts.treeOid,
+      parentShas: facts.parentShas,
+      ...(typeof body.attemptId === "string" ? { attemptId: body.attemptId } : {}),
+    });
+    if ("refused" in authorization) {
+      return c.json({ error: authorization.refused, code: "MERGE_NOT_AUTHORIZED" }, 409);
+    }
+    const intent = authorization.intent;
+    // A verified merge's record binds an Actions run id, which the intent does
+    // not carry, and an override binds an authorization this must not reissue.
+    // Neither can be rebuilt from what survives, so neither is guessed at.
+    if (intent.kind !== "reused" && intent.kind !== "candidate-verified") {
+      return c.json(
+        { error: `a ${intent.kind} merge cannot be rebuilt from its intent alone`, code: "MERGE_NOT_AUTHORIZED" },
+        409,
+      );
+    }
+    const attemptId = intent.attemptId;
+
+    const already = await transitionRecordFor(db, attemptId);
+    if (already !== null) {
+      return c.json({
+        recorded: "already",
+        attemptId,
+        pullRequestNumber: intent.pullRequestNumber,
+        transitionDigest: already,
+      });
+    }
+
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    if (snapshot.activeAttemptId === attemptId) {
+      return c.json(
+        { error: "that attempt still holds the lane; reconcile it instead", code: "ATTEMPT_STILL_LIVE" },
+        409,
+      );
+    }
+
+    // The tree the branch had before this merge, from the commit itself. A
+    // record that is not first in its epoch has to say where it started.
+    const before = await deps.commitFacts(c.env, repositoryId, intent.git.baseSha);
+    if (before === null) return c.json({ error: "could not read the base this merge started from" }, 404);
+
+    const head = snapshot.transitions.at(-1);
+    const transitionSequence = (head?.transitionSequence ?? 0) + 1;
+    const priorDigest = head?.digest ?? null;
+
+    // The policy the intent bound, not whatever is active now: the record says
+    // what this merge rested on, and the policy may have changed since.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const verified = intent.kind === "candidate-verified";
+    const signed = await signReusedRecord({
+      attemptId,
+      mergeMethod: intent.mergeMethod,
+      git: {
+        ...intent.git,
+        candidateSha: mergeSha,
+        candidateTreeOid: facts.treeOid,
+        candidateParentOids: [...facts.parentShas],
+      },
+      position: {
+        queueEpoch: snapshot.queueEpoch,
+        turnSequence: intent.turnSequence,
+        transitionSequence,
+        previousTransitionDigest: priorDigest as Sha256 | null,
+      },
+      pullRequestNumber: intent.pullRequestNumber,
+      evidence: {
+        workReceiptDigest: intent.evidence.workReceiptDigest,
+        organizationId: policy?.organizationId ?? "",
+        policyDigest: intent.policyDigest,
+        pipelineDigest: intent.evidence.pipelineDigest,
+        requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
+        proofCheckRunId: intent.evidence.proofCheckRunId,
+        ...(verified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
+      },
+      mergeIntentDigest: authorization.intentDigest,
+      before: { baseSha: intent.git.baseSha, treeOid: before.treeOid },
+      final: { sha: mergeSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
+      observedAt: new Date().toISOString(),
+      signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
+    });
+    if ("error" in signed) {
+      return c.json({ error: `the queue refused to sign its own record: ${signed.error}` }, 409);
+    }
+
+    const stored = await storeAttestation(db, {
+      digest: signed.digest,
+      kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
+      repositoryId,
+      baseRef,
+      transitionSequence,
+      attemptId,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy === null
+        ? {}
+        : {
+            organizationId: policy.organizationId,
+            mirror: (mirrored: {
+              organizationId: string;
+              repositoryId: string;
+              kind: "merge-intent" | "transition-record";
+              digest: string;
+              bytes: Uint8Array;
+            }) =>
+              storeEvidence(c.env, {
+                organizationId: mirrored.organizationId,
+                repositoryId: mirrored.repositoryId,
+                kind: mirrored.kind,
+                digest: mirrored.digest as `sha256:${string}`,
+                bytes: mirrored.bytes,
+              }).then(() => undefined),
+          }),
+    });
+    if (!stored.stored) {
+      return c.json({
+        recorded: "already",
+        attemptId,
+        pullRequestNumber: intent.pullRequestNumber,
+        transitionDigest: stored.digest,
+      });
+    }
+
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const tail = store.state().transitions.at(-1);
+      // The position this record claims is inside the bytes that were signed,
+      // and signing is not inside the transaction. A link recorded at a
+      // position its own record does not claim is exactly the break the
+      // verifier reports, so the record is dropped rather than misplaced.
+      if ((tail?.transitionSequence ?? 0) + 1 !== transitionSequence || (tail?.digest ?? null) !== priorDigest) {
+        return { moved: true as const };
+      }
+      return {
+        moved: false as const,
+        transition: commands.recordTransition({
+          idempotencyKey: `repair:${attemptId}`,
+          kind: verified ? "verified" : "reused",
+          transitionSequence,
+          priorDigest,
+          digest: signed.digest,
+          baseSha: mergeSha,
+          // The reducer chains an attempt only where it can see one whose phase
+          // is MERGED, and this attempt was terminated and has since been
+          // compacted away. The attempt is inside the signed record and on the
+          // row that holds it, which is where a reader looks for it.
+          attemptId: null,
+          witnessPrincipalIds: [who.principalId],
+        }),
+      };
+    });
+
+    if (result.moved) {
+      // The chain grew between reading the head and recording. The bytes stay:
+      // the queue really did sign them, and destroying signed evidence to tidy
+      // up is a worse habit than keeping a row nothing points at. What goes is
+      // the claim to a position, so the chain never serves a record whose own
+      // sequence disagrees with the one it was served at.
+      await db
+        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
+        .bind(signed.digest)
+        .run();
+      return c.json(
+        { error: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" },
+        409,
+      );
+    }
+
+    return c.json({
+      recorded: result.transition.status,
+      attemptId,
+      pullRequestNumber: intent.pullRequestNumber,
+      mergeSha,
+      sequence: transitionSequence,
+      transitionDigest: signed.digest,
+      mergeIntentDigest: authorization.intentDigest,
       actor: who.principalId,
       reason,
     });
