@@ -24,37 +24,42 @@ config, and lockfiles.
 
 ## How does this map to SLSA?
 
-The remote profile is SLSA Build L3: GitHub Actions performs the build and
-GitHub signs the provenance with an identity the workflow cannot forge. fast
-and fresh are deliberately not L3 — they are attributed assertions plus the
-controls SLSA's original L4 asked for and v1.0 dropped as impractical:
-hermetic execution, reproducible outputs, and optional two-party agreement.
-Those are cheap here because the pipeline runs as a content-addressed graph,
-so identical inputs must produce identical digests on any machine. Pick per
-path: L3 where a rerun is worth the minutes, reproducibility-backed assertions
-everywhere else.
+The remote profile is SLSA Build L3. GitHub Actions performs the build and
+GitHub signs the provenance with an identity the workflow cannot forge. Fast
+is deliberately not L3. It is an attributed assertion plus the controls
+SLSA's original L4 asked for and v1.0 dropped as impractical: hermetic
+execution, reproducible outputs, and optional two-party agreement. Those are
+cheap here because the pipeline runs as a content-addressed graph, so
+identical inputs must produce identical digests on any machine. Pick per
+path: L3 where a rerun is worth the minutes, a reproducibility-backed
+assertion everywhere else.
 
-## What are the security profiles: fast, fresh, audited, remote?
+## Which security profiles can I pick?
+
+Two.
 
 - **fast**: a signed local proof with no pre-run contact with the control
   plane. Works fully offline before push.
-- **fresh**: the CLI first requests a short-lived lease bound to the exact
-  tree, signer, and policy, so the proof also carries a trusted issuance
-  window.
-- **audited**: fresh, plus a random or risk-triggered independent rerun of
-  the pipeline in GitHub Actions to deter false assertions.
 - **remote**: the pipeline runs in GitHub for every required check
   (conventional remote CI).
 
 Pick organization defaults in the dashboard; use `thwip.yaml` only where a
 repository needs to override them.
 
+## The schema mentions fresh and audited. Can I use them?
+
+No, and the CLI refuses them by name rather than quietly delivering something
+else. Both are defined as issuing an assignment and requiring an integration
+receipt signed where the suites ran. Nothing issues one and nothing signs one
+yet, so a repository that asked for either would get what remote gives under a
+name claiming more than happened.
+
 ## What does a proof actually prove?
 
 That an enrolled signing key asserted the approved pipeline and required
 suites passed for this exact repository, Git tree, ancestry, base, and policy
-version. In fast and fresh profiles the execution claim is the signer's
-assertion; audited and remote add independent execution evidence.
+version. Under fast, the execution claim is the signer's own assertion. Under
+remote, GitHub ran the required suites and signed for them.
 
 ## How does a teammate join?
 
