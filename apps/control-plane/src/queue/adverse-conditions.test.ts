@@ -368,6 +368,60 @@ describe("the closed webhook itself, once the project or principal it looked up 
       fetch.mockRestore();
     }
   });
+
+  /**
+   * `driveLane`, the dispatcher every route goes through, withholds Actions
+   * for `fresh`/`audited`: those profiles have no fallback, so dispatching
+   * would spend a run to be told there is nothing for it to do. The `closed`
+   * webhook's own call to `driveTurnFor` — added to fix the starvation above —
+   * bypassed `driveLane` and, with it, that check. This proves the fix: a
+   * closed pull request still frees a device-only lane, but no longer pays
+   * GitHub Actions to find that out.
+   */
+  it("frees a device-only lane after the closed webhook, without dispatching Actions for it", async () => {
+    const e = env();
+    seed(raw);
+    raw
+      .prepare("UPDATE organizations SET installation_id = ? WHERE id = ?")
+      .run("inst_1", org);
+    raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled, active_policy_digest) VALUES (?, ?, ?, ?, 1, ?)",
+      )
+      .run("proj_1", org, REPO, "acme/repo", `sha256:${"d".repeat(64)}`);
+    raw
+      .prepare(
+        "INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status) VALUES (?, ?, 1, ?, 'active')",
+      )
+      .run(`sha256:${"d".repeat(64)}`, "proj_1", JSON.stringify({ schemaVersion: "1", securityProfile: "fresh", version: 1 }));
+    const app = routes();
+    await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    await authorize(app, e, 61);
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+      expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+      // The lane moved to 61 and 61 is offered, but under `fresh` only a
+      // connected device ever claims it — dispatching Actions here would be
+      // a wasted run.
+      const after = await liveState(app, e);
+      expect(stateOf(after, 61)).toBe("Offered");
+      const dispatch = fetch.mock.calls.find(([url]) => String(url).includes("/dispatches"));
+      expect(dispatch).toBeUndefined();
+    } finally {
+      fetch.mockRestore();
+    }
+  });
 });
 
 describe("ejecting an entry", () => {
