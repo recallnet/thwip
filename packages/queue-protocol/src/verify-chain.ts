@@ -6,8 +6,15 @@ import { parseTransitionRecord } from "./transition-record.js";
  *
  * The chain was a claim until this existed. Records were built, signed and
  * stored, and nothing ever checked that the links joined up, that a digest named
- * its own bytes, or that a signature was real. Two merges landed with no record
+ * its own bytes, or that a signature was real. Three merges landed with no record
  * at all and it went unnoticed until somebody looked by hand.
+ *
+ * The digest and sequence checks did not see any of the three. A record is
+ * numbered when it is written, so a merge nobody wrote down leaves the numbering
+ * intact and the digests joined up. What it does disturb is the base: the next
+ * record begins at a sha the chain never reached. Comparing each record's
+ * `before` against the one before it's `after` is what catches that, and every
+ * record already carries both halves.
  *
  * Pure. Signature verification is injected so the same walk runs in the Worker,
  * in the CLI, and in a test, and so this file never needs a key or a network.
@@ -32,6 +39,8 @@ export interface ChainFinding {
     | "DIGEST_MISMATCH"
     | "BROKEN_LINK"
     | "SEQUENCE_GAP"
+    | "BASE_DISCONTINUITY"
+    | "CHAIN_BEHIND_HEAD"
     | "BAD_SIGNATURE"
     | "UNPARSEABLE"
     | "PRE_ATTESTATION"
@@ -61,6 +70,22 @@ export interface ChainVerifierPorts {
    * not verify clean just because its own links join up internally.
    */
   subject?: { readonly repositoryId: string; readonly baseRef: string };
+  /**
+   * Where the branch actually stands right now, from somewhere that is not the
+   * chain. Optional for the same reason `subject` is: a caller that cannot get
+   * it keeps working, and the walk says nothing about the head rather than
+   * guessing.
+   *
+   * The records catch a merge that was never recorded only when a later merge
+   * was recorded, because the later record's `before` names a base the chain
+   * never reached. A chain that stops, with the unrecorded merges all sitting
+   * after the last record, is internally perfect. Nothing inside it can be
+   * compared against anything. The branch's current base sha is the only fact
+   * that closes that, and it has to come from the provider, not from thwip:
+   * a service asked to report both its chain and the head it is behind would
+   * simply report a head that matches.
+   */
+  head?: { readonly baseSha: string };
 }
 
 /**
@@ -84,7 +109,7 @@ export async function verifyChain(
 ): Promise<ChainVerification> {
   const findings: ChainFinding[] = [];
   let signaturesChecked = 0;
-  let previous: { digest: string; sequence: number | null } | null = null;
+  let previous: { digest: string; sequence: number | null; afterBaseSha: string | null } | null = null;
   let first = true;
 
   for (const link of links) {
@@ -108,8 +133,9 @@ export async function verifyChain(
             },
       );
       // The digest still anchors what comes next. A link we cannot read must not
-      // hide a break in the link after it.
-      previous = { digest: link.digest, sequence: null };
+      // hide a break in the link after it. Its base sha is unknown, so the link
+      // after it is not asked to continue from anywhere.
+      previous = { digest: link.digest, sequence: null, afterBaseSha: null };
       continue;
     }
 
@@ -133,14 +159,68 @@ export async function verifyChain(
           code: "SEQUENCE_GAP",
           sequence: parsed.sequence,
           digest: link.digest,
-          detail: `link ${parsed.sequence} follows ${previous.sequence}; a merge landed without a record`,
+          // Not "a merge landed without a record": this check cannot support
+          // that claim. Sequence numbers are handed out per recorded
+          // transition, so an unrecorded merge leaves the numbering intact.
+          // What a gap says is narrower — records that were written are not in
+          // what was served.
+          detail: `link ${parsed.sequence} follows ${previous.sequence}; the records in between were written and not served`,
+        });
+      }
+      if (
+        previous.afterBaseSha !== null &&
+        parsed.beforeBaseSha !== null &&
+        parsed.beforeBaseSha !== previous.afterBaseSha
+      ) {
+        findings.push({
+          code: "BASE_DISCONTINUITY",
+          sequence: parsed.sequence,
+          digest: link.digest,
+          detail:
+            `begins at ${parsed.beforeBaseSha}, but the record before it left the base at ` +
+            `${previous.afterBaseSha}; the base moved in between and no record says how`,
         });
       }
     }
-    previous = { digest: link.digest, sequence: parsed.sequence };
+    previous = { digest: link.digest, sequence: parsed.sequence, afterBaseSha: parsed.afterBaseSha };
   }
 
+  findings.push(...reachesHead(previous, ports));
   return { findings, signaturesChecked };
+}
+
+/**
+ * Whether the chain ends where the branch actually stands.
+ *
+ * `BASE_DISCONTINUITY` catches an unrecorded merge only once a later merge is
+ * recorded. Everything that landed after the final record is invisible from
+ * inside the chain, and it is the likeliest place for a merge to go missing:
+ * the record is written after the merge, so a crash between the two leaves
+ * exactly this shape.
+ *
+ * Nothing is claimed without the caller's head. Silence when it is absent, and
+ * silence when the last link could not be read, because "the last record is
+ * gone" is already reported as `MISSING_RECORD` and has no base sha to compare.
+ * An empty chain is not accused either: a repository that has merged nothing
+ * and a repository whose every record was withheld look the same from here,
+ * and the caller's own "nothing was verified" verdict already covers it.
+ */
+function reachesHead(
+  last: { afterBaseSha: string | null; digest: string; sequence: number | null } | null,
+  ports: ChainVerifierPorts,
+): ChainFinding[] {
+  if (ports.head === undefined || last === null || last.afterBaseSha === null) return [];
+  if (last.afterBaseSha === ports.head.baseSha) return [];
+  return [
+    {
+      code: "CHAIN_BEHIND_HEAD",
+      sequence: last.sequence,
+      digest: last.digest,
+      detail:
+        `the last record leaves the base at ${last.afterBaseSha}, but the branch stands at ` +
+        `${ports.head.baseSha}; the base moved after the chain ended and no record says how`,
+    },
+  ];
 }
 
 /**
@@ -193,6 +273,8 @@ async function inspect(
   readable: boolean;
   sequence: number | null;
   previousDigest: string | null;
+  beforeBaseSha: string | null;
+  afterBaseSha: string | null;
   signatureChecked: boolean;
   findings: ChainFinding[];
 }> {
@@ -212,13 +294,29 @@ async function inspect(
     value = JSON.parse(new TextDecoder().decode(link.bytes));
   } catch {
     findings.push({ code: "UNPARSEABLE", sequence: null, digest: link.digest, detail: "not JSON" });
-    return { readable: false, sequence: null, previousDigest: null, signatureChecked: false, findings };
+    return {
+      readable: false,
+      sequence: null,
+      previousDigest: null,
+      beforeBaseSha: null,
+      afterBaseSha: null,
+      signatureChecked: false,
+      findings,
+    };
   }
 
   const record = parseTransitionRecord(value);
   if (!record.ok) {
     findings.push({ code: "UNPARSEABLE", sequence: null, digest: link.digest, detail: record.detail });
-    return { readable: false, sequence: null, previousDigest: null, signatureChecked: false, findings };
+    return {
+      readable: false,
+      sequence: null,
+      previousDigest: null,
+      beforeBaseSha: null,
+      afterBaseSha: null,
+      signatureChecked: false,
+      findings,
+    };
   }
 
   if (
@@ -251,6 +349,8 @@ async function inspect(
     readable: true,
     sequence: record.value.transitionSequence,
     previousDigest: record.value.previousTransitionDigest,
+    beforeBaseSha: record.value.before.baseSha,
+    afterBaseSha: record.value.after.baseSha,
     signatureChecked,
     findings,
   };
