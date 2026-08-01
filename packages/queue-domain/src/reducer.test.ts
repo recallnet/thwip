@@ -460,6 +460,27 @@ describe("reducer", () => {
       expect(state.activeAttemptId).toBeNull();
     });
 
+    it("still records a merge that landed while the queue was paused", () => {
+      // The pause refuses the writes the queue controls and never refuses the
+      // news. Refusing a confirmation would leave the log denying a merge that
+      // exists on GitHub, and an attempt in Merging that nothing could resolve.
+      let state = applyEvents(base(), happyPath().slice(0, 12));
+      state = applyEvent(state, ev({ type: "QueuePaused", actorPrincipalId: "admin", reason: "incident" }));
+      state = applyEvent(
+        state,
+        ev({
+          type: "MergeConfirmed",
+          attemptId: "a1",
+          mergeSha: "m".repeat(40),
+          mergeTree: "t".repeat(40),
+          parentShas: ["b".repeat(40), "h".repeat(40)],
+        }),
+      );
+      expect(state.entries.get("e1")!.state).toBe("Merged");
+      expect(state.activeAttemptId).toBeNull();
+      expect(checkInvariants(state)).toEqual([]);
+    });
+
     it("refuses to confirm a merge whose tree is not the candidate tree (§6.2 invariant 18)", () => {
       const state = applyEvents(base(), happyPath().slice(0, 12));
       const wrongTree = ev({
