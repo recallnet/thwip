@@ -13,9 +13,10 @@ all repository facts from GitHub, fetches one signed fact bundle from the
 control plane, and fails closed with stable reason codes (PASS,
 SUBJECT_TREE_MISMATCH, SIGNER_KEY_REVOKED, ...).
 
-Security profiles per project: fast (signed local proof), fresh (adds a
-short-lived subject-bound lease), audited (adds sampled independent reruns in
-GitHub Actions), remote (GitHub runs every check).
+Security profiles per project: fast (signed local proof) and remote (GitHub
+runs every required check). The schema also names fresh and audited; both are
+refused, because each needs an integration receipt signed where the suites
+ran and nothing issues one yet.
 
 What a proof establishes, stated precisely: who ran the approved checks, on
 exactly which Git tree, under which policy version, signed by a key enrolled
@@ -25,7 +26,7 @@ reproducibility rather than surveillance: identical inputs produce identical
 digests on every machine, so a fabricated claim disagrees with teammates'
 runs, later commits, and any cloud run, permanently and attributably. The
 remote profile is SLSA Build L3 (GitHub builds and signs the provenance); fast
-and fresh are attributed assertions plus the hermeticity, reproducibility, and
+is an attributed assertion plus the hermeticity, reproducibility, and
 two-party controls that SLSA's original L4 specified and v1.0 dropped.
 
 ## Install
