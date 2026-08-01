@@ -1,3 +1,4 @@
+import type { BlockingReason } from "@thwip/queue-domain";
 import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 
 /**
@@ -40,11 +41,14 @@ export interface QueueCheckState {
 }
 
 /**
- * Plain-language next actions for the blocking reasons a developer can act on
- * (plan.md §28.8). A reason with no entry here is reported verbatim rather than
- * guessed at.
+ * Plain-language next actions for every blocking reason.
+ *
+ * Keyed by the domain's own union, so adding a reason without writing its
+ * sentence fails to compile. It used to be keyed by string, and a reason with
+ * no entry fell through to "Blocked: MERGE_REJECTED.", which is a code shown to
+ * a person, not an instruction.
  */
-const NEXT_ACTION: Record<string, string> = {
+const NEXT_ACTION: Record<BlockingReason, string> = {
   REVIEW_REQUIRED: "Ask for a review. The queue holds your place while you wait.",
   CODEOWNER_REVIEW_REQUIRED: "A code owner for the files you touched still needs to approve.",
   APPROVAL_AFTER_PUSH_REQUIRED: "You pushed after the last approval, so it needs approving again.",
@@ -72,11 +76,16 @@ const NEXT_ACTION: Record<string, string> = {
   APP_PERMISSION_DRIFT: "The Thwip App is missing a permission it needs. An admin needs to reinstall it.",
   PROJECT_DISABLED: "This project is not enabled for the queue.",
   QUEUE_PAUSED: "The queue is paused.",
+  MERGE_REJECTED: "GitHub refused the merge. Read the branch protection rules on the base branch.",
+  MERGE_OUTCOME_UNKNOWN:
+    "The queue cannot tell whether the merge landed. It is reconciling and will not write again. Check the pull request before doing anything.",
+  ADMIN_CANCELLED: "An administrator cancelled this attempt. Ask them why before queueing again.",
+  INTERNAL_FAILURE: "The queue failed internally. Send this output to whoever runs the queue.",
 };
 
 export function nextAction(reason: string | null): string | null {
   if (reason === null) return null;
-  return NEXT_ACTION[reason] ?? `Blocked: ${reason}.`;
+  return NEXT_ACTION[reason as BlockingReason] ?? `Blocked: ${reason}.`;
 }
 
 /**
