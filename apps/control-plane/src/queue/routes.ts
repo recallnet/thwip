@@ -40,6 +40,7 @@ import {
   storeAttestation,
   transitionRecordFor,
 } from "./attestation.js";
+import { DEFAULT_MERGE_METHOD, type MergeMethod } from "./merge-commit.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
@@ -208,6 +209,12 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
       organizationId: string;
     } | null>;
+    /** The merge method the record must bind — the same one the workflow used. */
+    queueProject(
+      env: TEnv,
+      repositoryId: string,
+      baseRef: string,
+    ): Promise<{ mergeMethod: MergeMethod } | null>;
     proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
    * Publish the candidate verdict as a check on the pull request head.
@@ -318,8 +325,16 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // itself can say that.
   const before = await deps.commitFacts(env, input.repositoryId, attempt.baseSha);
 
+  // The same method the workflow was told to merge with, read from the same
+  // row rather than assumed. A record that claims "merge" for a squash landing
+  // fails its own two-parent shape check and never reaches the chain — that is
+  // the bug this binds shut.
+  const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
+  const mergeMethod = project?.mergeMethod ?? DEFAULT_MERGE_METHOD;
+
   const signed = await signReusedRecord({
     attemptId: input.attemptId,
+    mergeMethod,
     git: {
       objectFormat: "sha1",
       repositoryId: input.repositoryId,
@@ -650,7 +665,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     },
   ): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   /** Queue configuration for a branch, or null when the branch has no queue. */
-  queueProject(env: TEnv, repositoryId: string, baseRef: string): Promise<{ activationState: string } | null>;
+  queueProject(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+  ): Promise<{ activationState: string; mergeMethod: MergeMethod } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
@@ -1722,7 +1741,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             headSha,
             candidateSha,
             candidateTreeOid: candidateTree,
-            candidateParentOids: [baseSha, headSha],
+            // A merge commit's second parent is the pull request head; a squash
+            // has none, because it never becomes a parent of anything.
+            candidateParentOids: project.mergeMethod === "squash" ? [baseSha] : [baseSha, headSha],
           },
           position: {
             queueEpoch: held.queueEpoch,
@@ -1732,6 +1753,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           },
           pullRequestNumber: body.pullRequestNumber,
           evidence: reuse,
+          mergeMethod: project.mergeMethod,
           createdAt: new Date().toISOString(),
           signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
         });
@@ -1839,6 +1861,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorized,
       enforcing,
       activationState: project.activationState,
+      // What the workflow must tell GitHub when it performs this merge, so the
+      // method it uses and the method the signed record binds can never drift.
+      mergeMethod: project.mergeMethod,
       reason: halted
         ? snapshot.rebaselineRequired
           ? "REBASELINE_REQUIRED"

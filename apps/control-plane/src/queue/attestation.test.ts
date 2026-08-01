@@ -73,6 +73,7 @@ async function intent() {
     position,
     pullRequestNumber: 82,
     evidence,
+    mergeMethod: "merge",
     createdAt: "2026-07-31T12:00:00Z",
     signer,
   });
@@ -87,6 +88,7 @@ async function record(mergeIntentDigest: Sha256) {
     position,
     pullRequestNumber: 82,
     evidence,
+    mergeMethod: "merge",
     mergeIntentDigest,
     before: { baseSha: BASE, treeOid: "5".repeat(40) },
     final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
@@ -185,6 +187,7 @@ describe("a merge the candidate verifier ran for", () => {
       position,
       pullRequestNumber: 82,
       evidence: verified,
+      mergeMethod: "merge",
       mergeIntentDigest: D("f"),
       before: { baseSha: BASE, treeOid: "5".repeat(40) },
       final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
@@ -222,6 +225,7 @@ describe("a merge the candidate verifier ran for", () => {
       position,
       pullRequestNumber: 82,
       evidence: verified,
+      mergeMethod: "merge",
       createdAt: "2026-07-31T12:00:00Z",
       signer,
     });
@@ -259,6 +263,7 @@ describe("a merge backed by an assignment and a signed receipt", () => {
       position,
       pullRequestNumber: 82,
       evidence: verifiedEvidence,
+      mergeMethod: "merge",
       createdAt: "2026-07-31T12:00:00Z",
       signer,
     });
@@ -273,6 +278,7 @@ describe("a merge backed by an assignment and a signed receipt", () => {
       position,
       pullRequestNumber: 82,
       evidence: verifiedEvidence,
+      mergeMethod: "merge",
       mergeIntentDigest,
       before: { baseSha: BASE, treeOid: "5".repeat(40) },
       final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
