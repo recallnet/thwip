@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { CompactSign, SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
+import { CompactSign, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
@@ -13,6 +13,7 @@ import {
   type PolicyPush,
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
+import { mintRunLease } from "./run-lease.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
@@ -1112,26 +1113,34 @@ app.post("/v1/run-leases", async (c) => {
     .bind(body.repositoryId)
     .first<{ id: string; active_policy_digest: string; security_profile: string }>();
   if (!project) return c.json({ error: "project not enabled" }, 404);
-  const { key, kid } = await serviceKey(c.env);
-  const jti = randomId("lease");
-  const lease = await new SignJWT({
-    repositoryId: body.repositoryId,
-    treeOid: body.treeOid,
-    parentOids: body.parentOids ?? [],
-    baseSha: body.baseSha ?? null,
-    policyDigest: project.active_policy_digest,
-    deviceKeyId: body.deviceKeyId,
-    profile: project.security_profile,
-  })
-    .setProtectedHeader({ alg: "ES256", kid })
-    .setIssuer(c.env.PUBLIC_ORIGIN)
-    .setAudience("urn:thwip:ci-run:v1")
-    .setJti(jti)
-    .setIssuedAt()
-    .setNotBefore("0s")
-    .setExpirationTime("30m")
-    .sign(key);
-  return c.json({ lease });
+  // The window closes when the policy stops accepting it. Read the lifetime
+  // from the active policy rather than restating it here: a lease that outlives
+  // `lease.maxAgeSeconds` is refused by the verifier while still looking valid
+  // to the runner holding it.
+  const activePolicy = await c.env.DB.prepare("SELECT canonical_json FROM policy_bundles WHERE digest = ?")
+    .bind(project.active_policy_digest)
+    .first<{ canonical_json: string }>();
+  if (!activePolicy) return c.json({ error: "no active policy" }, 409);
+  const leaseSeconds = (JSON.parse(activePolicy.canonical_json) as { lease?: { maxAgeSeconds?: unknown } }).lease
+    ?.maxAgeSeconds;
+  if (typeof leaseSeconds !== "number" || leaseSeconds <= 0) {
+    return c.json({ error: "the active policy does not bound a run lease" }, 409);
+  }
+  const lease = await mintRunLease(c.env, {
+    project: {
+      activePolicyDigest: project.active_policy_digest,
+      securityProfile: project.security_profile,
+    },
+    request: {
+      repositoryId: body.repositoryId,
+      treeOid: body.treeOid,
+      parentOids: body.parentOids ?? [],
+      baseSha: body.baseSha ?? null,
+      deviceKeyId: body.deviceKeyId,
+    },
+    leaseSeconds,
+  });
+  return c.json({ lease, expiresInSeconds: leaseSeconds });
 });
 
 // --- Verification bundles --------------------------------------------------
