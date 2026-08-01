@@ -15,6 +15,8 @@ import {
 import { sha256Fingerprint } from "../sshsig-verify.js";
 import {
   canonicalRecordBytes,
+  parseMergeIntent,
+  parseTransitionRecord,
   QUEUE_PREDICATE_TYPES,
   QUEUE_SIGN_NAMESPACE,
   queueSigningBytes,
@@ -72,6 +74,7 @@ const HEAD = "e".repeat(40);
 const CANDIDATE = "c".repeat(40);
 const TREE = "7".repeat(40);
 const OTHER_TREE = "8".repeat(40);
+const MERGE_SHA = "d".repeat(40);
 
 /** A real carrier, so the head's proof digest is a digest of something. */
 const CARRIER =
@@ -472,6 +475,107 @@ describe("the receipt the machine signs", () => {
       await authorize(routes, e, { prepare: true, candidate: { ...candidate, candidateTreeOid: OTHER_TREE } })
     ).json()) as Verdict;
     expect(verdict).toMatchObject({ authorized: false, reason: "INTEGRATION_RECEIPT_TREE_MISMATCH" });
+  });
+
+  /**
+   * What the chain says a `fresh` merge was. The record kind is the only thing
+   * an outside auditor reads, and a merge backed by a signed assignment and a
+   * signed receipt from the device that ran the candidate is not the same claim
+   * as a merge that reused the proof already on the head.
+   */
+  describe("what the chain records for a merge under fresh", () => {
+    async function merged(routes: Routes, e: QueueRouteEnv): Promise<{ attemptId: string; operationId: string }> {
+      const claimed = await claim(routes, e);
+      await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+      const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
+      if (verdict.operationId === null) throw new Error(`not authorized: ${verdict.reason}`);
+      const id = await attemptId(e);
+      const reported = await routes.request(
+        `/v1/queue/${REPO}/merged`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            baseRef: REF,
+            attemptId: id,
+            operationId: verdict.operationId,
+            mergeSha: MERGE_SHA,
+            mergeTree: TREE,
+            parentShas: [BASE, HEAD],
+          }),
+        },
+        e,
+      );
+      if (reported.status !== 200) throw new Error(`merged returned ${reported.status}: ${await reported.text()}`);
+      return { attemptId: id, operationId: verdict.operationId };
+    }
+
+    function stored(kind: string): Array<{ digest: string; bytes: string }> {
+      return raw
+        .prepare("SELECT digest, bytes FROM queue_attestations WHERE kind = ? ORDER BY created_at")
+        .all(kind) as Array<{ digest: string; bytes: string }>;
+    }
+
+    it("signs a verified merge intent, naming the assignment and the receipt", async () => {
+      const e = env();
+      const routes = app();
+      const claimed = await claim(routes, e);
+      const submitted = receipt(claimed);
+      await post(routes, e, "receipt", await signedReceipt(submitted));
+      await authorize(routes, e, { prepare: true, candidate });
+
+      const rows = stored("merge-intent");
+      expect(rows).toHaveLength(1);
+      const parsed = parseMergeIntent(JSON.parse(rows[0]!.bytes) as unknown);
+      if (!parsed.ok) throw new Error(parsed.detail);
+      expect(parsed.value.kind).toBe("verified");
+      if (parsed.value.kind !== "verified") return;
+      expect(parsed.value.evidence.assignmentDigest).toBe(claimed.assignmentDigest);
+      expect(parsed.value.evidence.execution).toEqual({ ranOn: "device", deviceKeyId });
+    });
+
+    it("records a verified merge, citing the assignment and the receipt behind it", async () => {
+      const e = env();
+      const routes = app();
+      await merged(routes, e);
+
+      const rows = stored("verified-merge");
+      expect(rows).toHaveLength(1);
+      const parsed = parseTransitionRecord(JSON.parse(rows[0]!.bytes) as unknown);
+      if (!parsed.ok) throw new Error(parsed.detail);
+      expect(parsed.value.kind).toBe("verified-merge");
+      if (parsed.value.kind !== "verified-merge") return;
+      const assignment = raw
+        .prepare("SELECT assignment_digest, receipt_digest FROM queue_assignments")
+        .get() as { assignment_digest: string; receipt_digest: string };
+      expect(parsed.value.verifiedMerge.assignmentDigest).toBe(assignment.assignment_digest);
+      expect(parsed.value.verifiedMerge.integrationEvidenceDigest).toBe(assignment.receipt_digest);
+      expect(parsed.value.verifiedMerge.execution).toEqual({ ranOn: "device", deviceKeyId });
+      expect(stored("candidate-verified-merge")).toHaveLength(0);
+      expect(stored("reused-proof-merge")).toHaveLength(0);
+    });
+
+    it("puts that record on the chain, and the intent it cites is readable", async () => {
+      const e = env();
+      const routes = app();
+      await merged(routes, e);
+
+      const link = raw
+        .prepare("SELECT digest, kind FROM queue_attestations WHERE transition_sequence IS NOT NULL")
+        .get() as { digest: string; kind: string };
+      expect(link.kind).toBe("verified-merge");
+      const record = parseTransitionRecord(
+        JSON.parse(
+          (raw.prepare("SELECT bytes FROM queue_attestations WHERE digest = ?").get(link.digest) as { bytes: string })
+            .bytes,
+        ) as unknown,
+      );
+      if (!record.ok || record.value.kind !== "verified-merge") throw new Error("wrong kind");
+      const intent = raw
+        .prepare("SELECT bytes FROM queue_attestations WHERE digest = ?")
+        .get(record.value.verifiedMerge.mergeIntentDigest) as { bytes: string } | undefined;
+      expect(intent).toBeDefined();
+    });
   });
 
   it("asks for the merge to be written once the run is answered for", async () => {
