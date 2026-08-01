@@ -251,7 +251,30 @@ describe("reconcile", () => {
 describe("isMutating", () => {
   it("agrees with the plans that carry an idempotency key", () => {
     for (const subcommand of MUTATING_SUBCOMMANDS) expect(isMutating(subcommand)).toBe(true);
-    for (const subcommand of ["status", "list", "doctor"]) expect(isMutating(subcommand)).toBe(false);
+    for (const subcommand of ["status", "list", "doctor", "work"]) expect(isMutating(subcommand)).toBe(false);
+  });
+});
+
+describe("work", () => {
+  it("requires --watch, because there is nothing else for it to do yet", () => {
+    const result = planQueueCommand(["work", ...REPO]);
+    expect(result).toMatchObject({ ok: false, exitCode: EXIT.usage });
+    if (!result.ok) expect(result.message).toMatch(/--watch/);
+  });
+
+  it("requires a well-formed repository", () => {
+    expect(planQueueCommand(["work", "--watch"])).toMatchObject({ ok: false });
+  });
+
+  it("rejects an unknown flag rather than ignoring it", () => {
+    expect(planQueueCommand(["work", ...REPO, "--watch", "--forse", "yes"])).toMatchObject({ ok: false });
+  });
+
+  it("names the heartbeat endpoint once --watch is present", () => {
+    const result = plan(["work", ...REPO, "--watch"]);
+    expect(result.method).toBe("POST");
+    expect(result.path).toContain("/runners/heartbeat");
+    expect(result.requiresAdmin).toBe(false);
   });
 });
 

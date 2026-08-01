@@ -93,21 +93,9 @@ export interface TurnContext {
   readonly previousBase: { baseSha: string | null; treeOid: string | null };
   readonly queueDecisionDigest: Sha256;
   readonly workReceiptDigest: Sha256;
-  readonly policy: {
-    readonly version: number;
-    readonly securityProfile: "fast" | "fresh" | "audited" | "remote";
-    readonly daggerModuleDigest: Sha256;
-    readonly daggerEngineDigest: Sha256;
-    readonly requiredSuites: readonly string[];
-    readonly document: unknown;
-  };
-  readonly verifier: {
-    readonly workflowRef: string;
-    readonly workflowSha: string;
-    readonly reusableWorkflowRef: string;
-    readonly reusableWorkflowSha: string;
-    readonly verifierDigest: Sha256;
-  };
+  readonly policy: Parameters<typeof buildAssignment>[0]["policy"];
+  /** Present only when `execution.mode` is `remote`; a local run pins no GitHub workflow. */
+  readonly verifier?: Parameters<typeof buildAssignment>[0]["verifier"];
   readonly execution: Parameters<typeof buildAssignment>[0]["execution"];
   readonly now: string;
   readonly executionSeconds: number;
@@ -159,7 +147,7 @@ export async function runTurn(
       workReceiptDigest: ctx.workReceiptDigest,
       previousTransitionDigest: ctx.previousTransitionDigest,
     },
-    verifier: ctx.verifier,
+    ...(ctx.verifier !== undefined ? { verifier: ctx.verifier } : {}),
     issuedAt: ctx.now,
     executionSeconds: ctx.executionSeconds,
     nonce: ctx.nonceSeed,

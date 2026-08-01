@@ -116,6 +116,22 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
   return (await response.json()) as Verdict;
 }
 
+/**
+ * Post a heartbeat as `principalId`, the way a connected device does before a
+ * device-only entry can ever become scheduler-eligible. `routes()`'s own
+ * `authenticate` stub is fixed to "alice", so callers that need a different
+ * connected principal — `principalFor` maps a pull request's author to
+ * `principal_<githubUserId>`, not to the session's principal — must build
+ * their own app with `authenticate` overridden to match.
+ */
+async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = "d1") {
+  return app.request(
+    `/v1/queue/${REPO}/runners/heartbeat`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
+    e,
+  );
+}
+
 async function liveState(app: App, e: QueueRouteEnv) {
   const response = await app.request(`/v1/queue/${REPO}?ref=${encodeURIComponent(REF)}&live=1`, {}, e);
   return (await response.json()) as {
@@ -364,6 +380,60 @@ describe("the closed webhook itself, once the project or principal it looked up 
       expect(dispatch).toBeDefined();
       const body = JSON.parse(String(dispatch![1]?.body));
       expect(body.client_payload.pullRequestNumber).toBe(61);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  /**
+   * `driveLane`, the dispatcher every route goes through, withholds Actions
+   * for `fresh`/`audited`: those profiles have no fallback, so dispatching
+   * would spend a run to be told there is nothing for it to do. The `closed`
+   * webhook's own call to `driveTurnFor` — added to fix the starvation above —
+   * bypassed `driveLane` and, with it, that check. This proves the fix: a
+   * closed pull request still frees a device-only lane, but no longer pays
+   * GitHub Actions to find that out.
+   */
+  it("frees a device-only lane after the closed webhook, without dispatching Actions for it", async () => {
+    const e = env();
+    seed(raw);
+    raw
+      .prepare("UPDATE organizations SET installation_id = ? WHERE id = ?")
+      .run("inst_1", org);
+    raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled, active_policy_digest) VALUES (?, ?, ?, ?, 1, ?)",
+      )
+      .run("proj_1", org, REPO, "acme/repo", `sha256:${"d".repeat(64)}`);
+    raw
+      .prepare(
+        "INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status) VALUES (?, ?, 1, ?, 'active')",
+      )
+      .run(`sha256:${"d".repeat(64)}`, "proj_1", JSON.stringify({ schemaVersion: "1", securityProfile: "fresh", version: 1 }));
+    const app = routes();
+    await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    await authorize(app, e, 61);
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      const result = await queueFromPullRequest(e as unknown as Env, closedPayload());
+      expect(result).toEqual({ handled: true, detail: "entry cancelled" });
+
+      // The lane moved to 61 and 61 is offered, but under `fresh` only a
+      // connected device ever claims it — dispatching Actions here would be
+      // a wasted run.
+      const after = await liveState(app, e);
+      expect(stateOf(after, 61)).toBe("Offered");
+      const dispatch = fetch.mock.calls.find(([url]) => String(url).includes("/dispatches"));
+      expect(dispatch).toBeUndefined();
     } finally {
       fetch.mockRestore();
     }
@@ -1169,5 +1239,164 @@ describe("the work receipt behind a merge", () => {
       authorized: false,
       reason: "WORK_RECEIPT_UNREADABLE",
     });
+  });
+});
+
+/** A policy bundle naming `securityProfile`, with the other fields `driveLane` needs. */
+function policyNamed(securityProfile: string) {
+  return async () => ({
+    policyDigest: `sha256:${"b".repeat(64)}`,
+    pipelineDigest: `sha256:${"c".repeat(64)}`,
+    requiredSuites: ["unit"],
+    securityProfile,
+    organizationId: "org_1",
+    verifier: null,
+  });
+}
+
+describe("nudging a held lane", () => {
+  /**
+   * Same family as the tick loop's own `driveLane` guard (scheduled-tick.test.ts):
+   * `/nudge` called `deps.driveTurn` directly, bypassing the check that keeps
+   * Actions out of a lane a connected device already claimed over its heartbeat.
+   */
+  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      activePolicy: policyNamed("fresh"),
+      // `principalFor` maps pull request 59's author to "principal_59"; that is
+      // the principal that has to be connected for a device-only entry to be
+      // scheduler-eligible at all.
+      authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
+    });
+    await heartbeat(app, e);
+    await authorize(app, e, 59);
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`,
+      { method: "POST" },
+      e,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ nudged: false, reason: "DEVICE_ONLY", pullRequestNumber: 59 });
+    expect(driven).toEqual([]);
+  });
+
+  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+
+    // `authorize` itself already drove the fresh offer once; only the nudge
+    // under test is under scrutiny here.
+    driven.length = 0;
+    const response = await app.request(
+      `/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`,
+      { method: "POST" },
+      e,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: 59 });
+    expect(driven).toEqual([59]);
+  });
+});
+
+describe("an accepted candidate verdict", () => {
+  const pinned = {
+    repositoryId: REPO,
+    repositoryOwnerId: "162603603",
+    workflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+    workflowSha: null,
+    reusableWorkflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify-impl.yml@refs/heads/main",
+    reusableWorkflowSha: null,
+    expectedEventName: "repository_dispatch" as const,
+    defaultBranchRef: "refs/heads/main",
+  };
+  const claims = {
+    repository_id: REPO,
+    repository_owner_id: "162603603",
+    workflow_ref: pinned.workflowRef,
+    workflow_sha: "5".repeat(40),
+    job_workflow_ref: pinned.reusableWorkflowRef,
+    job_workflow_sha: "6".repeat(40),
+    run_id: "998877",
+    run_attempt: "1",
+    event_name: "repository_dispatch",
+    ref: "refs/heads/main",
+    jti: "jti-1",
+  };
+
+  function postVerdict(app: App, e: QueueRouteEnv, pr: number) {
+    return app.request(
+      `/v1/queue/${REPO}/candidate-result`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          pullRequestNumber: pr,
+          candidateSha: "c".repeat(40),
+          candidateTreeOid: TREE,
+          baseSha: "b".repeat(40),
+          accepted: true,
+          suites: [{ name: "unit", outcome: "passed", durationMs: 100 }],
+        }),
+      },
+      e,
+    );
+  }
+
+  /**
+   * A pinned verifier runs on Actions to check the integrated candidate under
+   * every profile that requires one — `fresh` and `audited` included, since a
+   * developer's own machine cannot attest to the merge tree itself. What must
+   * not happen under those profiles is the *second* dispatch this callback used
+   * to fire directly through `deps.driveTurn`, pushing the merge turn through
+   * Actions for a lane the connected device already claimed over its heartbeat.
+   */
+  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: policyNamed("fresh"),
+      // `principalFor` maps pull request 59's author to "principal_59"; that is
+      // the principal that has to be connected for a device-only entry to be
+      // scheduler-eligible at all.
+      authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
+    });
+    await heartbeat(app, e);
+    await authorize(app, e, 59);
+
+    const response = await postVerdict(app, e, 59);
+    expect(response.status).toBe(202);
+    expect(driven).toEqual([]);
+  });
+
+  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+
+    // `authorize` itself already drove the fresh offer once; only the verdict
+    // callback under test is under scrutiny here.
+    driven.length = 0;
+    const response = await postVerdict(app, e, 59);
+    expect(response.status).toBe(202);
+    expect(driven).toEqual([59]);
   });
 });

@@ -14,7 +14,10 @@ import { projectPolicyState } from "./policy-state.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
+import { capabilityFor, requiresDeviceOnly } from "./queue/runners.js";
+import { foldCapability } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
+import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
@@ -1347,13 +1350,20 @@ export async function queueFromPullRequest(env: Env, payload: {
     // something drives it. The eject route drives through `driveLane`; this
     // webhook has no route deps to borrow it from, so it repeats the same
     // lookup directly against `driveTurnFor`, the same dispatcher the route
-    // uses underneath.
+    // uses underneath — and the same `requiresDeviceOnly` check `driveLane`
+    // applies, read here with `readActivePolicy` directly rather than through
+    // a `deps` object this module-level handler does not have. Skipping the
+    // check would spend an Actions run under `fresh`/`audited`, where no
+    // workflow can ever claim it.
     const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
     if (holder !== undefined) {
-      try {
-        await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
-      } catch {
-        /* the turn survives; a later tick or the drain asks again */
+      const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
+      if (!requiresDeviceOnly(policy?.securityProfile ?? null)) {
+        try {
+          await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
+        } catch {
+          /* the turn survives; a later tick or the drain asks again */
+        }
       }
     }
 
@@ -1380,6 +1390,26 @@ export async function queueFromPullRequest(env: Env, payload: {
 
   const draft = pr?.draft === true;
   const open = pr?.state === "open";
+  const ready = !draft && open;
+  const basePrimaryReason: BlockingReason | null = draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : null;
+
+  // A developer who is already heartbeating when the pull request is opened
+  // must not need an absent-to-present transition to become eligible — the
+  // heartbeat route only fires on that transition, so if this webhook wrote
+  // AGENT_OFFLINE unconditionally here, a machine that showed up first would
+  // never be corrected. Read before the transaction for the same reason
+  // `/authorize` does: `runOnQueue`'s callback is synchronous.
+  const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
+  const capability = ready
+    ? await capabilityFor(
+        env.DB as unknown as D1Like,
+        String(repositoryId),
+        principal.id,
+        new Date().toISOString(),
+        policy?.securityProfile ?? null,
+      )
+    : { serverExecutable: true, compatibleRunnerConnected: false };
+  const folded = foldCapability({ ready, primaryReason: basePrimaryReason }, capability);
 
   await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
     commands.requestQueue({
@@ -1396,9 +1426,9 @@ export async function queueFromPullRequest(env: Env, payload: {
     commands.evaluateReadiness({
       idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
       entryId,
-      ready: !draft && open,
-      schedulerEligible: false,
-      primaryReason: draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : "AGENT_OFFLINE",
+      ready,
+      schedulerEligible: folded.schedulerEligible,
+      primaryReason: folded.primaryReason,
     });
   });
 

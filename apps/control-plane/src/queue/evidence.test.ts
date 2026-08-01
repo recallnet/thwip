@@ -42,14 +42,6 @@ function recordingSigner(): Signer & { signed: Uint8Array[] } {
   };
 }
 
-const verifier = {
-  workflowRef: "recallnet/thwip/.github/workflows/verify.yml@refs/heads/main",
-  workflowSha: "5".repeat(40),
-  reusableWorkflowRef: "recallnet/thwip/.github/workflows/impl.yml@refs/heads/main",
-  reusableWorkflowSha: "6".repeat(40),
-  verifierDigest: D("a"),
-};
-
 async function assignmentDoc(over: Record<string, unknown> = {}) {
   return {
     ...(await buildAssignment({
@@ -68,6 +60,7 @@ async function assignmentDoc(over: Record<string, unknown> = {}) {
       policy: {
         version: 4,
         securityProfile: "fresh",
+        runner: "dagger",
         daggerModuleDigest: D("c"),
         daggerEngineDigest: D("d"),
         requiredSuites: ["lint", "test"],
@@ -75,7 +68,6 @@ async function assignmentDoc(over: Record<string, unknown> = {}) {
       },
       execution: { mode: "run", profile: "fresh", runnerPrincipalId: "alice", deviceKeyId: "key-1" },
       evidence: { workReceiptDigest: D("e"), previousTransitionDigest: null },
-      verifier,
       issuedAt: "2026-07-29T12:00:00Z",
       executionSeconds: 20 * 60,
       nonce: "nonce-1",
@@ -103,6 +95,7 @@ describe("buildAssignment", () => {
       policy: {
         version: 4,
         securityProfile: "fresh",
+        runner: "dagger",
         daggerModuleDigest: D("c"),
         daggerEngineDigest: D("d"),
         requiredSuites: ["lint", "test"],
@@ -111,7 +104,6 @@ describe("buildAssignment", () => {
       },
       execution: { mode: "run", profile: "fresh", runnerPrincipalId: "alice", deviceKeyId: "key-1" },
       evidence: { workReceiptDigest: D("e"), previousTransitionDigest: null },
-      verifier,
       issuedAt: "2026-07-29T12:00:00Z",
       executionSeconds: 20 * 60,
       nonce: "nonce-1",

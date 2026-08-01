@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { queueKey } from "@thwip/queue-domain";
+import { queueKey, type BlockingReason } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
@@ -20,6 +20,8 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
+import { capabilityFor, recordHeartbeat, requiresDeviceOnly } from "./runners.js";
+import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
@@ -384,19 +386,54 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
 }
 
+/**
+ * Why a lane was, or was not, driven through Actions.
+ *
+ * `nudge` reports these to its caller as a reason code; every other caller of
+ * `driveLane` fires and forgets, so it can ignore the return value entirely.
+ */
+export type DriveLaneOutcome =
+  | { readonly dispatched: false; readonly reason: "LANE_IDLE" }
+  | { readonly dispatched: false; readonly reason: "DEVICE_ONLY"; readonly pullRequestNumber: number }
+  | { readonly dispatched: false; readonly reason: "DISPATCH_FAILED"; readonly pullRequestNumber: number }
+  | { readonly dispatched: true; readonly pullRequestNumber: number };
+
 async function driveLane(
   env: QueueRouteEnv,
-  deps: { driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void> },
+  deps: {
+    driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
+    activePolicy(env: QueueRouteEnv, repositoryId: string): Promise<{ securityProfile: string } | null>;
+  },
   repositoryId: string,
   snapshot: QueueSnapshot,
-): Promise<void> {
+): Promise<DriveLaneOutcome> {
   const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-  if (holder === undefined) return;
+  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
+
+  // The security profile is a repository-wide setting, not a per-entry one,
+  // so one lookup answers for whichever entry holds the lane. `fresh` and
+  // `audited` have no fallback to GitHub Actions at all: the offer is only
+  // ever claimed by a connected device, over the heartbeat response, so
+  // dispatching here would spend an Actions run to be told there is nothing
+  // for it to do. This is a narrowing, not a removal — every other profile
+  // still needs the dispatch, and still gets it.
+  //
+  // This is the one place `driveTurn` is ever called. Every caller that wants
+  // to drive a lane goes through here, so this predicate cannot be forgotten
+  // at a call site the way it was at `/nudge` and the candidate-verdict
+  // callback.
+  const policy = await deps.activePolicy(env, repositoryId);
+  if (requiresDeviceOnly(policy?.securityProfile ?? null)) {
+    return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: holder.pullRequestNumber };
+  }
+
   try {
     await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
   } catch {
     /* the turn survives; a later tick or the drain asks again */
+    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber };
   }
+  return { dispatched: true, pullRequestNumber: holder.pullRequestNumber };
 }
 
 /**
@@ -844,6 +881,82 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     return c.json({ result });
   });
 
+  /**
+   * A runner says it is here (plan.md §5.0).
+   *
+   * The principal comes from the session, never the body, so a runner cannot
+   * claim to be somebody else. Upserts the heartbeat row; only on the
+   * absent-to-present transition does this touch any queue document, so a
+   * runner polling every fifteen seconds costs one row write per call and a
+   * queue write only the first time it shows up.
+   */
+  app.post("/v1/queue/:repositoryId/runners/heartbeat", async (c) => {
+    const repositoryId = decimal(c.req.param("repositoryId"));
+    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+
+    const body = (await c.req.json().catch(() => ({}))) as { deviceKeyId?: string };
+    if (typeof body.deviceKeyId !== "string" || body.deviceKeyId.length === 0) {
+      return c.json({ error: "deviceKeyId required" }, 400);
+    }
+
+    const db = c.env.DB as unknown as D1Like;
+    const now = new Date().toISOString();
+    const { wasOffline } = await recordHeartbeat(db, {
+      repositoryId,
+      principalId: who.principalId,
+      deviceKeyId: body.deviceKeyId,
+      now,
+    });
+
+    const projects = await db
+      .prepare("SELECT base_ref AS baseRef FROM queue_projects WHERE github_repository_id = ? AND enabled = 1")
+      .bind(repositoryId)
+      .all<{ baseRef: string }>();
+
+    let holdsOffer = false;
+    for (const { baseRef } of projects.results) {
+      if (wasOffline) {
+        // A heartbeat names a repository, not a branch: the principal's Ready
+        // entry could sit on any base ref this repository queues, so every
+        // enabled one is checked.
+        const { snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+          for (const entry of buildSnapshot(store).entries) {
+            if (
+              entry.sponsorPrincipalId === who.principalId &&
+              !entry.schedulerEligible &&
+              entry.primaryReason === "AGENT_OFFLINE"
+            ) {
+              commands.evaluateReadiness({
+                idempotencyKey: `runner-online:${entry.entryId}:${now}`,
+                entryId: entry.entryId,
+                ready: true,
+                schedulerEligible: true,
+                primaryReason: null,
+              });
+            }
+          }
+        });
+        await driveLane(c.env, deps, repositoryId, snapshot);
+        if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
+          holdsOffer = true;
+        }
+      } else {
+        // No write on the common case: read the document as it stands rather
+        // than run it through the compare-and-swap just to answer a question.
+        const loaded = await loadQueueState(db, repositoryId, baseRef);
+        const snapshot = buildSnapshot(loaded.store);
+        if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
+          holdsOffer = true;
+        }
+      }
+    }
+
+    return c.json({ holdsOffer });
+  });
+
   /** Administrative pause, resume, and rebaseline (plan.md §28.5). */
   app.post("/v1/queue/:repositoryId/pause", async (c) => {
     const repositoryId = decimal(c.req.param("repositoryId"));
@@ -1120,12 +1233,17 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // has landed, the queue knows whose turn it is, so it tells that pull request
     // rather than leaving it to ask. Only on acceptance, and only when this is the
     // first time we have recorded it, so a retried report does not re-drive.
+    //
+    // Through `driveLane`, not `driveTurn` directly: this candidate verdict is a
+    // claim about the integrated tree, established by a pinned verifier that runs
+    // on Actions under every profile that requires one — `fresh` and `audited`
+    // included, since a developer's own machine cannot attest to the merge tree
+    // for it. The lane it unblocks can still be device-only, and only `driveLane`
+    // knows not to spend an Actions run telling a connected device something it
+    // already claimed over its heartbeat.
     if (body.accepted === true && stored.status === "applied") {
-      try {
-        await deps.driveTurn(c.env, repositoryId, body.pullRequestNumber);
-      } catch {
-        /* the turn survives; the drain re-drives it if this was the only chance */
-      }
+      const { snapshot: forDrive } = await readQueue(c.env, repositoryId, baseRef);
+      await driveLane(c.env, deps, repositoryId, forDrive);
     }
 
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
@@ -1196,14 +1314,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // the merge workflow asks the queue itself and does nothing if the answer is
     // no — but it is a wasted run and the same habit that wedged the lane once
     // already. Reading the queue costs one row.
+    //
+    // Through `driveLane`, not `deps.driveTurn` directly, so a lane held under a
+    // device-only profile is not pushed through Actions: the connected device
+    // already claimed it over its heartbeat, and dispatching anyway spends a
+    // whole run to be told there is nothing for it to do.
     const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
     const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
     if (holder === undefined) return c.json({ nudged: false, reason: "LANE_IDLE" });
 
-    try {
-      await deps.driveTurn(c.env, repositoryId, holder.pullRequestNumber);
-    } catch {
-      return c.json({ nudged: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber });
+    const outcome = await driveLane(c.env, deps, repositoryId, snapshot);
+    if (!outcome.dispatched) {
+      return c.json({ nudged: false, reason: outcome.reason, pullRequestNumber: holder.pullRequestNumber });
     }
     return c.json({ nudged: true, pullRequestNumber: holder.pullRequestNumber, state: holder.state });
   });
@@ -1323,6 +1445,27 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const pullRequestNumber = body.pullRequestNumber;
     const headSha = body.headSha;
 
+    const baseReady = body.proofAccepted === true && body.draft !== true;
+    const basePrimaryReason: BlockingReason | null =
+      body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING";
+
+    // Runner presence has to be read before the transaction, not inside it:
+    // `onQueue`'s callback runs synchronously against the open store, and this
+    // is a network round trip. Skipped entirely when `principalId` is null —
+    // there is nobody to be connected — and when the profile has no device-only
+    // requirement, `capabilityFor` never touches `queue_runners` at all.
+    const capability =
+      principalId === null
+        ? { serverExecutable: true, compatibleRunnerConnected: false }
+        : await capabilityFor(
+            db,
+            repositoryId,
+            principalId,
+            new Date().toISOString(),
+            (await deps.activePolicy(c.env, repositoryId))?.securityProfile ?? null,
+          );
+    const folded = foldCapability({ ready: baseReady, primaryReason: basePrimaryReason }, capability);
+
     // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
     // against the stored document. This was a Durable Object round trip, which
     // is the one resource with a daily cliff; it is now a row read and, only when
@@ -1336,10 +1479,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             sponsorPrincipalId: principalId,
             sponsorGithubUserId: String(body.authorGithubUserId),
             headSha,
-            ready: body.proofAccepted === true && body.draft !== true,
-            schedulerEligible: body.proofAccepted === true && body.draft !== true,
-            primaryReason:
-              body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING",
+            ready: baseReady,
+            schedulerEligible: folded.schedulerEligible,
+            primaryReason: folded.primaryReason,
             // Time buckets, so a retried check re-evaluates rather than being
             // deduplicated against a decision taken minutes ago, while a burst of
             // parallel jobs for one head still collapses to one turn.
