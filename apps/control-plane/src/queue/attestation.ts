@@ -271,6 +271,15 @@ export async function storeAttestation(
         digest: row.digest,
         bytes: row.bytes,
       });
+      // Stamped here rather than left to the backfill: a row this mirror already
+      // wrote a durable copy for has no reason to sit in the backlog it exists to
+      // drain. Digest is content-addressed, so this is the same digest the row
+      // above was inserted under whether this call won or lost the race in
+      // storeAttestation's own insert.
+      await db
+        .prepare(`UPDATE queue_attestations SET mirrored_at = ? WHERE digest = ?`)
+        .bind(new Date().toISOString(), row.digest)
+        .run();
     } catch {
       /* the record is stored; the durable copy is retried by the backfill */
     }
