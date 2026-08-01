@@ -64,3 +64,44 @@ describe("the commit the workflow is told to write", () => {
     expect(DEFAULT_MERGE_METHOD).toBe("merge");
   });
 });
+
+/**
+ * Which commit the run reports as the one that landed.
+ *
+ * A losing merge run is told 405 "Merge already in progress" and then asks
+ * GitHub what became of the pull request. Git answered first: main already
+ * contained the head. The run then read the sha off the pull request, which was
+ * still open as far as that read was concerned, so it reported ff6ea882 — the
+ * test merge GitHub computes for an open pull request, a commit on no branch —
+ * and the queue signed chain record 54 saying main became it. Main became
+ * 0b207610.
+ *
+ * So the sha comes off the branch whenever git is what settled it.
+ */
+describe("the commit the workflow reports as landed", () => {
+  it("reads the merge off the base branch when git is what confirmed it", () => {
+    // The commit on the base branch whose parents include the head, which is
+    // the merge, rather than `.merge_commit_sha` from a pull request that has
+    // not caught up with its own merge.
+    expect(workflow).toContain("commits?sha=${BASE_REF#refs/heads/}");
+    expect(workflow).toContain('select(any(.parents[]; .sha == \\"$HEAD_SHA\\"))');
+  });
+
+  it("takes the pull request's own sha only where the pull request says it merged", () => {
+    // The arm git settles, from the compare read to the end of the loop. The
+    // pull request's sha must not appear anywhere in it. Reading it there is the
+    // whole of the bug: everything before this arm is guarded by `.merged`, and
+    // the candidate pin earlier in the run wants the test merge on purpose,
+    // because verifying the integration is what it is for.
+    const arm = workflow.slice(
+      workflow.indexOf('cmp=$(gh api "repos/$GITHUB_REPOSITORY/compare/'),
+      workflow.indexOf('[ "$unreadable" = "1" ] && return 2'),
+    );
+    expect(arm).toContain('printf \'%s\' "$onbase"');
+    expect(arm).not.toContain(".sha // empty");
+  });
+
+  it("leaves it to reconciliation when the branch cannot name the merge", () => {
+    expect(workflow).toContain("could not confirm what became of");
+  });
+});
