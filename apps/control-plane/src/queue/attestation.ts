@@ -196,6 +196,31 @@ export async function storeAttestation(
     .run();
 }
 
+/**
+ * The transition record this attempt already produced, if any.
+ *
+ * A merge is reported at least once, and sometimes more: two racing runs can
+ * both tell the queue their merge landed, or a single run can retry. The
+ * domain layer already deduplicates the transition itself by attempt id, but
+ * signing ran again on every call regardless — a fresh `observedAt` made a
+ * fresh digest every time, so a merge that landed once ended up with two
+ * signed records both claiming the same position in the chain. Checking here
+ * first, before anything is built or signed, is what makes the second report
+ * of a merge an idempotent no-op rather than a second link.
+ */
+export async function transitionRecordFor(db: D1Like, attemptId: string): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT digest FROM queue_attestations
+        WHERE attempt_id = ? AND transition_sequence IS NOT NULL
+        ORDER BY created_at ASC
+        LIMIT 1`,
+    )
+    .bind(attemptId)
+    .first<{ digest: string }>();
+  return row === null ? null : row.digest;
+}
+
 export async function readAttestation(
   db: D1Like,
   digest: string,

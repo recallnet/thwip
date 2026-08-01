@@ -303,9 +303,13 @@ describe("a merge that is not the one the queue authorized", () => {
         e,
       );
 
-    expect((await post()).status).toBe(200);
+    const firstResponse = await post();
+    expect(firstResponse.status).toBe(200);
+    const firstBody = (await firstResponse.json()) as { transitionDigest: string | null };
     // At-least-once delivery: the workflow can report the same merge twice.
-    expect((await post()).status).toBe(200);
+    const secondResponse = await post();
+    expect(secondResponse.status).toBe(200);
+    const secondBody = (await secondResponse.json()) as { transitionDigest: string | null };
 
     const snapshot = await liveState(app, e);
     expect(stateOf(snapshot, 59)).toBe("Merged");
@@ -316,6 +320,18 @@ describe("a merge that is not the one the queue authorized", () => {
       .get(REPO) as { c: number };
     // One merge is one link, however many times it was reported.
     expect(links.c).toBe(1);
+
+    // The stronger property: one merge signs one record. Two racing reports of
+    // the same merge used to each sign a fresh record — a new observedAt made a
+    // new digest every time — so the chain carried two links claiming sequence
+    // 47. Every report of this merge must resolve to the same signed row.
+    expect(secondBody.transitionDigest).toBe(firstBody.transitionDigest);
+    const attestations = raw
+      .prepare(
+        "SELECT COUNT(*) AS c FROM queue_attestations WHERE attempt_id = ? AND transition_sequence IS NOT NULL",
+      )
+      .get(attemptId) as { c: number };
+    expect(attestations.c).toBe(1);
   });
 });
 

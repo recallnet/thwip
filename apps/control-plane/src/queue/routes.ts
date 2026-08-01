@@ -29,6 +29,7 @@ import {
   signReusedIntent,
   signReusedRecord,
   storeAttestation,
+  transitionRecordFor,
 } from "./attestation.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
@@ -251,6 +252,32 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 }> {
   const skip = (detail: string) => ({ status: "skipped", sequence: null, digest: null, detail, snapshot: null });
 
+  // One merge, one signed record. The domain layer already deduplicates the
+  // transition itself by attempt id, but signing used to run again on every
+  // call regardless: a fresh `observedAt` made a fresh digest every time, so
+  // two racing reports of the same merge each got their own signed record and
+  // the chain carried two links claiming one position. Checked first, before
+  // anything is built or signed, so a second report of a merge this attempt
+  // already produced is idempotent all the way through rather than only at
+  // the transition.
+  const db = env.DB as unknown as D1Like;
+  const existingDigest = await transitionRecordFor(db, input.attemptId);
+  if (existingDigest !== null) {
+    const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
+      recordOnly(commands, store, {
+        attemptId: input.attemptId,
+        // Ignored on replay: the domain layer's idempotency key is keyed on
+        // attempt id alone, so this call can only ever return the transition
+        // this attempt already recorded.
+        kind: "reused",
+        digest: existingDigest,
+        baseSha: input.mergeSha,
+        witnessPrincipalIds: input.witnessPrincipalIds,
+      }),
+    );
+    return { status: result.transition.status, sequence: result.sequence, digest: existingDigest, snapshot };
+  }
+
   const attempt = input.attempt;
   if (attempt?.headSha == null || attempt.baseSha == null || attempt.receiptDigest == null) {
     return skip("the attempt no longer holds what the record would cite");
@@ -304,7 +331,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
-  await storeAttestation(env.DB as unknown as D1Like, {
+  await storeAttestation(db, {
     digest: signed.digest,
     kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
     repositoryId: input.repositoryId,
