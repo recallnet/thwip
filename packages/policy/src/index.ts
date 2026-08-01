@@ -314,6 +314,15 @@ export async function deriveProjectConfig(
   }
 
   const pipelineDigest = await canonicalDigest(pipeline);
+  // Audited is "fresh local receipt plus a full Dagger rerun in GitHub Actions
+  // before merge" (plan.md §19.3). Full, not sampled: every required suite has
+  // to be proven a second time by GitHub's own checks, on top of the signer's
+  // account of running it locally. Suites a project already names remote stay
+  // remote, so choosing Audited never subtracts a requirement.
+  const remoteSuites =
+    y.profile === "audited"
+      ? [...y.required, ...(y.remote ?? [])]
+      : (y.remote ?? []);
   const policy: PolicyBundleV1 = {
     schemaVersion: "1",
     projectId: `gh:${ids.repositoryId}`,
@@ -331,7 +340,7 @@ export async function deriveProjectConfig(
       digest: pipelineDigest,
       runner: y.pipeline === undefined ? "command" : "dagger",
       requiredSuites: y.required,
-      ...(y.remote !== undefined && y.remote.length > 0 ? { remoteSuites: y.remote } : {}),
+      ...(remoteSuites.length > 0 ? { remoteSuites } : {}),
     },
     proofMaxAgeSeconds: y.policy?.proof_max_age_seconds ?? 86400,
     audit: { basisPoints: 0, mandatoryPaths: [] },
