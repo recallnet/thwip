@@ -23,4 +23,6 @@ export interface Env {
   /* Thwip Queue: one Durable Object per repository and base ref, and the
      workflow that drives one integration turn. */
   BRANCH_QUEUE: DurableObjectNamespace<import("./queue/BranchQueue.js").BranchQueue>;
+  /** Digest-addressed evidence. Absent in environments that have no bucket. */
+  EVIDENCE?: R2Bucket;
 }

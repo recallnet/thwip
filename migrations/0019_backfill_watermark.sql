@@ -1,0 +1,12 @@
+-- The backfill's query had no WHERE and no cursor: it read the same oldest
+-- page every run, copied it, and reported nothing left even though rows past
+-- the page limit had never been touched. A backlog larger than one page
+-- never drained. This column is the cursor: it records when a row's durable
+-- copy was made, so the backfill can select only what it has not mirrored
+-- yet and the page it reads moves forward run over run instead of standing
+-- still.
+--
+-- Nullable, because every row already in the table predates this column and
+-- has not been mirrored by having it. NULL means "not yet copied," which is
+-- also what a brand-new row means before anything writes to it.
+ALTER TABLE queue_attestations ADD COLUMN mirrored_at TEXT;
