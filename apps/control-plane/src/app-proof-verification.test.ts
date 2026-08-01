@@ -16,6 +16,7 @@ import {
   appProofTaskFromWebhook,
   evaluateAppProof,
   loadGithubProofTargets,
+  pendingCheckOutput,
   processAppProofVerification,
   proofHints,
   type AppProofEvaluation,
@@ -23,6 +24,7 @@ import {
   type AppProofRequest,
   type AppProofTarget,
 } from "./app-proof-verification.js";
+import { VerificationBundleError } from "./verification-bundle.js";
 import type { Env } from "./env.js";
 
 const REPOSITORY_ID = "1315419165";
@@ -385,14 +387,40 @@ describe("App-native exact-subject evaluation", () => {
   });
 });
 
+/** A project whose policy names a remote suite GitHub has not concluded yet. */
+function unsettledRemoteSuiteDependencies() {
+  const dependencies = evaluationDependencies([target()]);
+  dependencies.resolveBundle = vi.fn(async () => {
+    const resolved = bundle();
+    resolved.policy.pipeline.remoteSuites = ["build-darwin"];
+    return {
+      kind: "active" as const,
+      projectId: "project_1",
+      repository: "recallnet/thwip",
+      defaultBranch: "main",
+      configSource: "repository-override",
+      bundle: resolved,
+    };
+  });
+  dependencies.remoteCheckConclusions = vi.fn(async () => new Map([["build-darwin", "in_progress"]]));
+  dependencies.sleep = async () => undefined;
+  return dependencies;
+}
+
 function processDependencies(options: {
   mode: "observe" | "enforced";
   enabled?: boolean;
   evaluation?: AppProofEvaluation;
 }) {
   const completed: Array<{ checkRunId: string; conclusion: string; evaluation: AppProofEvaluation }> = [];
+  const pending: Array<{ checkRunId: string; evaluation: AppProofEvaluation }> = [];
   const audits: unknown[] = [];
   const dependencies: AppProofProcessDependencies = {
+    markPending: vi.fn(async () => undefined),
+    pendingVerificationExists: vi.fn(async () => true),
+    reportPending: vi.fn(async (_project, _request, checkRunId, _name, evaluation) => {
+      pending.push({ checkRunId, evaluation });
+    }),
     loadProject: vi.fn(async () => ({
       id: "project_1",
       repositoryId: REPOSITORY_ID,
@@ -426,7 +454,7 @@ function processDependencies(options: {
     now: () => NOW,
     verifierVersion: () => "test-verifier",
   };
-  return { dependencies, completed, audits };
+  return { dependencies, completed, pending, audits };
 }
 
 describe("App-native check publication", () => {
@@ -507,5 +535,162 @@ describe("App-native check publication", () => {
 
     expect(newRun.checkRunId).not.toBe(oldResult.checkRunId);
     expect(completions).toEqual([newRun.checkRunId, oldResult.checkRunId]);
+  });
+});
+
+/**
+ * The bug: a single read of GitHub decided the proof's fate, so a check that had
+ * not finished, and a read that failed outright, both became durable verdicts a
+ * developer read as "your tests failed". The merge path lost three merges to the
+ * same shape (.superpowers/sdd/not-merged-report.md).
+ */
+describe("evidence that has not settled", () => {
+  const env = { PUBLIC_ORIGIN: "https://thwip.example" } as Env;
+
+  it("leaves the check running while GitHub's check is still running", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    state.dependencies.evaluationDependencies = () => unsettledRemoteSuiteDependencies();
+
+    const result = await processAppProofVerification(env, request(), state.dependencies);
+
+    expect(result.evaluation.outcome).toBe("VERIFICATION_PENDING");
+    expect(state.completed).toEqual([]);
+    expect(state.dependencies.markCompleted).not.toHaveBeenCalled();
+    expect(state.dependencies.signAudit).not.toHaveBeenCalled();
+    expect(state.pending).toEqual([
+      expect.objectContaining({ checkRunId: `check_${result.verificationId}` }),
+    ]);
+    expect(state.dependencies.markPending).toHaveBeenCalled();
+  });
+
+  it("says what is happening and what happens next, in words a person can act on", () => {
+    const output = pendingCheckOutput(
+      {
+        outcome: "VERIFICATION_PENDING",
+        detail: "GitHub is still running `build-darwin` on this commit; thwip verifies the proof once that check reports",
+        policyDigest: null,
+        policyVersion: null,
+        configSource: "unavailable",
+        targets: [],
+      },
+      "https://thwip.example/v1/proof-verifications/proof_1",
+    );
+
+    expect(output.title).not.toMatch(/reject|fail/i);
+    expect(output.summary).toContain("build-darwin");
+    expect(output.summary).not.toContain("—");
+    expect(output.summary.length).toBeGreaterThan(40);
+  });
+
+  it("reads GitHub again before deciding a read that failed means anything", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    let attempts = 0;
+    state.dependencies.evaluationDependencies = () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("GitHub recallnet/thwip/pulls/53 -> 502");
+        return [target()];
+      });
+      return dependencies;
+    };
+    state.dependencies.sleep = async () => undefined;
+
+    const result = await processAppProofVerification(env, request(), state.dependencies);
+
+    expect(attempts).toBe(2);
+    expect(result.evaluation.outcome).toBe("PASS");
+    expect(state.completed[0]).toMatchObject({ conclusion: "success" });
+  });
+
+  it("never stores a failed read as a verdict", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    state.dependencies.evaluationDependencies = () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
+        throw new Error("GitHub recallnet/thwip/pulls/53 -> 502");
+      });
+      return dependencies;
+    };
+    state.dependencies.sleep = async () => undefined;
+
+    const result = await processAppProofVerification(env, request(), state.dependencies);
+
+    expect(result.evaluation.outcome).toBe("VERIFICATION_PENDING");
+    expect(state.completed).toEqual([]);
+    expect(state.dependencies.markCompleted).not.toHaveBeenCalled();
+  });
+
+  it("still records the outcomes a bundle failure decides", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    state.dependencies.evaluationDependencies = () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
+        throw new VerificationBundleError(503, "BUNDLE_UNAVAILABLE", "no bundle");
+      });
+      return dependencies;
+    };
+
+    const result = await processAppProofVerification(env, request(), state.dependencies);
+
+    expect(result.evaluation.outcome).toBe("BUNDLE_UNAVAILABLE");
+    expect(state.completed[0]).toMatchObject({ conclusion: "failure" });
+  });
+
+  it("comes back when a check finishes, so a pending verification settles", () => {
+    const repository = {
+      installation: { id: 99 },
+      repository: { id: Number(REPOSITORY_ID), full_name: "recallnet/thwip", owner: { id: Number(OWNER_ID) } },
+    };
+    expect(
+      appProofTaskFromWebhook("check_run", {
+        ...repository,
+        action: "completed",
+        check_run: {
+          name: "build-darwin",
+          head_sha: HEAD,
+          pull_requests: [{ number: 53, head: { sha: HEAD }, base: { ref: "main", repo: { id: Number(REPOSITORY_ID) } } }],
+        },
+      }),
+    ).toEqual({
+      kind: "verify",
+      request: request({ prAuthorGithubUserId: undefined, settleIfPending: true }),
+    });
+  });
+
+  it("ignores its own check finishing, which would otherwise verify forever", () => {
+    const repository = {
+      installation: { id: 99 },
+      repository: { id: Number(REPOSITORY_ID), full_name: "recallnet/thwip", owner: { id: Number(OWNER_ID) } },
+    };
+    for (const name of [APP_PROOF_CHECK, APP_PROOF_OBSERVE_CHECK]) {
+      expect(
+        appProofTaskFromWebhook("check_run", {
+          ...repository,
+          action: "completed",
+          check_run: {
+            name,
+            head_sha: HEAD,
+            pull_requests: [
+              { number: 53, head: { sha: HEAD }, base: { ref: "main", repo: { id: Number(REPOSITORY_ID) } } },
+            ],
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("does no work when nothing on that commit is waiting", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    state.dependencies.pendingVerificationExists = vi.fn(async () => false);
+    const evaluator = vi.fn(() => evaluationDependencies([target()]));
+    state.dependencies.evaluationDependencies = evaluator;
+
+    const result = await processAppProofVerification(env, request({ settleIfPending: true }), state.dependencies);
+
+    expect(result.evaluation.outcome).toBe("VERIFICATION_PENDING");
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(state.dependencies.createCheck).not.toHaveBeenCalled();
+    expect(state.dependencies.insertStarted).not.toHaveBeenCalled();
   });
 });
