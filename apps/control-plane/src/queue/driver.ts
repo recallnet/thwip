@@ -1,3 +1,4 @@
+import { requiredSuitesDigest } from "@thwip/queue-protocol";
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
 import { buildAssignment, buildMergeIntent, buildTransitionRecord, signAssignment, signMergeIntent, signTransitionRecord, type Signer } from "./evidence.js";
 import { classifyMergeResponse, decideMergeWrite, finalGuard, type GuardObservation, type MergeAttemptOutcome } from "./turn.js";
@@ -101,6 +102,12 @@ export interface TurnContext {
   readonly previousBase: { baseSha: string | null; treeOid: string | null };
   readonly queueDecisionDigest: Sha256;
   readonly workReceiptDigest: Sha256;
+  /**
+   * The pipeline the active policy names. A verified record binds it, so the
+   * caller reads it from the activated bundle rather than the record claiming a
+   * pipeline nobody looked up.
+   */
+  readonly pipelineDigest: Sha256;
   readonly policy: Parameters<typeof buildAssignment>[0]["policy"];
   /** Present only when `execution.mode` is `remote`; a local run pins no GitHub workflow. */
   readonly verifier?: Parameters<typeof buildAssignment>[0]["verifier"];
@@ -295,8 +302,16 @@ export async function runTurn(
       workReceiptDigest: ctx.workReceiptDigest,
       assignmentDigest: assignment.digest,
       integrationEvidenceDigest: verdict.integrationEvidenceDigest,
-      verifierResultDigest: verdict.resultDigest,
-      candidateCheckRunId: verdict.checkRunId,
+      pipelineDigest: ctx.pipelineDigest,
+      requiredSuitesDigest: await requiredSuitesDigest(ctx.policy.requiredSuites),
+      // The managed verifier ran the candidate in Actions, so its result and
+      // both run ids are what this execution is.
+      execution: {
+        ranOn: "github-actions",
+        verifierResultDigest: verdict.resultDigest,
+        checkRunId: verdict.checkRunId,
+        actionRunId: verdict.actionRunId,
+      },
     },
   });
   const intent = await signMergeIntent(intentDoc, signer);
@@ -436,9 +451,15 @@ export async function runTurn(
     workReceiptDigest: ctx.workReceiptDigest,
     assignmentDigest: assignment.digest,
     integrationEvidenceDigest: verdict.integrationEvidenceDigest,
-    verifierResultDigest: verdict.resultDigest,
-    checkRunId: verdict.checkRunId,
-    actionRunId: verdict.actionRunId,
+    policyDigest: assignment.record.policy.digest,
+    pipelineDigest: ctx.pipelineDigest,
+    requiredSuitesDigest: await requiredSuitesDigest(ctx.policy.requiredSuites),
+    execution: {
+      ranOn: "github-actions",
+      verifierResultDigest: verdict.resultDigest,
+      checkRunId: verdict.checkRunId,
+      actionRunId: verdict.actionRunId,
+    },
   });
   const transition = await signTransitionRecord(transitionDoc, signer);
   if ("error" in transition) {

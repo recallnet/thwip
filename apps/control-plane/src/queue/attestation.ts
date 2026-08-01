@@ -1,5 +1,5 @@
 import { parseMergeIntent, requiredSuitesDigest } from "@thwip/queue-protocol";
-import type { GitSubject, MergeIntentV1, Sha256 } from "@thwip/queue-protocol";
+import type { GitSubject, MergeIntentV1, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
   buildReusedProofRecord,
@@ -174,13 +174,14 @@ export async function signReusedRecord(input: {
 }
 
 /**
- * The queue's own signed records, for a merge backed by an assignment, a
- * signed integration receipt, and a verifier result.
+ * The queue's own signed records, for a merge backed by an assignment and a
+ * signed integration receipt.
  *
  * This is the strongest of the four kinds, and until the assignment and
  * receipt paths existed there was nothing to fill these fields with — a
- * verified merge asserts three things happened, and a record built without
- * them would be signing a claim the queue cannot back.
+ * verified merge asserts the queue dispatched the run and the device signed
+ * for it, and a record built without either would be signing a claim the
+ * queue cannot back.
  */
 
 export interface VerifiedEvidence {
@@ -188,47 +189,76 @@ export interface VerifiedEvidence {
   /** Tenant scope, threaded through so a signed record can be mirrored under it. */
   readonly organizationId: string;
   readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
   readonly assignmentDigest: Sha256;
   readonly integrationEvidenceDigest: Sha256;
-  readonly verifierResultDigest: Sha256;
-  /** The check run the candidate ran under. */
-  readonly candidateCheckRunId: string;
-  readonly actionRunId: string;
+  readonly execution: VerifiedExecutionV1;
 }
 
 /**
  * Gather what a verified merge rests on, or say what is missing.
  *
  * Every digest here names something that actually happened: an assignment
- * issued to a runner, a receipt that runner signed back, and a result the
- * verifier produced. Any one of those absent means the record must not be
- * built — a refusal here is what keeps the record from claiming more than
- * the queue can show.
+ * issued to a device, and a receipt that device signed back. Either one absent
+ * means the record must not be built — a refusal here is what keeps the record
+ * from claiming more than the queue can show.
+ *
+ * Where the run happened is the other thing this decides. Under `fresh` the
+ * suites ran on the device and GitHub saw none of it, so the execution names
+ * the device and stops there. Under `audited` a second execution ran in
+ * Actions, and that one has a result and both run ids or it is not recorded at
+ * all: half a rerun would be a claim with nothing behind it.
  */
 export function verifiedEvidenceFor(input: {
   readonly workReceiptDigest: Sha256;
   readonly organizationId: string;
   readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256 | null;
+  readonly requiredSuitesDigest: Sha256;
   readonly assignmentDigest: Sha256 | null;
   readonly integrationEvidenceDigest: Sha256 | null;
-  readonly verifierResultDigest: Sha256 | null;
-  readonly candidateCheckRunId: string;
-  readonly actionRunId: string;
+  /** The device the receipt came from, read from the accepted receipt. */
+  readonly deviceKeyId: string | null;
+  /** The audited profile's second execution, null where none ran. */
+  readonly rerun: {
+    readonly verifierResultDigest: Sha256 | null;
+    readonly checkRunId: string | null;
+    readonly actionRunId: string | null;
+  } | null;
 }): VerifiedEvidence | { missing: string } {
   if (input.assignmentDigest === null) return { missing: "no assignment was issued for this attempt" };
   if (input.integrationEvidenceDigest === null) {
     return { missing: "no integration receipt was signed for this attempt" };
   }
-  if (input.verifierResultDigest === null) return { missing: "no verifier result was produced for this attempt" };
+  if (input.pipelineDigest === null) return { missing: "the active policy names no pipeline" };
+
+  const execution = ((): VerifiedExecutionV1 | { missing: string } => {
+    if (input.rerun === null) {
+      // Nothing else ran, so the device is the whole account of the execution
+      // and a record without it would say the suites passed somewhere unnamed.
+      return input.deviceKeyId === null
+        ? { missing: "no device is named by the receipt this merge rests on" }
+        : { ranOn: "device", deviceKeyId: input.deviceKeyId };
+    }
+    const { verifierResultDigest, checkRunId, actionRunId } = input.rerun;
+    if (verifierResultDigest === null) return { missing: "the second execution produced no result" };
+    if (checkRunId === null || actionRunId === null) {
+      return { missing: "the second execution names no check run and no Actions run" };
+    }
+    return { ranOn: "github-actions", verifierResultDigest, checkRunId, actionRunId };
+  })();
+  if ("missing" in execution) return execution;
+
   return {
     workReceiptDigest: input.workReceiptDigest,
     organizationId: input.organizationId,
     policyDigest: input.policyDigest,
+    pipelineDigest: input.pipelineDigest,
+    requiredSuitesDigest: input.requiredSuitesDigest,
     assignmentDigest: input.assignmentDigest,
     integrationEvidenceDigest: input.integrationEvidenceDigest,
-    verifierResultDigest: input.verifierResultDigest,
-    candidateCheckRunId: input.candidateCheckRunId,
-    actionRunId: input.actionRunId,
+    execution,
   };
 }
 
@@ -264,8 +294,9 @@ export async function signVerifiedIntent(input: {
       workReceiptDigest: input.evidence.workReceiptDigest,
       assignmentDigest: input.evidence.assignmentDigest,
       integrationEvidenceDigest: input.evidence.integrationEvidenceDigest,
-      verifierResultDigest: input.evidence.verifierResultDigest,
-      candidateCheckRunId: input.evidence.candidateCheckRunId,
+      pipelineDigest: input.evidence.pipelineDigest,
+      requiredSuitesDigest: input.evidence.requiredSuitesDigest,
+      execution: input.evidence.execution,
     },
   });
   return signMergeIntent(doc, input.signer);
@@ -299,9 +330,10 @@ export async function signVerifiedRecord(input: {
     workReceiptDigest: input.evidence.workReceiptDigest,
     assignmentDigest: input.evidence.assignmentDigest,
     integrationEvidenceDigest: input.evidence.integrationEvidenceDigest,
-    verifierResultDigest: input.evidence.verifierResultDigest,
-    checkRunId: input.evidence.candidateCheckRunId,
-    actionRunId: input.evidence.actionRunId,
+    policyDigest: input.evidence.policyDigest,
+    pipelineDigest: input.evidence.pipelineDigest,
+    requiredSuitesDigest: input.evidence.requiredSuitesDigest,
+    execution: input.evidence.execution,
   });
   return signTransitionRecord(doc, input.signer);
 }
