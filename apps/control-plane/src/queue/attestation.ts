@@ -1,6 +1,12 @@
 import { requiredSuitesDigest } from "@thwip/queue-protocol";
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
-import { buildMergeIntent, buildReusedProofRecord, signMergeIntent, signTransitionRecord } from "./evidence.js";
+import {
+  buildMergeIntent,
+  buildReusedProofRecord,
+  buildTransitionRecord,
+  signMergeIntent,
+  signTransitionRecord,
+} from "./evidence.js";
 import type { Signer, SignedRecord } from "./evidence.js";
 import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
 import type { D1Like } from "./projection.js";
@@ -160,6 +166,137 @@ export async function signReusedRecord(input: {
       ? {}
       : { verifierResultDigest: input.evidence.verifierResultDigest }),
     checkRunId: input.evidence.proofCheckRunId,
+  });
+  return signTransitionRecord(doc, input.signer);
+}
+
+/**
+ * The queue's own signed records, for a merge backed by an assignment, a
+ * signed integration receipt, and a verifier result.
+ *
+ * This is the strongest of the four kinds, and until the assignment and
+ * receipt paths existed there was nothing to fill these fields with — a
+ * verified merge asserts three things happened, and a record built without
+ * them would be signing a claim the queue cannot back.
+ */
+
+export interface VerifiedEvidence {
+  readonly workReceiptDigest: Sha256;
+  /** Tenant scope, threaded through so a signed record can be mirrored under it. */
+  readonly organizationId: string;
+  readonly policyDigest: Sha256;
+  readonly assignmentDigest: Sha256;
+  readonly integrationEvidenceDigest: Sha256;
+  readonly verifierResultDigest: Sha256;
+  /** The check run the candidate ran under. */
+  readonly candidateCheckRunId: string;
+  readonly actionRunId: string;
+}
+
+/**
+ * Gather what a verified merge rests on, or say what is missing.
+ *
+ * Every digest here names something that actually happened: an assignment
+ * issued to a runner, a receipt that runner signed back, and a result the
+ * verifier produced. Any one of those absent means the record must not be
+ * built — a refusal here is what keeps the record from claiming more than
+ * the queue can show.
+ */
+export function verifiedEvidenceFor(input: {
+  readonly workReceiptDigest: Sha256;
+  readonly organizationId: string;
+  readonly policyDigest: Sha256;
+  readonly assignmentDigest: Sha256 | null;
+  readonly integrationEvidenceDigest: Sha256 | null;
+  readonly verifierResultDigest: Sha256 | null;
+  readonly candidateCheckRunId: string;
+  readonly actionRunId: string;
+}): VerifiedEvidence | { missing: string } {
+  if (input.assignmentDigest === null) return { missing: "no assignment was issued for this attempt" };
+  if (input.integrationEvidenceDigest === null) {
+    return { missing: "no integration receipt was signed for this attempt" };
+  }
+  if (input.verifierResultDigest === null) return { missing: "no verifier result was produced for this attempt" };
+  return {
+    workReceiptDigest: input.workReceiptDigest,
+    organizationId: input.organizationId,
+    policyDigest: input.policyDigest,
+    assignmentDigest: input.assignmentDigest,
+    integrationEvidenceDigest: input.integrationEvidenceDigest,
+    verifierResultDigest: input.verifierResultDigest,
+    candidateCheckRunId: input.candidateCheckRunId,
+    actionRunId: input.actionRunId,
+  };
+}
+
+export async function signVerifiedIntent(input: {
+  readonly operationId: string;
+  readonly attemptId: string;
+  readonly git: GitSubject;
+  readonly position: ChainPosition;
+  readonly pullRequestNumber: number;
+  readonly evidence: VerifiedEvidence;
+  readonly createdAt: string;
+  readonly signer: Signer;
+}): Promise<SignedRecord<unknown> | { error: string }> {
+  const doc = await buildMergeIntent({
+    operationId: input.operationId,
+    attemptId: input.attemptId,
+    git: input.git,
+    queueEpoch: input.position.queueEpoch,
+    turnSequence: input.position.turnSequence,
+    transitionSequence: input.position.transitionSequence,
+    pullRequestNumber: input.pullRequestNumber,
+    mergeMethod: "merge",
+    policyDigest: input.evidence.policyDigest,
+    previousTransitionDigest: input.position.previousTransitionDigest,
+    // What the workflow is told to write, so the intent specifies the commit
+    // rather than describing one after the fact.
+    commitTitle: mergeCommitTitle(input.pullRequestNumber),
+    commitMessage: mergeCommitMessage(input.operationId),
+    createdAt: input.createdAt,
+    evidence: {
+      kind: "verified",
+      workReceiptDigest: input.evidence.workReceiptDigest,
+      assignmentDigest: input.evidence.assignmentDigest,
+      integrationEvidenceDigest: input.evidence.integrationEvidenceDigest,
+      verifierResultDigest: input.evidence.verifierResultDigest,
+      candidateCheckRunId: input.evidence.candidateCheckRunId,
+    },
+  });
+  return signMergeIntent(doc, input.signer);
+}
+
+export async function signVerifiedRecord(input: {
+  readonly attemptId: string;
+  readonly git: GitSubject;
+  readonly position: ChainPosition;
+  readonly pullRequestNumber: number;
+  readonly evidence: VerifiedEvidence;
+  readonly mergeIntentDigest: Sha256;
+  readonly before: { readonly baseSha: string | null; readonly treeOid: string | null };
+  readonly final: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
+  readonly observedAt: string;
+  readonly signer: Signer;
+}): Promise<SignedRecord<unknown> | { error: string }> {
+  const doc = await buildTransitionRecord({
+    git: input.git,
+    queueEpoch: input.position.queueEpoch,
+    transitionSequence: input.position.transitionSequence,
+    previousTransitionDigest: input.position.previousTransitionDigest,
+    before: input.before,
+    final: input.final,
+    observedAt: input.observedAt,
+    mergeMethod: "merge",
+    attemptId: input.attemptId,
+    pullRequestNumber: input.pullRequestNumber,
+    mergeIntentDigest: input.mergeIntentDigest,
+    workReceiptDigest: input.evidence.workReceiptDigest,
+    assignmentDigest: input.evidence.assignmentDigest,
+    integrationEvidenceDigest: input.evidence.integrationEvidenceDigest,
+    verifierResultDigest: input.evidence.verifierResultDigest,
+    checkRunId: input.evidence.candidateCheckRunId,
+    actionRunId: input.evidence.actionRunId,
   });
   return signTransitionRecord(doc, input.signer);
 }
