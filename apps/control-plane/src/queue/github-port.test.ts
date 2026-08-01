@@ -11,6 +11,7 @@ import {
   type RepoRef,
 } from "./github-port.js";
 import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
+import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
 
 const REPO: RepoRef = {
   owner: "recallnet",
@@ -191,8 +192,8 @@ describe("mergePullRequest", () => {
       pullRequestNumber: 42,
       expectedHeadSha: HEAD,
       mergeMethod: "squash",
-      commitTitle: "Merge pull request #42",
-      commitMessage: "body",
+      commitTitle: mergeCommitTitle(42),
+      commitMessage: mergeCommitMessage("merge_att_1"),
     });
     const call = calls.find((c) => c.path.endsWith("/merge"))!;
     expect(call.method).toBe("PUT");
@@ -207,8 +208,8 @@ describe("mergePullRequest", () => {
       pullRequestNumber: 42,
       expectedHeadSha: HEAD,
       mergeMethod: "squash",
-      commitTitle: "t",
-      commitMessage: "b",
+      commitTitle: mergeCommitTitle(42),
+      commitMessage: mergeCommitMessage("merge_att_1"),
     });
     expect(result.status).toBe(409);
     expect(classify(result)).toEqual({ kind: "supersede", outcome: "HEAD_MOVED" });
@@ -222,8 +223,8 @@ describe("mergePullRequest", () => {
       pullRequestNumber: 42,
       expectedHeadSha: HEAD,
       mergeMethod: "squash",
-      commitTitle: "t",
-      commitMessage: "b",
+      commitTitle: mergeCommitTitle(42),
+      commitMessage: mergeCommitMessage("merge_att_1"),
     });
     expect(result.transportError).toBe("socket hang up");
     expect(classify(result)).toMatchObject({ kind: "reconcile" });
