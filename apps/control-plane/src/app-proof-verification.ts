@@ -34,6 +34,12 @@ export interface AppProofRequest {
   pullRequestNumber?: number;
   prAuthorGithubUserId?: string;
   mergeGroupBaseSha?: string;
+  /**
+   * Set on the work a finished check schedules. Verification runs only when a
+   * verification on this commit is still waiting for evidence, so a repository
+   * whose checks all settled pays nothing for other people's CI finishing.
+   */
+  settleIfPending?: boolean;
 }
 
 export type AppProofTask =
@@ -53,15 +59,22 @@ interface ProofWebhookPayload {
   repository?: { id?: number; full_name?: string; owner?: { id?: number } };
   pull_request?: PullRequestPayload;
   merge_group?: { head_sha?: string; base_sha?: string; base_ref?: string };
-  check_run?: { name?: string; external_id?: string };
+  check_run?: {
+    name?: string;
+    external_id?: string;
+    head_sha?: string;
+    pull_requests?: CheckPullRequest[];
+  };
   check_suite?: {
     head_sha?: string;
-    pull_requests?: Array<{
-      number?: number;
-      head?: { sha?: string };
-      base?: { ref?: string; repo?: { id?: number } };
-    }>;
+    pull_requests?: CheckPullRequest[];
   };
+}
+
+interface CheckPullRequest {
+  number?: number;
+  head?: { sha?: string };
+  base?: { ref?: string; repo?: { id?: number } };
 }
 
 const PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review", "edited"]);
@@ -92,6 +105,42 @@ function repositoryFacts(payload: ProofWebhookPayload) {
   return { repositoryId, ownerId, installationId, repository };
 }
 
+/** The pull request a check belongs to, taken from the base repository rather than the fork. */
+function verifyPullFromChecks(
+  repository: NonNullable<ReturnType<typeof repositoryFacts>>,
+  headSha: unknown,
+  pulls: CheckPullRequest[] | undefined,
+  settleIfPending = false,
+): AppProofTask | null {
+  const subjectSha = gitOid(headSha);
+  const pull = pulls?.find(
+    (candidate) =>
+      decimal(candidate.base?.repo?.id) === repository.repositoryId && candidate.head?.sha === subjectSha,
+  );
+  const pullRequestNumber = pull?.number;
+  const base = pull?.base?.ref;
+  if (
+    subjectSha === null ||
+    !Number.isInteger(pullRequestNumber) ||
+    (pullRequestNumber ?? 0) < 1 ||
+    typeof base !== "string" ||
+    base.length === 0
+  ) {
+    return null;
+  }
+  return {
+    kind: "verify",
+    request: {
+      event: "pull_request",
+      ...repository,
+      subjectSha,
+      baseRef: `refs/heads/${base}`,
+      pullRequestNumber: pullRequestNumber!,
+      ...(settleIfPending ? { settleIfPending: true } : {}),
+    },
+  };
+}
+
 /** Normalize only the webhook actions that can require a fresh exact-subject check. */
 export function appProofTaskFromWebhook(event: string, payload: ProofWebhookPayload): AppProofTask | null {
   if (event === "check_run" && payload.action === "rerequested") {
@@ -105,33 +154,17 @@ export function appProofTaskFromWebhook(event: string, payload: ProofWebhookPayl
   const repository = repositoryFacts(payload);
   if (repository === null) return null;
   if (event === "check_suite" && payload.action === "rerequested") {
-    const subjectSha = gitOid(payload.check_suite?.head_sha);
-    const pull = payload.check_suite?.pull_requests?.find(
-      (candidate) =>
-        decimal(candidate.base?.repo?.id) === repository.repositoryId &&
-        candidate.head?.sha === subjectSha,
-    );
-    const pullRequestNumber = pull?.number;
-    const base = pull?.base?.ref;
-    if (
-      subjectSha === null ||
-      !Number.isInteger(pullRequestNumber) ||
-      (pullRequestNumber ?? 0) < 1 ||
-      typeof base !== "string" ||
-      base.length === 0
-    ) {
-      return null;
-    }
-    return {
-      kind: "verify",
-      request: {
-        event: "pull_request",
-        ...repository,
-        subjectSha,
-        baseRef: `refs/heads/${base}`,
-        pullRequestNumber: pullRequestNumber!,
-      },
-    };
+    return verifyPullFromChecks(repository, payload.check_suite?.head_sha, payload.check_suite?.pull_requests);
+  }
+  // A check finishing is the moment a verification that was waiting on it can
+  // settle. Thwip's own checks are excluded, because verifying on the strength
+  // of a verification would never stop.
+  if (
+    event === "check_run" &&
+    payload.action === "completed" &&
+    ![APP_PROOF_CHECK, APP_PROOF_OBSERVE_CHECK].includes(payload.check_run?.name ?? "")
+  ) {
+    return verifyPullFromChecks(repository, payload.check_run?.head_sha, payload.check_run?.pull_requests, true);
   }
   if (event === "pull_request" && PULL_REQUEST_ACTIONS.has(payload.action ?? "")) {
     const pullRequestNumber = payload.pull_request?.number;
@@ -213,6 +246,8 @@ export interface AppProofEvaluationDependencies {
   loadTargets(request: AppProofRequest): Promise<AppProofTarget[]>;
   resolveBundle(input: VerificationBundleInput): Promise<VerificationBundleResolution>;
   remoteCheckConclusions(headSha: string): Promise<Map<string, string>>;
+  /** Waiting between reads of GitHub. Injected so tests spend no backoff. */
+  sleep?(ms: number): Promise<void>;
   verifySshSignature(args: {
     publicKey: string;
     namespace: string;
@@ -333,12 +368,17 @@ export async function evaluateAppProof(
       {
         verifySshSignature: dependencies.verifySshSignature,
         remoteCheckConclusions: dependencies.remoteCheckConclusions,
+        ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
       },
     );
     results.push(targetResult(target, result));
   }
 
-  const failed = results.find((result) => result.outcome !== "PASS");
+  // A target whose evidence has not settled outranks a target that failed. The
+  // failure keeps until the pending one settles, and nothing is published red
+  // while any part of the answer is still unknown.
+  const unsettled = results.find((result) => result.outcome === PENDING_OUTCOME);
+  const failed = unsettled ?? results.find((result) => result.outcome !== "PASS");
   return {
     outcome: failed?.outcome ?? "PASS",
     ...(failed?.detail !== undefined ? { detail: failed.detail } : {}),
@@ -373,6 +413,10 @@ export interface AppProofProcessDependencies {
     },
   ): Promise<void>;
   markCheckStarted(env: Env, id: string, checkRunId: string): Promise<void>;
+  /** Record that this attempt reached no verdict, so a later attempt can settle it. */
+  markPending(env: Env, id: string, evaluation: AppProofEvaluation, at: string): Promise<void>;
+  /** Whether any verification on this commit is still waiting for evidence. */
+  pendingVerificationExists(env: Env, project: ProofProject, subjectSha: string): Promise<boolean>;
   markCompleted(
     env: Env,
     id: string,
@@ -390,14 +434,99 @@ export interface AppProofProcessDependencies {
     conclusion: "success" | "failure" | "neutral",
     detailsUrl: string,
   ): Promise<void>;
+  /** Say on the check itself that thwip is waiting, and leave the check running. */
+  reportPending(
+    project: ProofProject,
+    request: AppProofRequest,
+    checkRunId: string,
+    checkName: string,
+    evaluation: AppProofEvaluation,
+    detailsUrl: string,
+  ): Promise<void>;
   evaluationDependencies(project: ProofProject): AppProofEvaluationDependencies;
   signAudit(env: Env, audit: ProofVerificationAuditV1): Promise<string>;
   now(): string;
   verifierVersion(env: Env): string;
+  /** Waiting between attempts. Injected so tests spend no backoff. */
+  sleep?(ms: number): Promise<void>;
 }
 
 function verificationId(): string {
   return `proof_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+/**
+ * The outcome that says nothing was decided. It is never stored as a verdict and
+ * never published as a conclusion, because a check GitHub has not finished and a
+ * read GitHub would not answer are both silence, not refusal.
+ */
+export const PENDING_OUTCOME = "VERIFICATION_PENDING";
+
+/** Same backoff as the merge path's `confirmMergeAbsence`, for the same reason. */
+const EVALUATION_ATTEMPTS = 3;
+const EVALUATION_DELAYS_MS = [1000, 2000, 4000] as const;
+
+function pendingEvaluation(detail: string): AppProofEvaluation {
+  return {
+    outcome: PENDING_OUTCOME,
+    detail: detail.slice(0, 500),
+    policyDigest: null,
+    policyVersion: null,
+    configSource: "unavailable",
+    targets: [],
+  };
+}
+
+/**
+ * Evaluate, and read GitHub again when the attempt threw. One failed read says
+ * nothing about the work; a durable outcome needs an attempt that got far enough
+ * to judge the proof. What still cannot be read is left pending.
+ */
+async function evaluateWithRetries(
+  request: AppProofRequest,
+  project: ProofProject,
+  dependencies: AppProofProcessDependencies,
+): Promise<AppProofEvaluation> {
+  const sleep = dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let lastError = "the evaluation was never attempted";
+  for (let attempt = 0; attempt < EVALUATION_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await sleep(EVALUATION_DELAYS_MS[Math.min(attempt - 1, 2)] ?? 1000);
+    try {
+      return await evaluateAppProof(request, dependencies.evaluationDependencies(project));
+    } catch (error) {
+      // A bundle error is a decision about this repository's configuration, not
+      // a read that failed, so it stands on the first attempt.
+      if (error instanceof VerificationBundleError) {
+        return {
+          outcome: error.code,
+          detail: error.message.slice(0, 500),
+          policyDigest: null,
+          policyVersion: null,
+          configSource: "unavailable",
+          targets: [],
+        };
+      }
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return pendingEvaluation(
+    `thwip could not finish reading GitHub for this commit after ${EVALUATION_ATTEMPTS} attempts (${lastError}); thwip tries again, and you can rerun this check yourself`,
+  );
+}
+
+/** What the check says while thwip is waiting. A person reads this before anything else. */
+export function pendingCheckOutput(
+  evaluation: AppProofEvaluation,
+  detailsUrl: string,
+): { title: string; summary: string } {
+  const said = evaluation.detail ?? "thwip is waiting for evidence about this commit";
+  const sentence = `${said.slice(0, 1).toUpperCase()}${said.slice(1).replace(/\.$/, "")}.`;
+  return {
+    title: "Waiting for evidence",
+    summary: [sentence, "Thwip publishes the verdict once the evidence settles.", `[What thwip is waiting for](${detailsUrl})`].join(
+      "\n\n",
+    ),
+  };
 }
 
 function checkConclusion(_mode: ProofProject["mode"], outcome: string): "success" | "failure" | "neutral" {
@@ -411,6 +540,16 @@ export async function processAppProofVerification(
 ): Promise<{ verificationId: string; checkRunId: string; evaluation: AppProofEvaluation }> {
   const project = await dependencies.loadProject(env, request);
   if (project === null) throw new Error(`repository ${request.repositoryId} is not synchronized`);
+  if (request.settleIfPending === true) {
+    const waiting = await dependencies.pendingVerificationExists(env, project, request.subjectSha);
+    if (!waiting) {
+      return {
+        verificationId: "",
+        checkRunId: "",
+        evaluation: pendingEvaluation("no verification on this commit is waiting for evidence"),
+      };
+    }
+  }
   const id = verificationId();
   const verifierVersion = dependencies.verifierVersion(env);
   const checkName = project.mode === "observe" ? APP_PROOF_OBSERVE_CHECK : APP_PROOF_CHECK;
@@ -436,31 +575,24 @@ export async function processAppProofVerification(
       targets: [],
     };
   } else {
-    try {
-      evaluation = await evaluateAppProof(request, dependencies.evaluationDependencies(project));
-    } catch (error) {
-      evaluation =
-        error instanceof VerificationBundleError
-          ? {
-              outcome: error.code,
-              detail: error.message.slice(0, 500),
-              policyDigest: null,
-              policyVersion: null,
-              configSource: "unavailable",
-              targets: [],
-            }
-          : {
-              outcome: "VERIFICATION_INFRASTRUCTURE_ERROR",
-              detail: (error instanceof Error ? error.message : String(error)).slice(0, 500),
-              policyDigest: null,
-              policyVersion: null,
-              configSource: "unavailable",
-              targets: [],
-            };
-    }
+    evaluation = await evaluateWithRetries(request, project, dependencies);
   }
 
   const evaluatedAt = dependencies.now();
+  if (evaluation.outcome === PENDING_OUTCOME) {
+    // No verdict was reached, so none is written down. The check keeps running,
+    // says why, and a later attempt settles it.
+    await dependencies.markPending(env, id, evaluation, evaluatedAt);
+    await dependencies.reportPending(
+      project,
+      request,
+      checkRunId,
+      checkName,
+      evaluation,
+      `${env.PUBLIC_ORIGIN}/v1/proof-verifications/${encodeURIComponent(id)}`,
+    );
+    return { verificationId: id, checkRunId, evaluation };
+  }
   const audit: ProofVerificationAuditV1 = {
     schemaVersion: "1",
     verificationId: id,
@@ -690,7 +822,15 @@ async function loadProofProject(env: Env, repositoryId: string): Promise<ProofPr
 
 const defaultStorageDependencies: Pick<
   AppProofProcessDependencies,
-  "loadProject" | "insertStarted" | "markCheckStarted" | "markCompleted" | "signAudit" | "now" | "verifierVersion"
+  | "loadProject"
+  | "insertStarted"
+  | "markCheckStarted"
+  | "markPending"
+  | "pendingVerificationExists"
+  | "markCompleted"
+  | "signAudit"
+  | "now"
+  | "verifierVersion"
 > = {
   loadProject: (env, request) => loadProofProject(env, request.repositoryId),
   async insertStarted(env, input) {
@@ -719,6 +859,33 @@ const defaultStorageDependencies: Pick<
       .bind(checkRunId, id)
       .run();
   },
+  async markPending(env, id, evaluation, at) {
+    // `outcome` stays null: this attempt decided nothing. The older attempts on
+    // the same commit are superseded so that a finished check schedules one
+    // fresh verification rather than one for every attempt that ever waited.
+    const row = await env.DB.prepare("SELECT project_id, subject_sha FROM proof_verifications WHERE id = ?")
+      .bind(id)
+      .first<{ project_id: string; subject_sha: string }>();
+    await env.DB.prepare("UPDATE proof_verifications SET status = 'pending', detail = ? WHERE id = ?")
+      .bind(evaluation.detail ?? null, id)
+      .run();
+    if (row !== null) {
+      await env.DB.prepare(
+        `UPDATE proof_verifications SET status = 'superseded'
+          WHERE project_id = ? AND subject_sha = ? AND status = 'pending' AND id != ?`,
+      )
+        .bind(row.project_id, row.subject_sha, id)
+        .run();
+    }
+  },
+  async pendingVerificationExists(env, project, subjectSha) {
+    const row = await env.DB.prepare(
+      "SELECT id FROM proof_verifications WHERE project_id = ? AND subject_sha = ? AND status = 'pending' LIMIT 1",
+    )
+      .bind(project.id, subjectSha)
+      .first<{ id: string }>();
+    return row !== null;
+  },
   async markCompleted(env, id, evaluation, auditJws, completedAt) {
     await env.DB.prepare(
       `UPDATE proof_verifications
@@ -733,6 +900,15 @@ const defaultStorageDependencies: Pick<
         completedAt,
         id,
       )
+      .run();
+    // This commit has an answer now, so nothing on it is still waiting.
+    await env.DB.prepare(
+      `UPDATE proof_verifications SET status = 'superseded'
+        WHERE status = 'pending'
+          AND project_id = (SELECT project_id FROM proof_verifications WHERE id = ?1)
+          AND subject_sha = (SELECT subject_sha FROM proof_verifications WHERE id = ?1)`,
+    )
+      .bind(id)
       .run();
   },
   signAudit(env, audit) {
@@ -793,19 +969,38 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
         }),
       });
     },
+    async reportPending(project, _request, checkRunId, _checkName, evaluation, detailsUrl) {
+      // The check keeps running. GitHub shows it as pending, branch protection
+      // waits, and the developer reads why instead of reading a failure.
+      await github(await token(project), project.repository, `/check-runs/${encodeURIComponent(checkRunId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          status: "in_progress",
+          details_url: detailsUrl,
+          output: pendingCheckOutput(evaluation, detailsUrl),
+        }),
+      });
+    },
     evaluationDependencies(project) {
       return {
         loadTargets: async (request) => loadGithubProofTargets(await token(project), request),
         resolveBundle: (input) => resolveVerificationBundle(env, input),
         remoteCheckConclusions: async (headSha) => {
-          const runs = await github<{ check_runs?: Array<{ name?: string; conclusion?: string | null }> }>(
+          const runs = await github<{
+            check_runs?: Array<{ name?: string; status?: string; conclusion?: string | null }>;
+          }>(
             await token(project),
             project.repository,
             `/commits/${encodeURIComponent(headSha)}/check-runs?filter=latest&per_page=100`,
           );
           const conclusions = new Map<string, string>();
           for (const run of runs.check_runs ?? []) {
-            if (typeof run.name === "string") conclusions.set(run.name, run.conclusion ?? "pending");
+            // A conclusion counts only when GitHub also says the run completed.
+            // The status is the independent fact that corroborates it, the way
+            // git ancestry corroborates a merge in `confirmMergeAbsence`.
+            const settled = run.status === "completed" && typeof run.conclusion === "string";
+            if (typeof run.name === "string") conclusions.set(run.name, settled ? run.conclusion! : "pending");
           }
           return conclusions;
         },
