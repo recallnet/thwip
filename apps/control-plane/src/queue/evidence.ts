@@ -8,6 +8,7 @@ import {
   recordDigest,
   parentOidsDigest,
   requiredSuitesDigest,
+  type AssignmentVerifier,
   type GitSubject,
   type IntegrationAssignmentV1,
   type MergeIntentV1,
@@ -124,15 +125,17 @@ export async function buildAssignment(input: {
   readonly policy: {
     readonly version: number;
     readonly securityProfile: "fast" | "fresh" | "audited" | "remote";
-    readonly daggerModuleDigest: Sha256;
-    readonly daggerEngineDigest: Sha256;
     readonly requiredSuites: readonly string[];
     /** The policy document, digested here rather than trusted as a value. */
     readonly document: unknown;
-  };
+  } & (
+    | { readonly runner: "command" }
+    | { readonly runner: "dagger"; readonly daggerModuleDigest: Sha256; readonly daggerEngineDigest: Sha256 }
+  );
   readonly execution: IntegrationAssignmentV1["execution"];
   readonly evidence: { readonly workReceiptDigest: Sha256; readonly previousTransitionDigest: Sha256 | null };
-  readonly verifier: IntegrationAssignmentV1["verifier"];
+  /** Present only for a `remote` assignment; a local run has no GitHub workflow to pin. */
+  readonly verifier?: AssignmentVerifier;
   readonly issuedAt: string;
   readonly executionSeconds: number;
   readonly nonce: string;
@@ -151,12 +154,14 @@ export async function buildAssignment(input: {
       digest: policyDigest,
       version: input.policy.version,
       securityProfile: input.policy.securityProfile,
-      daggerModuleDigest: input.policy.daggerModuleDigest,
-      daggerEngineDigest: input.policy.daggerEngineDigest,
+      runner: input.policy.runner,
       requiredSuites: [...input.policy.requiredSuites],
+      ...(input.policy.runner === "dagger"
+        ? { daggerModuleDigest: input.policy.daggerModuleDigest, daggerEngineDigest: input.policy.daggerEngineDigest }
+        : {}),
     },
     evidence: { ...input.evidence },
-    verifier: input.verifier,
+    ...(input.verifier !== undefined ? { verifier: input.verifier } : {}),
     timing: { issuedAt: input.issuedAt, notBefore: input.issuedAt, expiresAt },
     nonce: input.nonce,
   };

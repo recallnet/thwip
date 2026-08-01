@@ -2,7 +2,16 @@ import { parseMergeIntent, parseTransitionRecord, envelopeDigest } from "@thwip/
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { readAttestation, readChain, signReusedIntent, signReusedRecord, storeAttestation } from "./attestation.js";
+import {
+  readAttestation,
+  readChain,
+  signReusedIntent,
+  signReusedRecord,
+  signVerifiedIntent,
+  signVerifiedRecord,
+  storeAttestation,
+  verifiedEvidenceFor,
+} from "./attestation.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -220,6 +229,137 @@ describe("a merge the candidate verifier ran for", () => {
     const parsed = parseMergeIntent(JSON.parse(new TextDecoder().decode(signed.bytes)));
     if (!parsed.ok || parsed.value.kind !== "candidate-verified") throw new Error("wrong kind");
     expect(parsed.value.evidence.verifierResultDigest).toBe(D("9"));
+  });
+});
+
+/**
+ * The strongest kind, unreachable until an assignment and a signed receipt
+ * existed to back it. It asserts three things happened — an assignment was
+ * issued, the runner it was issued to signed a receipt back, and a verifier
+ * produced a result — and a record built without one of those would be
+ * signing a claim the queue cannot show.
+ */
+describe("a merge backed by an assignment and a signed receipt", () => {
+  const verifiedEvidence = {
+    workReceiptDigest: D("a"),
+    organizationId: "org_1",
+    policyDigest: D("b"),
+    assignmentDigest: D("0"),
+    integrationEvidenceDigest: D("1"),
+    verifierResultDigest: D("2"),
+    candidateCheckRunId: "990011",
+    actionRunId: "123456",
+  };
+
+  async function verifiedIntent() {
+    const signed = await signVerifiedIntent({
+      operationId: "merge_att-1",
+      attemptId: "att-1",
+      git,
+      position,
+      pullRequestNumber: 82,
+      evidence: verifiedEvidence,
+      createdAt: "2026-07-31T12:00:00Z",
+      signer,
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    return signed;
+  }
+
+  async function verifiedRecord(mergeIntentDigest: Sha256) {
+    const signed = await signVerifiedRecord({
+      attemptId: "att-1",
+      git,
+      position,
+      pullRequestNumber: 82,
+      evidence: verifiedEvidence,
+      mergeIntentDigest,
+      before: { baseSha: BASE, treeOid: "5".repeat(40) },
+      final: { sha: CANDIDATE, treeOid: TREE, parentShas: [BASE, HEAD] },
+      observedAt: "2026-07-31T12:01:00Z",
+      signer,
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    return signed;
+  }
+
+  it("parses as a verified merge and binds all four extra digests", async () => {
+    const i = await verifiedIntent();
+    const signed = await verifiedRecord(i.digest);
+    const parsed = parseTransitionRecord(JSON.parse(new TextDecoder().decode(signed.bytes)));
+    if (!parsed.ok) throw new Error(parsed.detail);
+    expect(parsed.value.kind).toBe("verified-merge");
+    if (parsed.value.kind !== "verified-merge") return;
+    expect(parsed.value.verifiedMerge.mergeIntentDigest).toBe(i.digest);
+    expect(parsed.value.verifiedMerge.assignmentDigest).toBe(verifiedEvidence.assignmentDigest);
+    expect(parsed.value.verifiedMerge.integrationEvidenceDigest).toBe(verifiedEvidence.integrationEvidenceDigest);
+    expect(parsed.value.verifiedMerge.verifierResultDigest).toBe(verifiedEvidence.verifierResultDigest);
+    expect(parsed.value.verifiedMerge.actionRunId).toBe(verifiedEvidence.actionRunId);
+  });
+
+  it("signs an intent that carries the same four digests", async () => {
+    const signed = await verifiedIntent();
+    const parsed = parseMergeIntent(JSON.parse(new TextDecoder().decode(signed.bytes)));
+    if (!parsed.ok || parsed.value.kind !== "verified") throw new Error("expected a verified intent");
+    expect(parsed.value.evidence.assignmentDigest).toBe(verifiedEvidence.assignmentDigest);
+    expect(parsed.value.evidence.integrationEvidenceDigest).toBe(verifiedEvidence.integrationEvidenceDigest);
+    expect(parsed.value.evidence.verifierResultDigest).toBe(verifiedEvidence.verifierResultDigest);
+  });
+
+  it("gathers the evidence when all three facts are present", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      verifierResultDigest: verifiedEvidence.verifierResultDigest,
+      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
+      actionRunId: verifiedEvidence.actionRunId,
+    });
+    expect(result).toEqual(verifiedEvidence);
+  });
+
+  it("refuses when no assignment was issued", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      assignmentDigest: null,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      verifierResultDigest: verifiedEvidence.verifierResultDigest,
+      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
+      actionRunId: verifiedEvidence.actionRunId,
+    });
+    expect(result).toEqual({ missing: "no assignment was issued for this attempt" });
+  });
+
+  it("refuses when no receipt was signed", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: null,
+      verifierResultDigest: verifiedEvidence.verifierResultDigest,
+      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
+      actionRunId: verifiedEvidence.actionRunId,
+    });
+    expect(result).toEqual({ missing: "no integration receipt was signed for this attempt" });
+  });
+
+  it("refuses when no verifier result was produced", () => {
+    const result = verifiedEvidenceFor({
+      workReceiptDigest: verifiedEvidence.workReceiptDigest,
+      organizationId: verifiedEvidence.organizationId,
+      policyDigest: verifiedEvidence.policyDigest,
+      assignmentDigest: verifiedEvidence.assignmentDigest,
+      integrationEvidenceDigest: verifiedEvidence.integrationEvidenceDigest,
+      verifierResultDigest: null,
+      candidateCheckRunId: verifiedEvidence.candidateCheckRunId,
+      actionRunId: verifiedEvidence.actionRunId,
+    });
+    expect(result).toEqual({ missing: "no verifier result was produced for this attempt" });
   });
 });
 
