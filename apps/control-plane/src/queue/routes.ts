@@ -331,7 +331,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
-  await storeAttestation(db, {
+  const stored = await storeAttestation(db, {
     digest: signed.digest,
     kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
     repositoryId: input.repositoryId,
@@ -342,16 +342,28 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     jws: signed.jws,
   });
 
+  // Lost a simultaneous race with another report of the same merge: the
+  // index refused this attempt a second chain position. The record that won
+  // is already stored and is what the transition has to cite — this call's
+  // own signed bytes never occupy a link and are not persisted.
+  let digest = signed.digest;
+  let kind = evidence.verifierResultDigest === undefined ? "reused" : "verified";
+  if (!stored.stored) {
+    digest = stored.digest as Sha256;
+    const winner = await readAttestation(db, stored.digest);
+    kind = winner?.kind === "candidate-verified-merge" ? "verified" : "reused";
+  }
+
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
     recordOnly(commands, store, {
       attemptId: input.attemptId,
-      kind: evidence.verifierResultDigest === undefined ? "reused" : "verified",
-      digest: signed.digest,
+      kind: kind as "verified" | "reused",
+      digest,
       baseSha: input.mergeSha,
       witnessPrincipalIds: input.witnessPrincipalIds,
     }),
   );
-  return { status: result.transition.status, sequence: result.sequence, digest: signed.digest, snapshot };
+  return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
 }
 
 async function driveLane(
