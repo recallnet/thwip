@@ -89,6 +89,51 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
     expect(body.links).toEqual([]);
   });
 
+  /**
+   * One message covered a bad repository id and a missing branch, and it named
+   * the id. A live investigation followed it to the wrong conclusion, deciding
+   * the route wanted an internal database key when the id it had was correct.
+   * This is the public verification surface, so an outside auditor gets no
+   * second chance to guess.
+   */
+  it("blames the ref, not the repository id, when the ref is malformed", async () => {
+    const e = env();
+    await seedProject(e, PUBLIC_REPO, 1);
+
+    const response = await routes(false).request(`/v1/queue/${PUBLIC_REPO}/chain?ref=main`, {}, e);
+
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toContain("ref");
+  });
+
+  /**
+   * A published chain is the artifact an outside verifier fetches. Requiring
+   * them to know the branch spelling before they can read it serves nobody.
+   */
+  it("resolves the branch itself when a published chain is asked for without one", async () => {
+    const e = env();
+    await seedProject(e, PUBLIC_REPO, 1);
+
+    const response = await routes(false).request(`/v1/queue/${PUBLIC_REPO}/chain`, {}, e);
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { links: unknown[] }).links).toEqual([]);
+  });
+
+  /**
+   * Resolving the branch for an unpublished chain would answer "does this
+   * private repository use the queue" to anyone who asked, which is the
+   * enumeration the 404 case below exists to prevent.
+   */
+  it("will not resolve a branch for a chain that has not been published", async () => {
+    const e = env();
+    await seedProject(e, PRIVATE_REPO, 0);
+
+    const response = await routes(false).request(`/v1/queue/${PRIVATE_REPO}/chain`, {}, e);
+
+    expect(response.status).toBe(400);
+  });
+
   it("refuses an unauthenticated caller for a project that has not opted in", async () => {
     const e = env();
     await seedProject(e, PRIVATE_REPO, 0);
