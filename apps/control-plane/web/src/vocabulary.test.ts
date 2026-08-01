@@ -85,7 +85,7 @@ describe("queue guidance", () => {
   });
 
   it("says the place is kept wherever that is the reassuring truth", () => {
-    for (const reason of ["REVIEW_REQUIRED", "REQUIRED_CHECK_FAILED", "NEEDS_REPAIR"]) {
+    for (const reason of ["REVIEW_REQUIRED", "REQUIRED_CHECK_FAILED", "NEEDS_REPAIR"] as const) {
       expect(BLOCKED_NEXT_ACTION[reason], reason).toMatch(/place/);
     }
   });
