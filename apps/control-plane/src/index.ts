@@ -1295,7 +1295,7 @@ app.get("/v1/proof-verifications/:id", async (c) => {
  * for a branch the queue does not manage, is ignored rather than treated as an
  * error — most repositories in an installation are not queue projects.
  */
-async function queueFromPullRequest(env: Env, payload: {
+export async function queueFromPullRequest(env: Env, payload: {
   action?: string;
   pull_request?: {
     number?: number;
@@ -1316,6 +1316,48 @@ async function queueFromPullRequest(env: Env, payload: {
   }
 
   const ref = `refs/heads/${baseRef}`;
+  const entryId = `entry_${repositoryId}_${number}`;
+  const action = payload.action ?? "sync";
+
+  // Cancelling needs nothing but the entry's own address.
+  //
+  // This used to sit behind the project-configured and activated-principal
+  // lookups below, both of which exist to decide whether a *new* entry may be
+  // placed. A closed pull request that already has an entry needs neither: it
+  // is not asking to be placed, it is asking to leave. Gating the cancel
+  // behind them meant a queue whose project row had gone quiet, or an author
+  // whose principal no longer resolved, silently kept a closed pull request
+  // holding the lane — which starved everything behind it until an operator
+  // ejected it by hand. That happened three times in one night, to pull
+  // requests 78, 96 and 97, each already merged.
+  if (action === "closed") {
+    const { snapshot } = await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
+      commands.cancel({
+        idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+        entryId,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    // Cancelling a closed entry that held the lane frees it exactly like an
+    // eject does, and the same ninety-second offer expires unclaimed unless
+    // something drives it. The eject route drives through `driveLane`; this
+    // webhook has no route deps to borrow it from, so it repeats the same
+    // lookup directly against `driveTurnFor`, the same dispatcher the route
+    // uses underneath.
+    const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+    if (holder !== undefined) {
+      try {
+        await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
+      } catch {
+        /* the turn survives; a later tick or the drain asks again */
+      }
+    }
+
+    return { handled: true, detail: "entry cancelled" };
+  }
+
   const project = await env.DB.prepare(
     "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
   )
@@ -1334,29 +1376,10 @@ async function queueFromPullRequest(env: Env, payload: {
           .first<{ id: string }>();
   if (principal === null) return { handled: false, detail: "author has no activated principal" };
 
-  const entryId = `entry_${repositoryId}_${number}`;
-  const action = payload.action ?? "sync";
   const draft = pr?.draft === true;
   const open = pr?.state === "open";
 
-  // Against the queue, not against the Durable Object.
-  //
-  // This kept writing to the object after the authority moved to D1, so GitHub's
-  // events reached a copy nothing reads. A closed pull request therefore stayed
-  // in the queue, and because a closed one is never coming back to take its turn,
-  // the first one to be closed while holding the lane held it indefinitely. That
-  // happened within the hour.
   await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
-    if (action === "closed") {
-      commands.cancel({
-        idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
-        entryId,
-        actorPrincipalId: "github",
-        reason: "the pull request was closed",
-      });
-      return;
-    }
-
     commands.requestQueue({
       idempotencyKey: `webhook:request:${entryId}`,
       entryId,
@@ -1377,7 +1400,6 @@ async function queueFromPullRequest(env: Env, payload: {
     });
   });
 
-  if (action === "closed") return { handled: true, detail: "entry cancelled" };
   return { handled: true, detail: `placed in ${project.activation_state}` };
 }
 

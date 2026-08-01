@@ -794,7 +794,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const reason = c.req.query("reason") ?? "withdrawn by the queue owner";
     const entryId = c.req.param("entryId");
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.cancel({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `cancel:${entryId}`),
         entryId,
@@ -802,6 +802,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         reason,
       }),
     );
+
+    // Ejecting frees the lane, and a freed lane is offered to somebody else. That
+    // offer expires in ninety seconds, so telling nobody about it wastes a turn
+    // and, on a quiet queue, stalls it entirely.
+    await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -942,7 +947,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Classified and applied in the same transaction. Split across two, the
     // attempt can move in between and the verdict lands against a revision that
     // was current when it was checked and is not when it is written.
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+    const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
       // A result for an older attempt is stale and harmless; one for the current
       // attempt at a stale revision is a conflict and must not be applied.
       if (typeof attemptRevision === "number") {
@@ -952,6 +957,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return { applied: commands.completeVerification(verdict) } as const;
     });
     if ("stale" in result) return c.json({ error: result.stale, code: result.stale }, 409);
+
+    // A rejected verdict terminates the attempt and frees the lane, same as an
+    // eject or a reconcile that gives up on one. An accepted verdict leaves the
+    // attempt live in MergeGuard, still holding the lane, so there is nothing to
+    // drive there — only the rejection path needs this.
+    if (!verdict.accepted) await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result: result.applied }, result.applied.status === "rejected" ? 409 : 202);
   });
 
@@ -1754,6 +1765,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         onQueue,
       });
 
+      // Confirming ends the attempt and frees the lane; the offer that follows
+      // expires unclaimed in ninety seconds unless something drives it.
+      await driveLane(c.env, deps, repositoryId, recorded.snapshot ?? afterConfirm);
+
       return c.json({
         resolved: confirmation.confirmed.status,
         transition: recorded.status,
@@ -1775,7 +1790,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         return c.json({ error: "mergeSha required" }, 400);
       }
       const mergeSha = body.mergeSha;
-      const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
         // The entry leaves the queue with the attempt. Terminating the attempt
         // alone left the entry Blocked and still scheduler-eligible, so the queue
         // went on holding a merged pull request as live work and could have
@@ -1810,6 +1825,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         });
         return { entryId, sequence, transition };
       });
+
+      // Ending the attempt frees the lane; the next offer expires unclaimed in
+      // ninety seconds unless something drives it.
+      await driveLane(c.env, deps, repositoryId, snapshot);
+
       return c.json({
         resolved: "external",
         transition: result.transition.status,
@@ -1824,13 +1844,22 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: 'observed must be "merged", "not-merged", or "merged-outside-the-turn"' }, 400);
     }
 
-    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
-      commands.confirmNotMerged({
-        idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
-        attemptId,
-        operationId: `merge_${attemptId}`,
-      }),
+    const { result: resolved, snapshot: afterNotMerged } = await onQueue(
+      c.env,
+      repositoryId,
+      baseRef,
+      ({ commands }) =>
+        commands.confirmNotMerged({
+          idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
+          attemptId,
+          operationId: `merge_${attemptId}`,
+        }),
     );
+
+    // Confirming not-merged frees the lane; the next offer expires unclaimed in
+    // ninety seconds unless something drives it.
+    await driveLane(c.env, deps, repositoryId, afterNotMerged);
+
     return c.json({
       resolved: resolved.status,
       attemptId,
@@ -1869,7 +1898,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const attemptId = body.attemptId;
     const operationId = body.operationId;
-    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+    const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
       // An outcome already in doubt has to be declared unknown before it can be
       // resolved, which is the reducer refusing to skip reconciliation.
       commands.mergeOutcomeUnknown({
@@ -1882,6 +1911,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         operationId,
       });
     });
+
+    // This is the path a losing merge run takes when GitHub refuses the merge.
+    // Confirming not-merged frees the lane, and the next offer expires unclaimed
+    // in ninety seconds unless something drives it — this is how the lane was
+    // freed without being driven in production.
+    await driveLane(c.env, deps, repositoryId, snapshot);
+
     return c.json({ resolved: resolved.status, detail: body.detail ?? null });
   });
 
