@@ -1681,7 +1681,7 @@ app.route(
       // browser session was a reason to leave the terminal, and an operator fixing a
       // stuck lane at 3am should not have to.
       if (requireAdmin(env, c.req.raw)) {
-        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true };
+        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true, operator: true };
       }
       const viewer = await resolveViewer(env, c.req.raw);
       if (viewer === null) return { ok: false as const, status: 401 as const };

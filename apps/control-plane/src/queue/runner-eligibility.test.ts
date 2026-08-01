@@ -112,7 +112,10 @@ function routesAs(principalId: string, securityProfile: string) {
   });
 }
 
-function heartbeat(app: ReturnType<typeof routesAs>, e: QueueRouteEnv, deviceKeyId = "d1") {
+/** A device id shaped the way `thwip queue work` sends one: a signing key fingerprint. */
+const DEVICE = `SHA256:${"a".repeat(43)}`;
+
+function heartbeat(app: ReturnType<typeof routesAs>, e: QueueRouteEnv, deviceKeyId = DEVICE) {
   return app.request(
     `/v1/queue/${REPO}/runners/heartbeat`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
