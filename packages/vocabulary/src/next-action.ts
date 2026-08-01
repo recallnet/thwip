@@ -62,6 +62,18 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The proof carries no result for a required suite. Add the suite to your pipeline and run thwip run again.",
   BUNDLE_EXPIRED: "The trust bundle expired, so no proof can be checked against it. Run thwip login to refresh it.",
 
+  /* The turn handed this machine work it refused to do. */
+  ASSIGNMENT_UNVERIFIED:
+    "The turn thwip handed this machine is not signed by a key thwip publishes, so nothing was run. Run thwip ship again, and if it happens twice send this output to whoever runs the queue.",
+  ASSIGNMENT_EXPIRED:
+    "The turn's execution window closed before the suites finished. Run thwip ship again and the queue will hand you another.",
+  ASSIGNMENT_MISMATCH:
+    "The receipt this machine signed answers a turn the queue is no longer running. Run thwip ship again to take a current one.",
+  DEVICE_MISMATCH:
+    "Another machine holds this turn. Run thwip ship on the machine that claimed it, or wait for the queue to offer the turn here.",
+  CANDIDATE_UNAVAILABLE:
+    "This machine cannot fetch the merged commit the queue built, so there is nothing to run the suites against. Check that you can reach origin, then run thwip ship again.",
+
   /* The work itself failed. */
   SUITE_FAILED: "A required suite failed on your machine. Fix it and run thwip ship again.",
   SUITE_NOT_PASSED: "A required suite did not pass. Fix it and run thwip run again.",
@@ -127,7 +139,6 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The branch moved outside the queue. An administrator has to rebaseline before merging resumes.",
   MERGE_REJECTED: "GitHub refused the merge. Read the branch protection rules on the base branch.",
   ADMIN_CANCELLED: "An administrator cancelled this attempt. Ask them why before queueing again.",
-  AUDIT_REQUIRED: "The policy asks for an independent rerun of this pipeline. It waits for that run to finish.",
 
   /* The branch needs work before it can integrate. */
   MERGE_CONFLICT: "Rebase or merge the base branch to clear the conflict.",
@@ -181,8 +192,6 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The queue refused its own merge intent, so nothing was merged. Send this output to whoever runs the queue.",
   CANDIDATE_DIGEST_MISMATCH:
     "The stored verdict does not match its digest, so it was changed after the verifier wrote it. Send this output to whoever runs the queue.",
-  AUDIT_DISAGREED:
-    "An independent rerun did not reproduce the signed result. Treat the claim as unproven and look at both runs.",
   BUNDLE_SIGNATURE_INVALID:
     "The trust bundle's signature does not check out, so nothing can be trusted from it. Send this output to whoever runs the queue.",
 };

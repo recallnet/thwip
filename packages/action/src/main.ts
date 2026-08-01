@@ -11,6 +11,7 @@ import {
 } from "@thwip/protocol";
 import servicePublicJwk from "../service-public.jwk.json" with { type: "json" };
 import { parseBundleResolutionBody } from "./bundle-resolution.js";
+import { collectMergeGroupTargets, type MergeGroupTarget } from "./merge-group-targets.js";
 
 interface CommitData {
   sha: string;
@@ -121,10 +122,7 @@ async function mergeBase(repoFullName: string, base: string, head: string): Prom
   return cmp.merge_base_commit.sha;
 }
 
-interface Target {
-  prHeadSha: string;
-  prAuthorId?: string;
-}
+type Target = MergeGroupTarget;
 
 async function requireBootstrapPrerequisites(
   fullName: string,
@@ -189,18 +187,18 @@ async function main(): Promise<void> {
   } else if (eventName === "merge_group") {
     const mg = event["merge_group"];
     baseRefName = (mg["base_ref"] as string).replace(/^refs\/heads\//, "");
-    // Walk the first-parent chain from the group head down to the group base;
-    // each hop's second parent is one PR's head commit.
-    let cursor = mg["head_sha"] as string;
-    const baseSha = mg["base_sha"] as string;
-    let hops = 0;
-    while (cursor !== baseSha && hops < 50) {
-      const c = await gh<CommitData>(`/repos/${fullName}/git/commits/${cursor}`);
-      if (c.parents.length >= 2) targets.push({ prHeadSha: c.parents[1]!.sha });
-      if (c.parents.length === 0) break;
-      cursor = c.parents[0]!.sha;
-      hops++;
-    }
+    targets.push(
+      ...(await collectMergeGroupTargets(
+        { headSha: mg["head_sha"] as string, baseSha: mg["base_sha"] as string },
+        {
+          commit: (sha) => gh<CommitData>(`/repos/${fullName}/git/commits/${sha}`),
+          pullsForCommit: (sha) =>
+            gh<Array<{ head: { sha: string }; user: { id: number } }>>(
+              `/repos/${fullName}/commits/${sha}/pulls?per_page=100`,
+            ),
+        },
+      )),
+    );
     if (targets.length === 0) {
       summary("thwip: FAIL — merge group contains no mergeable PR entries");
       process.exit(1);

@@ -84,13 +84,10 @@ function makeBundle(overrides?: (b: VerificationBundleV1) => void): Verification
       securityProfile: "fast",
       minimumPermission: "write",
       allowAuthorAsSigner: true,
-      evaluationMode: "head-tree",
       allowedKeyAlgorithms: ["ssh-ed25519"],
-      requireGithubKeyPresence: false,
       lease: { required: false, maxAgeSeconds: 1800 },
       pipeline: { digest: PIPELINE_DIGEST, runner: "command", requiredSuites: ["lint", "typecheck", "test"] },
       proofMaxAgeSeconds: 86400,
-      audit: { basisPoints: 0, mandatoryPaths: [] },
     },
     keys: [
       {
@@ -268,6 +265,22 @@ describe("verifyProof decision table", () => {
     });
     const facts = makeFacts({ prAuthorGithubUserId: "264261678" });
     expect((await run({ bundle, facts })).code).toBe("SIGNER_PERMISSION_INSUFFICIENT");
+  });
+
+  // The control is "somebody other than the author signed". Without an author
+  // the comparison is false and the merge goes through, which is the check
+  // reading as satisfied on missing data.
+  it("fails when the author may not sign and the checker does not know who the author is", async () => {
+    const bundle = makeBundle((b) => {
+      b.policy.allowAuthorAsSigner = false;
+    });
+    const r = await run({ bundle, facts: makeFacts() });
+    expect(r.code).toBe("SIGNER_PERMISSION_INSUFFICIENT");
+    expect(r.detail).toContain("who opened");
+  });
+
+  it("leaves projects that allow the author to sign alone when the author is unknown", async () => {
+    expect((await run({ facts: makeFacts() })).code).toBe("PASS");
   });
 
   it("fails when a required suite is missing", async () => {
@@ -596,118 +609,21 @@ describe("run leases", () => {
   });
 });
 
-describe("merge-tree evaluation", () => {
-  const MERGE = "e".repeat(40);
-  const mergeBundle = () =>
-    makeBundle((b) => {
-      b.policy.evaluationMode = "merge-tree";
+/**
+ * A proof carries one claim about what it covers: the head tree. `merge-tree`
+ * was a second mode nothing selected and nothing could produce, so a proof that
+ * claims it is a proof this verifier cannot judge.
+ */
+describe("evaluation modes this verifier accepts", () => {
+  it("refuses a proof that claims to cover a merge tree", async () => {
+    const statement = makeStatement((s) => {
+      (s.predicate.git as { evaluationMode: string }).evaluationMode = "merge-tree";
     });
-  const mergeStatement = (mergeTreeOid?: string) =>
-    makeStatement((s) => {
-      s.predicate.git.evaluationMode = "merge-tree";
-      if (mergeTreeOid !== undefined) s.predicate.git.mergeTreeOid = mergeTreeOid;
-    });
-
-  it("passes when the proof names the merge GitHub computes", async () => {
-    const r = await runWith(
-      { statement: mergeStatement(MERGE), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
-      deps,
-    );
-    expect(r.code).toBe("PASS");
+    const r = await runWith({ statement }, deps);
+    expect(r.code).toBe("PROOF_MALFORMED");
   });
 
-  it("refuses a proof that names a different merge tree", async () => {
-    const r = await runWith(
-      { statement: mergeStatement("f".repeat(40)), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
-      deps,
-    );
-    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
-  });
-
-  it("refuses a proof that names no merge tree", async () => {
-    const r = await runWith(
-      { statement: mergeStatement(), bundle: mergeBundle(), facts: makeFacts({ mergeTreeOid: MERGE }) },
-      deps,
-    );
-    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
-  });
-
-  it("refuses when the merge GitHub computes is unavailable", async () => {
-    const r = await runWith({ statement: mergeStatement(MERGE), bundle: mergeBundle() }, deps);
-    expect(r.code).toBe("SUBJECT_TREE_MISMATCH");
-  });
-
-  it("leaves head-tree projects alone", async () => {
+  it("accepts the head-tree claim every proof makes", async () => {
     expect((await runWith({}, deps)).code).toBe("PASS");
-  });
-});
-
-describe("requireGithubKeyPresence", () => {
-  const strict = () =>
-    makeBundle((b) => {
-      b.policy.requireGithubKeyPresence = true;
-    });
-
-  it("passes when GitHub publishes the enrolled key", async () => {
-    const r = await runWith(
-      { bundle: strict() },
-      { ...deps, githubUserSigningKeys: async () => ["ssh-ed25519 AAAATESTKEY andrew@laptop"] },
-    );
-    expect(r.code).toBe("PASS");
-  });
-
-  it("refuses when GitHub publishes other keys", async () => {
-    const r = await runWith({ bundle: strict() }, { ...deps, githubUserSigningKeys: async () => ["ssh-ed25519 AAAAOTHER"] });
-    expect(r.code).toBe("SIGNER_KEY_UNKNOWN");
-  });
-
-  it("refuses when nothing can read the signer's GitHub keys", async () => {
-    expect((await runWith({ bundle: strict() }, deps)).code).toBe("SIGNER_KEY_UNKNOWN");
-  });
-});
-
-describe("audit", () => {
-  const audited = (basisPoints: number, mandatoryPaths: string[] = []) =>
-    makeBundle((b) => {
-      b.policy.securityProfile = "audited";
-      b.policy.audit = { basisPoints, mandatoryPaths };
-    });
-
-  it("audits nothing when the rate is zero and no paths are protected", async () => {
-    expect((await runWith({ bundle: audited(0) }, deps)).code).toBe("PASS");
-  });
-
-  it("refuses when every proof is audited and no auditor is available", async () => {
-    expect((await runWith({ bundle: audited(10_000) }, deps)).code).toBe("AUDIT_REQUIRED");
-  });
-
-  it("passes when the audit re-run agrees", async () => {
-    const r = await runWith({ bundle: audited(10_000) }, { ...deps, auditProof: async () => ({ agrees: true }) });
-    expect(r.code).toBe("PASS");
-  });
-
-  it("refuses when the audit re-run disagrees", async () => {
-    const r = await runWith(
-      { bundle: audited(10_000) },
-      { ...deps, auditProof: async () => ({ agrees: false, detail: "test failed on re-run" }) },
-    );
-    expect(r.code).toBe("AUDIT_DISAGREED");
-  });
-
-  it("audits a change under a protected path whatever the sampling rate", async () => {
-    const r = await runWith(
-      { bundle: audited(0, ["infra/"]), facts: makeFacts({ changedPaths: ["infra/deploy.tf"] }) },
-      deps,
-    );
-    expect(r.code).toBe("AUDIT_REQUIRED");
-  });
-
-  it("leaves a change outside the protected paths alone", async () => {
-    const r = await runWith({ bundle: audited(0, ["infra/"]), facts: makeFacts({ changedPaths: ["src/app.ts"] }) }, deps);
-    expect(r.code).toBe("PASS");
-  });
-
-  it("refuses when the protected paths cannot be compared to the change", async () => {
-    expect((await runWith({ bundle: audited(0, ["infra/"]) }, deps)).code).toBe("AUDIT_REQUIRED");
   });
 });
