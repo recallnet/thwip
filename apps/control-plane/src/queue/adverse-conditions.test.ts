@@ -1171,3 +1171,152 @@ describe("the work receipt behind a merge", () => {
     });
   });
 });
+
+/** A policy bundle naming `securityProfile`, with the other fields `driveLane` needs. */
+function policyNamed(securityProfile: string) {
+  return async () => ({
+    policyDigest: `sha256:${"b".repeat(64)}`,
+    pipelineDigest: `sha256:${"c".repeat(64)}`,
+    requiredSuites: ["unit"],
+    securityProfile,
+    organizationId: "org_1",
+    verifier: null,
+  });
+}
+
+describe("nudging a held lane", () => {
+  /**
+   * Same family as the tick loop's own `driveLane` guard (scheduled-tick.test.ts):
+   * `/nudge` called `deps.driveTurn` directly, bypassing the check that keeps
+   * Actions out of a lane a connected device already claimed over its heartbeat.
+   */
+  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      activePolicy: policyNamed("fresh"),
+    });
+    await authorize(app, e, 59);
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`,
+      { method: "POST" },
+      e,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ nudged: false, reason: "DEVICE_ONLY", pullRequestNumber: 59 });
+    expect(driven).toEqual([]);
+  });
+
+  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+
+    // `authorize` itself already drove the fresh offer once; only the nudge
+    // under test is under scrutiny here.
+    driven.length = 0;
+    const response = await app.request(
+      `/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`,
+      { method: "POST" },
+      e,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: 59 });
+    expect(driven).toEqual([59]);
+  });
+});
+
+describe("an accepted candidate verdict", () => {
+  const pinned = {
+    repositoryId: REPO,
+    repositoryOwnerId: "162603603",
+    workflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+    workflowSha: null,
+    reusableWorkflowRef: "recallnet/thwip/.github/workflows/thwip-queue-verify-impl.yml@refs/heads/main",
+    reusableWorkflowSha: null,
+    expectedEventName: "repository_dispatch" as const,
+    defaultBranchRef: "refs/heads/main",
+  };
+  const claims = {
+    repository_id: REPO,
+    repository_owner_id: "162603603",
+    workflow_ref: pinned.workflowRef,
+    workflow_sha: "5".repeat(40),
+    job_workflow_ref: pinned.reusableWorkflowRef,
+    job_workflow_sha: "6".repeat(40),
+    run_id: "998877",
+    run_attempt: "1",
+    event_name: "repository_dispatch",
+    ref: "refs/heads/main",
+    jti: "jti-1",
+  };
+
+  function postVerdict(app: App, e: QueueRouteEnv, pr: number) {
+    return app.request(
+      `/v1/queue/${REPO}/candidate-result`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          pullRequestNumber: pr,
+          candidateSha: "c".repeat(40),
+          candidateTreeOid: TREE,
+          baseSha: "b".repeat(40),
+          accepted: true,
+          suites: [{ name: "unit", outcome: "passed", durationMs: 100 }],
+        }),
+      },
+      e,
+    );
+  }
+
+  /**
+   * A pinned verifier runs on Actions to check the integrated candidate under
+   * every profile that requires one — `fresh` and `audited` included, since a
+   * developer's own machine cannot attest to the merge tree itself. What must
+   * not happen under those profiles is the *second* dispatch this callback used
+   * to fire directly through `deps.driveTurn`, pushing the merge turn through
+   * Actions for a lane the connected device already claimed over its heartbeat.
+   */
+  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: policyNamed("fresh"),
+    });
+    await authorize(app, e, 59);
+
+    const response = await postVerdict(app, e, 59);
+    expect(response.status).toBe(202);
+    expect(driven).toEqual([]);
+  });
+
+  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      driveTurn: async (_e, _r, pr) => void driven.push(pr),
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+
+    // `authorize` itself already drove the fresh offer once; only the verdict
+    // callback under test is under scrutiny here.
+    driven.length = 0;
+    const response = await postVerdict(app, e, 59);
+    expect(response.status).toBe(202);
+    expect(driven).toEqual([59]);
+  });
+});

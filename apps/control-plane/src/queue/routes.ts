@@ -385,6 +385,18 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
 }
 
+/**
+ * Why a lane was, or was not, driven through Actions.
+ *
+ * `nudge` reports these to its caller as a reason code; every other caller of
+ * `driveLane` fires and forgets, so it can ignore the return value entirely.
+ */
+export type DriveLaneOutcome =
+  | { readonly dispatched: false; readonly reason: "LANE_IDLE" }
+  | { readonly dispatched: false; readonly reason: "DEVICE_ONLY"; readonly pullRequestNumber: number }
+  | { readonly dispatched: false; readonly reason: "DISPATCH_FAILED"; readonly pullRequestNumber: number }
+  | { readonly dispatched: true; readonly pullRequestNumber: number };
+
 async function driveLane(
   env: QueueRouteEnv,
   deps: {
@@ -393,9 +405,9 @@ async function driveLane(
   },
   repositoryId: string,
   snapshot: QueueSnapshot,
-): Promise<void> {
+): Promise<DriveLaneOutcome> {
   const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-  if (holder === undefined) return;
+  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
 
   // The security profile is a repository-wide setting, not a per-entry one,
   // so one lookup answers for whichever entry holds the lane. `fresh` and
@@ -404,14 +416,23 @@ async function driveLane(
   // dispatching here would spend an Actions run to be told there is nothing
   // for it to do. This is a narrowing, not a removal — every other profile
   // still needs the dispatch, and still gets it.
+  //
+  // This is the one place `driveTurn` is ever called. Every caller that wants
+  // to drive a lane goes through here, so this predicate cannot be forgotten
+  // at a call site the way it was at `/nudge` and the candidate-verdict
+  // callback.
   const policy = await deps.activePolicy(env, repositoryId);
-  if (requiresDeviceOnly(policy?.securityProfile ?? null)) return;
+  if (requiresDeviceOnly(policy?.securityProfile ?? null)) {
+    return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: holder.pullRequestNumber };
+  }
 
   try {
     await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
   } catch {
     /* the turn survives; a later tick or the drain asks again */
+    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber };
   }
+  return { dispatched: true, pullRequestNumber: holder.pullRequestNumber };
 }
 
 /**
@@ -1211,12 +1232,17 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // has landed, the queue knows whose turn it is, so it tells that pull request
     // rather than leaving it to ask. Only on acceptance, and only when this is the
     // first time we have recorded it, so a retried report does not re-drive.
+    //
+    // Through `driveLane`, not `driveTurn` directly: this candidate verdict is a
+    // claim about the integrated tree, established by a pinned verifier that runs
+    // on Actions under every profile that requires one — `fresh` and `audited`
+    // included, since a developer's own machine cannot attest to the merge tree
+    // for it. The lane it unblocks can still be device-only, and only `driveLane`
+    // knows not to spend an Actions run telling a connected device something it
+    // already claimed over its heartbeat.
     if (body.accepted === true && stored.status === "applied") {
-      try {
-        await deps.driveTurn(c.env, repositoryId, body.pullRequestNumber);
-      } catch {
-        /* the turn survives; the drain re-drives it if this was the only chance */
-      }
+      const { snapshot: forDrive } = await readQueue(c.env, repositoryId, baseRef);
+      await driveLane(c.env, deps, repositoryId, forDrive);
     }
 
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
@@ -1287,14 +1313,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // the merge workflow asks the queue itself and does nothing if the answer is
     // no — but it is a wasted run and the same habit that wedged the lane once
     // already. Reading the queue costs one row.
+    //
+    // Through `driveLane`, not `deps.driveTurn` directly, so a lane held under a
+    // device-only profile is not pushed through Actions: the connected device
+    // already claimed it over its heartbeat, and dispatching anyway spends a
+    // whole run to be told there is nothing for it to do.
     const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
     const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
     if (holder === undefined) return c.json({ nudged: false, reason: "LANE_IDLE" });
 
-    try {
-      await deps.driveTurn(c.env, repositoryId, holder.pullRequestNumber);
-    } catch {
-      return c.json({ nudged: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber });
+    const outcome = await driveLane(c.env, deps, repositoryId, snapshot);
+    if (!outcome.dispatched) {
+      return c.json({ nudged: false, reason: outcome.reason, pullRequestNumber: holder.pullRequestNumber });
     }
     return c.json({ nudged: true, pullRequestNumber: holder.pullRequestNumber, state: holder.state });
   });
