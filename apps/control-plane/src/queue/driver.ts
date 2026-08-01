@@ -3,6 +3,7 @@ import { buildAssignment, buildMergeIntent, buildTransitionRecord, signAssignmen
 import { classifyMergeResponse, decideMergeWrite, finalGuard, type GuardObservation, type MergeAttemptOutcome } from "./turn.js";
 import { validateMergeResult, type CommitFacts } from "./candidate.js";
 import { buildCheck, mayGate, type ActivationState } from "./check.js";
+import { confirmMergeAbsence } from "./merge-absence.js";
 
 /**
  * One integration turn, from a claimed offer to a recorded transition.
@@ -75,6 +76,12 @@ export interface ProviderPort {
     commitMessage: string;
   }): Promise<{ status: number; transportError?: string; body?: Record<string, unknown> }>;
   observeResult(): Promise<{ merged: boolean; commit: CommitFacts | null }>;
+  /**
+   * Whether the base branch already contains the head commit, read from git
+   * ancestry rather than from the pull request's merged flag. Null when it
+   * cannot be read, which is not the same as false.
+   */
+  baseContainsHead(): Promise<boolean | null>;
   publishCheck(input: { headSha: string; conclusion: string; title: string; summary: string; externalId: string }): Promise<void>;
 }
 
@@ -109,11 +116,58 @@ export type TurnResult =
   | { readonly outcome: "abandoned"; readonly reason: string }
   | { readonly outcome: "incident"; readonly reason: string };
 
+/**
+ * Turn a first negative into a settled one, or into something else.
+ *
+ * The response to our own write says what that call did, not what became of the
+ * pull request, and one read of the pull request says what GitHub had caught up
+ * to at that instant. Pull request 105 merged and answered `merged: false` one
+ * and a half seconds later, so the queue recorded CONFIRMED_NOT_MERGED for a
+ * merge that is on main and wrote no transition record for it. A negative now
+ * costs several reads and has to agree with git before it stands.
+ */
+async function settleNegative(
+  first: MergeAttemptOutcome,
+  provider: ProviderPort,
+  sleep?: (ms: number) => Promise<void>,
+): Promise<MergeAttemptOutcome> {
+  if (first.kind !== "rejected") return first;
+
+  const verdict = await confirmMergeAbsence(
+    {
+      readPull: async () => {
+        const observed = await provider.observeResult();
+        return { merged: observed.merged, mergeCommitSha: observed.commit?.sha ?? null };
+      },
+      baseContainsHead: () => provider.baseContainsHead(),
+    },
+    sleep === undefined ? {} : { sleep },
+  );
+
+  if (verdict.kind === "not-merged") return { kind: "rejected", reason: `${first.reason}; ${verdict.reason}` };
+  if (verdict.kind === "unknown") return { kind: "unknown", reason: `${first.reason}; ${verdict.reason}` };
+
+  // It merged. The facts that go into the record come from a read of the commit,
+  // never from the refusal we started with; without them this is unknown and
+  // reconciliation takes it from here.
+  const observed = await provider.observeResult();
+  return observed.merged && observed.commit !== null
+    ? {
+        kind: "merged",
+        mergeSha: observed.commit.sha,
+        mergeTree: observed.commit.treeOid,
+        parentShas: observed.commit.parentShas,
+      }
+    : { kind: "unknown", reason: verdict.reason };
+}
+
 export async function runTurn(
   ctx: TurnContext,
   queue: QueuePort,
   provider: ProviderPort,
   signer: Signer,
+  /** The backoff between confirmation reads, so a test does not wait out seven seconds. */
+  options: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<TurnResult> {
   /* 1. Pin the candidate. */
   const candidate = await provider.resolveCandidate();
@@ -298,7 +352,7 @@ export async function runTurn(
     isReentry: begun.status === "already-started",
   });
 
-  let outcome: MergeAttemptOutcome;
+  let first: MergeAttemptOutcome;
   if (decision.action === "send") {
     const response = await provider.merge({
       pullRequestNumber: ctx.pullRequestNumber,
@@ -306,10 +360,10 @@ export async function runTurn(
       commitTitle: `Merge pull request #${ctx.pullRequestNumber}`,
       commitMessage,
     });
-    outcome = classifyMergeResponse(response as never);
+    first = classifyMergeResponse(response as never);
   } else {
     const observedResult = await provider.observeResult();
-    outcome = !observedResult.merged
+    first = !observedResult.merged
       ? { kind: "rejected", reason: "GitHub reports the pull request as not merged" }
       : observedResult.commit === null
         ? { kind: "unknown", reason: "merged with no commit reported" }
@@ -320,6 +374,7 @@ export async function runTurn(
             parentShas: observedResult.commit.parentShas,
           };
   }
+  const outcome = await settleNegative(first, provider, options.sleep);
 
   /* 8. Resolve. */
   if (outcome.kind === "unknown") {
