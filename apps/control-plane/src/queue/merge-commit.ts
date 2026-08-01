@@ -18,6 +18,8 @@
  * disagree.
  */
 
+import { QUEUE_MERGE_TRAILER } from "./external-push.js";
+
 export type MergeMethod = "merge" | "squash";
 
 /**
@@ -36,12 +38,23 @@ export function mergeCommitTitle(pullRequestNumber: number): string {
   return `Merge pull request #${pullRequestNumber} (Thwip Queue)`;
 }
 
+/** The operation id a merge for this attempt is performed under. */
+export function mergeOperationId(attemptId: string): string {
+  return `merge_${attemptId}`;
+}
+
+/**
+ * The trailer naming the operation a merge performed, which is also how the
+ * queue tells its own merges from somebody else's push. Any path that writes a
+ * merge commit ends its message with this line.
+ */
+export function queueAttributionTrailer(operationId: string): string {
+  return `${QUEUE_MERGE_TRAILER}: ${operationId}`;
+}
+
 /**
  * Matches `commit_message` in .github/workflows/thwip-merge.yml.
- *
- * The trailer names the operation this merge performed, which is also how the
- * queue tells its own merges from somebody else's push.
  */
 export function mergeCommitMessage(operationId: string): string {
-  return `Integrated by Thwip Queue.\n\nthwip-queue-operation: ${operationId}\n`;
+  return `Integrated by Thwip Queue.\n\n${queueAttributionTrailer(operationId)}\n`;
 }
