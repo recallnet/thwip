@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { CompactSign, SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
+import { isWorkerOwnedPath } from "./worker-routes.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import {
@@ -1970,7 +1971,14 @@ app.route(
   }) as never,
 );
 
-app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.all("*", (c) => {
+  // An unmatched path under a prefix the Worker owns is a missing route, and
+  // must say so. Handing it to the assets returns the dashboard's HTML with a
+  // 200, which reads as success to every client that asked for JSON.
+  const { pathname } = new URL(c.req.url);
+  if (isWorkerOwnedPath(pathname)) return c.json({ error: "no such route", path: pathname }, 404);
+  return c.env.ASSETS.fetch(c.req.raw);
+});
 
 export default {
   fetch: app.fetch,

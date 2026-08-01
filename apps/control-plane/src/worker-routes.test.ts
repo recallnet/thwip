@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { WORKER_PREFIXES, isWorkerOwnedPath } from "./worker-routes.js";
+
 /**
  * Which paths reach the Worker at all.
  *
@@ -20,16 +22,6 @@ import { describe, expect, it } from "vitest";
  */
 
 const wrangler = readFileSync(fileURLToPath(new URL("../../../wrangler.jsonc", import.meta.url)), "utf8");
-
-/** Every top-level prefix the Worker answers on. */
-const WORKER_PREFIXES = [
-  "/api/*",
-  "/v1/*",
-  "/admin/*",
-  "/health",
-  // Publishes the verification keys. Public and unauthenticated on purpose.
-  "/.well-known/*",
-];
 
 function runWorkerFirst(): string[] {
   const match = wrangler.match(/"run_worker_first"\s*:\s*\[([^\]]*)\]/);
@@ -52,5 +44,42 @@ describe("paths that reach the Worker", () => {
    */
   it("routes the verification keys past them", () => {
     expect(runWorkerFirst()).toContain("/.well-known/*");
+  });
+});
+
+/**
+ * Reaching the Worker is half the problem. The other half shipped to staging:
+ * GET /v1/definitely-not-a-route answered 200 with the dashboard's HTML,
+ * because the catch-all handed every unmatched path to the asset binding and
+ * that binding is configured to answer anything with the app shell.
+ *
+ * A renamed endpoint therefore kept reporting success.
+ */
+describe("paths the Worker must answer itself", () => {
+  it("claims the paths it owns", () => {
+    for (const path of ["/health", "/v1/queue/1/chain", "/api/anything", "/admin/seed", "/.well-known/thwip-keys"]) {
+      expect(isWorkerOwnedPath(path), `${path} would be answered by the dashboard's HTML`).toBe(true);
+    }
+  });
+
+  it("claims an unmatched path under a prefix it owns, so it 404s instead of serving a page", () => {
+    expect(isWorkerOwnedPath("/v1/definitely-not-a-route")).toBe(true);
+    expect(isWorkerOwnedPath("/api/definitely-not-a-route")).toBe(true);
+  });
+
+  it("leaves the site and the dashboard to the assets", () => {
+    for (const path of ["/", "/faq", "/install", "/dashboard/projects/recallnet/thwip", "/assets/index.js"]) {
+      expect(isWorkerOwnedPath(path), `${path} must still be served as a page`).toBe(false);
+    }
+  });
+
+  /** `/v1x` starts with `/v1` as a string and is not under `/v1/`. */
+  it("does not claim a path that merely shares a prefix's opening characters", () => {
+    expect(isWorkerOwnedPath("/v1x")).toBe(false);
+    expect(isWorkerOwnedPath("/healthy")).toBe(false);
+  });
+
+  it("keeps its list equal to the one the deploy configuration uses", () => {
+    expect([...WORKER_PREFIXES].sort()).toEqual(runWorkerFirst().sort());
   });
 });
