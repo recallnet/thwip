@@ -52,8 +52,10 @@ import {
   candidateResultDigest,
   decideCandidate,
   requiresIntegratedRun,
+  requiresRemoteVerification,
 } from "./candidate-verdict.js";
 import { putEvidence, type R2Like } from "./evidence-store.js";
+import { localRunEvidenceFor } from "./local-run-gate.js";
 import type { CandidateSuite } from "./store.js";
 import {
   candidateVerdict as readCandidateVerdict,
@@ -563,33 +565,44 @@ async function driveLane(
   repositoryId: string,
   snapshot: QueueSnapshot,
 ): Promise<DriveLaneOutcome> {
-  const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
+  const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+  // Under a device-only profile the run is over by the time the merge has to be
+  // written, and writing it is still Actions' job.
+  const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
+  if (running === undefined && ran === undefined) return { dispatched: false, reason: "LANE_IDLE" };
 
   // The security profile is a repository-wide setting, not a per-entry one,
   // so one lookup answers for whichever entry holds the lane. `fresh` and
-  // `audited` have no fallback to GitHub Actions at all: the offer is only
-  // ever claimed by a connected device, over the heartbeat response, so
-  // dispatching here would spend an Actions run to be told there is nothing
-  // for it to do. This is a narrowing, not a removal — every other profile
-  // still needs the dispatch, and still gets it.
+  // `audited` have no fallback to GitHub Actions for the run itself: the offer
+  // is only ever claimed by a connected device, over the heartbeat response, so
+  // dispatching while that device still holds the turn would spend an Actions
+  // run to be told there is nothing for it to do. Once the device's receipt has
+  // been accepted there is something to do, and it is dispatched then.
   //
   // This is the one place `driveTurn` is ever called. Every caller that wants
   // to drive a lane goes through here, so this predicate cannot be forgotten
   // at a call site the way it was at `/nudge` and the candidate-verdict
   // callback.
   const policy = await deps.activePolicy(env, repositoryId);
-  if (requiresDeviceOnly(policy?.securityProfile ?? null)) {
-    return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: holder.pullRequestNumber };
+  const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+
+  let holder = running;
+  if (deviceOnly) {
+    if (running !== undefined) {
+      return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: running.pullRequestNumber };
+    }
+    holder = ran;
   }
+  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
+  const pullRequestNumber = holder.pullRequestNumber;
 
   try {
-    await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
+    await deps.driveTurn(env, repositoryId, pullRequestNumber);
   } catch {
     /* the turn survives; a later tick or the drain asks again */
-    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber };
+    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber };
   }
-  return { dispatched: true, pullRequestNumber: holder.pullRequestNumber };
+  return { dispatched: true, pullRequestNumber };
 }
 
 /**
@@ -1735,16 +1748,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // is a network round trip. Skipped entirely when `principalId` is null —
     // there is nobody to be connected — and when the profile has no device-only
     // requirement, `capabilityFor` never touches `queue_runners` at all.
+    //
+    // Read once and used everywhere below. The profile decides whether a runner
+    // has to be connected, whether the server may take the offer for itself, and
+    // what evidence the merge rests on, and three reads of it could disagree.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
     const capability =
       principalId === null
         ? { serverExecutable: true, compatibleRunnerConnected: false }
-        : await capabilityFor(
-            db,
-            repositoryId,
-            principalId,
-            new Date().toISOString(),
-            (await deps.activePolicy(c.env, repositoryId))?.securityProfile ?? null,
-          );
+        : await capabilityFor(db, repositoryId, principalId, new Date().toISOString(), policy?.securityProfile ?? null);
     const folded = foldCapability({ ready: baseReady, primaryReason: basePrimaryReason }, capability);
 
     // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
@@ -1769,6 +1782,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             readinessBucket: Math.floor(Date.now() / 60_000),
             tickBucket: Math.floor(Date.now() / 60_000),
             decisionDigest: `sha256:${"0".repeat(64)}`,
+            // Under `fresh` and `audited` the offer belongs to the developer's
+            // machine, which claims it at `/claim`. A server that claimed here
+            // would take the turn away from the runner it is waiting on and then
+            // merge on the head's own proof, which is the `fast` merge wearing
+            // another profile's name.
+            serverMayClaim: !deviceOnly,
           }),
     );
 
@@ -1789,7 +1808,28 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // run. Until this check existed the walk below used a constant in place of a
       // verifier result, so the queue recorded a verified transition for an
       // integration no suite had ever seen.
-      const policy = await deps.activePolicy(c.env, repositoryId);
+      //
+      // What the developer's machine did, from storage. Under `fresh` and
+      // `audited` a merge is refused here unless a receipt this queue accepted
+      // is about this attempt and this tree, and the walk below cannot be
+      // performed without the value this returns.
+      const evidence = await localRunEvidenceFor(db, {
+        securityProfile: policy?.securityProfile ?? null,
+        attemptId,
+        candidateTreeOid: cand.candidateTreeOid,
+      });
+      if (!evidence.ok) {
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: evidence.code,
+          detail: evidence.detail,
+          entryId,
+          operationId: null,
+        });
+      }
+      const localRun = evidence.evidence.localRun;
 
       // Under the fast profile the policy's own evidence is the proof on the head,
       // so there is nothing further to establish. Under every other profile the
@@ -1798,7 +1838,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // cannot be satisfied by anything, so it refuses rather than quietly weakening.
       // No active policy means no stronger claim is being made, so the head proof
       // stands, as it did before candidate verification existed.
-      const needsIntegratedRun = policy !== null && requiresIntegratedRun(policy.securityProfile);
+      //
+      // `fresh` is the one profile whose integrated run happens somewhere else.
+      // Its suites ran on the device, under an assignment this queue signed, and
+      // asking GitHub Actions to run them again is the fallback plan.md §5.0
+      // says `fresh` does not have. `audited` asks for both, and still does.
+      const needsIntegratedRun = policy !== null && requiresRemoteVerification(policy.securityProfile);
       // Null unless something actually ran. Under reuse nothing does, and the
       // constant that used to sit here was stored on the attempt as though a
       // verifier had spoken.
@@ -1898,7 +1943,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         candidatePolicyDigest = policy.policyDigest;
       }
 
-      if (holder !== undefined && holder.state === "Active") {
+      // A local run leaves the entry past `Active` before anything asks for the
+      // merge: the device claims the offer, runs, and its receipt moves the
+      // entry to `Verifying`. Only the walk itself moves a reuse entry that far,
+      // so the wider set is opened for the local-run path alone.
+      const walkable =
+        holder !== undefined &&
+        (holder.state === "Active" ||
+          (localRun !== null && (holder.state === "Verifying" || holder.state === "MergeGuard")));
+      if (walkable && holder !== undefined) {
         // The proof the developer signed, by its own digest.
         //
         // This was `sha256:2222…2222`, a constant, so everything downstream that
@@ -2030,18 +2083,37 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             candidateSha,
             candidateTree,
             policyDigest: candidatePolicyDigest,
-            runner: needsIntegratedRun ? "verified-candidate" : "reuse",
-            // Nothing was dispatched, so there is no assignment to issue. The
-            // reducer no longer demands one for an attempt nobody assigned.
-            assignmentDigest: null,
+            runner: localRun !== null ? "local-run" : needsIntegratedRun ? "verified-candidate" : "reuse",
+            evidence: evidence.evidence,
             receiptDigest: workReceiptDigest,
-            verifierResultDigest: verifiedResultDigest,
+            // What the merge rests on having been run. A device's accepted
+            // receipt is that account under `fresh`; under `audited` the second
+            // execution in Actions is, and it is the stronger of the two.
+            verifierResultDigest: verifiedResultDigest ?? localRun?.receiptDigest ?? null,
             intentDigest: signedIntent.digest,
             operationId: mergeOperationId(attemptId),
           });
         });
         operationId = walked.operationId;
         latest = walked.snapshot;
+        // Say why the evidence was refused, rather than falling through to
+        // "waiting for turn" and leaving an operator to guess. Only the
+        // evidence refusals are answered here: a walk stopped by a pause or a
+        // moved base already has a better answer below, from the snapshot.
+        const evidenceRefusal =
+          walked.refusal !== undefined &&
+          (walked.refusal.startsWith("INTEGRATION_") || walked.refusal === "CANDIDATE_CHANGED");
+        if (walked.operationId === null && evidenceRefusal) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: walked.refusal,
+            detail: "the queue document and the evidence for this merge do not agree",
+            entryId,
+            operationId: null,
+          });
+        }
       }
     }
 
