@@ -1971,6 +1971,42 @@ This is the largest phase and the only one that unlocks a product tier. `verifie
 **Revised task order for this phase.** Task 5.0 does not yet have step-level detail and needs it written before anyone starts:
 
 - **5.0 Runner liveness.** A heartbeat endpoint, `thwip queue work --watch` posting to it, and `schedulerEligible` derived from a heartbeat inside the grace window. Nothing else in this phase can be reached without it.
+### Task 5.0: Runner liveness
+
+Nothing marks an entry scheduler-eligible on the strength of a connected runner, so under `fresh` no entry is ever offered a turn and everything after this task is unreachable. plan.md:452 states the rule: an entry is eligible only when a compatible connected runner exists, and an offline entry keeps its place in line, receives no offer, and blocks nobody.
+
+**Smaller than it looks, because the domain is already built for it.** The reducer models `HeartbeatReceived`, `HeartbeatLost`, `Reconnected` and a `graceUntil` window. `commands.claim` already accepts `executionMode: "device"` with a `deviceId`, and `EXECUTION_MODES` already separates a device claim from the synthetic ones. What is missing is a way for a runner to say it is here, and a way for that to reach the scheduler.
+
+**Where liveness lives.** Heartbeat rows in D1, not a WebSocket Durable Object. That object was retired to stay inside the free tier whose daily cap is the deliberate circuit breaker, D1 cannot hold a socket, and plan.md:887 already sanctions HTTP polling as the transport for restrictive networks.
+
+**Files**
+- Create `migrations/0020_queue_runners.sql`
+- Create `apps/control-plane/src/queue/runners.ts` and `runners.test.ts`
+- Modify `apps/control-plane/src/queue/routes.ts` for the heartbeat and claim endpoints
+- Modify `apps/control-plane/src/queue/scheduled-tick.ts` to retire stale runners
+- Create `packages/cli/src/queue-work.ts` and its test
+
+**Steps**
+
+- [ ] **A table of who is connected.** `queue_runners(github_repository_id, principal_id, device_key_id, last_heartbeat_at)` keyed on all three columns. A row means a runner said it was here at that moment, nothing more. Comment why the key is all three: one person may run two machines, and one machine may serve two repositories.
+
+- [ ] **`POST /v1/queue/:repositoryId/runners/heartbeat`.** Authenticated, with the principal taken from the session rather than the body so a runner cannot claim to be somebody else. Upserts the row. Returns whether this principal currently holds an offer, so a watching runner learns it has work in the same call and needs no second poll.
+
+- [ ] **Eligibility on arrival.** A heartbeat that moves a principal from absent to present marks that principal's Ready entries scheduler-eligible and clears `AGENT_OFFLINE`. Only on that transition, never on every heartbeat, or a runner polling every fifteen seconds writes to the queue document every fifteen seconds.
+
+- [ ] **Eligibility on departure.** The five-minute tick already visits every queue. Extend it: a runner whose `last_heartbeat_at` is older than the grace window is removed and its principal's entries become ineligible with reason `AGENT_OFFLINE`. The entry keeps its fairness ordinal, per plan.md:452.
+
+- [ ] **`POST /v1/queue/:repositoryId/claim`.** A runner with a live heartbeat claims the offer it was told about and receives the signed assignment from Task 5.2. Refuse a claim from a principal that does not hold the current offer, and refuse one whose heartbeat has gone stale, because a runner that has vanished must not start work the queue will then wait on.
+
+- [ ] **`thwip queue work --watch`.** Heartbeat on an interval; when the response says this principal holds an offer, claim it and run. Keep the interval and the grace window in one place so they cannot drift, since a grace window shorter than the interval retires a healthy runner every cycle.
+
+**Tests that matter**
+- A heartbeat makes a Ready-but-offline entry eligible, and a second heartbeat writes nothing.
+- A runner that stops heartbeating is retired by the tick, its entry becomes ineligible, and its fairness ordinal survives.
+- An offline entry does not block a Ready entry behind it.
+- A claim from the wrong principal is refused, and so is one with a stale heartbeat.
+- The grace window exceeds the heartbeat interval, asserted against the constants themselves rather than restated as literals.
+
 - **5.1** Give the assignment builder the policy document, version and Dagger digests.
 - **5.2** Issue and sign an assignment when a connected runner claims a turn.
 - **5.3** Run the candidate in an isolated worktree and sign an integration receipt.
