@@ -253,6 +253,15 @@ export async function storeAttestation(
   // down loses nothing that D1 does not already hold, so the failure is
   // swallowed here rather than thrown: the durable copy is retried by backfill,
   // but a merge record thrown away for a storage hiccup is not recoverable.
+  //
+  // This runs on the losing path too, mirroring the loser's own digest and
+  // bytes rather than the winner's. The loser is a genuine signed record —
+  // the queue really did sign it — and storage is content-addressed, so it
+  // lands under its own digest and collides with nothing. That matches what
+  // the schema migration chose for D1: the losing row is demoted out of the
+  // chain but its bytes and signature are kept rather than deleted.
+  // Destroying signed evidence to tidy up is a worse habit than keeping a
+  // blob nobody references.
   if (row.mirror !== undefined && row.organizationId !== undefined) {
     try {
       await row.mirror({
