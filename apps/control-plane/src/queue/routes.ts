@@ -1759,6 +1759,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         onQueue,
       });
 
+      // Confirming ends the attempt and frees the lane; the offer that follows
+      // expires unclaimed in ninety seconds unless something drives it.
+      await driveLane(c.env, deps, repositoryId, recorded.snapshot ?? afterConfirm);
+
       return c.json({
         resolved: confirmation.confirmed.status,
         transition: recorded.status,
@@ -1780,7 +1784,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         return c.json({ error: "mergeSha required" }, 400);
       }
       const mergeSha = body.mergeSha;
-      const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
+      const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
         // The entry leaves the queue with the attempt. Terminating the attempt
         // alone left the entry Blocked and still scheduler-eligible, so the queue
         // went on holding a merged pull request as live work and could have
@@ -1815,6 +1819,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         });
         return { entryId, sequence, transition };
       });
+
+      // Ending the attempt frees the lane; the next offer expires unclaimed in
+      // ninety seconds unless something drives it.
+      await driveLane(c.env, deps, repositoryId, snapshot);
+
       return c.json({
         resolved: "external",
         transition: result.transition.status,
@@ -1829,13 +1838,22 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: 'observed must be "merged", "not-merged", or "merged-outside-the-turn"' }, 400);
     }
 
-    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
-      commands.confirmNotMerged({
-        idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
-        attemptId,
-        operationId: `merge_${attemptId}`,
-      }),
+    const { result: resolved, snapshot: afterNotMerged } = await onQueue(
+      c.env,
+      repositoryId,
+      baseRef,
+      ({ commands }) =>
+        commands.confirmNotMerged({
+          idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
+          attemptId,
+          operationId: `merge_${attemptId}`,
+        }),
     );
+
+    // Confirming not-merged frees the lane; the next offer expires unclaimed in
+    // ninety seconds unless something drives it.
+    await driveLane(c.env, deps, repositoryId, afterNotMerged);
+
     return c.json({
       resolved: resolved.status,
       attemptId,
@@ -1874,7 +1892,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const attemptId = body.attemptId;
     const operationId = body.operationId;
-    const { result: resolved } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+    const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
       // An outcome already in doubt has to be declared unknown before it can be
       // resolved, which is the reducer refusing to skip reconciliation.
       commands.mergeOutcomeUnknown({
@@ -1887,6 +1905,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         operationId,
       });
     });
+
+    // This is the path a losing merge run takes when GitHub refuses the merge.
+    // Confirming not-merged frees the lane, and the next offer expires unclaimed
+    // in ninety seconds unless something drives it — this is how the lane was
+    // freed without being driven in production.
+    await driveLane(c.env, deps, repositoryId, snapshot);
+
     return c.json({ resolved: resolved.status, detail: body.detail ?? null });
   });
 
