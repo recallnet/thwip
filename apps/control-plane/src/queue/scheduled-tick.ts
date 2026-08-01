@@ -14,6 +14,13 @@ import { readActivePolicy } from "../active-policy.js";
  * quiet repository that is indefinitely: the lane sits held by an offer nobody
  * can take, and the pull request behind it waits forever.
  *
+ * Advancing the clock is only half of that. `runAlarm()` alone can clear a
+ * cooldown or expire a stale offer, but it never asks the scheduler to hand the
+ * freed lane to a Ready entry — that also has to be settled here, the same way
+ * `runOnQueue` settles it after every command (routes.ts), or a queue that
+ * comes off cooldown between two pieces of unrelated traffic sits frozen with
+ * a free lane and work waiting.
+ *
  * Deliberately cheap. One row read per queue, a write only when the clock
  * actually changed something, and a dispatch only when a lane is held.
  */
@@ -79,6 +86,22 @@ export async function tickAllQueues(
               });
             }
           }
+        }
+
+        // If the lane is free after the above, offer it before answering —
+        // the same settling `runOnQueue` does after every command (routes.ts).
+        // Without this, `runAlarm()` advances an expired cooldown or offer but
+        // never asks the scheduler to hand the lane to whatever is Ready now,
+        // so a queue that comes off cooldown between two pieces of unrelated
+        // traffic sits frozen with a free lane and work waiting — exactly what
+        // the heartbeat exists to prevent. Cheap to do unconditionally: the
+        // scheduler refuses while the lane is busy or the queue is paused, and
+        // a tick that offers nothing writes no event.
+        if (store.state().activeAttemptId === null) {
+          commands.tick({
+            idempotencyKey: `settle:${store.generation()}`,
+            decisionDigest: `sha256:${"0".repeat(64)}`,
+          });
         }
         return buildSnapshot(store);
       });

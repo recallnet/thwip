@@ -78,7 +78,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
@@ -116,6 +116,26 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
   return (await response.json()) as Verdict;
 }
 
+/** A device id shaped the way `thwip queue work` sends one: a signing key fingerprint. */
+const DEVICE = `SHA256:${"a".repeat(43)}`;
+
+/** The repository's organization, its project row, and one principal in it. */
+function seedMembership(principalId: string, githubUserId: string): void {
+  raw
+    .prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
+    .run("org_1", "1", "acme");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+    )
+    .run("proj_1", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+    )
+    .run(principalId, "org_1", githubUserId, `author${githubUserId}`);
+}
+
 /**
  * Post a heartbeat as `principalId`, the way a connected device does before a
  * device-only entry can ever become scheduler-eligible. `routes()`'s own
@@ -123,8 +143,11 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
  * connected principal — `principalFor` maps a pull request's author to
  * `principal_<githubUserId>`, not to the session's principal — must build
  * their own app with `authenticate` overridden to match.
+ *
+ * The route also refuses a principal who is not in the organization that owns
+ * the repository, so a test that heartbeats calls `seedMembership` first.
  */
-async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = "d1") {
+async function heartbeat(app: App, e: QueueRouteEnv, deviceKeyId = DEVICE) {
   return app.request(
     `/v1/queue/${REPO}/runners/heartbeat`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKeyId }) },
@@ -925,6 +948,87 @@ describe("the record behind a merge", () => {
     expect(holder.authorized).toBe(false);
     expect(holder.reason).toBe("MERGE_EVIDENCE_INCOMPLETE");
   });
+
+  /**
+   * `mergeOne` always merged with two parents, the shape a "merge" record
+   * demands. This exercises the method a queue project actually names,
+   * squash included, so a single-parent landing is not something only the
+   * default case gets to happen for.
+   */
+  async function mergeOneAs(app: App, e: QueueRouteEnv, pr: number, parentShas: readonly string[]) {
+    const holder = await authorize(app, e, pr, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: [...parentShas],
+      },
+    });
+    const response = await app.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: holder.operationId!.replace("merge_", ""),
+          operationId: holder.operationId,
+          mergeSha: "9".repeat(40),
+          mergeTree: TREE,
+          parentShas: [...parentShas],
+        }),
+      },
+      e,
+    );
+    return (await response.json()) as { transition: string; transitionDigest: string | null; detail?: string };
+  }
+
+  /**
+   * The defect this whole change exists to close. `attestation.ts` used to
+   * hardcode `mergeMethod: "merge"` no matter what a repository's queue
+   * project actually named. A squash-configured repository's landed commit
+   * has one parent; the hardcoded record demanded two; `checkMergeConsistency`
+   * refused it; `recordMergedTransition` took its `skip(...)` path; and the
+   * merge — which really landed — never advanced the chain. Nothing failed
+   * loudly: the endpoint still answered 200, and the next merge silently
+   * reused the same sequence number. This is the failure mode: before the
+   * fix, `merged.transition` here is `"skipped"`, not `"applied"`.
+   */
+  it("still writes a chain link for a squash-configured repository, rather than silently skipping it", async () => {
+    const e = env();
+    const app = routes({
+      queueProject: async () => ({ activationState: "enforced", mergeMethod: "squash" }),
+    });
+    const merged = await mergeOneAs(app, e, 59, ["b".repeat(40)]);
+
+    expect(merged.transition).toBe("applied");
+    expect(merged.transitionDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    const links = raw
+      .prepare("SELECT COUNT(*) AS c FROM queue_transitions_index WHERE github_repository_id = ?")
+      .get(REPO) as { c: number };
+    expect(links.c).toBe(1);
+
+    const response = await app.request(`/v1/queue/records/${merged.transitionDigest}`, {}, e);
+    expect(response.status).toBe(200);
+    const found = (await response.json()) as { kind: string };
+    expect(found.kind).toBe("reused-proof-merge");
+  });
+
+  /** The other side of the same binding: a merge-configured repository is unaffected. */
+  it("still merges with two parents for a merge-configured repository, exactly as before", async () => {
+    const e = env();
+    const app = routes({
+      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    });
+    // The second parent of a two-parent merge must be the pull request head,
+    // which `authorize` pins to `String(pr).padStart(40, "a")`.
+    const merged = await mergeOneAs(app, e, 59, ["b".repeat(40), String(59).padStart(40, "a")]);
+
+    expect(merged.transition).toBe("applied");
+    expect(merged.transitionDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
 });
 
 /**
@@ -1271,6 +1375,7 @@ describe("nudging a held lane", () => {
       // scheduler-eligible at all.
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    seedMembership("principal_59", "59");
     await heartbeat(app, e);
     await authorize(app, e, 59);
 
@@ -1373,6 +1478,7 @@ describe("an accepted candidate verdict", () => {
       // scheduler-eligible at all.
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
+    seedMembership("principal_59", "59");
     await heartbeat(app, e);
     await authorize(app, e, 59);
 

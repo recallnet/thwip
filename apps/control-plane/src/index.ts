@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { CompactSign, SignJWT, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
+import { isWorkerOwnedPath } from "./worker-routes.js";
+import { latestVerification } from "./latest-verification.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import {
@@ -20,6 +22,7 @@ import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
+import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
 import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
@@ -409,20 +412,8 @@ app.get("/v1/dashboard/projects", async (c) => {
             json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
             b.config_source AS config_source,
             (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
-            COALESCE(
-              (SELECT outcome FROM proof_verifications v
-                WHERE v.project_id = p.id AND v.status = 'completed'
-                ORDER BY completed_at DESC LIMIT 1),
-              (SELECT outcome FROM verification_observations o
-                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
-            ) AS last_outcome,
-            COALESCE(
-              (SELECT completed_at FROM proof_verifications v
-                WHERE v.project_id = p.id AND v.status = 'completed'
-                ORDER BY completed_at DESC LIMIT 1),
-              (SELECT observed_at FROM verification_observations o
-                WHERE o.project_id = p.id ORDER BY observed_at DESC LIMIT 1)
-            ) AS last_observed_at
+            ${latestVerification("outcome")} AS last_outcome,
+            ${latestVerification("at")} AS last_observed_at
      FROM projects p LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
      WHERE p.organization_id = ? ORDER BY p.github_name`,
   )
@@ -1681,7 +1672,7 @@ app.route(
       // browser session was a reason to leave the terminal, and an operator fixing a
       // stuck lane at 3am should not have to.
       if (requireAdmin(env, c.req.raw)) {
-        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true };
+        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true, operator: true };
       }
       const viewer = await resolveViewer(env, c.req.raw);
       if (viewer === null) return { ok: false as const, status: 401 as const };
@@ -1699,11 +1690,17 @@ app.route(
     },
     async queueProject(env: Env, repositoryId: string, baseRef: string) {
       const row = await env.DB.prepare(
-        "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+        "SELECT activation_state, merge_method FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
       )
         .bind(repositoryId, baseRef)
-        .first<{ activation_state: string }>();
-      return row === null ? null : { activationState: row.activation_state };
+        .first<{ activation_state: string; merge_method: string }>();
+      if (row === null) return null;
+      // The column is a free-text default in the schema; a record must never
+      // bind a value the protocol does not recognize.
+      const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
+        ? row.merge_method
+        : DEFAULT_MERGE_METHOD;
+      return { activationState: row.activation_state, mergeMethod };
     },
     async principalFor(env: Env, githubUserId: string) {
       if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
@@ -1963,7 +1960,14 @@ app.route(
   }) as never,
 );
 
-app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+app.all("*", (c) => {
+  // An unmatched path under a prefix the Worker owns is a missing route, and
+  // must say so. Handing it to the assets returns the dashboard's HTML with a
+  // 200, which reads as success to every client that asked for JSON.
+  const { pathname } = new URL(c.req.url);
+  if (isWorkerOwnedPath(pathname)) return c.json({ error: "no such route", path: pathname }, 404);
+  return c.env.ASSETS.fetch(c.req.raw);
+});
 
 export default {
   fetch: app.fetch,

@@ -332,3 +332,150 @@ describe("driving a held lane against the active profile", () => {
     expect(result.driven).toBe(1);
   });
 });
+
+/**
+ * `runAlarm()` advances the clock; it never asks the scheduler to hand a freed
+ * lane to whatever is waiting. `runOnQueue` settles that with `commands.tick()`
+ * after every command (routes.ts); the heartbeat did not, so a queue whose
+ * entries came off cooldown between two pieces of unrelated traffic sat frozen
+ * with an idle lane and work waiting. These fail against the code before that
+ * settling call is added.
+ */
+describe("the tick offers a turn, not just advances the clock", () => {
+  /** A Ready, eligible entry, sponsored by `principal`, never offered a turn. */
+  async function readyButUnoffered(
+    db: D1Like,
+    repositoryId: string,
+    entryId: string,
+    principal: string,
+    pr: number,
+  ): Promise<void> {
+    await withQueueState(db, repositoryId, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.requestQueue({
+        idempotencyKey: `req-${entryId}`,
+        entryId,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: principal,
+        sponsorGithubUserId: pr.toString(),
+        headSha: "h".repeat(40),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: `ready-${entryId}`,
+        entryId,
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+    });
+  }
+
+  /**
+   * A Deferred entry whose cooldown has already elapsed — the state a lane is
+   * left in after an offer goes unclaimed (`OfferExpired`, store.ts). Built with
+   * a zero-length cooldown so the elapsed condition (`cooldownUntil <= now`)
+   * holds by the time the tick under test reads it, the same way it holds ten
+   * minutes later in production; nothing here waits on the real clock.
+   */
+  async function deferredPastCooldown(
+    db: D1Like,
+    repositoryId: string,
+    entryId: string,
+    principal: string,
+    pr: number,
+  ): Promise<void> {
+    await withQueueState(db, repositoryId, REF, (store) => {
+      const commands = commandsFor(store, {
+        offerSeconds: 90,
+        executionSeconds: 20 * 60,
+        heartbeatSeconds: 20,
+        graceSeconds: 60,
+        noClaimCooldownSeconds: 0,
+        mergeConfirmSeconds: 60,
+      });
+      commands.requestQueue({
+        idempotencyKey: `req-${entryId}`,
+        entryId,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: principal,
+        sponsorGithubUserId: pr.toString(),
+        headSha: "h".repeat(40),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: `ready-${entryId}`,
+        entryId,
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+      const offer = commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+      const attemptId = (offer as { attemptId?: string }).attemptId;
+      if (attemptId === undefined) throw new Error("test setup expected an offer");
+      commands.expireOffer({ idempotencyKey: `expire-${entryId}`, attemptId });
+    });
+  }
+
+  it("offers and drives the turn of a Ready entry sitting behind an idle lane", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await readyButUnoffered(db, "1", "entry_a", "alice", 41);
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(after, "entry_a")?.state).not.toBe("Ready");
+    expect(["Offered", "Active"]).toContain(entryFrom(after, "entry_a")?.state);
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+  });
+
+  it("un-sticks a Deferred entry whose cooldown has already elapsed, and offers it a turn", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await deferredPastCooldown(db, "1", "entry_a", "alice", 41);
+
+    const before = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(before, "entry_a")?.state).toBe("Deferred");
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(after, "entry_a")?.state).not.toBe("Deferred");
+    expect(["Offered", "Active"]).toContain(entryFrom(after, "entry_a")?.state);
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+  });
+
+  it("writes nothing for an idle queue with no entries at all", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+
+    const row = () =>
+      raw
+        .prepare("SELECT generation FROM queue_state WHERE github_repository_id = ? AND base_ref = ?")
+        .get("1", REF) as { generation: number } | undefined;
+
+    expect(row()).toBeUndefined();
+
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+
+    // `withQueueState` only saves on a real change (queue-state.ts). An empty
+    // queue has nothing for `runAlarm()` or the settling `tick()` to change, so
+    // this must still write no row — this runs every five minutes across every
+    // enabled queue on an account that deliberately stays inside a free tier.
+    expect(row()).toBeUndefined();
+  });
+});

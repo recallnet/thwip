@@ -290,11 +290,18 @@ export function walkToMergeReady(
     accepted: true,
     resultDigest: input.verifierResultDigest,
   });
-  commands.createMergeIntent({
+  const intent = commands.createMergeIntent({
     idempotencyKey: `authorize:intent:${input.attemptId}`,
     attemptId: input.attemptId,
     intentDigest: input.intentDigest,
   });
+  // The reducer refuses the intent when the queue may not merge this attempt:
+  // an operator paused, or the base moved outside the queue and the candidate
+  // was integrated against something that no longer exists. Walking on would
+  // insert a merge_operations row for a write that never begins, and the next
+  // caller reads that row as already-started and is handed an operation id to
+  // merge with.
+  if (!ok(intent)) return done(null);
   const begun = commands.beginMergeWrite({
     idempotencyKey: `authorize:write:${input.attemptId}`,
     attemptId: input.attemptId,
