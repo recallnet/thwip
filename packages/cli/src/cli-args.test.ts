@@ -15,6 +15,7 @@ const QUEUE_SUBCOMMANDS = [
   "explain",
   "reconcile",
   "doctor",
+  "work",
 ] as const;
 
 const HELP_TARGETS: readonly (readonly string[])[] = [
@@ -89,6 +90,7 @@ describe("fail-closed arguments", () => {
     ["ship", "--unknown"],
     ["queue", "status", "--repo", "recallnet/thwip", "--unknown"],
     ["queue", "status", "--repo", "recallnet/thwip", "-x"],
+    ["queue", "work", "--repo", "recallnet/thwip"],
     ["init", "--unknown"],
     ["keys", "status", "--unknown"],
     ["setup", "--unknown"],
@@ -120,6 +122,7 @@ describe("dispatch", () => {
     [["login"], "login"],
     [["ship"], "ship"],
     [["queue", "status", "--repo", "recallnet/thwip"], "queue"],
+    [["queue", "work", "--repo", "recallnet/thwip", "--watch"], "queue"],
     [["init", "--required", "lint"], "init"],
     [["keys"], "keys-status"],
     [["keys", "status"], "keys-status"],
