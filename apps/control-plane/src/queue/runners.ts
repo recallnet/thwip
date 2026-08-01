@@ -22,8 +22,32 @@ export const HEARTBEAT_INTERVAL_SECONDS = 15;
  * How long a runner is still considered present after its last heartbeat.
  * Wider than the interval so a couple of missed beats — a slow network, a
  * laptop waking up — do not read as offline.
+ *
+ * This is not the bound that actually protects a queue from a dead runner.
+ * That bound is the one below: a dead runner's entry keeps its now-stale
+ * eligibility until the next sweep, so the queue can still offer it a turn
+ * inside that window. When it does, the offer expires unclaimed and
+ * `commands.ts`'s `noClaimCooldownSeconds` puts the entry in cooldown — and
+ * that cooldown has to last at least until the next sweep retires the
+ * runner, or a second offer can reach the same dead machine before it is
+ * ever retired, and a third, unboundedly. plan.md:1208 permits exactly one
+ * bounded lost turn, not a repeating one. Today `noClaimCooldownSeconds`
+ * (300s, `commands.ts`) equals `SWEEP_INTERVAL_SECONDS` (300s, below) only
+ * because both were written as `5 * 60` independently; `runners.test.ts`
+ * asserts `noClaimCooldownSeconds >= SWEEP_INTERVAL_SECONDS` directly, so
+ * moving either one without the other fails a test instead of silently
+ * reopening the gap.
  */
 export const GRACE_SECONDS = 45;
+
+/**
+ * How often the scheduled tick — index.ts's every-five-minutes cron trigger —
+ * sweeps stale runners out of `queue_runners`. Cloudflare's cron trigger is a
+ * string, not an importable value, so this is not that string's source of
+ * truth — it is what the string has to keep meaning for the cooldown bound
+ * documented above to hold.
+ */
+export const SWEEP_INTERVAL_SECONDS = 5 * 60;
 
 export interface HeartbeatInput {
   readonly repositoryId: string;
@@ -44,6 +68,29 @@ export interface HeartbeatOutcome {
 
 function cutoff(now: string): string {
   return new Date(new Date(now).getTime() - GRACE_SECONDS * 1000).toISOString();
+}
+
+/**
+ * Security profiles that run only on a connected developer's own machine, with
+ * no fallback to GitHub Actions (plan.md §5.0).
+ *
+ * A held lane under either one must never cause a `repository_dispatch`.
+ * There is nothing for Actions to do — the runner claims the offer itself,
+ * over the heartbeat response — and dispatching anyway spends a whole Actions
+ * run to be told so. This is the one place that set lives, so the two callers
+ * that decide whether to drive a lane through Actions (`routes.ts`'s
+ * `driveLane` and `scheduled-tick.ts`'s tick loop) cannot drift apart on it.
+ */
+const DEVICE_ONLY_SECURITY_PROFILES: ReadonlySet<string> = new Set(["fresh", "audited"]);
+
+/**
+ * Whether a repository's active security profile requires a device and has no
+ * Actions fallback. `null` — no active policy — answers false: without a
+ * profile there is nothing to withhold on, so the caller does whatever it
+ * would have done before this existed.
+ */
+export function requiresDeviceOnly(securityProfile: string | null): boolean {
+  return securityProfile !== null && DEVICE_ONLY_SECURITY_PROFILES.has(securityProfile);
 }
 
 /**

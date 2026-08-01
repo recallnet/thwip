@@ -20,7 +20,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { recordHeartbeat } from "./runners.js";
+import { recordHeartbeat, requiresDeviceOnly } from "./runners.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import {
@@ -387,12 +387,26 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
 async function driveLane(
   env: QueueRouteEnv,
-  deps: { driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void> },
+  deps: {
+    driveTurn(env: QueueRouteEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
+    activePolicy(env: QueueRouteEnv, repositoryId: string): Promise<{ securityProfile: string } | null>;
+  },
   repositoryId: string,
   snapshot: QueueSnapshot,
 ): Promise<void> {
   const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
   if (holder === undefined) return;
+
+  // The security profile is a repository-wide setting, not a per-entry one,
+  // so one lookup answers for whichever entry holds the lane. `fresh` and
+  // `audited` have no fallback to GitHub Actions at all: the offer is only
+  // ever claimed by a connected device, over the heartbeat response, so
+  // dispatching here would spend an Actions run to be told there is nothing
+  // for it to do. This is a narrowing, not a removal — every other profile
+  // still needs the dispatch, and still gets it.
+  const policy = await deps.activePolicy(env, repositoryId);
+  if (requiresDeviceOnly(policy?.securityProfile ?? null)) return;
+
   try {
     await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
   } catch {
