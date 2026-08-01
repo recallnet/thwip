@@ -1198,14 +1198,8 @@ function parsePredicate(v) {
   if (typeof baseSha !== "string" || !OID_RE.test(baseSha))
     return fail("git.baseSha invalid");
   const evaluationMode = git["evaluationMode"];
-  if (evaluationMode !== "head-tree" && evaluationMode !== "merge-tree")
+  if (evaluationMode !== "head-tree")
     return fail("git.evaluationMode invalid");
-  let mergeTreeOid;
-  if (git["mergeTreeOid"] !== void 0) {
-    if (typeof git["mergeTreeOid"] !== "string" || !OID_RE.test(git["mergeTreeOid"]))
-      return fail("git.mergeTreeOid invalid");
-    mergeTreeOid = git["mergeTreeOid"];
-  }
   const policy = v["policy"];
   if (!isRecord(policy))
     return fail("policy invalid");
@@ -1277,8 +1271,7 @@ function parsePredicate(v) {
       parentOids,
       baseRef: baseRef.value,
       baseSha,
-      evaluationMode,
-      ...mergeTreeOid !== void 0 ? { mergeTreeOid } : {}
+      evaluationMode
     },
     policy: { digest: policyDigest, version: policyVersion },
     pipeline: { digest: pipelineDigest, runner },
@@ -1436,6 +1429,110 @@ async function verifyLeaseSignature(args) {
   }
 }
 
+// ../verifier/dist/ssh-signature.js
+function b64decode(s) {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++)
+    out[i] = bin.charCodeAt(i);
+  return out;
+}
+var Reader = class {
+  buf;
+  off = 0;
+  constructor(buf) {
+    this.buf = buf;
+  }
+  u32() {
+    if (this.off + 4 > this.buf.length)
+      throw new Error("truncated");
+    const v = this.buf[this.off] << 24 | this.buf[this.off + 1] << 16 | this.buf[this.off + 2] << 8 | this.buf[this.off + 3];
+    this.off += 4;
+    return v >>> 0;
+  }
+  bytes(n) {
+    if (this.off + n > this.buf.length)
+      throw new Error("truncated");
+    const v = this.buf.slice(this.off, this.off + n);
+    this.off += n;
+    return v;
+  }
+  string() {
+    return this.bytes(this.u32());
+  }
+};
+function encodeSshString(b) {
+  const out = new Uint8Array(4 + b.length);
+  new DataView(out.buffer).setUint32(0, b.length);
+  out.set(b, 4);
+  return out;
+}
+function concat2(...parts) {
+  const len = parts.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+var te = new TextEncoder();
+var td = new TextDecoder();
+function ed25519RawFromAuthorizedKey(publicKey) {
+  const parts = publicKey.trim().split(/\s+/);
+  if (parts[0] !== "ssh-ed25519" || !parts[1])
+    throw new Error("not an ssh-ed25519 key");
+  const blob = b64decode(parts[1]);
+  const r = new Reader(blob);
+  const keyType = td.decode(r.string());
+  if (keyType !== "ssh-ed25519")
+    throw new Error("key blob type mismatch");
+  const raw = r.string();
+  if (raw.length !== 32)
+    throw new Error("bad ed25519 key length");
+  return raw;
+}
+async function verifySshSignature2(args) {
+  try {
+    const raw = ed25519RawFromAuthorizedKey(args.publicKey);
+    const blob = b64decode(args.signatureBase64);
+    const r = new Reader(blob);
+    if (td.decode(r.bytes(6)) !== "SSHSIG")
+      return false;
+    if (r.u32() !== 1)
+      return false;
+    const sigPubBlob = r.string();
+    const namespace = r.string();
+    if (td.decode(namespace) !== args.namespace)
+      return false;
+    const reserved = r.string();
+    const hashAlg = r.string();
+    const hashAlgName = td.decode(hashAlg);
+    if (hashAlgName !== "sha512" && hashAlgName !== "sha256")
+      return false;
+    const sigBlob = r.string();
+    const pr = new Reader(sigPubBlob);
+    if (td.decode(pr.string()) !== "ssh-ed25519")
+      return false;
+    const sigPubRaw = pr.string();
+    if (sigPubRaw.length !== raw.length || sigPubRaw.some((b, i) => b !== raw[i]))
+      return false;
+    const sr = new Reader(sigBlob);
+    if (td.decode(sr.string()) !== "ssh-ed25519")
+      return false;
+    const rawSig = sr.string();
+    if (rawSig.length !== 64)
+      return false;
+    const hashed = new Uint8Array(await crypto.subtle.digest(hashAlgName === "sha512" ? "SHA-512" : "SHA-256", args.message));
+    const signedData = concat2(te.encode("SSHSIG"), encodeSshString(te.encode(args.namespace)), encodeSshString(reserved), encodeSshString(hashAlg), encodeSshString(hashed));
+    const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
+    return crypto.subtle.verify({ name: "Ed25519" }, key, rawSig, signedData);
+  } catch {
+    return false;
+  }
+}
+
 // ../verifier/dist/index.js
 var PERMISSION_RANK = {
   none: 0,
@@ -1483,8 +1580,9 @@ async function verifyProof(input, deps) {
   }
   const pae = dssePae(DSSE_PAYLOAD_TYPE, payloadBytes);
   let sigOk;
+  const checkSshSignature = deps.verifySshSignature ?? verifySshSignature2;
   try {
-    sigOk = await deps.verifySshSignature({
+    sigOk = await checkSshSignature({
       publicKey: key.publicKey,
       namespace: SSH_SIGN_NAMESPACE,
       message: pae,
@@ -1524,24 +1622,9 @@ async function verifyProof(input, deps) {
   }
   if (pred.git.baseSha !== facts.baseSha)
     return res("SUBJECT_BASE_MISMATCH", void 0, { statement });
-  if (bundle.policy.evaluationMode === "merge-tree") {
-    const claimed = pred.git.mergeTreeOid;
-    if (claimed === void 0) {
-      return res("SUBJECT_TREE_MISMATCH", "this project verifies the merged tree and the proof does not name one; upgrade the thwip CLI and run the tests again on the merge of your branch with the base", { statement });
-    }
-    if (facts.mergeTreeOid === void 0) {
-      return res("SUBJECT_TREE_MISMATCH", "this project verifies the merged tree and the checker could not read the merge of this branch with the base from GitHub; retry once GitHub has computed the merge", { statement });
-    }
-    if (claimed !== facts.mergeTreeOid) {
-      return res("SUBJECT_TREE_MISMATCH", `the proof names merge tree ${claimed} and GitHub merges this branch into the base as ${facts.mergeTreeOid}; run the tests again on the current merge`, { statement });
-    }
-  }
   const policyEligible = pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
   if (!policyEligible)
     return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
-  if (pred.git.evaluationMode !== bundle.policy.evaluationMode) {
-    return res("POLICY_NOT_ACTIVE", "evaluation mode mismatch", { statement });
-  }
   if (pred.pipeline.digest !== bundle.policy.pipeline.digest || pred.pipeline.runner !== bundle.policy.pipeline.runner) {
     return res("PIPELINE_DIGEST_MISMATCH", void 0, { statement });
   }
@@ -1557,24 +1640,12 @@ async function verifyProof(input, deps) {
   if ((PERMISSION_RANK[grant.permission] ?? 0) < need) {
     return res("SIGNER_PERMISSION_INSUFFICIENT", grant.permission, { statement });
   }
-  if (!bundle.policy.allowAuthorAsSigner && facts.prAuthorGithubUserId === key.githubUserId) {
-    return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
-  }
-  if (bundle.policy.requireGithubKeyPresence) {
-    if (!deps.githubUserSigningKeys) {
-      return res("SIGNER_KEY_UNKNOWN", "this project requires the signing key to be published on the signer's GitHub account and the checker cannot read GitHub's key list", { statement });
+  if (!bundle.policy.allowAuthorAsSigner) {
+    if (facts.prAuthorGithubUserId === void 0) {
+      return res("SIGNER_PERMISSION_INSUFFICIENT", "this project requires somebody other than the author to sign, and the checker could not find out who opened the pull request for this commit; re-run the check, and if it persists ask an administrator to check the GitHub App's pull request permission", { statement });
     }
-    let published;
-    try {
-      published = await deps.githubUserSigningKeys(key.githubUserId);
-    } catch {
-      return res("SIGNER_KEY_UNKNOWN", "GitHub did not answer when asked which keys this signer publishes; try again", {
-        statement
-      });
-    }
-    const wanted = sshKeyBody(key.publicKey);
-    if (wanted === void 0 || !published.some((line) => sshKeyBody(line) === wanted)) {
-      return res("SIGNER_KEY_UNKNOWN", `key ${key.keyId} is not among the SSH keys ${key.githubUserId} publishes on GitHub; add it to the GitHub account or enroll the key that is there`, { statement });
+    if (facts.prAuthorGithubUserId === key.githubUserId) {
+      return res("SIGNER_PERMISSION_INSUFFICIENT", "author may not sign", { statement });
     }
   }
   const seen = /* @__PURE__ */ new Set();
@@ -1634,51 +1705,10 @@ async function verifyProof(input, deps) {
     if (verdict !== void 0)
       return { ...verdict, statement };
   }
-  const audit = bundle.policy.audit;
-  const mandatoryPaths = audit.mandatoryPaths ?? [];
-  const basisPoints = audit.basisPoints ?? 0;
-  if (mandatoryPaths.length > 0 || basisPoints > 0) {
-    if (mandatoryPaths.length > 0 && facts.changedPaths === void 0) {
-      return res("AUDIT_REQUIRED", "this project audits changes under protected paths and the checker could not read which paths this branch changes; retry, and if it persists ask an administrator to check the GitHub App's contents permission", { statement });
-    }
-    const touchesProtected = (facts.changedPaths ?? []).some((path) => mandatoryPaths.some((prefix) => path === prefix || path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)));
-    if (touchesProtected || sampledForAudit(facts.treeOid, basisPoints)) {
-      if (!deps.auditProof) {
-        return res("AUDIT_REQUIRED", "this project audits a share of proofs by re-running them and no auditor is available to this checker; ask an administrator to enable the audit runner or lower the audit rate", { statement });
-      }
-      let outcome;
-      try {
-        outcome = await deps.auditProof({ statement, facts });
-      } catch {
-        return res("AUDIT_REQUIRED", "the audit re-run did not complete, so this proof is unaudited; run it again", {
-          statement
-        });
-      }
-      if (!outcome.agrees) {
-        return res("AUDIT_DISAGREED", outcome.detail ?? "an independent re-run of this pipeline disagreed with the proof; run the tests again and look at what differs", { statement });
-      }
-    }
-  }
   return res("PASS", void 0, { statement, signerKey: key });
 }
 var CLOCK_SKEW_TOLERANCE_MS = 6e4;
 var LEASE_ALGORITHMS = /* @__PURE__ */ new Set(["ES256", "EdDSA"]);
-function sampledForAudit(treeOid, basisPoints) {
-  if (basisPoints <= 0)
-    return false;
-  if (basisPoints >= 1e4)
-    return true;
-  const bucket = Number.parseInt(treeOid.slice(0, 8), 16);
-  if (!Number.isFinite(bucket))
-    return true;
-  return bucket % 1e4 < basisPoints;
-}
-function sshKeyBody(line) {
-  const parts = line.trim().split(/\s+/);
-  if (parts.length < 2)
-    return void 0;
-  return `${parts[0]} ${parts[1]}`;
-}
 function b64urlDecode2(value) {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");
   return b64stdDecode(padded + "=".repeat((4 - padded.length % 4) % 4));
@@ -1816,6 +1846,38 @@ function parseBundleResolutionBody(value) {
   throw new Error("BUNDLE_UNAVAILABLE: resolver returned neither an active bundle nor bootstrap state");
 }
 
+// src/merge-group-targets.ts
+var MAX_HOPS = 50;
+async function collectMergeGroupTargets(group, read) {
+  const heads = [];
+  let cursor = group.headSha;
+  let hops = 0;
+  while (cursor !== group.baseSha && hops < MAX_HOPS) {
+    const commit = await read.commit(cursor);
+    if (commit.parents.length >= 2) heads.push(commit.parents[1].sha);
+    if (commit.parents.length === 0) break;
+    cursor = commit.parents[0].sha;
+    hops++;
+  }
+  return Promise.all(
+    heads.map(async (prHeadSha) => {
+      const prAuthorId = await authorOf(prHeadSha, read);
+      return { prHeadSha, ...prAuthorId !== void 0 ? { prAuthorId } : {} };
+    })
+  );
+}
+async function authorOf(headSha, read) {
+  let pulls;
+  try {
+    pulls = await read.pullsForCommit(headSha);
+  } catch {
+    return void 0;
+  }
+  const authors = new Set(pulls.filter((pull) => pull.head.sha === headSha).map((pull) => String(pull.user.id)));
+  if (authors.size !== 1) return void 0;
+  return [...authors][0];
+}
+
 // src/main.ts
 var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
 var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
@@ -1931,16 +1993,17 @@ async function main() {
   } else if (eventName === "merge_group") {
     const mg = event["merge_group"];
     baseRefName = mg["base_ref"].replace(/^refs\/heads\//, "");
-    let cursor = mg["head_sha"];
-    const baseSha = mg["base_sha"];
-    let hops = 0;
-    while (cursor !== baseSha && hops < 50) {
-      const c = await gh(`/repos/${fullName}/git/commits/${cursor}`);
-      if (c.parents.length >= 2) targets.push({ prHeadSha: c.parents[1].sha });
-      if (c.parents.length === 0) break;
-      cursor = c.parents[0].sha;
-      hops++;
-    }
+    targets.push(
+      ...await collectMergeGroupTargets(
+        { headSha: mg["head_sha"], baseSha: mg["base_sha"] },
+        {
+          commit: (sha) => gh(`/repos/${fullName}/git/commits/${sha}`),
+          pullsForCommit: (sha) => gh(
+            `/repos/${fullName}/commits/${sha}/pulls?per_page=100`
+          )
+        }
+      )
+    );
     if (targets.length === 0) {
       summary("thwip: FAIL \u2014 merge group contains no mergeable PR entries");
       process.exit(1);

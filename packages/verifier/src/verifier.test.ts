@@ -156,6 +156,16 @@ describe("verifyProof decision table", () => {
     expect(r.code).toBe("PASS");
   });
 
+  // The blank the lease check was handed for months. A caller that passes no
+  // signature check gets the verifier's own, never an accepted proof.
+  it("checks the signature itself when the caller hands in nothing", async () => {
+    const r = await verifyProof(
+      { commitMessage: commitMessageFor(envelopeFor(makeStatement())), facts: makeFacts(), bundle: makeBundle(), now: NOW },
+      {},
+    );
+    expect(r.code).toBe("SIGNATURE_INVALID");
+  });
+
   it("fails with no trailer", async () => {
     expect((await run({ message: "feat: nothing here\n" })).code).toBe("PROOF_MISSING");
   });

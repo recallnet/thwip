@@ -16,8 +16,10 @@ import {
 import { settleRemoteSuites } from "./remote-suite-settlement.js";
 
 import { verifyLeaseSignature as defaultLeaseSignatureCheck } from "./lease-signature.js";
+import { verifySshSignature as defaultSshSignatureCheck } from "./ssh-signature.js";
 
 export { verifyLeaseSignature } from "./lease-signature.js";
+export { ed25519RawFromAuthorizedKey, sha256Fingerprint, verifySshSignature } from "./ssh-signature.js";
 
 /** Facts the Action derives independently from GitHub. Never taken from the proof. */
 export interface GithubFacts {
@@ -47,9 +49,11 @@ export interface VerifyDeps {
   /**
    * Verify an OpenSSH SSHSIG signature (standard base64 of the binary SSHSIG
    * blob) over `message` under `namespace` with an authorized_keys-format
-   * public key. Injected so the verifier itself stays pure.
+   * public key. Optional: the package verifies Ed25519 signatures itself, so a
+   * caller that passes nothing still gets a real check. A caller with OpenSSH
+   * to hand may pass one that covers more key types.
    */
-  verifySshSignature(args: {
+  verifySshSignature?(args: {
     publicKey: string;
     namespace: string;
     message: Uint8Array;
@@ -144,8 +148,9 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
   }
   const pae = dssePae(DSSE_PAYLOAD_TYPE, payloadBytes);
   let sigOk: boolean;
+  const checkSshSignature = deps.verifySshSignature ?? defaultSshSignatureCheck;
   try {
-    sigOk = await deps.verifySshSignature({
+    sigOk = await checkSshSignature({
       publicKey: key.publicKey,
       namespace: SSH_SIGN_NAMESPACE,
       message: pae,
