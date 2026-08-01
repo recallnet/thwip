@@ -30,7 +30,10 @@ import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 import { acquireRunLease, httpLeasePorts } from "./run-lease.js";
 import { executeCli, type CommandInvocation } from "./cli-args.js";
-import { cmdVerifyChain } from "./verify-chain.js";
+import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
+import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
+import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
+import { runFreshTurn, type FreshTurnResult } from "./fresh-turn.js";
 import { flag } from "./cli-flags.js";
 import { realHeartbeat, runQueueWork } from "./queue-work.js";
 
@@ -433,6 +436,10 @@ async function cmdShip(argv: string[]): Promise<number> {
 
   let prNumber: number | null = await currentPrNumber(cwd);
   let headProof: "accepted" | "missing" | "stale" = "missing";
+  // Which attempt the queue is running, read from the snapshot each time it is
+  // observed. A claim names the attempt it answers, and claiming under a stale
+  // one is the mismatch the service refuses.
+  let attemptId: string | null = null;
 
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(endpoint + path, {
@@ -453,6 +460,9 @@ async function cmdShip(argv: string[]): Promise<number> {
       const snapshot = useQueue ? await call("GET", queuePath()) : { status: 404, body: {} };
       const entries = (snapshot.body["entries"] as Array<Record<string, unknown>> | undefined) ?? [];
       const mine = entries.find((e) => String(e["entryId"]).endsWith("_" + String(prNumber)));
+      const active = snapshot.body["activeAttemptId"];
+      const last = mine?.["lastAttemptId"];
+      attemptId = typeof active === "string" ? active : typeof last === "string" ? last : null;
       return {
         authenticated: true,
         workingTreeClean: git.workingTreeClean,
@@ -497,10 +507,31 @@ async function cmdShip(argv: string[]): Promise<number> {
       return result.status >= 500 ? { reasonCode: "SERVICE_UNAVAILABLE" } : {};
     },
     async executeTurn() {
-      // The control plane's workflow drives the turn; the CLI keeps this device
-      // present while it runs.
-      await sleep(5000);
-      return {};
+      // Under fast and remote the queue runs the turn itself, and this device
+      // only has to stay present while it does. Under fresh and audited the
+      // turn is this machine's work, and nothing else will do it.
+      if (project.policy.securityProfile !== "fresh" && project.policy.securityProfile !== "audited") {
+        await sleep(5000);
+        return {};
+      }
+      if (attemptId === null) {
+        // The snapshot names the attempt. Without one there is nothing to claim
+        // against, and guessing would claim against whatever the queue moves to
+        // next.
+        await sleep(5000);
+        return {};
+      }
+      const result = await executeFreshTurn({
+        cwd,
+        endpoint,
+        auth,
+        repositoryId,
+        baseRef,
+        attemptId,
+        config: await loadConfig(),
+        emit: (text) => process.stdout.write(text + "\n"),
+      });
+      return result.ok ? {} : { reasonCode: result.reasonCode };
     },
     async awaitMerge() {
       await sleep(5000);
@@ -535,6 +566,117 @@ async function cmdShip(argv: string[]): Promise<number> {
   } finally {
     detach();
   }
+}
+
+/**
+ * The `fresh` half of a turn: claim the offer, check what thwip signed, run the
+ * candidate it names, and send back a signed receipt.
+ *
+ * Everything that decides anything lives in fresh-turn.ts and is tested there.
+ * This assembles the ports: the queue over HTTP, git for the candidate, the
+ * project's own pipeline for the suites, and this machine's enrolled key for
+ * the signature.
+ */
+async function executeFreshTurn(input: {
+  readonly cwd: string;
+  readonly endpoint: string;
+  readonly auth: string;
+  readonly repositoryId: string;
+  readonly baseRef: string;
+  readonly attemptId: string;
+  readonly config: CliConfig;
+  readonly emit: (text: string) => void;
+}): Promise<FreshTurnResult> {
+  const identity = await resolveGithubIdentity(input.config);
+  const key = await requireRegisteredKey(input.cwd, input.config, identity.login);
+
+  const post = async (suffix: string, body: unknown) => {
+    const res = await fetch(
+      `${input.endpoint}/v1/queue/${input.repositoryId}${suffix}?ref=${encodeURIComponent(input.baseRef)}`,
+      {
+        method: "POST",
+        headers: { authorization: input.auth, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    return { status: res.status, body: (await res.json().catch(() => null)) as unknown };
+  };
+
+  const result = await runFreshTurn(
+    { deviceKeyId: key.fingerprint, repositoryId: input.repositoryId, attemptId: input.attemptId },
+    {
+      claim: () => post("/claim", { attemptId: input.attemptId, deviceKeyId: key.fingerprint }),
+      async publishedKeys() {
+        // The same public endpoint `thwip verify-chain` reads. A key set that
+        // cannot be read means nothing can be checked, which parseKeySet says
+        // by returning nothing rather than by handing back an empty set.
+        try {
+          const res = await fetch(`${input.endpoint}/.well-known/thwip-keys`);
+          if (!res.ok) return null;
+          return parseKeySet(await res.json().catch(() => null));
+        } catch {
+          return null;
+        }
+      },
+      materialize: (candidate) =>
+        materializeCandidate({
+          repoDir: input.cwd,
+          candidateSha: candidate.candidateSha,
+          candidateTreeOid: candidate.candidateTreeOid,
+        }),
+      runSuites: (workspace, suites) =>
+        runCandidateSuites(workspace, suites, input.endpoint, input.auth, input.emit),
+      signReceipt: (receipt) => signReceipt(receipt, key.privateKeyPath),
+      submit: (receipt) => post("/receipt", receipt),
+      now: () => new Date().toISOString(),
+    },
+  );
+
+  input.emit(
+    result.ok
+      ? `[thwip] the candidate ${result.candidateTreeOid} passed here and the receipt was accepted`
+      : `[thwip] ${result.reasonCode}: ${result.detail}`,
+  );
+  return result;
+}
+
+/**
+ * Run the required suites in the candidate worktree.
+ *
+ * The pipeline comes from the candidate's own tree, because that is the
+ * pipeline the merge would land. Only the suites the assignment requires are
+ * run: a receipt is about those, and running more would spend a developer's
+ * machine on work the queue is not waiting for.
+ */
+async function runCandidateSuites(
+  workspace: CandidateWorkspace,
+  required: readonly string[],
+  endpoint: string,
+  auth: string,
+  emit: (text: string) => void,
+): Promise<ReceiptSuiteOutcome[]> {
+  const project = await loadProjectConfigAtHead(workspace.dir, endpoint, auth);
+  const def = project.pipeline;
+  const wanted = def.suites.filter((s) => required.includes(s.id));
+  const absent = required.filter((name) => !def.suites.some((s) => s.id === name));
+  if (absent.length > 0) {
+    // Said here rather than left for the service to refuse, so the developer
+    // reads it beside the run rather than after it.
+    emit(`[thwip] the candidate's pipeline defines no suite named ${absent.join(", ")}`);
+  }
+
+  emit(`[thwip] running ${wanted.map((s) => s.id).join(", ")} against candidate ${workspace.candidateSha}`);
+  const results =
+    def.runner === "dagger"
+      ? await (async () => {
+          const { ensureDagger, requireContainerRuntime, runDaggerSuites } = await import("./dagger.js");
+          await requireContainerRuntime();
+          const bin = await ensureDagger(def.daggerVersion!);
+          return runDaggerSuites({ bin, module: def.module!, suites: wanted.map((s) => s.id), cwd: workspace.dir });
+        })()
+      : await runSuites({ ...def, suites: wanted }, workspace.dir);
+
+  return results.map((r) => ({ name: r.id, outcome: r.status === "passed" ? "passed" : "failed" }));
 }
 
 function turnFrom(
