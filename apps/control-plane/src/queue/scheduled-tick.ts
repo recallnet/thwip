@@ -18,12 +18,13 @@ import type { QueueRouteEnv } from "./routes.js";
 export interface TickPorts {
   driveTurn(repositoryId: string, pullRequestNumber: number): Promise<void>;
   onQueueTicked(repositoryId: string): void;
+  onQueueFailed(repositoryId: string, error: unknown): void;
 }
 
 export async function tickAllQueues(
   env: QueueRouteEnv,
   ports: TickPorts,
-): Promise<{ ticked: number; driven: number }> {
+): Promise<{ ticked: number; driven: number; failed: number }> {
   const rows = await (env.DB as unknown as D1Like)
     .prepare("SELECT github_repository_id AS repositoryId, base_ref AS baseRef FROM queue_projects WHERE enabled = 1")
     .bind()
@@ -31,6 +32,7 @@ export async function tickAllQueues(
 
   let ticked = 0;
   let driven = 0;
+  let failed = 0;
   for (const row of rows.results) {
     try {
       const snapshot = await withQueueState(
@@ -53,10 +55,15 @@ export async function tickAllQueues(
         await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
         driven += 1;
       }
-    } catch {
-      // One queue's problem is not the others'. The next tick retries it.
-      ticked += 1;
+    } catch (error) {
+      // A heartbeat that reports the same number whether it worked or failed
+      // is not a signal. Keep this out of `ticked` so a fleet-wide outage
+      // shows up as a fleet-wide `failed` count instead of a normal-looking
+      // one, and hand the error to the caller since this port has no other
+      // way to report it.
+      failed += 1;
+      ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven };
+  return { ticked, driven, failed };
 }
