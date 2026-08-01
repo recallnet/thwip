@@ -151,11 +151,47 @@ describe("migration 0018: one record per merge", () => {
     applyMigration(t.raw, MIGRATION);
 
     expect(positions(t.raw, [winner, loser, intent])).toEqual([47, null, null]);
-    const intentRow = t.raw.prepare(`SELECT transition_sequence FROM queue_attestations WHERE digest = ?`).get(intent) as {
-      transition_sequence: number | null;
-    };
-    // Was already null before the migration ran; still null, not cleared by it.
-    expect(intentRow.transition_sequence).toBeNull();
+  });
+
+  it("prefers the indexed row even when it is not the earliest created", () => {
+    const t = fresh();
+    const attemptId = "att_indexed-not-earliest";
+    const earlier = `sha256:${"6".repeat(64)}`;
+    const indexed = `sha256:${"a".repeat(64)}`;
+    // The indexed row is the later write. A migration that only ever fell
+    // back to earliest-created_at would pick `earlier` here and would agree
+    // with the correct answer in every other fixture in this file, because
+    // everywhere else the indexed row also happens to be earliest. This is
+    // the one case where "prefer the index" and "prefer earliest" disagree.
+    insertAttestation(t.raw, { digest: earlier, attemptId, transitionSequence: 47, createdAt: "2026-01-01T00:00:00.000Z" });
+    insertAttestation(t.raw, { digest: indexed, attemptId, transitionSequence: 47, createdAt: "2026-01-01T00:00:05.000Z" });
+    insertIndexed(t.raw, { id: "idx-1", digest: indexed, sequence: 47, attemptId });
+
+    applyMigration(t.raw, MIGRATION);
+
+    expect(positions(t.raw, [earlier, indexed])).toEqual([null, 47]);
+  });
+
+  it("never lets a merge intent win the fallback ordering it is excluded from", () => {
+    const t = fresh();
+    const attemptId = "att_intent-sorts-first";
+    const winner = `sha256:${"3".repeat(64)}`;
+    const loser = `sha256:${"4".repeat(64)}`;
+    // Earliest created_at and, if it came to it, the lowest digest too — the
+    // intent would win the fallback's own ORDER BY on both columns if it
+    // were eligible to compete at all. It isn't: it has no chain position to
+    // keep. No queue_transitions_index row exists for this attempt, so the
+    // fallback is what has to reject it, not the index preference.
+    const intent = `sha256:${"2".repeat(64)}`;
+    insertAttestation(t.raw, { digest: winner, attemptId, transitionSequence: 47, createdAt: "2026-01-01T00:00:02.000Z" });
+    insertAttestation(t.raw, { digest: loser, attemptId, transitionSequence: 47, createdAt: "2026-01-01T00:00:03.000Z" });
+    insertAttestation(t.raw, { digest: intent, attemptId, transitionSequence: null, createdAt: "2026-01-01T00:00:00.000Z" });
+
+    applyMigration(t.raw, MIGRATION);
+
+    // If the intent had won the fallback, neither real row's digest would
+    // match the keeper and both would be demoted alongside it.
+    expect(positions(t.raw, [winner, loser, intent])).toEqual([47, null, null]);
   });
 
   it("matches production: att_04e73f0a keeps the indexed digest at sequence 47", () => {
