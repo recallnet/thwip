@@ -185,7 +185,18 @@ jobs:
             # GitHub offers no other way to say "merge only onto this base".
             # Refusing costs a squash repository its merges. Merging anyway
             # costs everyone the one claim this queue exists to make.
-            echo "::error::a $method merge cannot be bound to the base the queue verified; not merging"
+            #
+            # The queue authorized a merge that is now not going to happen, so
+            # it hears that here. Otherwise the lane stays held until its
+            # deadline and every pull request behind this one waits on a merge
+            # nobody is going to make.
+            curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
+              -H "content-type: application/json" \
+              -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" \
+                    --arg detail "SQUASH_UNBINDABLE $method" \
+                    '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
+              "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+            echo "::error::this repository merges by $method, and a $method commit does not contain the pull request head, so there is no way to bind it to the base the queue verified; nothing was merged. Set the queue to merge commits, or leave this pull request to a maintainer."
             exit 1
           fi
 

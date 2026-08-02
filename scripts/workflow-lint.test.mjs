@@ -38,7 +38,17 @@ jobs: {}
 // keyed its group per pull request, two runs for two pull requests drove one lane
 // at once, and pull requests 114, 117 and 119 merged trees no suite had run.
 describe("workflow lint: workflows that move a branch ref", () => {
-  const laneWorkflow = (concurrency) => `
+  // The land step PR 123 shipped: a commit composed on the pinned base, then a
+  // ref update that does not force.
+  const LANDS_ON_THE_PINNED_BASE = `base_pin=$(printf '%s' "$abody" | jq -r '.merge.baseSha // empty')
+          tree_pin=$(printf '%s' "$abody" | jq -r '.merge.treeOid // empty')
+          parents=$(printf '%s' "$abody" | jq -c '.merge.parentShas // []')
+          curl -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/git/commits" \\
+            -d "$(jq -nc --arg tree "$tree_pin" --argjson parents "$parents" '{tree:$tree, parents:$parents}')"
+          curl -X PATCH "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/main" \\
+            -d "$(jq -nc --arg sha "$composed" '{sha:$sha, force:false}')"`;
+
+  const laneWorkflow = (concurrency, land = LANDS_ON_THE_PINNED_BASE) => `
 name: lane
 on:
   workflow_run:
@@ -52,8 +62,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          curl -X PATCH "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/main"
+          ${land}
 `;
+
+  const LANE = `concurrency:
+  group: thwip-merge-\${{ github.repository }}
+  cancel-in-progress: false`;
 
   it("accepts a group keyed on the repository alone", () => {
     expect(() =>
@@ -155,5 +169,50 @@ jobs:
 `,
       ),
     ).not.toThrow();
+  });
+
+  // GitHub's merge-pull-request API takes an expected head and no expected base,
+  // so it merges onto whatever the branch is at that instant. Pull requests 114,
+  // 117, 119 and 121 were each signed against one base and merged onto another,
+  // and GitHub called every one of them a success. The only base-binding
+  // primitive GitHub has is a ref update without force, so that is what a
+  // workflow that merges has to use.
+  describe("a merge that binds the base it was verified against", () => {
+    const mergeApiWorkflow = `curl -X PUT "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" \\
+            -d "$(jq -nc --arg sha "$HEAD_SHA" '{sha:$sha, merge_method:"merge"}')"`;
+
+    it("rejects the merge-pull-request API, which has no expected base", () => {
+      expect(() => validateWorkflow("lane.yml", laneWorkflow(LANE, mergeApiWorkflow))).toThrow(
+        /lane\.yml: merges through the pull-request merge API, which takes an expected head and no expected base/,
+      );
+    });
+
+    it("rejects a ref update that forces", () => {
+      const forced = LANDS_ON_THE_PINNED_BASE.replace("force:false", "force:true");
+      expect(() => validateWorkflow("lane.yml", laneWorkflow(LANE, forced))).toThrow(
+        /lane\.yml: moves a branch ref with force/,
+      );
+    });
+
+    it("rejects a ref update that leaves force to the default", () => {
+      const silent = LANDS_ON_THE_PINNED_BASE.replace(", force:false", "");
+      expect(() => validateWorkflow("lane.yml", laneWorkflow(LANE, silent))).toThrow(
+        /lane\.yml: moves a branch ref without saying force:false/,
+      );
+    });
+
+    it("rejects a ref update to a commit composed from nothing the queue pinned", () => {
+      const unpinned = `composed=$(curl -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/git/commits" \\
+            -d '{"tree":"t","parents":["p"]}')
+          curl -X PATCH "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/main" \\
+            -d "$(jq -nc --arg sha "$composed" '{sha:$sha, force:false}')"`;
+      expect(() => validateWorkflow("lane.yml", laneWorkflow(LANE, unpinned))).toThrow(
+        /lane\.yml: moves a branch ref to a commit it did not compose on the base the queue pinned/,
+      );
+    });
+
+    it("accepts a commit composed on the pinned base and landed without force", () => {
+      expect(() => validateWorkflow("lane.yml", laneWorkflow(LANE))).not.toThrow();
+    });
   });
 });
