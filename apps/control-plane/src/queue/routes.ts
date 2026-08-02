@@ -29,7 +29,13 @@ import {
   requiresDeviceOnly,
   wellFormedDeviceKeyId,
 } from "./runners.js";
-import { mayActOnRepository, REPOSITORY_FORBIDDEN } from "./repository-access.js";
+import {
+  atLeast,
+  repositoryAccess,
+  REPOSITORY_FORBIDDEN,
+  REPOSITORY_READ_ONLY,
+  type RepositoryLevel,
+} from "./repository-access.js";
 import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./readiness.js";
 import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
@@ -814,47 +820,72 @@ function failure(error: unknown): {
  * What a repository-scoped path requires of its caller, keyed by the segment
  * after the repository id.
  *
- * Membership is the default, and the gate below applies it, so a route added to
- * this file is guarded before its first line runs. Thirteen routes each
- * remembering to check for themselves is how a signed-in member of one
- * organization came to be able to pause, rebaseline and reconcile another
- * organization's queue: every one of them called `authenticate`, which says the
- * caller holds a session somewhere and has never said anything about the
- * repository in the path. It is the same shape that produced twelve copies of a
- * queue-key guard carrying the same wrong message.
+ * The gate below applies this, so a route added to this file is guarded before
+ * its first line runs. Thirteen routes each remembering to check for themselves
+ * is how a signed-in member of one organization came to be able to pause,
+ * rebaseline and reconcile another organization's queue: every one of them
+ * called `authenticate`, which says the caller holds a session somewhere and has
+ * never said anything about the repository in the path. It is the same shape
+ * that produced twelve copies of a queue-key guard carrying the same wrong
+ * message.
  *
- * A route that establishes access some other way is listed here, in one place,
- * with the reason. Forgetting to list a route makes it stricter, never weaker.
+ * A route that establishes access some other way, or that needs less than the
+ * default, is listed here, in one place, with the reason. The default is write,
+ * so forgetting to list a route makes it stricter, never weaker.
  */
-const REPOSITORY_ACCESS: Readonly<Record<string, "workflow" | "either" | "route">> = {
+interface Requirement {
+  /**
+   * A GitHub Actions OIDC token minted in this repository. `only` takes nothing
+   * else; `or` accepts it in place of a session.
+   */
+  readonly token?: "only" | "or";
+  /** The route settles access for itself, and says why where it does it. */
+  readonly route?: true;
+  /** The floor a session has to clear on this repository. */
+  readonly need?: RepositoryLevel;
+}
+
+const REPOSITORY_ACCESS: Readonly<Record<string, Requirement>> = {
   // The pinned workflow's own calls. Each verifies a GitHub Actions OIDC token
   // and refuses one minted for another repository, which binds the repository
-  // harder than a membership row does. A workflow holds no session and belongs
-  // to no organization, so asking it for membership would refuse it outright.
-  authorize: "workflow",
-  "candidate-result": "workflow",
-  merged: "workflow",
-  "not-merged": "workflow",
+  // harder than a permission row does. A workflow holds no session and belongs
+  // to no organization, so asking it for one would refuse it outright.
+  authorize: { token: "only" },
+  "candidate-result": { token: "only" },
+  merged: { token: "only" },
+  "not-merged": { token: "only" },
   // Either identity. The merge workflow polls these with the token it
   // authorizes with; a person or the CLI arrives with a session, and that half
-  // still has to be a member. `nudge` had no authentication of any kind, and it
-  // drives GitHub Actions on the repository it names.
-  candidate: "either",
-  nudge: "either",
+  // still has to hold the repository. `nudge` had no authentication of any
+  // kind, and it drives GitHub Actions on the repository it names.
+  candidate: { token: "or", need: "read" },
+  nudge: { token: "or", need: "write" },
   // The route decides, because the answer turns on a `chain_public` row and the
   // order of its refusals is what stops a caller walking the numeric repository
   // id space. See the route, and `chain-route.test.ts`, which pins that order.
-  chain: "route",
+  chain: { route: true },
+  // Reading the lane and asking it to explain itself. Both are what somebody
+  // with triage on the repository is there to do, and neither moves anything.
+  "": { need: "read" },
+  explain: { need: "read" },
 };
+
+/**
+ * Write, for everything not listed: joining the queue, cancelling, ticking,
+ * heartbeating a runner. It is what GitHub requires to push the branch these
+ * routes exist to merge into, and the walk to a merge already refuses a sponsor
+ * holding less.
+ */
+const REPOSITORY_DEFAULT: Requirement = { need: "write" };
 
 /**
  * The caller the gate established, for the handlers that name them.
  *
- * `isAdmin` is only ever read after membership has been established, which is
- * what makes it a claim about the organization that owns this repository.
- * `authenticate` answers for whichever organization the session selected, so
- * read before membership it said an administrator of one organization was an
- * administrator of every other.
+ * `isAdmin` is the gate's answer about this repository, not the session's about
+ * whichever organization it selected. Set from the level the gate resolved: an
+ * owner of the organization that owns the repository, or somebody GitHub calls
+ * an admin of the repository itself. Read straight off `authenticate` it said
+ * an administrator of one organization was an administrator of every other.
  */
 interface QueueCaller {
   readonly principalId: string;
@@ -1105,24 +1136,31 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const repositoryId = decimal(segments[3]);
     if (repositoryId === null) return next();
 
-    const mode = REPOSITORY_ACCESS[segments[4] ?? ""] ?? "member";
-    if (mode === "workflow" || mode === "route") return next();
+    const requirement = REPOSITORY_ACCESS[segments[4] ?? ""] ?? REPOSITORY_DEFAULT;
+    if (requirement.route === true || requirement.token === "only") return next();
 
-    if (mode === "either") {
+    if (requirement.token === "or") {
       const claims = await deps.verifyOidc(c, c.env);
       if (claims !== null && String(claims["repository_id"] ?? "") === repositoryId) return next();
     }
 
     const who = await deps.authenticate(c, c.env);
     if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-    // One refusal for a repository this caller is not in and one for a
+    const level = await repositoryAccess(c.env.DB as unknown as D1Like, repositoryId, who);
+    // One refusal for a repository this caller holds nothing on and one for a
     // repository nobody has onboarded. Two answers would be the enumeration
     // the chain route's ordering already exists to prevent, arriving through a
     // different door.
-    if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
-      return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
-    }
-    c.set("caller", who);
+    if (!atLeast(level, "read")) return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+    // Past that point the caller has been told by GitHub that the repository
+    // exists, so a refusal may say what they are short of.
+    if (!atLeast(level, requirement.need ?? "write")) return c.json({ error: REPOSITORY_READ_ONLY }, 403);
+    // `isAdmin` is the repository's answer, not the session's. `authenticate`
+    // reports the role of whichever organization the session selected, so a
+    // handler reading it directly made an owner of one organization an
+    // administrator of every other, and it says nothing at all about somebody
+    // who holds this repository and belongs to no organization.
+    c.set("caller", { ...who, isAdmin: level === "admin" });
     return next();
   });
 
@@ -3944,9 +3982,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (project === null || project.chainPublic !== 1) {
       const who = await deps.authenticate(c, c.env);
       if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
-      if (!(await mayActOnRepository(c.env.DB as unknown as D1Like, repositoryId, who))) {
-        return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
-      }
+      const level = await repositoryAccess(c.env.DB as unknown as D1Like, repositoryId, who);
+      if (!atLeast(level, "read")) return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
     }
     if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
