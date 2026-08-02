@@ -33,6 +33,7 @@ import { mayActOnRepository, REPOSITORY_FORBIDDEN } from "./repository-access.js
 import { foldCapability } from "./readiness.js";
 import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
+import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
 import {
   authorizationFor,
   readAttestation,
@@ -1042,6 +1043,22 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * as the branch's new state is on the branch at all.
    */
   baseContainsSha(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
+  /**
+   * What the branch requires of a head, and what the head says about it.
+   *
+   * Read before the queue prepares a merge. A required check that is not on the
+   * head makes the merge PUT a certain 405, and the queue used to learn that
+   * from the rejection — after it had signed an intent and minted an operation,
+   * with the attempt holding the lane and everything behind it stopped.
+   *
+   * Null when GitHub could not be read, which is unknown rather than a refusal.
+   */
+  requiredCheckState?(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+    headSha: string,
+  ): Promise<RequiredCheckState | null>;
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
@@ -2528,6 +2545,45 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         (holder.state === "Active" ||
           (localRun !== null && (holder.state === "Verifying" || holder.state === "MergeGuard")));
       if (walkable && holder !== undefined) {
+        // What the branch requires, before the queue commits to a merge.
+        //
+        // The merge is a PUT the caller makes once this returns an operation, and
+        // GitHub refuses it outright when a required check is not on the head.
+        // The queue used to find that out from the 405: by then it had signed an
+        // intent, minted an operation and started the confirmation clock, and the
+        // attempt held the lane until a person cleared it. Everything behind it
+        // waited. That happened to four pull requests on one day.
+        //
+        // Both facts are readable here. Refusing now costs a turn; discovering it
+        // from GitHub's answer cost the queue.
+        //
+        // Only the certain cases, and only when GitHub answered. A check still
+        // running may yet pass, and rules that could not be read say nothing
+        // about this head.
+        const requiredChecks =
+          deps.requiredCheckState === undefined
+            ? null
+            : await deps.requiredCheckState(c.env, repositoryId, baseRef, headSha).catch(() => null);
+        const unsatisfied = requiredChecks === null ? [] : unsatisfiedRequiredChecks(requiredChecks);
+        if (unsatisfied.length > 0) {
+          const named = unsatisfied
+            .map((check) =>
+              check.state === "absent"
+                ? `"${check.context}", which nothing has published on this commit`
+                : `"${check.context}", which did not pass`,
+            )
+            .join("; ");
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: "REQUIRED_CHECK_MISSING",
+            detail: `this branch requires ${named}. GitHub would refuse the merge, so the queue is not asking for it.`,
+            entryId,
+            operationId: null,
+          });
+        }
+
         // The proof the developer signed, by its own digest.
         //
         // This was `sha256:2222…2222`, a constant, so everything downstream that
