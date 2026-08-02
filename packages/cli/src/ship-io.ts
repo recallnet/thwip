@@ -21,6 +21,11 @@ export interface ShipPorts {
   push(): Promise<void>;
   openOrUpdatePullRequest(): Promise<{ pullRequestNumber: number }>;
   joinQueue(): Promise<{ reasonCode?: string }>;
+  /**
+   * Say this machine is here, so a profile that runs the turn on a device can
+   * offer it one. A no-op under a profile the server executes itself.
+   */
+  announcePresence(): Promise<void>;
   awaitTurn(): Promise<{ reasonCode?: string }>;
   executeTurn(): Promise<{ reasonCode?: string }>;
   awaitMerge(): Promise<{ reasonCode?: string }>;
@@ -111,9 +116,16 @@ async function perform(ports: ShipPorts, step: string): Promise<{ reasonCode?: s
       return {};
     case "join-queue":
       return ports.joinQueue();
+    // Presence is a fact with a short expiry, and both of these steps depend on
+    // it: the queue withholds the offer from an absent machine, and refuses a
+    // claim from one. Announcing here rather than in the ports keeps the two
+    // from drifting apart, and costs a `fast` repository nothing — its
+    // announcement is a no-op.
     case "await-turn":
+      await ports.announcePresence();
       return ports.awaitTurn();
     case "execute-turn":
+      await ports.announcePresence();
       return ports.executeTurn();
     case "await-merge":
       return ports.awaitMerge();

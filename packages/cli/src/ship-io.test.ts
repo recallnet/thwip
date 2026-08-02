@@ -33,6 +33,7 @@ function scripted(states: ShipState[], over: Partial<ShipPorts> = {}) {
     push: async () => {},
     openOrUpdatePullRequest: async () => ({ pullRequestNumber: 42 }),
     joinQueue: async () => ({}),
+    announcePresence: async () => {},
     awaitTurn: async () => ({}),
     executeTurn: async () => ({}),
     awaitMerge: async () => ({}),
@@ -79,6 +80,20 @@ describe("runShip", () => {
     expect(out.lines.filter((l) => l.includes("merge_confirmed"))).toHaveLength(1);
   });
 
+  it("says this machine is here before waiting for a turn, and again before taking one", async () => {
+    // Under `fresh` the queue withholds the offer until a device is present, so
+    // a ship that waits without announcing waits for a turn it has made
+    // impossible. That is what happened: `queue_runners` stayed empty, the
+    // entry sat Ready on AGENT_OFFLINE, and ship stalled on INTERNAL_FAILURE
+    // after sixty polls of a queue that was never going to offer it anything.
+    // Claiming reads the same presence, so the announcement has to precede the
+    // claim too, not only the wait.
+    const { ports, calls } = scripted([state({ turn: "none" }), state({ turn: "offered" }), state({ turn: "merged" })]);
+    const report = await runShip(ports, collect().emit, { jsonEvents: true });
+    expect(report).toMatchObject({ outcome: "MERGE_CONFIRMED" });
+    expect(calls).toEqual(["announcePresence", "awaitTurn", "announcePresence", "executeTurn"]);
+  });
+
   it("stops on something a person must fix, without touching the queue further", async () => {
     const { ports, calls } = scripted([state({ turn: "none" })], {
       awaitTurn: async () => ({ reasonCode: "REVIEW_REQUIRED" }),
@@ -113,8 +128,9 @@ describe("runShip", () => {
     const report = await runShip(ports, out.emit, { jsonEvents: true });
     expect(report).toMatchObject({ exitCode: EXIT.invariant, reasonCode: "INTERNAL_FAILURE" });
     expect(out.lines.some((l) => l.includes("ship.stalled"))).toBe(true);
-    // It stopped well short of the hard bound.
-    expect(calls.length).toBeLessThan(100);
+    // It stopped well short of the hard bound. Counted in loop turns, not port
+    // calls, because a turn performs more than one call.
+    expect(calls.filter((c) => c === "awaitTurn").length).toBeLessThan(100);
   });
 
   it("respects an explicit turn bound", async () => {
