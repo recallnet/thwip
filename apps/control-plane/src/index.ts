@@ -3,6 +3,8 @@ import { CompactSign, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
+import { projectsInReach } from "./dashboard-scope.js";
+import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
@@ -124,9 +126,20 @@ interface ViewerOrg {
 interface Viewer {
   baUserId: string;
   githubUserId: string;
+  /** The organizations this viewer is a member of. Outside collaborators have none. */
   orgs: ViewerOrg[];
-  /** the org selected for this request (?org=<github org id>, else first) */
+  /** the principal selected for this request (?org=<github org id>, else first) */
   principalId: string | null;
+  /**
+   * The organization selected for this request, and only when the viewer is a
+   * member of it.
+   *
+   * Null for a viewer acting as an outside collaborator. Every
+   * organization-wide read below already refuses a viewer without one, so a
+   * collaborator is refused the member list, the seat counts and the
+   * organization's settings by the guard that was already on each of them
+   * rather than by a new check that some route would eventually forget.
+   */
   organizationId: string | null;
   githubOrgRole: string | null;
   activated: boolean;
@@ -137,6 +150,12 @@ interface Viewer {
  * Better Auth, is the authorization source: roles and permissions come from
  * the synced org projections keyed by the numeric GitHub user id. A viewer
  * can belong to several installed organizations; `?org=` selects one.
+ *
+ * A principal row is the viewer's place in one organization's world and no
+ * longer means membership of it: installation sync writes one for every outside
+ * collaborator, with `github_org_role` set to `outside`. So the rows are split
+ * here. `orgs` is what the viewer belongs to, and a collaborator's row gives
+ * them a principal to act as with no organization selected.
  */
 async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
   const auth = createAuth(env);
@@ -163,7 +182,7 @@ async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
     }>();
   if (rows.results.length === 0) return null;
   const account = { accountId: rows.results[0]!.accountId };
-  const orgs: ViewerOrg[] = rows.results
+  const principals: ViewerOrg[] = rows.results
     .filter((r) => r.id !== null && r.organization_id !== null)
     .map((r) => ({
       organizationId: r.organization_id!,
@@ -173,15 +192,17 @@ async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
       githubOrgRole: r.github_org_role,
       activated: r.activated_at != null,
     }));
+  const orgs = principals.filter((p) => isMembership(p.githubOrgRole));
   const requested = new URL(req.url).searchParams.get("org");
-  const selected = orgs.find((o) => o.githubOrgId === requested || o.githubLogin === requested) ?? orgs[0] ?? null;
+  const selected = selectPrincipal(principals, requested);
+  const member = selected !== null && isMembership(selected.githubOrgRole);
   return {
     baUserId: session.user.id,
     githubUserId: account.accountId,
     orgs,
     principalId: selected?.principalId ?? null,
-    organizationId: selected?.organizationId ?? null,
-    githubOrgRole: selected?.githubOrgRole ?? null,
+    organizationId: member ? selected!.organizationId : null,
+    githubOrgRole: member ? selected!.githubOrgRole : null,
     activated: selected?.activated ?? false,
   };
 }
@@ -402,29 +423,20 @@ app.put("/v1/dashboard/proof-defaults", async (c) => {
   return c.json({ defaults });
 });
 
+/**
+ * Signed in is enough to ask. What comes back is the organization's projects
+ * when the viewer is a member of one, plus every repository their grants reach,
+ * which is the whole answer for somebody who belongs to no organization and
+ * used to be sent away with a 401.
+ */
 app.get("/v1/dashboard/projects", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const rows = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
-            p.proof_check_mode,
-            CASE
-              WHEN p.enabled = 0 THEN 'disabled'
-              WHEN p.active_policy_digest IS NULL THEN 'awaiting_policy'
-              ELSE 'active'
-            END AS activation_state,
-            b.version AS policy_version,
-            json_extract(b.canonical_json, '$.securityProfile') AS policy_profile,
-            b.config_source AS config_source,
-            (SELECT COUNT(*) FROM repository_grants g WHERE g.project_id = p.id AND g.active = 1) AS collaborators,
-            ${latestVerification("outcome")} AS last_outcome,
-            ${latestVerification("at")} AS last_observed_at
-     FROM projects p LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
-     WHERE p.organization_id = ? ORDER BY p.github_name`,
-  )
-    .bind(viewer.organizationId)
-    .all();
-  return c.json({ projects: rows.results });
+  if (!viewer) return c.json({ error: "unauthenticated" }, 401);
+  const projects = await projectsInReach(c.env.DB as unknown as D1Like, {
+    organizationId: viewer.organizationId,
+    githubUserId: viewer.githubUserId,
+  });
+  return c.json({ projects });
 });
 
 app.post("/v1/dashboard/projects/:id/enable", async (c) => {
