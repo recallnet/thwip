@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Who is connected to run a queue's turns on their own machine (plan.md §5.0).
 --
 -- A row means a runner said it was here at that moment, nothing more: it is

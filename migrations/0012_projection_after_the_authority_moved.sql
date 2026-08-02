@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Let the projection accept writes from the queue's new home.
 --
 -- The projection refuses a message whose generation it has already seen, which

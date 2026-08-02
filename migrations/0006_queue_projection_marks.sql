@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- The generation each branch's projection was last advanced to. Projection
 -- messages arrive at-least-once and unordered, so a write from an older
 -- generation is dropped rather than applied: otherwise a retried old message

@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- thwip control-plane schema (staging + production)
 CREATE TABLE organizations (
   id TEXT PRIMARY KEY,
