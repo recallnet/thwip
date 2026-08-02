@@ -13,6 +13,14 @@
  * has, and the endpoint is the control plane the caller is deployed at.
  * `bootstrap-workflows.test.ts` compares the names and triggers against the
  * originals, because those are what the ruleset pins.
+ *
+ * The merge workflow is not a copy at all any more. There were two of them and
+ * they drifted twice: the attribution trailer went missing from one, and PR 123
+ * taught this repository's copy to bind the base it verified while every adopted
+ * repository went on merging onto whatever the branch was at that instant. So
+ * `MERGE_WORKFLOW` below is the merge, and `.github/workflows/thwip-merge.yml`
+ * is what it renders at the production endpoint. `scripts/generate-workflows.mjs`
+ * writes that file and `scripts/lint.mjs` fails when it is not what this emits.
  */
 
 export interface SetupFile {
@@ -228,17 +236,28 @@ on:
 # serialised. The lane belongs to a base branch: one pull request holds it, is
 # integrated against the base, verified, and merged, and nothing else merges
 # meanwhile. Two pull requests meant two groups meant two runs driving one lane.
+# On 2 August 2026 pull requests 117 and 119 both pinned base 1511515c1241 and
+# landed on two different bases, and 114 did the same. The attestation refused to
+# sign any of the three, which is how we found out.
 #
-# The group cannot name the base ref as well. This workflow is reached by two
-# triggers, repository_dispatch carries only a pull request number and
-# workflow_run carries a base ref only for same-repository pull requests, so
-# reading the base here would put two triggers for one lane into two groups. A
-# group keyed on the repository holds every lane in it: a repository with two
-# queues merges a little slower and never merges twice at once.
+# So the group names the queue. It cannot name the base ref as well: this workflow
+# is reached by two triggers, repository_dispatch carries only a pull request
+# number and workflow_run carries a base ref only for same-repository pull
+# requests, so any attempt to read the base here puts two triggers for one lane
+# into two different groups. That is the same bug spelled differently. A group
+# keyed on the repository holds every lane in it, which serialises base branches
+# against each other; a repository with two queues merges a little slower and
+# never merges twice at once.
+#
+# It also still does the job it was added for: the drain re-runs every blocked
+# check at once, each of those fires a merge run, and only one of them runs.
 concurrency:
   group: thwip-merge-\${{ github.repository }}
   # Never cancel. A run past the ref update has moved the branch and has not yet
-  # told the queue, and a cancel there is a merge with no transition record.
+  # told the queue, and a cancel there is a merge with no transition record, the
+  # one outcome this queue exists to prevent. Runs do not pile up in exchange:
+  # each one asks the queue once and exits, GitHub holds a single pending run per
+  # group and drops the rest, and a turn nobody claimed is offered again.
   cancel-in-progress: false
 
 permissions:
@@ -298,8 +317,8 @@ jobs:
               "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=\${THWIP_ENDPOINT}/api/github-actions" | jq -r .value
           }
 
-          # Ask the queue again. Idempotent, and it is the queue : not this
-          # workflow : that decides whether this pull request holds the turn.
+          # Ask the queue again. Idempotent, and it is the queue — not this
+          # workflow — that decides whether this pull request holds the turn.
           base_sha=$(printf '%s' "$pr" | jq -r .base.sha)
           merge_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.merge_commit_sha // empty')
           candidate='null'
@@ -350,21 +369,109 @@ jobs:
             echo "queue did not authorize a merge: $(printf '%s' "$abody" | jq -r .reason)"; exit 0
           fi
 
+          # The base, the tree and the parents the queue signed for this merge.
+          #
+          # This run used to read the base for itself and then hand GitHub an
+          # expected head and nothing else, because the merge-pull-request API
+          # has no expected base. Pull requests 114, 117 and 119 were each
+          # signed against one base, merged onto another, and produced a tree no
+          # suite had ever run — and GitHub called all three a success. The base
+          # the intent bound is a fact the queue holds, so the queue is what
+          # says it.
+          base_pin=$(printf '%s' "$abody" | jq -r '.merge.baseSha // empty')
+          tree_pin=$(printf '%s' "$abody" | jq -r '.merge.treeOid // empty')
+          parents=$(printf '%s' "$abody" | jq -c '.merge.parentShas // []')
+          if [ -z "$base_pin" ] || [ -z "$tree_pin" ] || [ "$parents" = "[]" ]; then
+            echo "::error::the queue named no base for this merge; nothing will be merged"
+            exit 1
+          fi
+          if [ "$method" != "merge" ]; then
+            # A squash commit does not contain the pull request head, so the
+            # branch's own required checks refuse the ref update below, and
+            # GitHub offers no other way to say "merge only onto this base".
+            # Refusing costs a squash repository its merges. Merging anyway
+            # costs everyone the one claim this queue exists to make.
+            #
+            # The queue authorized a merge that is now not going to happen, so
+            # it hears that here. Otherwise the lane stays held until its
+            # deadline and every pull request behind this one waits on a merge
+            # nobody is going to make.
+            curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \\
+              -H "content-type: application/json" \\
+              -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "\${op#merge_}" --arg op "$op" \\
+                    --arg detail "SQUASH_UNBINDABLE $method" \\
+                    '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \\
+              "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+            echo "::error::this repository merges by $method, and a $method commit does not contain the pull request head, so there is no way to bind it to the base the queue verified; nothing was merged. Set the queue to merge commits, or leave this pull request to a maintainer."
+            exit 1
+          fi
+
+          title="Merge pull request #$PR (Thwip Queue)"
           # printf, so the trailer's blank line never appears literally in YAML.
-          msg=$(printf 'Integrated by Thwip Queue.\\n\\nthwip-queue-operation: %s\\n' "$op")
-          resp=$(curl -sS -w '\\n%{http_code}' -X PUT \\
+          trailer=$(printf 'Integrated by Thwip Queue.\\n\\nthwip-queue-operation: %s\\n' "$op")
+          # GitHub's merge API joined a title and a body; a git commit has one
+          # message, so this run does the joining.
+          msg=$(printf '%s\\n\\n%s' "$title" "$trailer")
+
+          # Write the merge commit ourselves: the pinned base as the first
+          # parent, the pull request head as the second, and the tree the
+          # verifier ran. Nothing is computed here, so nothing can drift from
+          # what the record binds.
+          written=$(curl -sS -w '\\n%{http_code}' -X POST \\
             -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \\
             -H "content-type: application/json" \\
-            -d "$(jq -nc --arg sha "$HEAD_SHA" --arg title "Merge pull request #$PR (Thwip Queue)" \\
-                  --arg msg "$msg" --arg method "$method" \\
-                  '{sha:$sha, merge_method:$method, commit_title:$title, commit_message:$msg}')" \\
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
-          mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
-          echo "merge: http $mcode"
-          landed=$(printf '%s' "$payload" | jq -r '.sha // empty')
+            -d "$(jq -nc --arg msg "$msg" --arg tree "$tree_pin" --argjson parents "$parents" \\
+                  '{message:$msg, tree:$tree, parents:$parents}')" \\
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/commits" || true)
+          wcode=$(printf '%s' "$written" | tail -n1); wbody=$(printf '%s' "$written" | sed '$d')
+          if [ "$wcode" != "201" ] && [ "$wcode" != "200" ]; then
+            echo "::error::could not write the merge commit ($wcode: $(printf '%s' "$wbody" | jq -r '.message // "no message"')); nothing was merged"
+            exit 1
+          fi
+          composed=$(printf '%s' "$wbody" | jq -r '.sha // empty')
+          if [ -z "$composed" ]; then
+            echo "::error::GitHub wrote the merge commit and named no sha; nothing was merged"; exit 1
+          fi
+          echo "composed $composed on base $base_pin with tree $tree_pin"
 
-          if [ "$mcode" != "200" ]; then
+          # Move the branch to it, without force.
+          #
+          # This is the whole guard. GitHub accepts a ref update without force
+          # only where the branch is an ancestor of the new commit, and the only
+          # branch that is an ancestor of this commit is the base it was
+          # composed on. If the base moved, GitHub answers 422 "Update is not a
+          # fast forward" and the merge does not happen at all.
+          resp=$(curl -sS -w '\\n%{http_code}' -X PATCH \\
+            -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \\
+            -H "content-type: application/json" \\
+            -d "$(jq -nc --arg sha "$composed" '{sha:$sha, force:false}')" \\
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/\${BASE_REF#refs/heads/}" || true)
+          mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
+          echo "land: http $mcode"
+          landed=""
+          if [ "$mcode" = "200" ] || [ "$mcode" = "201" ]; then
+            landed=$(printf '%s' "$payload" | jq -r '.object.sha // empty')
+          fi
+
+          if [ -z "$landed" ]; then
             reason=$(printf '%s' "$payload" | jq -r '.message // "no message"')
+
+            # A base that moved is not a refusal to retry. The candidate was
+            # verified against a base that no longer exists, so the queue takes
+            # the turn back, pins the new base, and runs the suites again. What
+            # must never happen is this run reaching for the new base itself.
+            case "$reason" in
+              *"not a fast forward"*)
+                curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \\
+                  -H "content-type: application/json" \\
+                  -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "\${op#merge_}" --arg op "$op" \\
+                        --arg detail "BASE_MOVED off $base_pin" \\
+                        '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \\
+                  "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+                echo "::error::BASE_MOVED: the base branch is no longer $base_pin, which is what this candidate was verified against; nothing was merged"
+                exit 1
+                ;;
+            esac
 
             # The status code says what this call did, not what happened to the
             # pull request.
@@ -385,7 +492,7 @@ jobs:
             # with GitHub's own writes: pull request 105 merged at 16:41:38 and
             # answered \`merged: false\` at 16:41:39, so the single re-read below
             # reported a refusal for a merge that was already on main. Every read
-            # has to agree, over a backoff, and git has to agree too : if the
+            # has to agree, over a backoff, and git has to agree too — if the
             # base branch contains the head commit then the merge landed whatever
             # the pull request says about itself.
             #
@@ -509,6 +616,8 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
     "- `.github/workflows/thwip-required.yml` publishes the `thwip` check, which says whether the proof is good for the tree, and places the pull request in the queue.",
     "- `.github/workflows/thwip-merge.yml` performs the merge the queue authorizes. It needs a `THWIP_ENQUEUE_TOKEN` repository secret; without one it declines and leaves the merge to a maintainer.",
     "- `thwip.yaml` says which suites have to pass. Edit it before merging if these are not the right ones.",
+    "",
+    "The merge is a merge commit, composed on the base the queue verified against and landed with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. A squash cannot be bound that way: it does not contain the pull request head, so this branch's own required checks refuse it and GitHub cannot tell the pull request was merged. If this repository squashes, the workflow says so, merges nothing, and hands the lane back. Set the queue to merge commits before enabling it.",
     "",
     `Both workflows talk to ${input.endpoint}.`,
     "",
