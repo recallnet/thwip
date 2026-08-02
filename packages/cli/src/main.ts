@@ -519,8 +519,16 @@ async function cmdShip(argv: string[]): Promise<number> {
       // Only `fresh` and `audited` run the turn on this machine, and only they
       // read presence. Under `fast` or `remote` there is nothing to announce,
       // and a row per shipping developer would be a row nothing ever reads.
-      if (!deviceOnlyProfile) return;
-      await realHeartbeat(endpoint, auth, repositoryId, await deviceKey())();
+      if (!deviceOnlyProfile) return {};
+      const key = await deviceKey();
+      const outcome = await realHeartbeat(endpoint, auth, repositoryId, key)();
+      if (outcome.ok) return {};
+      return {
+        refusal:
+          outcome.status === 0
+            ? `could not reach ${endpoint} to say this machine is here; the queue cannot offer a turn to a machine it cannot see`
+            : `${endpoint} refused this machine's presence (${outcome.status}) for device ${key}; the queue will not offer a turn until it accepts one`,
+      };
     },
     async awaitTurn() {
       await sleep(5000);
