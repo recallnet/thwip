@@ -2037,6 +2037,87 @@ app.route(
     },
     publishTurnCheck: publishTurnCheckFor,
     /**
+     * What the branch requires of a head, and what the head says about it.
+     *
+     * The rules endpoint answers with the rules in force for one branch, across
+     * every ruleset that targets it, which is what the merge is actually held
+     * to. The check runs come back latest-per-name, so a rerun does not leave
+     * its own earlier failure lying next to it.
+     *
+     * Null on any unreadable answer. The caller treats that as unknown and goes
+     * ahead, because refusing a merge on our own failure to read GitHub would
+     * stop the queue every time GitHub had a bad minute.
+     */
+    async requiredCheckState(env: Env, repositoryId: string, baseRef: string, headSha: string) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const read = async <T>(path: string): Promise<T | null> => {
+        const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        }).catch(() => null);
+        if (res === null || !res.ok) return null;
+        return (await res.json().catch(() => null)) as T | null;
+      };
+
+      const branch = baseRef.replace(/^refs\/heads\//, "");
+      const rules = await read<
+        Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
+      >(`/rules/branches/${encodeURIComponent(branch)}`);
+      if (rules === null) return null;
+      const required = rules
+        .filter((rule) => rule.type === "required_status_checks")
+        .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+        .map((check) => check.context)
+        .filter((context): context is string => typeof context === "string");
+      if (required.length === 0) return { required: [], runs: [] };
+
+      const checks = await read<{
+        check_runs?: Array<{ name?: string; status?: string; conclusion?: string | null }>;
+      }>(`/commits/${encodeURIComponent(headSha)}/check-runs?filter=latest&per_page=100`);
+      if (checks === null) return null;
+      // Commit statuses too. A required context may be satisfied by either, and a
+      // queue that read only check runs would call a context satisfied by a
+      // status absent and refuse a merge GitHub would have allowed.
+      const statuses = await read<{ statuses?: Array<{ context?: string; state?: string }> }>(
+        `/commits/${encodeURIComponent(headSha)}/status?per_page=100`,
+      );
+      if (statuses === null) return null;
+      return {
+        required,
+        runs: [
+          ...(checks.check_runs ?? [])
+            .filter((run): run is { name: string; status?: string; conclusion?: string | null } =>
+              typeof run.name === "string",
+            )
+            .map((run) => ({
+              name: run.name,
+              status: run.status ?? "queued",
+              conclusion: run.conclusion ?? null,
+            })),
+          ...(statuses.statuses ?? [])
+            .filter((status): status is { context: string; state?: string } => typeof status.context === "string")
+            .map((status) =>
+              status.state === "pending"
+                ? { name: status.context, status: "in_progress", conclusion: null }
+                : {
+                    name: status.context,
+                    status: "completed",
+                    conclusion: status.state === "success" ? "success" : "failure",
+                  },
+            ),
+        ],
+      };
+    },
+    /**
      * The candidate verdict, as a check on the pull request head.
      *
      * Moved here from the verifier workflow, which asked GitHub for
