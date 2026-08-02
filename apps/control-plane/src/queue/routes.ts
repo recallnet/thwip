@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { queueKey, type BlockingReason } from "@thwip/queue-domain";
+import { queueKey, TERMINAL_ENTRY_STATES, type BlockingReason } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
@@ -13,6 +13,7 @@ import {
   admit,
   buildSnapshot,
   commandsFor,
+  requestTurn,
   confirmOnly,
   recordOnly,
   diagnose,
@@ -961,6 +962,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   ): Promise<{ activationState: string; mergeMethod: MergeMethod } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  /**
+   * Who wrote a pull request and which branch it targets, from GitHub.
+   *
+   * Both facts settle something a caller must not get to choose. The author is
+   * the entry's sponsor, so a turn is offered to the person whose work it is
+   * rather than to whoever happened to run the command; and the base branch is
+   * which queue the entry belongs on, so one pull request cannot be placed on
+   * two of them. Null when the pull request could not be read, which is a
+   * refusal rather than a licence to guess either one.
+   */
+  pullRequestPlacement(
+    env: TEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{ authorGithubUserId: string; baseRef: string } | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
   driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /**
@@ -1166,19 +1182,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * Join the queue. Durable: accepted before reviews finish, and the entry keeps
    * its place through failure (plan.md §7.1).
+   *
+   * Who sponsors the entry and which queue it lands on both come from GitHub,
+   * never from the request. This route used to sponsor whoever called it while
+   * the `pull_request` webhook sponsored the author, so the same pull request
+   * had two sponsors depending on which arrived first — and under `fresh` the
+   * turn then went to one person while the queue waited for a machine belonging
+   * to the other. The branch was the caller's to name too, so a pull request
+   * could be placed on a queue it does not target, which is how one pull request
+   * came to hold two places in line.
    */
   app.post("/v1/queue/:repositoryId/entries", async (c) => {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const who = c.get("caller");
-
     const body = (await c.req.json().catch(() => ({}))) as {
       pullRequestNumber?: number;
       headSha?: string;
-      sponsorPrincipalId?: string;
-      sponsorGithubUserId?: string;
     };
     if (typeof body.pullRequestNumber !== "number" || !Number.isSafeInteger(body.pullRequestNumber)) {
       return c.json({ error: "pullRequestNumber required" }, 400);
@@ -1187,19 +1208,33 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "headSha must be a lowercase hex object id" }, 400);
     }
 
-    // A bot pull request needs a human sponsor, and only an administrator may
-    // name a sponsor other than themselves (plan.md §8.1).
-    const sponsorPrincipalId = body.sponsorPrincipalId ?? who.principalId;
-    const sponsorGithubUserId = body.sponsorGithubUserId ?? who.githubUserId;
-    if (sponsorPrincipalId !== who.principalId && !who.isAdmin) {
-      return c.json({ error: "only an administrator may sponsor on another principal's behalf" }, 403);
+    const placement = await deps.pullRequestPlacement(c.env, repositoryId, body.pullRequestNumber);
+    if (placement === null) {
+      return c.json(
+        { error: "PULL_REQUEST_UNREADABLE", detail: "GitHub did not say who wrote this pull request or where it goes" },
+        502,
+      );
+    }
+    if (placement.baseRef !== baseRef) {
+      return c.json(
+        { error: "WRONG_QUEUE", detail: `this pull request targets ${placement.baseRef}` },
+        409,
+      );
+    }
+    const sponsorPrincipalId = await deps.principalFor(c.env, placement.authorGithubUserId);
+    if (sponsorPrincipalId === null) {
+      return c.json(
+        { error: "AUTHOR_NOT_ACTIVATED", detail: "the pull request's author has no activated principal here" },
+        409,
+      );
     }
 
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
     const headSha = body.headSha;
     const pullRequestNumber = body.pullRequestNumber;
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
-      commands.requestQueue({
+    const sponsorGithubUserId = placement.authorGithubUserId;
+    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
+      requestTurn(commands, store, {
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `request:${entryId}`),
         entryId,
         pullRequestNumber,
@@ -1310,6 +1345,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // enabled one is checked.
         const { snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
           for (const entry of buildSnapshot(store).entries) {
+            // A finished entry is finished. Readiness is derived for entries
+            // that could still take a turn, and a cancelled one never will, so
+            // re-deriving it onto one left the queue asserting that a pull
+            // request nobody can merge was schedulable with nothing blocking it.
+            // The reducer keeps a terminal entry terminal; this path went around
+            // it by writing the two fields the reducer sets before it looks.
+            if (TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number])) continue;
             if (
               entry.sponsorPrincipalId === who.principalId &&
               !entry.schedulerEligible &&
@@ -2197,8 +2239,26 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ authorized: true, reason: "QUEUE_NOT_CONFIGURED", enforcing: false });
     }
 
-    const principalId = await deps.principalFor(c.env, String(body.authorGithubUserId ?? ""));
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
+    const db = c.env.DB as unknown as D1Like;
+
+    // Whose turn this is.
+    //
+    // One question, one answer: the scheduler offers the turn to the entry's
+    // sponsor, and the machine this gate waits for has to belong to the same
+    // person. This used to read presence for the pull request's author while the
+    // offer went to the sponsor, so wherever the two differed a `fresh` queue
+    // waited on a laptop belonging to somebody who was never going to run the
+    // turn.
+    //
+    // The author derives the sponsor and nothing else, and only where there is
+    // no entry yet to have a sponsor. One extra row read against the document
+    // this route is about to open anyway, which is the same trade the heartbeat
+    // route already makes to avoid a write.
+    const placed = (await loadQueueState(db, repositoryId, baseRef)).store.state().entries.get(entryId);
+    const sponsorPrincipalId =
+      placed?.sponsorPrincipalId ?? (await deps.principalFor(c.env, String(body.authorGithubUserId ?? "")));
+    const sponsorGithubUserId = placed?.sponsorGithubUserId ?? String(body.authorGithubUserId ?? "");
 
     // The queue has nobody to give the turn to, so say so on the check.
     //
@@ -2212,7 +2272,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Said on every ask rather than on a change, because there is no entry to
     // compare against. The publisher reads what the commit already says and stays
     // quiet when it is the same, so this does not accumulate.
-    if (principalId === null && deps.publishTurnCheck !== undefined) {
+    if (sponsorPrincipalId === null && deps.publishTurnCheck !== undefined) {
       try {
         await deps.publishTurnCheck(
           c.env,
@@ -2243,8 +2303,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     //
     // Writes are what a waiting pull request should avoid, and it still does: the
     // compare-and-swap does not write when the commands changed nothing.
-    const db = c.env.DB as unknown as D1Like;
-
+    //
     // Captured after validation: TypeScript discards the narrowing inside a
     // closure, and re-checking would be checking the same thing twice.
     const pullRequestNumber = body.pullRequestNumber;
@@ -2256,8 +2315,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     // Runner presence has to be read before the transaction, not inside it:
     // `onQueue`'s callback runs synchronously against the open store, and this
-    // is a network round trip. Skipped entirely when `principalId` is null —
-    // there is nobody to be connected — and when the profile has no device-only
+    // is a network round trip. Skipped entirely when there is no sponsor — there
+    // is nobody to be connected — and when the profile has no device-only
     // requirement, `capabilityFor` never touches `queue_runners` at all.
     //
     // Read once and used everywhere below. The profile decides whether a runner
@@ -2266,9 +2325,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const policy = await deps.activePolicy(c.env, repositoryId);
     const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
     const capability =
-      principalId === null
+      sponsorPrincipalId === null
         ? { serverExecutable: true, compatibleRunnerConnected: false }
-        : await capabilityFor(db, repositoryId, principalId, new Date().toISOString(), policy?.securityProfile ?? null);
+        : await capabilityFor(
+            db,
+            repositoryId,
+            sponsorPrincipalId,
+            new Date().toISOString(),
+            policy?.securityProfile ?? null,
+          );
     const folded = foldCapability({ ready: baseReady, primaryReason: basePrimaryReason }, capability);
 
     // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
@@ -2276,13 +2341,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // is the one resource with a daily cliff; it is now a row read and, only when
     // something actually changed, a row write.
     const { snapshot: held } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
-      principalId === null
+      sponsorPrincipalId === null
         ? buildSnapshot(store)
         : admit(commands, store, {
             entryId,
             pullRequestNumber,
-            sponsorPrincipalId: principalId,
-            sponsorGithubUserId: String(body.authorGithubUserId),
+            sponsorPrincipalId,
+            sponsorGithubUserId,
             headSha,
             ready: baseReady,
             schedulerEligible: folded.schedulerEligible,

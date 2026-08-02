@@ -17,12 +17,13 @@ import { mintRunLease } from "./run-lease.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
-import { capabilityFor, requiresDeviceOnly } from "./queue/runners.js";
+import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
 import { foldCapability } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
+import { requestTurn } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
@@ -860,19 +861,16 @@ app.post("/v1/devices", async (c) => {
   });
   if (!popOk) return c.json({ error: "proof of possession failed" }, 400);
 
-  const keyId = randomId("key");
-  const fingerprint = await sha256Fingerprint(body.publicKey);
-  const algorithm = body.publicKey.trim().split(/\s+/)[0]!;
-  try {
-    await c.env.DB.prepare(
-      "INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-      .bind(keyId, githubUserId, algorithm, body.publicKey.trim(), fingerprint, body.label ?? "device")
-      .run();
-  } catch {
-    return c.json({ error: "key already enrolled" }, 409);
-  }
-  return c.json({ keyId, fingerprint, githubUserId });
+  // The key is its own name. Minting a separate identifier here produced keys
+  // nothing could look up: every reader of `device_keys` resolves a key by
+  // `key_id` holding a fingerprint.
+  const enrolled = await enrolDeviceKey(c.env.DB as unknown as D1Like, {
+    githubUserId,
+    publicKey: body.publicKey,
+    label: body.label ?? "device",
+  });
+  if (enrolled === null) return c.json({ error: "key already enrolled" }, 409);
+  return c.json({ keyId: enrolled.keyId, fingerprint: enrolled.fingerprint, githubUserId });
 });
 
 app.post("/v1/devices/:keyId/revoke", async (c) => {
@@ -1412,8 +1410,11 @@ export async function queueFromPullRequest(env: Env, payload: {
     : { serverExecutable: true, compatibleRunnerConnected: false };
   const folded = foldCapability({ ready, primaryReason: basePrimaryReason }, capability);
 
-  await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
-    commands.requestQueue({
+  await runOnQueue(env, String(repositoryId), ref, ({ store, commands }) => {
+    // Through `requestTurn`, so a pull request that was closed and reopened is
+    // placed again instead of being discarded against the entry its close
+    // cancelled. Reopening is the case this webhook exists to notice.
+    requestTurn(commands, store, {
       idempotencyKey: `webhook:request:${entryId}`,
       entryId,
       pullRequestNumber: number,
@@ -1718,6 +1719,33 @@ app.route(
         .bind(githubUserId)
         .first<{ id: string }>();
       return row?.id ?? null;
+    },
+    /**
+     * Who wrote a pull request and which branch it targets, read from GitHub so
+     * neither is the caller's to choose. Null on anything that is not an answer:
+     * no installation, a refused read, a payload missing either field.
+     */
+    async pullRequestPlacement(env: Env, repositoryId: string, pullRequestNumber: number) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const token = await installationToken(env, project.installation_id);
+      const res = await fetch(`https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
+        },
+      });
+      if (!res.ok) return null;
+      const pull = (await res.json()) as { user?: { id?: number }; base?: { ref?: string } };
+      const authorId = pull.user?.id;
+      const ref = pull.base?.ref;
+      if (typeof authorId !== "number" || typeof ref !== "string" || ref === "") return null;
+      return { authorGithubUserId: String(authorId), baseRef: `refs/heads/${ref}` };
     },
     async commitFacts(env: Env, repositoryId: string, sha: string) {
       const project = await env.DB.prepare(

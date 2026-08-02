@@ -84,6 +84,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
     // A refusal the queue can confirm: GitHub says not merged and the base does

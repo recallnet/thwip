@@ -1,4 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
+import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
@@ -89,8 +90,14 @@ export async function tickAllQueues(
         // A runner that stopped heartbeating loses eligibility, never its
         // fairness ordinal: it must not block a Ready entry behind it, and it
         // must not lose its place when the runner comes back.
+        //
+        // A finished entry is skipped. Cancelling leaves eligibility as it was,
+        // so this sweep would otherwise write a blocking reason onto an entry
+        // that can never run again — the same going-around-the-reducer the
+        // heartbeat route did from the other direction.
         if (offlinePrincipals.length > 0) {
           for (const entry of buildSnapshot(store).entries) {
+            if (TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number])) continue;
             if (offlinePrincipals.includes(entry.sponsorPrincipalId) && entry.schedulerEligible) {
               commands.evaluateReadiness({
                 idempotencyKey: `runner-offline:${entry.entryId}:${now}`,
