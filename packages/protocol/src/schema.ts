@@ -126,13 +126,10 @@ export function parsePredicate(v: unknown): ParseResult<ThwipCiRunPredicateV1> {
   if (!baseRef.ok) return baseRef;
   const baseSha = git["baseSha"];
   if (typeof baseSha !== "string" || !OID_RE.test(baseSha)) return fail("git.baseSha invalid");
+  // A proof covers the head tree. A proof claiming to cover anything else is
+  // a proof this schema has no rules for, so it is not a proof.
   const evaluationMode = git["evaluationMode"];
-  if (evaluationMode !== "head-tree" && evaluationMode !== "merge-tree") return fail("git.evaluationMode invalid");
-  let mergeTreeOid: string | undefined;
-  if (git["mergeTreeOid"] !== undefined) {
-    if (typeof git["mergeTreeOid"] !== "string" || !OID_RE.test(git["mergeTreeOid"])) return fail("git.mergeTreeOid invalid");
-    mergeTreeOid = git["mergeTreeOid"];
-  }
+  if (evaluationMode !== "head-tree") return fail("git.evaluationMode invalid");
 
   const policy = v["policy"];
   if (!isRecord(policy)) return fail("policy invalid");
@@ -196,7 +193,6 @@ export function parsePredicate(v: unknown): ParseResult<ThwipCiRunPredicateV1> {
       baseRef: baseRef.value,
       baseSha,
       evaluationMode,
-      ...(mergeTreeOid !== undefined ? { mergeTreeOid } : {}),
     },
     policy: { digest: policyDigest as ThwipCiRunPredicateV1["policy"]["digest"], version: policyVersion },
     pipeline: { digest: pipelineDigest as ThwipCiRunPredicateV1["pipeline"]["digest"], runner },

@@ -45,6 +45,7 @@ function context(over: Partial<TurnContext> = {}): TurnContext {
     previousBase: { baseSha: null, treeOid: null },
     queueDecisionDigest: D("b"),
     workReceiptDigest: D("e"),
+    pipelineDigest: D("f"),
     policy: {
       version: 4,
       securityProfile: "fresh",

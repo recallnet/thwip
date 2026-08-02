@@ -186,8 +186,9 @@ describe("buildMergeIntent", () => {
         workReceiptDigest: D("1"),
         assignmentDigest: D("2"),
         integrationEvidenceDigest: D("3"),
-        verifierResultDigest: D("4"),
-        candidateCheckRunId: "5566",
+        pipelineDigest: D("6"),
+        requiredSuitesDigest: D("7"),
+        execution: { ranOn: "device", deviceKeyId: "dev-1" },
       },
     });
     expect(doc["generatedCommitMessageDigest"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -202,8 +203,9 @@ describe("buildMergeIntent", () => {
         workReceiptDigest: D("1"),
         assignmentDigest: D("2"),
         integrationEvidenceDigest: D("3"),
-        verifierResultDigest: D("4"),
-        candidateCheckRunId: "5566",
+        pipelineDigest: D("6"),
+        requiredSuitesDigest: D("7"),
+        execution: { ranOn: "device", deviceKeyId: "dev-1" },
       },
     });
     expect(doc["override"]).toBeUndefined();
@@ -250,9 +252,10 @@ describe("buildTransitionRecord", () => {
       workReceiptDigest: D("2"),
       assignmentDigest: D("3"),
       integrationEvidenceDigest: D("4"),
-      verifierResultDigest: D("5"),
-      checkRunId: "7788",
-      actionRunId: "9900",
+      policyDigest: D("6"),
+      pipelineDigest: D("7"),
+      requiredSuitesDigest: D("8"),
+      execution: { ranOn: "github-actions", verifierResultDigest: D("5"), checkRunId: "7788", actionRunId: "9900" },
     });
     const after = doc["after"] as Record<string, unknown>;
     expect(after["parentCount"]).toBe(2);
@@ -279,9 +282,10 @@ describe("buildTransitionRecord", () => {
       workReceiptDigest: D("2"),
       assignmentDigest: D("3"),
       integrationEvidenceDigest: D("4"),
-      verifierResultDigest: D("5"),
-      checkRunId: "7788",
-      actionRunId: "9900",
+      policyDigest: D("6"),
+      pipelineDigest: D("7"),
+      requiredSuitesDigest: D("8"),
+      execution: { ranOn: "github-actions", verifierResultDigest: D("5"), checkRunId: "7788", actionRunId: "9900" },
     });
     const after = doc["after"] as Record<string, unknown>;
     expect((after["parentOids"] as unknown[]).length).toBe(16);

@@ -14,6 +14,43 @@
  * never see, so it stays with the caller.
  */
 
+import {
+  canonicalRecordBytes,
+  envelopeDigest,
+  integrationReceiptContent,
+  integrationReceiptSigningBytes,
+  QUEUE_SIGN_NAMESPACE,
+  type Sha256,
+} from "@thwip/queue-protocol";
+
+/**
+ * The namespace and the domain separation a device signs a receipt under.
+ *
+ * Both come from the protocol package rather than being restated here, because
+ * the signer and the verifier live in different packages and a constant written
+ * twice is a constant that drifts. The pre-authentication encoding names the
+ * integration-run predicate, which is what stops a signature over one kind of
+ * thwip record being replayed as another.
+ */
+export const INTEGRATION_RECEIPT_NAMESPACE = QUEUE_SIGN_NAMESPACE;
+
+/**
+ * The exact bytes a device signs and the queue verifies: the canonical JSON of
+ * the receipt without its signature, wrapped in that encoding.
+ */
+export function integrationReceiptBytes(receipt: SubmittedReceipt): Uint8Array {
+  // The device builds these bytes from the same function, in the protocol
+  // package, because a shape picked out by hand on each side agrees only until
+  // one of them gains a field.
+  return integrationReceiptSigningBytes(receipt);
+}
+
+/** The digest of the receipt as content, which is what a merge record cites. */
+export function integrationReceiptDigest(receipt: SubmittedReceipt): Promise<Sha256> {
+  return envelopeDigest(canonicalRecordBytes(integrationReceiptContent(receipt)));
+}
+
+
 export interface SubmittedReceiptSuite {
   readonly name: string;
   readonly outcome: string;

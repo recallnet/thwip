@@ -14,6 +14,7 @@ import {
   type MergeIntentV1,
   type Sha256,
   type TransitionRecordV1,
+  type VerifiedExecutionV1,
 } from "@thwip/queue-protocol";
 
 /**
@@ -192,8 +193,9 @@ export async function buildMergeIntent(input: {
         readonly workReceiptDigest: Sha256;
         readonly assignmentDigest: Sha256;
         readonly integrationEvidenceDigest: Sha256;
-        readonly verifierResultDigest: Sha256;
-        readonly candidateCheckRunId: string;
+        readonly pipelineDigest: Sha256;
+        readonly requiredSuitesDigest: Sha256;
+        readonly execution: VerifiedExecutionV1;
       }
     | {
         /** A merge the queue had the integrated candidate run for. */
@@ -275,9 +277,10 @@ export async function buildTransitionRecord(input: {
   readonly workReceiptDigest: Sha256;
   readonly assignmentDigest: Sha256;
   readonly integrationEvidenceDigest: Sha256;
-  readonly verifierResultDigest: Sha256;
-  readonly checkRunId: string;
-  readonly actionRunId: string;
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly execution: VerifiedExecutionV1;
 }): Promise<Record<string, unknown>> {
   const parents = input.final.parentShas;
   const embedded = parents.slice(0, 16);
@@ -310,9 +313,10 @@ export async function buildTransitionRecord(input: {
       workReceiptDigest: input.workReceiptDigest,
       assignmentDigest: input.assignmentDigest,
       integrationEvidenceDigest: input.integrationEvidenceDigest,
-      verifierResultDigest: input.verifierResultDigest,
-      checkRunId: input.checkRunId,
-      actionRunId: input.actionRunId,
+      policyDigest: input.policyDigest,
+      pipelineDigest: input.pipelineDigest,
+      requiredSuitesDigest: input.requiredSuitesDigest,
+      execution: input.execution,
     },
   };
 }

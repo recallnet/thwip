@@ -18,7 +18,14 @@ import {
   type ParseResult,
   type Sha256,
 } from "./primitives.js";
-import { MERGE_METHODS, OVERRIDE_OMISSIONS, SECURITY_PROFILES, type MergeMethod } from "./merge-intent.js";
+import {
+  MERGE_METHODS,
+  OVERRIDE_OMISSIONS,
+  SECURITY_PROFILES,
+  parseVerifiedExecution,
+  type MergeMethod,
+  type VerifiedExecutionV1,
+} from "./merge-intent.js";
 
 /**
  * The Transition Record (plan.md §21.8) is how a branch's history becomes
@@ -105,6 +112,17 @@ export interface TransitionRecordBaseV1 {
   readonly observedAt: string;
 }
 
+/**
+ * A merge the queue assigned to a device, which signed a receipt for the suites
+ * it ran against the integrated candidate.
+ *
+ * The assignment and the receipt are what no other kind may claim. Beside them
+ * sit the policy, the pipeline and the suites the run had to cover, so a reader
+ * can tell what "the suites passed" was required to mean, and an execution that
+ * says where the run happened. Under `fresh` that is a device and there is no
+ * check run to name; under `audited` a second execution in Actions produced a
+ * result and both run ids.
+ */
 export interface VerifiedMergeFacts {
   readonly attemptId: string;
   readonly mergeIntentDigest: Sha256;
@@ -116,9 +134,10 @@ export interface VerifiedMergeFacts {
   readonly workReceiptDigest: Sha256;
   readonly assignmentDigest: Sha256;
   readonly integrationEvidenceDigest: Sha256;
-  readonly verifierResultDigest: Sha256;
-  readonly checkRunId: string;
-  readonly actionRunId: string;
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
+  readonly execution: VerifiedExecutionV1;
 }
 
 /**
@@ -439,22 +458,27 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
       const facts = parseMergeFacts(v[factsKey], "transition.verifiedMerge", [
         "assignmentDigest",
         "integrationEvidenceDigest",
-        "verifierResultDigest",
-        "checkRunId",
-        "actionRunId",
+        "policyDigest",
+        "pipelineDigest",
+        "requiredSuitesDigest",
+        "execution",
       ]);
       if (!facts.ok) return facts;
       const raw = v[factsKey] as Record<string, unknown>;
-      for (const key of ["assignmentDigest", "integrationEvidenceDigest", "verifierResultDigest"]) {
+      for (const key of [
+        "assignmentDigest",
+        "integrationEvidenceDigest",
+        "policyDigest",
+        "pipelineDigest",
+        "requiredSuitesDigest",
+      ]) {
         const digest = sha256(raw[key], `transition.verifiedMerge.${key}`);
         if (!digest.ok) return digest;
         facts.value[key] = digest.value;
       }
-      for (const key of ["checkRunId", "actionRunId"]) {
-        const id = decimalId(raw[key], `transition.verifiedMerge.${key}`);
-        if (!id.ok) return id;
-        facts.value[key] = id.value;
-      }
+      const execution = parseVerifiedExecution(raw["execution"], "transition.verifiedMerge.execution");
+      if (!execution.ok) return execution;
+      facts.value["execution"] = execution.value;
       const consistency = checkMergeConsistency(base.value, facts.value);
       if (!consistency.ok) return consistency;
       return ok({

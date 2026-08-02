@@ -87,13 +87,10 @@ function makeBundle(overrides?: (b: VerificationBundleV1) => void): Verification
       securityProfile: "fast",
       minimumPermission: "write",
       allowAuthorAsSigner: true,
-      evaluationMode: "head-tree",
       allowedKeyAlgorithms: ["ssh-ed25519"],
-      requireGithubKeyPresence: false,
       lease: { required: false, maxAgeSeconds: 1800 },
       pipeline: { digest: PIPELINE_DIGEST, runner: "command", requiredSuites: ["lint", "typecheck", "test"] },
       proofMaxAgeSeconds: 86400,
-      audit: { basisPoints: 0, mandatoryPaths: [] },
     },
     keys: [
       {
@@ -201,38 +198,27 @@ describe("ADVERSARIAL: what the proof gate does not check", () => {
     expect(result.code).not.toBe("PASS");
   });
 
-  it("checks the merge tree when the policy evaluates merge trees", async () => {
-    // Under `merge-tree` the claim is about the integrated tree. The verifier
-    // compares the subject to the head tree and never looks at mergeTreeOid,
-    // which the proof does not even have to carry.
-    const bundle = makeBundle((b) => {
-      b.policy.evaluationMode = "merge-tree";
-    });
+  it("refuses a proof that claims to cover something other than the head tree", async () => {
+    // `merge-tree` was a second evaluation mode no derivation ever selected and
+    // no signer could produce. A proof claiming it is a proof nothing judges.
     const statement = makeStatement((s) => {
-      s.predicate.git.evaluationMode = "merge-tree";
-      // No mergeTreeOid at all.
+      (s.predicate.git as { evaluationMode: string }).evaluationMode = "merge-tree";
     });
-    const result = await run({ statement, bundle });
-    expect(result.code, "merge-tree mode passed with no merge tree in the proof").not.toBe("PASS");
+    const result = await run({ statement });
+    expect(result.code, "a proof claiming an unsupported evaluation mode was accepted").not.toBe("PASS");
   });
 
-  it("does not accept a merge tree the proof made up", async () => {
-    const bundle = makeBundle((b) => {
-      b.policy.evaluationMode = "merge-tree";
-    });
-    const statement = makeStatement((s) => {
-      s.predicate.git.evaluationMode = "merge-tree";
-      s.predicate.git.mergeTreeOid = "f".repeat(40);
-    });
-    const result = await run({ statement, bundle });
-    expect(result.code).not.toBe("PASS");
-  });
-
-  it("honours requireGithubKeyPresence", async () => {
-    // The policy field exists, is persisted, and is shipped in every bundle. No
-    // code path reads it, so turning it on changes nothing.
-    const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
-    expect(source, "requireGithubKeyPresence is never read").toContain("requireGithubKeyPresence");
+  it("reads no policy field the policy derivation never writes", async () => {
+    // The family this file exists to catch: a field the verifier branches on
+    // that nothing populates reads as a control to whoever opens the policy and
+    // decides nothing. Every field the verifier reads has to be one the
+    // derivation sets.
+    const [verifier, derivation] = await Promise.all(
+      ["./index.ts", "../../policy/src/index.ts"].map(async (path) => readFile(new URL(path, import.meta.url), "utf8")),
+    );
+    const read = new Set([...verifier.matchAll(/bundle\.policy\.([A-Za-z][A-Za-z0-9]*)/g)].map((m) => m[1]!));
+    const unset = [...read].filter((field) => !derivation.includes(`${field}:`));
+    expect(unset, `policy fields the verifier reads and nothing sets: ${unset.join(", ")}`).toEqual([]);
   });
 
   it("can emit every reason code the protocol declares", async () => {

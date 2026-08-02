@@ -43,8 +43,27 @@ function verified(over: Record<string, unknown> = {}): Record<string, unknown> {
       workReceiptDigest: D("1"),
       assignmentDigest: D("2"),
       integrationEvidenceDigest: D("3"),
-      verifierResultDigest: D("4"),
-      candidateCheckRunId: "88991122",
+      pipelineDigest: D("6"),
+      requiredSuitesDigest: D("7"),
+      execution: { ranOn: "device", deviceKeyId: "dev-1" },
+    },
+    ...over,
+  };
+}
+
+/** The same intent, with the audited profile's second execution named. */
+function verifiedInActions(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const intent = verified();
+  return {
+    ...intent,
+    evidence: {
+      ...(intent["evidence"] as Record<string, unknown>),
+      execution: {
+        ranOn: "github-actions",
+        verifierResultDigest: D("4"),
+        checkRunId: "88991122",
+        actionRunId: "112233",
+      },
     },
     ...over,
   };
@@ -96,6 +115,76 @@ function reused(over: Record<string, unknown> = {}): Record<string, unknown> {
 describe("parseMergeIntent", () => {
   it("accepts a well-formed verified intent", () => {
     expect(parseMergeIntent(verified())).toMatchObject({ ok: true });
+  });
+
+  /**
+   * Under `fresh` the suites run on the developer's own machine. There is no
+   * check run and no Actions run for that execution, so the intent says where
+   * it ran and names the device rather than borrowing a GitHub id from some
+   * other run and presenting it as the one that verified the candidate.
+   */
+  describe("where the integration ran", () => {
+    it("binds the assignment, the receipt and the device that ran it", () => {
+      const parsed = parseMergeIntent(verified());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "verified") throw new Error("wrong kind");
+      expect(parsed.value.evidence.assignmentDigest).toBe(D("2"));
+      expect(parsed.value.evidence.integrationEvidenceDigest).toBe(D("3"));
+      expect(parsed.value.evidence.execution).toEqual({ ranOn: "device", deviceKeyId: "dev-1" });
+    });
+
+    it("accepts a second execution in Actions, with its result and its run ids", () => {
+      const parsed = parseMergeIntent(verifiedInActions());
+      if (!parsed.ok) throw new Error(parsed.detail);
+      if (parsed.value.kind !== "verified") throw new Error("wrong kind");
+      expect(parsed.value.evidence.execution).toEqual({
+        ranOn: "github-actions",
+        verifierResultDigest: D("4"),
+        checkRunId: "88991122",
+        actionRunId: "112233",
+      });
+    });
+
+    it("refuses a device execution that names a check run", () => {
+      const lying = verified({
+        evidence: {
+          workReceiptDigest: D("1"),
+          assignmentDigest: D("2"),
+          integrationEvidenceDigest: D("3"),
+          pipelineDigest: D("6"),
+          requiredSuitesDigest: D("7"),
+          execution: { ranOn: "device", deviceKeyId: "dev-1", checkRunId: "88991122" },
+        },
+      });
+      expect(parseMergeIntent(lying)).toMatchObject({ ok: false });
+    });
+
+    it("refuses an Actions execution missing the result it produced", () => {
+      const partial = verified({
+        evidence: {
+          workReceiptDigest: D("1"),
+          assignmentDigest: D("2"),
+          integrationEvidenceDigest: D("3"),
+          pipelineDigest: D("6"),
+          requiredSuitesDigest: D("7"),
+          execution: { ranOn: "github-actions", checkRunId: "88991122", actionRunId: "112233" },
+        },
+      });
+      expect(parseMergeIntent(partial)).toMatchObject({ ok: false });
+    });
+
+    it("refuses an intent that does not say where the integration ran", () => {
+      const silent = verified({
+        evidence: {
+          workReceiptDigest: D("1"),
+          assignmentDigest: D("2"),
+          integrationEvidenceDigest: D("3"),
+          pipelineDigest: D("6"),
+          requiredSuitesDigest: D("7"),
+        },
+      });
+      expect(parseMergeIntent(silent)).toMatchObject({ ok: false });
+    });
   });
 
   describe("a merge that reused the head's proof", () => {

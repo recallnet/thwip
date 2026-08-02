@@ -8,10 +8,10 @@ import { EXIT, type ExitCode } from "./queue-exit.js";
  * of "connected" — it says this machine is here, on an interval, and notices
  * the moment the server reports this principal holds an offer.
  *
- * Claiming that offer, materializing the candidate, and signing an integration
- * receipt are Tasks 5.2 and 5.3 (`POST .../claim` does not exist yet). This
- * stops at "an offer is waiting" and reports it — it does not stub a call
- * against an endpoint the server cannot answer.
+ * Claiming the offer, materializing the candidate and signing an integration
+ * receipt belong to `thwip ship --wait`, which runs in the checkout being
+ * integrated (fresh-turn.ts). This command has no checkout to run against, so
+ * it reports the offer and names the command that takes it.
  */
 
 /**
@@ -130,8 +130,8 @@ export async function runQueueWork(options: RunQueueWorkOptions): Promise<ExitCo
   });
   if (outcome.kind === "offer") {
     options.emit(
-      `[thwip] this machine holds an offer for ${options.repo}. Claiming and running the candidate is not ` +
-        "built yet (plan.md Task 5.2); stopping here rather than guessing at the claim endpoint.",
+      `[thwip] this machine holds an offer for ${options.repo}. Run thwip ship --wait in the checkout ` +
+        "you want integrated, which claims the offer and runs the candidate the queue names.",
     );
     return EXIT.ok;
   }

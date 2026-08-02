@@ -332,9 +332,7 @@ export async function deriveProjectConfig(
     securityProfile: y.profile,
     minimumPermission: y.policy?.minimum_permission ?? "write",
     allowAuthorAsSigner: y.policy?.allow_author_as_signer ?? true,
-    evaluationMode: "head-tree",
     allowedKeyAlgorithms: y.policy?.allowed_key_algorithms ?? ["ssh-ed25519"],
-    requireGithubKeyPresence: false,
     lease: { required: y.profile !== "fast", maxAgeSeconds: 1800 },
     pipeline: {
       digest: pipelineDigest,
@@ -343,7 +341,6 @@ export async function deriveProjectConfig(
       ...(remoteSuites.length > 0 ? { remoteSuites } : {}),
     },
     proofMaxAgeSeconds: y.policy?.proof_max_age_seconds ?? 86400,
-    audit: { basisPoints: 0, mandatoryPaths: [] },
   };
   const policyDigest = await canonicalDigest(policy);
   return { policy, policyDigest, pipeline, pipelineDigest };

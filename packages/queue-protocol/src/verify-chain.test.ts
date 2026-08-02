@@ -100,6 +100,42 @@ describe("verifying a chain", () => {
     expect(result.signaturesChecked).toBe(2);
   });
 
+  /**
+   * A chain that carries a merge under `fresh`. Its record is a different kind
+   * with a different facts block, and a walk that only knew the reuse shape
+   * would stop dead on a real chain the moment one landed.
+   */
+  it("walks a chain containing a verified merge", async () => {
+    const one = await link(1, null);
+    const two = await makeLink({
+      sequence: 2,
+      previous: one.digest,
+      over: {
+        kind: "verified-merge",
+        reusedProof: undefined,
+        verifiedMerge: {
+          attemptId: "att-2",
+          mergeIntentDigest: D("1"),
+          pullRequestNumber: 2,
+          headSha: HEAD,
+          candidateSha: baseAt(2),
+          candidateTreeOid: treeAt(2),
+          mergeMethod: "merge",
+          workReceiptDigest: D("2"),
+          assignmentDigest: D("3"),
+          integrationEvidenceDigest: D("4"),
+          policyDigest: D("6"),
+          pipelineDigest: D("8"),
+          requiredSuitesDigest: D("9"),
+          execution: { ranOn: "device", deviceKeyId: "SHA256:abc" },
+        },
+      },
+    });
+    const result = await verifyChain([one, two], signedOk);
+    expect(result.findings).toEqual([]);
+    expect(result.signaturesChecked).toBe(2);
+  });
+
   it("reports a digest that does not name its own bytes", async () => {
     const one = await link(1, null);
     const tampered = { ...one, digest: D("0") };
