@@ -354,13 +354,20 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
     }
 
     case "doctor": {
-      const unknown = rejectUnknown(flags, ["repo", "explain", "strict", "json"]);
+      // Doctor reads three things and is dispatched by queue-doctor.ts, the way
+      // `work` is. The plan below names the first of them, for `queue --help`
+      // and for anything that inspects a plan without executing it.
+      //
+      // It used to name `/admin/queue/doctor`, which only an operator token
+      // opens, so the command failed for every developer who ran it. A
+      // diagnostic an administrator has to run is not a diagnostic.
+      const unknown = rejectUnknown(flags, ["repo", "branch", "explain", "strict", "json"]);
       if (unknown !== null) return unknown;
       const repo = requireRepo(flags);
       if (isPlan(repo)) return repo;
       return {
         ok: true,
-        plan: { method: "GET", path: `/admin/queue/doctor?repo=${encodeURIComponent(repo)}`, requiresAdmin: true },
+        plan: { method: "GET", path: `/v1/resolve-repo?name=${encodeURIComponent(repo)}`, requiresAdmin: false },
       };
     }
 
