@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { DivergedTips, PushAttempt } from "./push-plan.js";
 
 const execFileP = promisify(execFile);
 
@@ -69,4 +70,50 @@ export async function amendMessage(cwd: string, message: string): Promise<void> 
 
 export async function showFileAtHead(cwd: string, path: string): Promise<string> {
   return git(["show", `HEAD:${path}`], cwd);
+}
+
+/** Run git and keep what it printed, so a refusal can be classified rather than thrown. */
+export async function tryGit(cwd: string, args: string[]): Promise<PushAttempt> {
+  try {
+    await git(args, cwd);
+    return { ok: true, stderr: "" };
+  } catch (error) {
+    const carried = (error as { stderr?: unknown } | null)?.stderr;
+    return {
+      ok: false,
+      stderr: typeof carried === "string" ? carried : error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * The two tips a rejected push is about.
+ *
+ * The remote tip comes from `ls-remote`, because the remote-tracking ref is
+ * whatever the last fetch left behind and the whole question is what is on the
+ * remote now. Its parents are read from this machine's object store: the commit
+ * ship amended is still here, and a tip this machine has never seen is one
+ * somebody else pushed, which is the case that must never be forced over.
+ */
+export async function readTips(cwd: string, branch: string): Promise<DivergedTips> {
+  const parentsOf = async (rev: string) =>
+    (await git(["rev-list", "--parents", "-n", "1", rev], cwd)).split(/\s+/).slice(1);
+
+  const localSha = await git(["rev-parse", "HEAD"], cwd);
+  const localParents = await parentsOf("HEAD");
+
+  let remoteSha: string | null = null;
+  let remoteParents: string[] = [];
+  try {
+    const listed = await git(["ls-remote", "origin", `refs/heads/${branch}`], cwd);
+    const sha = listed.split(/\s+/)[0] ?? "";
+    if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
+      remoteParents = await parentsOf(sha);
+      remoteSha = sha;
+    }
+  } catch {
+    remoteSha = null;
+  }
+
+  return { branch, localSha, localParents, remoteSha, remoteParents };
 }

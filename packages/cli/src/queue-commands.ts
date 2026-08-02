@@ -130,22 +130,36 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
     }
 
     case "join": {
-      const unknown = rejectUnknown(flags, ["repo", "branch", "pr", "sponsor", "wait"]);
+      // Named before the unknown-flag check, so somebody who still passes it
+      // reads why it went rather than that it is not a flag. The route derives
+      // the sponsor from the pull request's author now: the same pull request
+      // queued through the route and through the webhook was producing two
+      // entries with two different sponsors.
+      if (flags.values.has("sponsor")) {
+        return usage("--sponsor is no longer accepted; the pull request's author sponsors it");
+      }
+      const unknown = rejectUnknown(flags, ["repo", "branch", "pr", "head-sha", "wait"]);
       if (unknown !== null) return unknown;
       const repo = requireRepo(flags);
       if (isPlan(repo)) return repo;
       const pr = requirePr(flags);
       if (isPlan(pr)) return pr;
-      const sponsor = flags.values.get("sponsor");
+
+      // The route refuses an entry with no head sha, and join never sent one, so
+      // every join anybody ran was answered 400. It is the head of the pull
+      // request being queued, which is not necessarily this machine's HEAD, so
+      // the caller resolves it from GitHub unless it was named here.
+      const given = flags.values.get("head-sha");
+      if (given !== undefined && !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(given)) {
+        return usage("--head-sha must be a lowercase hex object id");
+      }
+
       return {
         ok: true,
         plan: {
           method: "POST",
           path: `/v1/queue/{repositoryId}/entries?ref=${encodeURIComponent(requireRef(flags))}`,
-          body: {
-            pullRequestNumber: pr,
-            ...(sponsor === undefined || sponsor === "" ? {} : { sponsorLogin: sponsor }),
-          },
+          body: { pullRequestNumber: pr, headSha: given ?? "{headSha}" },
           idempotencyKey: key(["join", repo, requireRef(flags), pr]),
           requiresAdmin: false,
         },
@@ -354,13 +368,20 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
     }
 
     case "doctor": {
-      const unknown = rejectUnknown(flags, ["repo", "explain", "strict", "json"]);
+      // Doctor reads three things and is dispatched by queue-doctor.ts, the way
+      // `work` is. The plan below names the first of them, for `queue --help`
+      // and for anything that inspects a plan without executing it.
+      //
+      // It used to name `/admin/queue/doctor`, which only an operator token
+      // opens, so the command failed for every developer who ran it. A
+      // diagnostic an administrator has to run is not a diagnostic.
+      const unknown = rejectUnknown(flags, ["repo", "branch", "explain", "strict", "json"]);
       if (unknown !== null) return unknown;
       const repo = requireRepo(flags);
       if (isPlan(repo)) return repo;
       return {
         ok: true,
-        plan: { method: "GET", path: `/admin/queue/doctor?repo=${encodeURIComponent(repo)}`, requiresAdmin: true },
+        plan: { method: "GET", path: `/v1/resolve-repo?name=${encodeURIComponent(repo)}`, requiresAdmin: false },
       };
     }
 

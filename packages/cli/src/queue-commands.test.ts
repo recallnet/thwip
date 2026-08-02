@@ -169,13 +169,20 @@ describe("authority", () => {
     expect(plan(["pause", ...REPO, "--reason", "incident under way"]).requiresAdmin).toBe(true);
     expect(plan(["resume", ...REPO]).requiresAdmin).toBe(true);
     expect(plan(["eject", ...REPO, "--pr", "1", "--reason", "abandoned by its author"]).requiresAdmin).toBe(true);
-    expect(plan(["doctor", ...REPO]).requiresAdmin).toBe(true);
   });
 
   it("does not require admin for a developer's own queue actions", () => {
     expect(plan(["status", ...REPO]).requiresAdmin).toBe(false);
     expect(plan(["join", ...REPO, "--pr", "1"]).requiresAdmin).toBe(false);
     expect(plan(["leave", ...REPO, "--pr", "1"]).requiresAdmin).toBe(false);
+  });
+
+  it("lets a member run the diagnostic, because the people who need it are members", () => {
+    // Doctor sent the developer's session to an operator-only endpoint, so it
+    // failed for exactly the people most likely to be asking what is wrong.
+    const doctor = plan(["doctor", ...REPO]);
+    expect(doctor.requiresAdmin).toBe(false);
+    expect(doctor.path).not.toContain("/admin/");
   });
 });
 

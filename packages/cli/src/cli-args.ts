@@ -121,7 +121,9 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
   list: `Usage: thwip queue list --repo OWNER/NAME [--branch BRANCH] [--json] [--watch]\n`,
   join:
     `Usage: thwip queue join --repo OWNER/NAME --pr NUMBER [--branch BRANCH] ` +
-    `[--sponsor LOGIN] [--wait]\n`,
+    `[--head-sha OID] [--wait]\n\n` +
+    `Queue a pull request. The head sha comes from GitHub unless you name one.\n` +
+    `The pull request's author sponsors the entry, so there is no sponsor flag.\n`,
   leave: `Usage: thwip queue leave --repo OWNER/NAME --pr NUMBER [--branch BRANCH]\n`,
   pause: `Usage: thwip queue pause --repo OWNER/NAME --reason TEXT [--branch BRANCH]\n`,
   resume: `Usage: thwip queue resume --repo OWNER/NAME [--branch BRANCH] [--reason TEXT]\n`,
@@ -138,7 +140,13 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
   reconcile:
     `Usage: thwip queue reconcile --repo OWNER/NAME --observed RESULT --reason TEXT ` +
     `[--merge-sha OID] [--branch BRANCH]\n`,
-  doctor: `Usage: thwip queue doctor --repo OWNER/NAME [--explain] [--strict] [--json]\n`,
+  doctor:
+    `Usage: thwip queue doctor --repo OWNER/NAME [--branch BRANCH] [--explain] [--strict] [--json]\n\n` +
+    `Report whether thwip is installed here, what the queue is doing on this\n` +
+    `branch, and what the GitHub App is granted. Any member can run it. The App\n` +
+    `permissions come from GitHub under the installation and need repository\n` +
+    `admin, so for anyone else that section is named as unread and the rest is\n` +
+    `still reported. Use --strict to make an unread section fail.\n`,
   work:
     `Usage: thwip queue work --repo OWNER/NAME --watch [--branch BRANCH]\n\n` +
     `Make this machine available for a fresh/audited turn: heartbeat on an\n` +

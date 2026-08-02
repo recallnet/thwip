@@ -56,6 +56,13 @@ export const LOCAL_REASONS = [
   "ASSIGNMENT_UNVERIFIED",
   "ASSIGNMENT_EXPIRED",
   "CANDIDATE_UNAVAILABLE",
+  // Attaching a proof rewrites the commit, so a branch that is already on the
+  // remote diverges from it. Ship replaces the tip it rewrote itself; this is
+  // the case where the remote holds a commit ship never had.
+  "PUSH_REJECTED",
+  // Whatever threw before anything classified it. It exists so the process has
+  // a code and a sentence to exit through instead of a stack trace.
+  "LOCAL_FAILURE",
   "MERGE_OUTCOME_UNKNOWN",
   "QUEUE_NOT_CONFIGURED",
   "SERVICE_UNAVAILABLE",
