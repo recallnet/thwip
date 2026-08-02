@@ -441,6 +441,20 @@ async function cmdShip(argv: string[]): Promise<number> {
   // one is the mismatch the service refuses.
   let attemptId: string | null = null;
 
+  // A device announces itself with the fingerprint of the key it signs with,
+  // which costs a disk read and a call to GitHub. Read once and kept, because
+  // ship announces on every loop turn it spends waiting.
+  const deviceOnlyProfile =
+    project.policy.securityProfile === "fresh" || project.policy.securityProfile === "audited";
+  let deviceKeyId: string | null = null;
+  const deviceKey = async (): Promise<string> => {
+    if (deviceKeyId !== null) return deviceKeyId;
+    const config = await loadConfig();
+    const identity = await resolveGithubIdentity(config);
+    deviceKeyId = (await requireRegisteredKey(cwd, config, identity.login)).fingerprint;
+    return deviceKeyId;
+  };
+
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(endpoint + path, {
       method,
@@ -500,6 +514,21 @@ async function cmdShip(argv: string[]): Promise<number> {
       return result.status >= 400
         ? { reasonCode: String(result.body["error"] ?? "SERVICE_UNAVAILABLE") }
         : {};
+    },
+    async announcePresence() {
+      // Only `fresh` and `audited` run the turn on this machine, and only they
+      // read presence. Under `fast` or `remote` there is nothing to announce,
+      // and a row per shipping developer would be a row nothing ever reads.
+      if (!deviceOnlyProfile) return {};
+      const key = await deviceKey();
+      const outcome = await realHeartbeat(endpoint, auth, repositoryId, key)();
+      if (outcome.ok) return {};
+      return {
+        refusal:
+          outcome.status === 0
+            ? `could not reach ${endpoint} to say this machine is here; the queue cannot offer a turn to a machine it cannot see`
+            : `${endpoint} refused this machine's presence (${outcome.status}) for device ${key}; the queue will not offer a turn until it accepts one`,
+      };
     },
     async awaitTurn() {
       await sleep(5000);
