@@ -30,7 +30,7 @@ function scripted(states: ShipState[], over: Partial<ShipPorts> = {}) {
   const base: ShipPorts = {
     observe: async () => states[Math.min(i++, states.length - 1)]!,
     runSuites: async () => ({ ok: true }),
-    push: async () => {},
+    push: async () => ({}),
     openOrUpdatePullRequest: async () => ({ pullRequestNumber: 42 }),
     joinQueue: async () => ({}),
     announcePresence: async () => ({}),
@@ -103,6 +103,20 @@ describe("runShip", () => {
     const out = collect();
     await runShip(ports, out.emit, { jsonEvents: true, maxTurns: 2 });
     expect(out.lines.some((l) => l.includes("ship.presence-refused") && l.includes("somebody else"))).toBe(true);
+  });
+
+  it("ends a refused push with an exit class and a sentence, and joins nothing", async () => {
+    // The proof amends HEAD, so a branch already on the remote is rejected as
+    // non-fast-forward. That escaped as an unhandled exception: git's output, a
+    // stack trace, a dump of the child-process object, and exit 1.
+    const { ports, calls } = scripted([state({ pushedHeadMatchesLocal: false })], {
+      push: async () => ({ reasonCode: "PUSH_REJECTED" }),
+    });
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: false, maxTurns: 4 });
+    expect(report).toMatchObject({ exitCode: EXIT.sourceChanged, reasonCode: "PUSH_REJECTED" });
+    expect(out.lines.some((l) => l.includes("Fetch and rebase onto it"))).toBe(true);
+    expect(calls).not.toContain("joinQueue");
   });
 
   it("stops on something a person must fix, without touching the queue further", async () => {

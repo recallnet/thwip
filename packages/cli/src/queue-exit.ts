@@ -188,6 +188,9 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   SUBJECT_TREE_MISMATCH: EXIT.sourceChanged,
   SUBJECT_ANCESTRY_MISMATCH: EXIT.sourceChanged,
   SUBJECT_BASE_MISMATCH: EXIT.sourceChanged,
+  // The remote branch holds work this machine never had. Nothing local is
+  // wrong, and no retry fixes it: the developer has to pull that commit in.
+  PUSH_REJECTED: EXIT.sourceChanged,
   PERMISSION_REVOKED: EXIT.sourceChanged,
   CANDIDATE_TREE_MISMATCH: EXIT.sourceChanged,
   CANDIDATE_POLICY_MISMATCH: EXIT.sourceChanged,
@@ -210,6 +213,10 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   APP_UNINSTALLED: EXIT.setupInvalid,
   ADMIN_CANCELLED: EXIT.humanRequired,
   INTERNAL_FAILURE: EXIT.invariant,
+  // Something threw before anything could classify it. The invariant class is
+  // right for the same reason it is right for INTERNAL_FAILURE: a person has to
+  // read it, and no caller should retry on it.
+  LOCAL_FAILURE: EXIT.invariant,
   MERGE_EVIDENCE_INCOMPLETE: EXIT.invariant,
   MERGE_INTENT_INVALID: EXIT.invariant,
   CANDIDATE_DIGEST_MISMATCH: EXIT.invariant,
