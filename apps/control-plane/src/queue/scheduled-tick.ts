@@ -2,6 +2,8 @@
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
+import { overdueReconciliation } from "@thwip/queue-domain";
+import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
 import type { D1Like } from "./projection.js";
 import type { QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
@@ -21,8 +23,14 @@ import { readActivePolicy } from "../active-policy.js";
  * comes off cooldown between two pieces of unrelated traffic sits frozen with
  * a free lane and work waiting.
  *
+ * It also ends a reconciliation nothing else can end. An attempt whose merge
+ * outcome is in doubt refuses every deadline-driven outcome the alarm knows, so
+ * it sat holding the lane while this cron fired and fired; `deadlines.ts` reads
+ * GitHub for it and settles it whichever way the reads come out.
+ *
  * Deliberately cheap. One row read per queue, a write only when the clock
- * actually changed something, and a dispatch only when a lane is held.
+ * actually changed something, a dispatch only when a lane is held, and GitHub is
+ * read only for a queue that has an overdue reconciliation waiting.
  */
 export interface TickPorts {
   driveTurn(repositoryId: string, pullRequestNumber: number): Promise<void>;
@@ -33,7 +41,13 @@ export interface TickPorts {
 export async function tickAllQueues(
   env: QueueRouteEnv,
   ports: TickPorts,
-): Promise<{ ticked: number; driven: number; failed: number }> {
+  /**
+   * How the sweep reads GitHub to settle a merge outcome nobody could confirm.
+   * Defaulted rather than injected from the Worker's entry point: a queue that
+   * only recovers once somebody remembers to pass a port stays wedged.
+   */
+  reads: ReconciliationReads = GITHUB_READS,
+): Promise<{ ticked: number; driven: number; failed: number; reconciled: number }> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
     .prepare("SELECT github_repository_id AS repositoryId, base_ref AS baseRef FROM queue_projects WHERE enabled = 1")
@@ -54,6 +68,7 @@ export async function tickAllQueues(
   let ticked = 0;
   let driven = 0;
   let failed = 0;
+  let reconciled = 0;
   for (const row of rows.results) {
     try {
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
@@ -67,7 +82,7 @@ export async function tickAllQueues(
         deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
         deviceOnlyByRepo.set(row.repositoryId, deviceOnly);
       }
-      const snapshot = await withQueueState(db, row.repositoryId, row.baseRef, (store) => {
+      const swept = await withQueueState(db, row.repositoryId, row.baseRef, (store) => {
         const commands = commandsFor(store);
         commands.runAlarm();
 
@@ -103,10 +118,35 @@ export async function tickAllQueues(
             decisionDigest: `sha256:${"0".repeat(64)}`,
           });
         }
-        return buildSnapshot(store);
+        // Named inside the transaction the tick already runs, so discovering the
+        // usual nothing costs no extra read. GitHub is only consulted for a
+        // queue that really has an attempt stuck reconciling.
+        return { snapshot: buildSnapshot(store), overdue: overdueReconciliation(store.state(), now) };
       });
       ticked += 1;
       ports.onQueueTicked(row.repositoryId);
+
+      // `runAlarm()` has no answer for a merge outcome in doubt. Its only
+      // outcome for an overrun turn is `EXPIRED_EXECUTION`, and the reducer
+      // refuses that while the outcome is unknown, so every sweep rejected its
+      // own command, cleared the deadline row and left the lane exactly where it
+      // found it. That is how one indeterminate merge held a whole queue for
+      // twenty minutes while this cron fired four times. Reading GitHub is the
+      // only thing that can end it, and it happens outside the transaction above
+      // because it takes seconds.
+      let snapshot = swept.snapshot;
+      if (swept.overdue !== null) {
+        const settled = await settleReconciliation(env, row.repositoryId, row.baseRef, swept.overdue, reads);
+        snapshot = settled.snapshot;
+        reconciled += 1;
+        // Said out loud, on the channel this account watches. A person used to
+        // do this by hand and knew they had done it; something doing it for them
+        // silently is worse than the wedge it replaces.
+        console.log(
+          `[queue heartbeat] settled overdue reconciliation for repository ${row.repositoryId}: ` +
+            `attempt ${settled.outcome.attemptId} ${settled.outcome.settled}`,
+        );
+      }
 
       // Only a held lane needs driving. Dispatching for an idle queue would
       // spend a CI run to be told there is nothing to do — and under `fresh`
@@ -128,5 +168,5 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed };
+  return { ticked, driven, failed, reconciled };
 }
