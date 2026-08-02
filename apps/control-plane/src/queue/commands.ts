@@ -107,6 +107,15 @@ export class QueueCommands {
     sponsorPrincipalId: string;
     sponsorGithubUserId: string;
     headSha: string;
+    /**
+     * Rebuild an entry that already exists, at the back of the line.
+     *
+     * Without it the reducer discards a request for an entry it already holds,
+     * which is what keeps a pull request in one queue rather than in two. A
+     * finished entry is the case that needs the opposite: `requestTurn` in
+     * `queue-operations.ts` decides when, and is the only caller that sets it.
+     */
+    resetOrdinal?: boolean;
   }): CommandResult {
     return this.store.append({
       idempotencyKey: input.idempotencyKey,
@@ -117,6 +126,7 @@ export class QueueCommands {
       sponsorPrincipalId: input.sponsorPrincipalId,
       sponsorGithubUserId: input.sponsorGithubUserId,
       headSha: input.headSha,
+      ...(input.resetOrdinal === true ? { resetOrdinal: true } : {}),
     });
   }
 
