@@ -11,10 +11,11 @@ import { describe, expect, it } from "vitest";
  * around the queue, and the title and message with the YAML in
  * `.github/workflows/thwip-merge.yml`.
  *
- * Retyping one is how the driver came to write merges carrying no attribution,
- * which would have been read back as external pushes and appended a chain link
- * for work the queue itself did. Four more copies of the operation id sat in
- * `routes.ts` agreeing with the helper only by luck.
+ * Retyping one is how a second merge path came to write merges carrying no
+ * attribution, which would have been read back as external pushes and appended
+ * a chain link for work the queue itself did. That path is deleted; four more
+ * copies of the operation id sat in `routes.ts` agreeing with the helper only
+ * by luck.
  *
  * The same shape has produced three bug families in this directory now: twelve
  * copies of the queue-key guard all with the same wrong message, three copies
@@ -50,6 +51,9 @@ describe("merge commit details", () => {
   it("scans the files that write merges", () => {
     const names = sources().map((s) => s.name);
     expect(names).toContain("routes.ts");
-    expect(names).toContain("driver.ts");
+    // The one place the control plane asks GitHub for a merge, and the one that
+    // signs the intent naming the operation it will perform.
+    expect(names).toContain("github-port.ts");
+    expect(names).toContain("attestation.ts");
   });
 });

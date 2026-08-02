@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BLOCKING_REASONS } from "@thwip/queue-domain";
 import { REASON_CODES } from "@thwip/protocol";
-import { nextAction } from "./check.js";
+import { nextAction } from "./turn-check.js";
 import { nextActionFor } from "../../../../packages/cli/src/queue-exit.js";
 import { blockedNextAction, outcome } from "../../web/src/vocabulary.js";
 
