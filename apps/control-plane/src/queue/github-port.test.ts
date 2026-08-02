@@ -1,16 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  classify,
   dispatchVerifier,
   githubHttp,
-  landMergeOnPinnedBase,
-  mergePullRequest,
   observeMergeResult,
   readFinalGuardFacts,
   resolveCandidate,
   type RepoRef,
 } from "./github-port.js";
-import { mergeCommitMessage, mergeCommitText, mergeCommitTitle } from "./merge-commit.js";
 
 const REPO: RepoRef = {
   owner: "recallnet",
@@ -179,169 +175,6 @@ describe("resolveCandidate", () => {
     });
     const result = await resolveCandidate(githubHttp("t", impl), REPO, 42);
     expect(result.status === "pinned" && result.subject.headRepositoryId).toBe("999");
-  });
-});
-
-describe("mergePullRequest", () => {
-  it("sends the expected head sha so GitHub itself guards against a moved branch", async () => {
-    const { impl, calls } = fakeFetch({
-      "/repos/recallnet/thwip/pulls/42/merge": () => json({ merged: true, sha: "m".repeat(40) }),
-    });
-    await mergePullRequest(githubHttp("t", impl), REPO, {
-      pullRequestNumber: 42,
-      expectedHeadSha: HEAD,
-      mergeMethod: "squash",
-      commitTitle: mergeCommitTitle(42),
-      commitMessage: mergeCommitMessage("merge_att_1"),
-    });
-    const call = calls.find((c) => c.path.endsWith("/merge"))!;
-    expect(call.method).toBe("PUT");
-    expect(call.body).toMatchObject({ sha: HEAD, merge_method: "squash" });
-  });
-
-  it("returns 409 rather than throwing when the head moved", async () => {
-    const { impl } = fakeFetch({
-      "/repos/recallnet/thwip/pulls/42/merge": () => json({ message: "Head branch was modified" }, 409),
-    });
-    const result = await mergePullRequest(githubHttp("t", impl), REPO, {
-      pullRequestNumber: 42,
-      expectedHeadSha: HEAD,
-      mergeMethod: "squash",
-      commitTitle: mergeCommitTitle(42),
-      commitMessage: mergeCommitMessage("merge_att_1"),
-    });
-    expect(result.status).toBe(409);
-    expect(classify(result)).toEqual({ kind: "supersede", outcome: "HEAD_MOVED" });
-  });
-
-  it("returns a transport error rather than throwing, so no retry policy sees it", async () => {
-    const impl = (async () => {
-      throw new Error("socket hang up");
-    }) as unknown as typeof fetch;
-    const result = await mergePullRequest(githubHttp("t", impl), REPO, {
-      pullRequestNumber: 42,
-      expectedHeadSha: HEAD,
-      mergeMethod: "squash",
-      commitTitle: mergeCommitTitle(42),
-      commitMessage: mergeCommitMessage("merge_att_1"),
-    });
-    expect(result.transportError).toBe("socket hang up");
-    expect(classify(result)).toMatchObject({ kind: "reconcile" });
-  });
-});
-
-/**
- * The merge that binds the base it was verified against.
- *
- * GitHub's merge-pull-request API takes an expected head and no expected base,
- * so it merges onto whatever the branch is at that instant. Pull requests 114,
- * 117 and 119 were signed against one base, merged onto another, and produced
- * trees nobody had run. The queue refused to sign records for them, which is the
- * gate working and the merge still landing.
- *
- * Writing the commit ourselves and moving the ref without `force` binds both
- * ends: the commit's first parent is the base the candidate was verified
- * against, and GitHub refuses the ref update unless the branch is still there.
- */
-describe("landMergeOnPinnedBase", () => {
-  const commitsPath = "/repos/recallnet/thwip/git/commits";
-  const refPath = "/repos/recallnet/thwip/git/refs/heads/main";
-  const MERGE = "m".repeat(40);
-
-  const pinned = {
-    pullRequestNumber: 42,
-    expectedBaseSha: BASE,
-    expectedHeadSha: HEAD,
-    candidateTreeOid: TREE,
-    mergeMethod: "merge" as const,
-    commitMessage: mergeCommitText(42, "merge_att_1"),
-  };
-
-  it("writes the verified tree onto the verified base and moves the ref without force", async () => {
-    const { impl, calls } = fakeFetch({
-      [commitsPath]: () => json({ sha: MERGE }),
-      [refPath]: () => json({ object: { sha: MERGE } }),
-    });
-
-    const result = await landMergeOnPinnedBase(githubHttp("t", impl), REPO, pinned);
-
-    expect(calls.find((c) => c.path === commitsPath)?.body).toEqual({
-      message: mergeCommitText(42, "merge_att_1"),
-      tree: TREE,
-      parents: [BASE, HEAD],
-    });
-    const update = calls.find((c) => c.path === refPath)!;
-    expect(update.method).toBe("PATCH");
-    // Without force, GitHub accepts the update only where the branch is an
-    // ancestor of the new commit, which for this commit means the branch is
-    // still the pinned base.
-    expect(update.body).toEqual({ sha: MERGE, force: false });
-    expect(result).toEqual({
-      kind: "landed",
-      mergeSha: MERGE,
-      mergeTree: TREE,
-      parentShas: [BASE, HEAD],
-    });
-  });
-
-  it("refuses to land when the base moved, rather than merging onto the new one", async () => {
-    const { impl, calls } = fakeFetch({
-      [commitsPath]: () => json({ sha: MERGE }),
-      [refPath]: () => json({ message: "Update is not a fast forward" }, 422),
-    });
-
-    const result = await landMergeOnPinnedBase(githubHttp("t", impl), REPO, pinned);
-
-    expect(result).toEqual({
-      kind: "base-moved",
-      reason: `the base branch is no longer ${BASE}, which is the base this candidate was verified against`,
-    });
-    // Nothing else was tried. A second base is not a second chance.
-    expect(calls.filter((c) => c.path === refPath)).toHaveLength(1);
-  });
-
-  it("gives a squash one parent, because a squash never becomes a parent of anything", async () => {
-    const { impl, calls } = fakeFetch({
-      [commitsPath]: () => json({ sha: MERGE }),
-      [refPath]: () => json({ object: { sha: MERGE } }),
-    });
-    await landMergeOnPinnedBase(githubHttp("t", impl), REPO, { ...pinned, mergeMethod: "squash" });
-    expect(calls.find((c) => c.path === commitsPath)?.body).toMatchObject({ parents: [BASE] });
-  });
-
-  it("refuses before the request when the message would not name the operation", async () => {
-    const { impl, calls } = fakeFetch({});
-    await expect(
-      landMergeOnPinnedBase(githubHttp("t", impl), REPO, { ...pinned, commitMessage: "Merge it" }),
-    ).rejects.toThrow(/thwip-queue-operation/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("reports a refused ruleset as refused, not as a moved base", async () => {
-    const { impl } = fakeFetch({
-      [commitsPath]: () => json({ sha: MERGE }),
-      [refPath]: () => json({ message: 'Required status check "thwip" is expected.' }, 422),
-    });
-    const result = await landMergeOnPinnedBase(githubHttp("t", impl), REPO, pinned);
-    expect(result).toMatchObject({ kind: "refused", status: 422 });
-  });
-
-  it("reports a transport failure as unknown, so nothing retries the write", async () => {
-    const impl = (async () => {
-      throw new Error("socket hang up");
-    }) as unknown as typeof fetch;
-    const result = await landMergeOnPinnedBase(githubHttp("t", impl), REPO, pinned);
-    expect(result).toEqual({ kind: "unknown", reason: "transport: socket hang up" });
-  });
-
-  it("does not move the ref when the commit could not be written", async () => {
-    const { impl, calls } = fakeFetch({
-      [commitsPath]: () => json({ message: "no" }, 403),
-      [refPath]: () => json({ object: { sha: MERGE } }),
-    });
-    const result = await landMergeOnPinnedBase(githubHttp("t", impl), REPO, pinned);
-    expect(result).toMatchObject({ kind: "refused", status: 403 });
-    expect(calls.filter((c) => c.path === refPath)).toHaveLength(0);
   });
 });
 

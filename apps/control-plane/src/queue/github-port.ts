@@ -6,7 +6,6 @@ import {
   type PullRequestFacts,
 } from "./candidate.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
-import { carriesQueueAttribution, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
 /**
  * The real GitHub side of an integration turn.
@@ -170,156 +169,23 @@ export async function resolveCandidate(
 }
 
 /**
- * The merge (plan.md §18.3). Returns the raw response so the caller can classify
- * it; this function deliberately makes no decision about retrying.
+ * The merge is not here, and this is the note that says where it is.
  *
- * This is the only place the control plane asks GitHub to write a merge commit,
- * so it is where the attribution is enforced. A message that does not name the
- * operation lands a merge the push webhook cannot tell from an outsider's push,
- * and the queue then appends an `external` chain link for its own work — a
- * record of something that never happened. Refusing before the request means a
- * merge path that forgets the trailer fails a test instead of forging a link.
+ * Two functions in this file wrote merges and nothing called either. One asked
+ * GitHub's merge-pull-request API, which takes an expected head and no expected
+ * base and so merges onto whatever the branch is at that instant; that is the
+ * call that landed four unverified trees on this repository. The other composed
+ * the merge on the pinned base and landed it with a ref update that does not
+ * force, which is the fix, and it was a second unreachable spelling of a merge
+ * that already existed in YAML.
+ *
+ * The merge runs in Actions, because the merge token lives there and the run has
+ * to happen after the required check concludes. So there is one of it:
+ * `bootstrap-workflows.ts` holds the shell, `.github/workflows/thwip-merge.yml`
+ * is what that renders, and `scripts/workflow-lint.mjs` fails a workflow that
+ * merges without binding the base. A third spelling here is how the first two
+ * came to disagree about the attribution trailer.
  */
-export async function mergePullRequest(
-  http: GitHubHttp,
-  repo: RepoRef,
-  input: {
-    readonly pullRequestNumber: number;
-    readonly expectedHeadSha: string;
-    readonly mergeMethod: "merge" | "squash";
-    readonly commitTitle: string;
-    readonly commitMessage: string;
-  },
-): Promise<RawResponse> {
-  if (!carriesQueueAttribution(input.commitMessage)) {
-    throw new Error(
-      `refusing to merge pull request #${input.pullRequestNumber}: the commit message carries no ${QUEUE_MERGE_TRAILER} trailer, so the merge would be read back as an external push`,
-    );
-  }
-  return http.raw(`/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}/merge`, {
-    method: "PUT",
-    body: JSON.stringify({
-      // The head sha is the server-side guard: GitHub answers 409 if the branch
-      // moved, which is cheaper and more reliable than our own re-read.
-      sha: input.expectedHeadSha,
-      merge_method: input.mergeMethod,
-      commit_title: input.commitTitle,
-      commit_message: input.commitMessage,
-    }),
-    headers: { "content-type": "application/json" },
-  });
-}
-
-/**
- * The result of landing a merge on the base the candidate was verified against.
- *
- * `base-moved` is its own outcome and not a rejection to be retried. A merge
- * whose base moved has nothing to try again: the candidate was verified against
- * a base that no longer exists, so the queue takes a new turn, pins a new base,
- * and runs the suites again.
- */
-export type LandOutcome =
-  | { readonly kind: "landed"; readonly mergeSha: string; readonly mergeTree: string; readonly parentShas: readonly string[] }
-  | { readonly kind: "base-moved"; readonly reason: string }
-  | { readonly kind: "refused"; readonly status: number; readonly reason: string }
-  | { readonly kind: "unknown"; readonly reason: string };
-
-/** GitHub's wording when a ref update would not fast-forward the branch. */
-const NOT_FAST_FORWARD = /not a fast forward/i;
-
-/**
- * The merge, bound to the base it was verified against.
- *
- * The merge-pull-request API takes an expected head and no expected base, so it
- * merges onto whatever the branch is at that instant. Pull requests 114, 117 and
- * 119 were each signed against one base and merged onto another; each produced a
- * tree no suite had ever run, and GitHub reported all three as successes.
- *
- * There is no expected-base parameter to reach for. There is a ref update, and a
- * ref update without `force` succeeds only where the branch is an ancestor of
- * the new commit. This writes a commit whose first parent is the pinned base and
- * whose tree is the verified tree, then moves the branch to it: if the branch is
- * still the pinned base the update is a fast-forward and lands; if the base
- * moved the branch is not an ancestor of anything with that parent, GitHub
- * answers 422 "Update is not a fast forward", and nothing lands.
- *
- * The tree comes from the candidate, never from a merge GitHub recomputes, so
- * what lands is byte for byte the tree the verifier ran.
- */
-export async function landMergeOnPinnedBase(
-  http: GitHubHttp,
-  repo: RepoRef,
-  input: {
-    readonly pullRequestNumber: number;
-    /** The base the intent pinned. The merge lands on this base or on none. */
-    readonly expectedBaseSha: string;
-    readonly expectedHeadSha: string;
-    /** The tree the verifier ran, which is the tree this commit will have. */
-    readonly candidateTreeOid: string;
-    readonly mergeMethod: "merge" | "squash";
-    readonly commitMessage: string;
-  },
-): Promise<LandOutcome> {
-  if (!carriesQueueAttribution(input.commitMessage)) {
-    throw new Error(
-      `refusing to merge pull request #${input.pullRequestNumber}: the commit message carries no ${QUEUE_MERGE_TRAILER} trailer, so the merge would be read back as an external push`,
-    );
-  }
-
-  // A squash has one parent, because it never becomes a parent of anything.
-  const parents =
-    input.mergeMethod === "squash"
-      ? [input.expectedBaseSha]
-      : [input.expectedBaseSha, input.expectedHeadSha];
-
-  const written = await http.raw(`/repos/${repo.owner}/${repo.repo}/git/commits`, {
-    method: "POST",
-    body: JSON.stringify({ message: input.commitMessage, tree: input.candidateTreeOid, parents }),
-    headers: { "content-type": "application/json" },
-  });
-  if (written.transportError !== undefined) {
-    // Writing a commit object changes no branch, so an ambiguous one is harmless
-    // and the ref was never touched.
-    return { kind: "unknown", reason: `transport: ${written.transportError}` };
-  }
-  const mergeSha = written.body?.["sha"];
-  if (written.status !== 200 && written.status !== 201) {
-    return {
-      kind: "refused",
-      status: written.status,
-      reason: (written.body?.["message"] as string | undefined) ?? `status ${written.status}`,
-    };
-  }
-  if (typeof mergeSha !== "string") {
-    return { kind: "unknown", reason: "GitHub wrote the merge commit and named no sha" };
-  }
-
-  const branch = repo.baseRef.replace(/^refs\/heads\//, "");
-  const moved = await http.raw(`/repos/${repo.owner}/${repo.repo}/git/refs/heads/${branch}`, {
-    method: "PATCH",
-    // force stays false. It is the whole guard: it is what makes GitHub refuse
-    // a base that moved instead of merging onto it.
-    body: JSON.stringify({ sha: mergeSha, force: false }),
-    headers: { "content-type": "application/json" },
-  });
-  if (moved.transportError !== undefined) {
-    return { kind: "unknown", reason: `transport: ${moved.transportError}` };
-  }
-  if (moved.status === 200 || moved.status === 201) {
-    return { kind: "landed", mergeSha, mergeTree: input.candidateTreeOid, parentShas: parents };
-  }
-  const message = (moved.body?.["message"] as string | undefined) ?? `status ${moved.status}`;
-  if (moved.status === 422 && NOT_FAST_FORWARD.test(message)) {
-    return {
-      kind: "base-moved",
-      reason: `the base branch is no longer ${input.expectedBaseSha}, which is the base this candidate was verified against`,
-    };
-  }
-  if (moved.status >= 500 || moved.status === 408 || moved.status === 429) {
-    return { kind: "unknown", reason: `status ${moved.status}` };
-  }
-  return { kind: "refused", status: moved.status, reason: message };
-}
 
 /**
  * Whether the base branch already contains a commit.

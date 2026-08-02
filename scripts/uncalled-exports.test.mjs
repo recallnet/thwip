@@ -137,11 +137,10 @@ const ALLOWED = [
     why: "read by `@better-auth/cli generate`, which takes a file path rather than an import",
   },
 
-  /* The merge write the Actions workflow performs instead. See the PR that
-     added this check: the shell in bootstrap-workflows.ts is the live copy, and
-     `landMergeOnPinnedBase` is a stronger guarantee than the live one makes. */
-  { symbol: "apps/control-plane/src/queue/github-port.ts#landMergeOnPinnedBase", why: "merge write" },
-  { symbol: "apps/control-plane/src/queue/github-port.ts#mergePullRequest", why: "merge write" },
+  /* The merge write the Actions workflow performs instead. `mergePullRequest`
+     and `landMergeOnPinnedBase` were two more spellings of it and are deleted:
+     the shell in bootstrap-workflows.ts is the merge, and this repository's
+     workflow is what that renders. */
   { symbol: "apps/control-plane/src/queue/github-port.ts#observeMergeResult", why: "merge write" },
   { symbol: "apps/control-plane/src/queue/github-port.ts#readFinalGuardFacts", why: "merge write" },
   { symbol: "apps/control-plane/src/queue/github-port.ts#dispatchVerifier", why: "merge write" },

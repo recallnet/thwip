@@ -51,8 +51,10 @@ describe("merge commit details", () => {
   it("scans the files that write merges", () => {
     const names = sources().map((s) => s.name);
     expect(names).toContain("routes.ts");
-    // The one place the control plane asks GitHub for a merge, and the one that
-    // signs the intent naming the operation it will perform.
+    // Where the merge is written: the shell every repository runs, including
+    // this one, and the file that signs the intent naming the operation it
+    // will perform.
+    expect(names).toContain("bootstrap-workflows.ts");
     expect(names).toContain("github-port.ts");
     expect(names).toContain("attestation.ts");
   });
