@@ -8,10 +8,37 @@
  * one, because each would hand the branch to the wrong writer.
  */
 
+import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
+
 export type Backend = "managed" | "native";
 export type MergeMethod = "merge" | "squash";
 
+/**
+ * A context this generator once required and nothing has ever published.
+ *
+ * plan.md §44 names one App-published gate, `Thwip / Merge`. The queue that got
+ * built publishes two checks and neither is called that: `thwip / turn` from the
+ * App, and `thwip` from the workflow in `.github/workflows/thwip-required.yml`.
+ * A repository provisioned from the old generator required a check no source
+ * would ever post, so its branch could not merge and no amount of waiting would
+ * change that.
+ *
+ * Kept exported because `check.ts` and `github-port.ts` still name it. Nothing
+ * requires it, and nothing should start.
+ */
 export const THWIP_MERGE_CONTEXT = "Thwip / Merge" as const;
+
+/**
+ * GitHub Actions' own Integration id, which is the same everywhere.
+ *
+ * The proof check is published by a workflow, so GitHub attributes it to Actions
+ * rather than to the Thwip App, and pinning it to the App's id would produce a
+ * requirement the workflow can never satisfy. Read off the live ruleset on
+ * `recallnet/thwip`, where `thwip` is pinned to 15368 and `thwip / turn` to the
+ * App.
+ */
+export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
+
 export const OWNERSHIP_RULESET_NAME = "Thwip Queue Ownership" as const;
 export const POLICY_RULESET_NAME = "Thwip Repository Policy" as const;
 
@@ -31,7 +58,10 @@ export interface Ruleset {
 
 export interface PolicyOptions {
   readonly baseRef: string;
+  /** The Thwip App, which publishes the turn check. */
   readonly integrationId: number;
+  /** GitHub Actions, which publishes the proof check. Defaulted, never guessed. */
+  readonly actionsIntegrationId?: number;
   readonly mergeMethod: MergeMethod;
   readonly requiredApprovingReviewCount: number;
   readonly requireCodeOwnerReview: boolean;
@@ -68,25 +98,39 @@ export function managedOwnershipRuleset(input: { baseRef: string; integrationId:
 }
 
 /**
- * The repository policy: review requirements plus the App-sourced merge check.
+ * The repository policy: review requirements plus the two checks the queue
+ * actually publishes.
+ *
+ * `thwip` answers whether the proof is good for this tree and comes out of the
+ * repository's own workflow, so GitHub Actions is its source. `thwip / turn`
+ * answers whose turn it is and is published by the App the moment it offers the
+ * lane, so the App is its source. They have different sources because they have
+ * different publishers, and one shared `integration_id` would make one of them
+ * unsatisfiable.
+ *
  * Existing required checks are carried through, deduplicated by context, with
- * the caller's own source pin winning for the Thwip context only.
+ * the caller's own source pin winning for the two Thwip contexts only.
  */
 export function policyRuleset(input: PolicyOptions): Ruleset {
+  const actionsIntegrationId = input.actionsIntegrationId ?? GITHUB_ACTIONS_INTEGRATION_ID;
+  const thwipContexts = new Set<string>([PROOF_CHECK, TURN_CHECK]);
   const existing = input.existingRequiredChecks ?? [];
   const merged: Array<{ context: string; integration_id?: number }> = [];
   const seen = new Set<string>();
   for (const check of existing) {
-    if (check.context === THWIP_MERGE_CONTEXT) continue; // replaced below, deliberately
+    if (thwipContexts.has(check.context)) continue; // replaced below, deliberately
     if (seen.has(check.context)) continue;
     seen.add(check.context);
     merged.push(check.integration_id === undefined ? { context: check.context } : { ...check });
   }
-  merged.push(
-    input.pinCheckSource === false
-      ? { context: THWIP_MERGE_CONTEXT }
-      : { context: THWIP_MERGE_CONTEXT, integration_id: input.integrationId },
-  );
+  if (input.pinCheckSource === false) {
+    merged.push({ context: PROOF_CHECK }, { context: TURN_CHECK });
+  } else {
+    merged.push(
+      { context: PROOF_CHECK, integration_id: actionsIntegrationId },
+      { context: TURN_CHECK, integration_id: input.integrationId },
+    );
+  }
 
   return {
     name: POLICY_RULESET_NAME,
@@ -284,6 +328,11 @@ export function mayActivate(progress: BootstrapProgress): ActivationCheck {
  * The bootstrap check is configuration evidence, not a verdict. It may be
  * neutral only while the policy is disabled, and it is never copied into an
  * attempt or a certificate (§44.3).
+ *
+ * It names `thwip / turn` because that is the App's context. GitHub will only
+ * offer an App as the expected source of a context the App has recently posted,
+ * and the App posts the turn check. The proof check gets its source the ordinary
+ * way: the setup pull request adds the workflow, and the workflow runs.
  */
 export function bootstrapCheckRun(input: { headSha: string; policyEnforcement: "active" | "disabled" }):
   | { readonly ok: true; readonly checkRun: { name: string; head_sha: string; status: string; conclusion: string; external_id: string; output: { title: string; summary: string } } }
@@ -294,7 +343,7 @@ export function bootstrapCheckRun(input: { headSha: string; policyEnforcement: "
   return {
     ok: true,
     checkRun: {
-      name: THWIP_MERGE_CONTEXT,
+      name: TURN_CHECK,
       head_sha: input.headSha,
       status: "completed",
       conclusion: "neutral",
@@ -303,7 +352,7 @@ export function bootstrapCheckRun(input: { headSha: string; policyEnforcement: "
         title: "Configuration evidence",
         summary:
           "This check exists so GitHub can offer the Thwip App as the expected source for the " +
-          `${THWIP_MERGE_CONTEXT} context. It is not CI and it is not merge verification.`,
+          `${TURN_CHECK} context. It is not CI and it is not merge verification.`,
       },
     },
   };

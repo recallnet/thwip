@@ -4,17 +4,19 @@ import {
   bootstrapCheckRun,
   checkRulesetForBackend,
   diffRuleset,
+  GITHUB_ACTIONS_INTEGRATION_ID,
   isBootstrapCheck,
   managedOwnershipRuleset,
   mayActivate,
   nativeMergeQueueRuleset,
   nextBootstrapStep,
   policyRuleset,
-  THWIP_MERGE_CONTEXT,
   type Ruleset,
 } from "./rulesets.js";
+import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
 
-const INTEGRATION_ID = 15368;
+/** The Thwip App. Distinct from GitHub Actions, which sources the proof check. */
+const INTEGRATION_ID = 4419870;
 const BASE = "refs/heads/main";
 
 function policy(over: Partial<Parameters<typeof policyRuleset>[0]> = {}): Ruleset {
@@ -46,28 +48,39 @@ describe("managedOwnershipRuleset", () => {
 });
 
 describe("policyRuleset", () => {
-  it("requires the App-sourced merge check", () => {
+  it("requires the two checks something actually publishes, each from its own source", () => {
     expect(requiredChecks(policy())).toEqual([
-      { context: THWIP_MERGE_CONTEXT, integration_id: INTEGRATION_ID },
+      { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+      { context: TURN_CHECK, integration_id: INTEGRATION_ID },
     ]);
+  });
+
+  it("never requires a context nothing publishes", () => {
+    const contexts = requiredChecks(policy()).map((c) => c.context);
+    expect(contexts).not.toContain("Thwip / Merge");
   });
 
   it("carries existing required checks through instead of replacing them", () => {
     const ruleset = policy({
-      existingRequiredChecks: [
-        { context: "thwip", integration_id: 15368 },
-        { context: "build" },
-      ],
+      existingRequiredChecks: [{ context: "build" }, { context: "e2e", integration_id: 42 }],
     });
     const contexts = requiredChecks(ruleset).map((c) => c.context);
-    expect(contexts).toContain("thwip");
     expect(contexts).toContain("build");
-    expect(contexts).toContain(THWIP_MERGE_CONTEXT);
+    expect(contexts).toContain("e2e");
+    expect(contexts).toContain(PROOF_CHECK);
+    expect(contexts).toContain(TURN_CHECK);
   });
 
   it("keeps another check's own source pin", () => {
-    const ruleset = policy({ existingRequiredChecks: [{ context: "thwip", integration_id: 99 }] });
-    expect(requiredChecks(ruleset)).toContainEqual({ context: "thwip", integration_id: 99 });
+    const ruleset = policy({ existingRequiredChecks: [{ context: "build", integration_id: 99 }] });
+    expect(requiredChecks(ruleset)).toContainEqual({ context: "build", integration_id: 99 });
+  });
+
+  it("re-pins a Thwip context a repository had left unsourced", () => {
+    const ruleset = policy({ existingRequiredChecks: [{ context: PROOF_CHECK }] });
+    expect(requiredChecks(ruleset).filter((c) => c.context === PROOF_CHECK)).toEqual([
+      { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+    ]);
   });
 
   it("deduplicates a repeated context", () => {
@@ -76,7 +89,10 @@ describe("policyRuleset", () => {
   });
 
   it("omits the source pin during bootstrap, when GitHub cannot accept one yet", () => {
-    expect(requiredChecks(policy({ pinCheckSource: false }))).toEqual([{ context: THWIP_MERGE_CONTEXT }]);
+    expect(requiredChecks(policy({ pinCheckSource: false }))).toEqual([
+      { context: PROOF_CHECK },
+      { context: TURN_CHECK },
+    ]);
   });
 
   it("allows exactly the configured merge method", () => {
@@ -147,15 +163,16 @@ describe("diffRuleset", () => {
   it("reports a first-time application as all additions", () => {
     const diff = diffRuleset(null, policy());
     expect(diff.removedRules).toEqual([]);
-    expect(diff.addedRequiredChecks).toContain(THWIP_MERGE_CONTEXT);
+    expect(diff.addedRequiredChecks).toContain(TURN_CHECK);
+    expect(diff.addedRequiredChecks).toContain(PROOF_CHECK);
     expect(diff.safe).toBe(true);
   });
 
   it("warns loudly when a generated payload would drop an existing check", () => {
-    const current = policy({ existingRequiredChecks: [{ context: "thwip" }, { context: "build" }] });
+    const current = policy({ existingRequiredChecks: [{ context: "e2e" }, { context: "build" }] });
     const next = policy();
     const diff = diffRuleset(current, next);
-    expect(diff.removedRequiredChecks.sort()).toEqual(["build", "thwip"]);
+    expect(diff.removedRequiredChecks.sort()).toEqual(["build", "e2e"]);
     expect(diff.safe).toBe(false);
     expect(diff.warnings.join(" ")).toMatch(/stop requiring build/);
   });
@@ -226,7 +243,7 @@ describe("bootstrapCheckRun", () => {
     const ok = bootstrapCheckRun({ headSha: "a".repeat(40), policyEnforcement: "disabled" });
     expect(ok).toMatchObject({ ok: true });
     if (ok.ok) {
-      expect(ok.checkRun.name).toBe(THWIP_MERGE_CONTEXT);
+      expect(ok.checkRun.name).toBe(TURN_CHECK);
       expect(ok.checkRun.conclusion).toBe("neutral");
       expect(ok.checkRun.external_id.startsWith("bootstrap:")).toBe(true);
       expect(ok.checkRun.output.summary).toMatch(/not CI and it is not merge verification/);
