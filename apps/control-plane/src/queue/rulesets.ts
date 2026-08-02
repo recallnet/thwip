@@ -13,20 +13,20 @@ import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
 export type Backend = "managed" | "native";
 export type MergeMethod = "merge" | "squash";
 
-/**
- * A context this generator once required and nothing has ever published.
+/*
+ * `Thwip / Merge` is gone.
  *
- * plan.md §44 names one App-published gate, `Thwip / Merge`. The queue that got
- * built publishes two checks and neither is called that: `thwip / turn` from the
- * App, and `thwip` from the workflow in `.github/workflows/thwip-required.yml`.
- * A repository provisioned from the old generator required a check no source
- * would ever post, so its branch could not merge and no amount of waiting would
- * change that.
+ * plan.md §44 named one App-published gate by that name. The queue that got
+ * built publishes three checks and none of them is called that: `thwip` from
+ * the workflow in `.github/workflows/thwip-required.yml`, and `thwip / turn`
+ * and `thwip / candidate` from the App. A repository provisioned from the old
+ * generator required a check no source would ever post, so its branch could not
+ * merge and no amount of waiting would change that.
  *
- * Kept exported because `check.ts` and `github-port.ts` still name it. Nothing
- * requires it, and nothing should start.
+ * The pin came out first, then the builder that nothing called and the
+ * publisher that nothing called. What the check was going to say now goes on
+ * `thwip / turn`, which is required and which developers already open.
  */
-export const THWIP_MERGE_CONTEXT = "Thwip / Merge" as const;
 
 /**
  * GitHub Actions' own Integration id, which is the same everywhere.

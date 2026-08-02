@@ -6,12 +6,10 @@ import {
   landMergeOnPinnedBase,
   mergePullRequest,
   observeMergeResult,
-  publishMergeCheck,
   readFinalGuardFacts,
   resolveCandidate,
   type RepoRef,
 } from "./github-port.js";
-import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 import { mergeCommitMessage, mergeCommitText, mergeCommitTitle } from "./merge-commit.js";
 
 const REPO: RepoRef = {
@@ -477,27 +475,6 @@ describe("observeMergeResult", () => {
         mergeMethod: "squash",
       }),
     ).toMatchObject({ kind: "merged" });
-  });
-});
-
-describe("publishMergeCheck", () => {
-  it("publishes under the required context name from the App", async () => {
-    const { impl, calls } = fakeFetch({ "/repos/recallnet/thwip/check-runs": () => json({ id: 1 }, 201) });
-    const result = await publishMergeCheck(githubHttp("t", impl), REPO, {
-      headSha: HEAD,
-      conclusion: "success",
-      title: "Verified",
-      summary: "s",
-      externalId: "attempt:att-1",
-    });
-    expect(result.status).toBe(201);
-    expect(calls[0]!.body).toMatchObject({
-      name: THWIP_MERGE_CONTEXT,
-      head_sha: HEAD,
-      status: "completed",
-      conclusion: "success",
-      external_id: "attempt:att-1",
-    });
   });
 });
 

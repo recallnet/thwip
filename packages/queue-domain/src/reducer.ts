@@ -219,8 +219,8 @@ function requireMergeable(state: BranchQueueState, attempt: Attempt): void {
 /**
  * Merged and Cancelled are endings, not stages. A merged pull request has a
  * signed transition record naming it, so moving its entry anywhere else leaves
- * the queue contradicting the chain: `buildCheck` publishes "Removed from the
- * queue" for a pull request that is in `main`. The guard sits on the two
+ * the queue contradicting the chain: the turn check goes back to reporting a
+ * pull request that is in `main` as still waiting for a lane. The guard sits on the two
  * functions that write `state` so that no event handler has to remember it, and
  * an event that would move a finished entry is refused rather than applied.
  */

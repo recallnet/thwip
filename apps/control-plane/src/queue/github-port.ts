@@ -5,7 +5,6 @@ import {
   type CommitFacts,
   type PullRequestFacts,
 } from "./candidate.js";
-import { THWIP_MERGE_CONTEXT } from "./rulesets.js";
 import type { MergeAttemptOutcome } from "./turn.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
 import { carriesQueueAttribution, QUEUE_MERGE_TRAILER } from "./external-push.js";
@@ -404,35 +403,6 @@ export async function observeMergeResult(
     mergeTree: commit.tree.sha,
     parentShas: commit.parents.map((p) => p.sha),
   };
-}
-
-/**
- * The check the branch requires. Published by the App so its source can be
- * pinned, which is what stops any workflow from satisfying the gate (§17.2).
- */
-export async function publishMergeCheck(
-  http: GitHubHttp,
-  repo: RepoRef,
-  input: {
-    readonly headSha: string;
-    readonly conclusion: "success" | "failure" | "neutral";
-    readonly title: string;
-    readonly summary: string;
-    readonly externalId: string;
-  },
-): Promise<RawResponse> {
-  return http.raw(`/repos/${repo.owner}/${repo.repo}/check-runs`, {
-    method: "POST",
-    body: JSON.stringify({
-      name: THWIP_MERGE_CONTEXT,
-      head_sha: input.headSha,
-      status: "completed",
-      conclusion: input.conclusion,
-      external_id: input.externalId,
-      output: { title: input.title, summary: input.summary },
-    }),
-    headers: { "content-type": "application/json" },
-  });
 }
 
 /** Dispatch the pinned verifier workflow (plan.md §17.1). */
