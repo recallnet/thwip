@@ -72,6 +72,27 @@ describe("setupPullRequestFiles", () => {
   });
 });
 
+/**
+ * The template is a workflow, so the rules workflows are held to apply to it.
+ *
+ * `scripts/lint.mjs` reads `.github/workflows`, and the template is TypeScript
+ * that emits YAML, so lint never saw it. This repository's merge workflow was
+ * fixed to bind the base and the template was not, and every adopted repository
+ * went on merging onto whatever the branch happened to be. Same rules, same
+ * messages, applied to what the template emits.
+ */
+const { validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint.mjs"))) as {
+  validateWorkflow: (filename: string, source: string) => void;
+};
+
+describe("the generated workflows under the workflow lint", () => {
+  for (const generated of files.filter((f) => f.path.startsWith(".github/workflows/"))) {
+    it(`passes every rule for ${generated.path}`, () => {
+      expect(() => validateWorkflow(generated.path, generated.content)).not.toThrow();
+    });
+  }
+});
+
 describe("drift against this repository's own workflows", () => {
   /**
    * The generated proof workflow is a copy of the one this repository runs, so a
