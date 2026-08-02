@@ -24,8 +24,13 @@ export interface ShipPorts {
   /**
    * Say this machine is here, so a profile that runs the turn on a device can
    * offer it one. A no-op under a profile the server executes itself.
+   *
+   * Reports a refusal rather than throwing on one. A queue that will not accept
+   * the announcement withholds the offer forever, and the developer sees a wait
+   * with no end and no reason — which is exactly how an unannounced ship spent
+   * sixty polls looking like a slow queue instead of an invisible machine.
    */
-  announcePresence(): Promise<void>;
+  announcePresence(): Promise<{ refusal?: string }>;
   awaitTurn(): Promise<{ reasonCode?: string }>;
   executeTurn(): Promise<{ reasonCode?: string }>;
   awaitMerge(): Promise<{ reasonCode?: string }>;
@@ -85,6 +90,16 @@ export async function runShip(
       return { exitCode: EXIT.invariant, reasonCode: "INTERNAL_FAILURE" };
     }
 
+    // Presence is a fact with a short expiry, and both of these steps depend on
+    // it: the queue withholds the offer from an absent machine, and refuses a
+    // claim from one. Announced here rather than inside the ports so the two
+    // steps cannot drift apart, and it costs a `fast` repository nothing — its
+    // announcement is a no-op.
+    if (decision.step === "await-turn" || decision.step === "execute-turn") {
+      const presence = await ports.announcePresence();
+      if (presence.refusal !== undefined) say("ship.presence-refused", "AGENT_OFFLINE", presence.refusal);
+    }
+
     say(`ship.${decision.step}`, undefined, decision.why);
 
     const outcome = await perform(ports, decision.step);
@@ -116,16 +131,9 @@ async function perform(ports: ShipPorts, step: string): Promise<{ reasonCode?: s
       return {};
     case "join-queue":
       return ports.joinQueue();
-    // Presence is a fact with a short expiry, and both of these steps depend on
-    // it: the queue withholds the offer from an absent machine, and refuses a
-    // claim from one. Announcing here rather than in the ports keeps the two
-    // from drifting apart, and costs a `fast` repository nothing — its
-    // announcement is a no-op.
     case "await-turn":
-      await ports.announcePresence();
       return ports.awaitTurn();
     case "execute-turn":
-      await ports.announcePresence();
       return ports.executeTurn();
     case "await-merge":
       return ports.awaitMerge();

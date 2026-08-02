@@ -33,7 +33,7 @@ function scripted(states: ShipState[], over: Partial<ShipPorts> = {}) {
     push: async () => {},
     openOrUpdatePullRequest: async () => ({ pullRequestNumber: 42 }),
     joinQueue: async () => ({}),
-    announcePresence: async () => {},
+    announcePresence: async () => ({}),
     awaitTurn: async () => ({}),
     executeTurn: async () => ({}),
     awaitMerge: async () => ({}),
@@ -92,6 +92,17 @@ describe("runShip", () => {
     const report = await runShip(ports, collect().emit, { jsonEvents: true });
     expect(report).toMatchObject({ outcome: "MERGE_CONFIRMED" });
     expect(calls).toEqual(["announcePresence", "awaitTurn", "announcePresence", "executeTurn"]);
+  });
+
+  it("says out loud when the queue refuses this machine's presence", async () => {
+    // The refusal was silent, so a session belonging to one GitHub account and
+    // a signing key belonging to another read as a queue that was merely slow.
+    const { ports } = scripted([state({ turn: "none" })], {
+      announcePresence: async () => ({ refusal: "that device key belongs to somebody else" }),
+    });
+    const out = collect();
+    await runShip(ports, out.emit, { jsonEvents: true, maxTurns: 2 });
+    expect(out.lines.some((l) => l.includes("ship.presence-refused") && l.includes("somebody else"))).toBe(true);
   });
 
   it("stops on something a person must fix, without touching the queue further", async () => {
