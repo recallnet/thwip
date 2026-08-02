@@ -5,6 +5,7 @@ import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
 import {
   activatePolicyFromDefaultBranchPush,
   policyPushFromGithubWebhook,
@@ -1006,8 +1007,16 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     pull_requests: "write",
     statuses: "write",
   };
-  const granted = (installation as unknown as { permissions?: Record<string, string> }).permissions ?? {};
+  const granted = installation.permissions ?? {};
   const missing = Object.entries(required).filter(([scope, level]) => granted[scope] !== level);
+
+  // What the App is subscribed to, against what the router handles. This
+  // installation delivered `check_suite` and nothing else for months, so every
+  // other handler was dead code in production while the manifest, the tests and
+  // the review all said otherwise. The doctor is where an operator already
+  // looks when the queue is not moving, and it is the only surface that can see
+  // the live subscription at all.
+  const events = webhookEventDrift(installation.events);
 
   return Response.json({
     repo,
@@ -1017,6 +1026,12 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
     canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    subscribedEvents: events.subscribed,
+    handledEvents: events.handled,
+    deadHandlers: events.deadHandlers,
+    unreadSubscriptions: events.unreadSubscriptions,
+    subscriptionKnown: events.known,
+    receivesEveryHandledEvent: events.healthy,
     rulesets,
   });
 }
@@ -1590,18 +1605,10 @@ app.get("/admin/github/manifest", async (c) => {
       metadata: "read",
       pull_requests: "read",
     },
-    default_events: [
-      "check_run",
-      "check_suite",
-      "member",
-      "membership",
-      "merge_group",
-      "organization",
-      "pull_request",
-      "push",
-      "repository",
-      "team",
-    ],
+    // The same list the router handles, never a copy of it. A fresh App
+    // registered from a copy that fell behind delivers nothing for whatever the
+    // copy is missing, and the handler waits forever without erroring.
+    default_events: APP_MANIFEST_EVENTS,
   };
   return c.html(
     `<!doctype html><meta charset="utf-8"><title>Register thwip GitHub App</title>
