@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { queueKey, type BlockingReason } from "@thwip/queue-domain";
+import { queueKey, TERMINAL_ENTRY_STATES, type BlockingReason } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
@@ -1310,6 +1310,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // enabled one is checked.
         const { snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
           for (const entry of buildSnapshot(store).entries) {
+            // A finished entry is finished. Readiness is derived for entries
+            // that could still take a turn, and a cancelled one never will, so
+            // re-deriving it onto one left the queue asserting that a pull
+            // request nobody can merge was schedulable with nothing blocking it.
+            // The reducer keeps a terminal entry terminal; this path went around
+            // it by writing the two fields the reducer sets before it looks.
+            if (TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number])) continue;
             if (
               entry.sponsorPrincipalId === who.principalId &&
               !entry.schedulerEligible &&
