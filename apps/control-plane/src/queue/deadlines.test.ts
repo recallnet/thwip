@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import { tickAllQueues } from "./scheduled-tick.js";
+import { buildSnapshot, commandsFor } from "./queue-operations.js";
+import { withQueueState } from "./queue-state.js";
+import type { D1Like } from "./projection.js";
+import type { ReconciliationReads } from "./deadlines.js";
 
 /**
  * A Durable Object has an alarm. D1 does not, so nothing wakes up to expire a
@@ -153,5 +158,280 @@ describe("a turn that ran out, with nothing to wake the queue up", () => {
     // The lapsed turn released the lane rather than keeping it after the holder
     // stopped answering.
     expect(state.activeAttemptId).toBeNull();
+  });
+});
+
+/**
+ * Attempt `att_2dc5e37e` for pull request 114 entered `Reconciling` and stayed
+ * there for more than twenty minutes past an execution deadline of
+ * 2026-08-02T05:06:04Z. The five-minute cron fired several times in that window
+ * and resolved nothing: the alarm's only answer for an overrun turn is
+ * `EXPIRED_EXECUTION`, and the reducer refuses that outcome for an attempt whose
+ * merge outcome is in doubt, so every sweep rejected its own command, cleared the
+ * deadline row and left the lane exactly where it found it. `POST /tick` was a
+ * no-op throughout, because the wedged attempt held the lane and no entry was
+ * eligible. Pull request 115 sat Ready behind it until an operator ran
+ * `POST /reconcile observed=not-merged` by hand.
+ *
+ * One indeterminate merge stopping the whole queue is the failure the durability
+ * work was meant to remove, so the sweep now reads GitHub and settles it.
+ */
+
+const TREE = "t".repeat(40);
+const MERGE_SHA = "f".repeat(40);
+
+/** A queue row the tick will visit. */
+function queueProject(repositoryId: string): void {
+  raw
+    .prepare(
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
+       VALUES (?, 'org_1', ?, 'refs/heads/main', 1, 'enforced')`,
+    )
+    .run(`qp_${repositoryId}`, repositoryId);
+}
+
+/**
+ * Pull request 114 driven all the way to a merge write whose outcome is in
+ * doubt, with 115 Ready behind it. The execution window is zero seconds rather
+ * than twenty minutes, so the deadline is already behind by the time the tick
+ * reads it, which is the same condition without waiting out the clock.
+ */
+async function reconcilingLane(db: D1Like): Promise<string> {
+  return withQueueState(db, REPO, REF, (store) => {
+    const commands = commandsFor(store, {
+      offerSeconds: 90,
+      executionSeconds: 0,
+      heartbeatSeconds: 20,
+      graceSeconds: 60,
+      noClaimCooldownSeconds: 300,
+      mergeConfirmSeconds: 60,
+    });
+    for (const [entryId, pr] of [
+      ["e114", 114],
+      ["e115", 115],
+    ] as const) {
+      commands.requestQueue({
+        idempotencyKey: `req-${entryId}`,
+        entryId,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: `principal_${pr}`,
+        sponsorGithubUserId: String(pr),
+        headSha: String(pr).padStart(40, "a"),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: `ready-${entryId}`,
+        entryId,
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+    }
+
+    const offer = commands.tick({ idempotencyKey: "offer-114", decisionDigest: `sha256:${"0".repeat(64)}` });
+    const attemptId = (offer as { attemptId?: string }).attemptId;
+    if (attemptId === undefined) throw new Error("test setup expected an offer");
+
+    commands.claim({ idempotencyKey: `claim-${attemptId}`, attemptId, executionMode: "remote" });
+    commands.candidatePrepared({
+      idempotencyKey: `candidate-${attemptId}`,
+      attemptId,
+      baseSha: "b".repeat(40),
+      headSha: "114".padStart(40, "a"),
+      candidateSha: "c".repeat(40),
+      candidateTree: TREE,
+      policyDigest: `sha256:${"b".repeat(64)}`,
+      runner: "dagger",
+    });
+    commands.assign({
+      idempotencyKey: `assign-${attemptId}`,
+      attemptId,
+      assignmentDigest: `sha256:${"a".repeat(64)}`,
+    });
+    commands.submitReceipt({
+      idempotencyKey: `receipt-${attemptId}`,
+      attemptId,
+      receiptDigest: `sha256:${"r".repeat(64)}`,
+    });
+    const started = commands.startVerification({ idempotencyKey: `verify-${attemptId}`, attemptId });
+    commands.completeVerification({
+      idempotencyKey: `verdict-${attemptId}`,
+      attemptId,
+      nonce: started.nonce!,
+      accepted: true,
+      resultDigest: `sha256:${"d".repeat(64)}`,
+    });
+    commands.createMergeIntent({
+      idempotencyKey: `intent-${attemptId}`,
+      attemptId,
+      intentDigest: `sha256:${"e".repeat(64)}`,
+    });
+    commands.beginMergeWrite({
+      idempotencyKey: `write-${attemptId}`,
+      attemptId,
+      operationId: `merge_${attemptId}`,
+    });
+    commands.mergeOutcomeUnknown({ idempotencyKey: `unknown-${attemptId}`, attemptId });
+    return attemptId;
+  });
+}
+
+async function stateNow(db: D1Like) {
+  const snapshot = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+  return {
+    activeAttemptId: snapshot.activeAttemptId,
+    of: (pr: number) => snapshot.entries.find((entry) => entry.pullRequestNumber === pr),
+  };
+}
+
+const PORTS = { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} };
+
+/** Every read agrees the merge did not happen, which is what was true on the day. */
+const NOT_MERGED: ReconciliationReads = {
+  pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
+  baseContainsSha: async () => false,
+  commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "114".padStart(40, "a")] }),
+  sleep: async () => {},
+};
+
+describe("a merge outcome nobody could settle, past its deadline", () => {
+  it("confirms the refusal, frees the lane, and lets the next pull request take a turn", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queueProject(REPO);
+    const attemptId = await reconcilingLane(db);
+
+    const before = await stateNow(db);
+    expect(before.activeAttemptId).toBe(attemptId);
+    expect(before.of(114)?.state).toBe("Reconciling");
+    expect(before.of(115)?.state).toBe("Ready");
+
+    await tickAllQueues(e, PORTS, NOT_MERGED);
+
+    const after = await stateNow(db);
+    // 114 keeps its place and serves a cooldown, as any refused merge does.
+    expect(after.of(114)?.state).toBe("Deferred");
+    // The lane went to the pull request that had been waiting behind it.
+    expect(["Offered", "Active"]).toContain(after.of(115)?.state);
+    expect(after.activeAttemptId).not.toBe(attemptId);
+    expect(after.activeAttemptId).not.toBeNull();
+  });
+
+  it("records the merge and frees the lane when the reads say it landed", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queueProject(REPO);
+    await reconcilingLane(db);
+
+    await tickAllQueues(e, PORTS, {
+      ...NOT_MERGED,
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: MERGE_SHA }),
+      baseContainsSha: async () => true,
+    });
+
+    const after = await stateNow(db);
+    expect(after.of(114)?.state).toBe("Merged");
+    expect(["Offered", "Active"]).toContain(after.of(115)?.state);
+  });
+
+  /**
+   * The hard case. Every read failed, so the queue still cannot say what became
+   * of the merge, and it must not guess, because guessing "not merged" is how
+   * four merges left the chain.
+   *
+   * It frees the lane anyway and blocks the one entry it cannot speak for. The
+   * write that may still be in flight belongs to this attempt and this pull
+   * request; a blocked entry is not scheduler-eligible, so nothing offers it a
+   * second turn and no second write can follow the first. Everything behind it
+   * is unrelated work that was never in doubt, and holding the whole queue for
+   * one indeterminate merge is the failure being fixed.
+   */
+  it("frees the lane on an outcome it still cannot determine, and blocks only the entry it cannot speak for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queueProject(REPO);
+    const attemptId = await reconcilingLane(db);
+
+    await tickAllQueues(e, PORTS, {
+      ...NOT_MERGED,
+      pullRequestMergeState: async () => null,
+      baseContainsSha: async () => null,
+    });
+
+    const after = await stateNow(db);
+    expect(after.of(114)?.state).toBe("Blocked");
+    expect(after.of(114)?.primaryReason).toBe("MERGE_OUTCOME_UNKNOWN");
+    expect(after.activeAttemptId).not.toBe(attemptId);
+    expect(["Offered", "Active"]).toContain(after.of(115)?.state);
+
+    // And it stays out of the running. The scheduler considers Ready entries and
+    // Deferred entries serving a cooldown; a Blocked one is neither, so no later
+    // sweep hands this pull request a second turn on its own.
+    await tickAllQueues(e, PORTS, NOT_MERGED);
+    expect((await stateNow(db)).of(114)?.state).toBe("Blocked");
+  });
+
+  it("reads nothing and settles nothing while the deadline is still ahead", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queueProject(REPO);
+
+    await withQueueState(db, REPO, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.requestQueue({
+        idempotencyKey: "req-e114",
+        entryId: "e114",
+        pullRequestNumber: 114,
+        sponsorPrincipalId: "principal_114",
+        sponsorGithubUserId: "114",
+        headSha: "114".padStart(40, "a"),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: "ready-e114",
+        entryId: "e114",
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+      const offer = commands.tick({ idempotencyKey: "offer", decisionDigest: `sha256:${"0".repeat(64)}` });
+      const attemptId = (offer as { attemptId?: string }).attemptId!;
+      commands.claim({ idempotencyKey: "claim", attemptId, executionMode: "remote" });
+      commands.candidatePrepared({
+        idempotencyKey: "candidate",
+        attemptId,
+        baseSha: "b".repeat(40),
+        headSha: "114".padStart(40, "a"),
+        candidateSha: "c".repeat(40),
+        candidateTree: TREE,
+        policyDigest: `sha256:${"b".repeat(64)}`,
+        runner: "dagger",
+      });
+      commands.assign({ idempotencyKey: "assign", attemptId, assignmentDigest: `sha256:${"a".repeat(64)}` });
+      commands.submitReceipt({ idempotencyKey: "receipt", attemptId, receiptDigest: `sha256:${"r".repeat(64)}` });
+      const started = commands.startVerification({ idempotencyKey: "verify", attemptId });
+      commands.completeVerification({
+        idempotencyKey: "verdict",
+        attemptId,
+        nonce: started.nonce!,
+        accepted: true,
+        resultDigest: `sha256:${"d".repeat(64)}`,
+      });
+      commands.createMergeIntent({ idempotencyKey: "intent", attemptId, intentDigest: `sha256:${"e".repeat(64)}` });
+      commands.beginMergeWrite({ idempotencyKey: "write", attemptId, operationId: `merge_${attemptId}` });
+      commands.mergeOutcomeUnknown({ idempotencyKey: "unknown", attemptId });
+    });
+
+    let reads = 0;
+    await tickAllQueues(e, PORTS, {
+      ...NOT_MERGED,
+      pullRequestMergeState: async () => {
+        reads += 1;
+        return { merged: false, mergeCommitSha: null };
+      },
+    });
+
+    // Reconciliation reads and waits. Nothing about a merge still inside its
+    // window is anybody's business yet.
+    expect(reads).toBe(0);
+    expect((await stateNow(db)).of(114)?.state).toBe("Reconciling");
   });
 });
