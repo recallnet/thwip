@@ -6,6 +6,7 @@ import { latestVerification } from "./latest-verification.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
 import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
+import { syncInstallations } from "./admin-sync.js";
 import {
   activatePolicyFromDefaultBranchPush,
   policyPushFromGithubWebhook,
@@ -944,15 +945,16 @@ app.post("/admin/seed", async (c) => {
 app.post("/admin/sync", async (c) => {
   if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
   const installations = await listInstallations(c.env);
-  const results: Record<string, unknown> = {};
-  for (const inst of installations) {
-    const installationId = String(inst.id);
-    const projection = await syncInstallation(c.env, installationId);
-    const policies = await reconcileInstallationPolicies(c.env, installationId);
-    const proofChecks = await reconcileInstallationProofChecks(c.env, installationId);
-    results[inst.account.login] = { projection, policies, proofChecks };
-  }
-  return c.json({ installations: results });
+  // The proof-check pass reads open pull requests, which needs a permission an
+  // installation may not hold. It used to throw out of here, so a reconcile
+  // that had already finished came back as a 500 and an operator retried work
+  // that was done. See admin-sync.ts.
+  const report = await syncInstallations(installations, {
+    syncInstallation: (installationId) => syncInstallation(c.env, installationId),
+    reconcilePolicies: (installationId) => reconcileInstallationPolicies(c.env, installationId),
+    reconcileProofChecks: (installationId) => reconcileInstallationProofChecks(c.env, installationId),
+  });
+  return c.json(report);
 });
 
 /**
