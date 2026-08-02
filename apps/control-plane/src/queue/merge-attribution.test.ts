@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { carriesQueueAttribution, externalPushFromWebhook } from "./external-push.js";
-import { mergeCommitMessage } from "./merge-commit.js";
-import { githubHttp, mergePullRequest } from "./github-port.js";
+import { setupPullRequestFiles } from "./bootstrap-workflows.js";
+import { carriesQueueAttribution } from "./external-push.js";
+import { mergeCommitMessage, mergeCommitText } from "./merge-commit.js";
 
 /**
  * A merge the queue wrote must be readable as the queue's own work.
@@ -17,10 +18,8 @@ import { githubHttp, mergePullRequest } from "./github-port.js";
  * A second merge path once built its message by hand and left the trailer out.
  * It never shipped, because nothing called it, and nothing in the code said the
  * two files depended on each other. Both are gone; `mergeCommitMessage` is the
- * one message, and `mergePullRequest` refuses anything else.
+ * one message, and the workflow below is the one thing that writes a merge.
  */
-
-const HEAD = "2".repeat(40);
 
 /**
  * One predicate, used by the side that writes the commit and the side that
@@ -38,56 +37,39 @@ describe("the attribution both sides read", () => {
 });
 
 /**
- * The guard that makes a forgetful future path fail loudly.
+ * The message the merge actually writes.
  *
- * `mergePullRequest` is the only place the control plane asks GitHub to write a
- * merge commit. Refusing an unattributed message there means a new merge path
- * that forgets the trailer cannot reach GitHub at all, rather than landing a
- * merge the push webhook then misreports.
+ * The guard used to sit in front of a TypeScript merge nothing called, which is
+ * a guard on a path that could not forget. The merge runs in Actions and builds
+ * its message with printf, so this runs that printf and reads the trailer out of
+ * what it produces. A workflow that stopped writing the trailer would land
+ * merges the push webhook reads as somebody pushing around the queue, and the
+ * queue would append a chain link for work it did itself.
  */
-describe("asking GitHub to write a merge commit", () => {
-  function recordingFetch() {
-    const calls: string[] = [];
-    const impl = (async (input: string) => {
-      calls.push(String(input));
-      return new Response(JSON.stringify({ merged: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
-    return { impl, calls };
+describe("the message the merge workflow writes", () => {
+  const merge = setupPullRequestFiles({
+    endpoint: "https://thwip.example.test",
+    actionRef: "recallnet/thwip@v1",
+  }).find((f) => f.path === ".github/workflows/thwip-merge.yml")!.content;
+
+  /** The workflow's own lines, run as the workflow runs them. */
+  function messageForOperation(pullRequestNumber: number, operationId: string): string {
+    const from = merge.indexOf('title="Merge pull request');
+    const to = merge.indexOf("\n", merge.indexOf("msg=$(printf"));
+    const lines = merge.slice(from, to).replace(/^ +/gm, "");
+    return execFileSync(
+      "bash",
+      ["-c", `PR=${pullRequestNumber}\nop=${operationId}\n${lines}\nprintf '%s' "$msg"`],
+      { encoding: "utf8" },
+    );
   }
 
-  const repo = {
-    owner: "recallnet",
-    repo: "thwip",
-    repositoryId: "1315419165",
-    baseRef: "refs/heads/main",
-  };
-
-  it("refuses a message that does not attribute the merge to the queue", async () => {
-    const { impl, calls } = recordingFetch();
-    await expect(
-      mergePullRequest(githubHttp("t", impl), repo, {
-        pullRequestNumber: 42,
-        expectedHeadSha: HEAD,
-        mergeMethod: "merge",
-        commitTitle: "Merge pull request #42 (Thwip Queue)",
-        commitMessage: "body",
-      }),
-    ).rejects.toThrow(/thwip-queue-operation/);
-    expect(calls).toEqual([]);
+  it("attributes the merge to the operation the queue signed", () => {
+    expect(carriesQueueAttribution(messageForOperation(42, "merge_att_1"))).toBe(true);
   });
 
-  it("sends an attributed message through", async () => {
-    const { impl, calls } = recordingFetch();
-    await mergePullRequest(githubHttp("t", impl), repo, {
-      pullRequestNumber: 42,
-      expectedHeadSha: HEAD,
-      mergeMethod: "merge",
-      commitTitle: "Merge pull request #42 (Thwip Queue)",
-      commitMessage: mergeCommitMessage("merge_att_1"),
-    });
-    expect(calls).toHaveLength(1);
+  it("writes the text the intent bound, and no other", () => {
+    // Command substitution eats the trailing newline; the commit keeps the rest.
+    expect(`${messageForOperation(42, "merge_att_1")}\n`).toBe(mergeCommitText(42, "merge_att_1"));
   });
 });
