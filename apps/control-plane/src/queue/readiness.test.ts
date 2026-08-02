@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { blockedOnlyByCapability, deriveReadiness, isKnownReason, type ReadinessFacts } from "./readiness.js";
-import { nextAction } from "./check.js";
+import { nextAction } from "./turn-check.js";
 
 function facts(over: Partial<ReadinessFacts> = {}): ReadinessFacts {
   return {

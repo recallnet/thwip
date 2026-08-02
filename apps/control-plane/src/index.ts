@@ -1751,11 +1751,17 @@ async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnC
     .catch(() => null);
   const current = existing?.check_runs?.[0];
 
+  // The summary is compared too, not only the title. Two blocking reasons can
+  // share a title — a missing review and a missing code-owner review are both
+  // "Waiting for review" — while the sentence saying what to do about them
+  // differs, and comparing titles alone left the wrong instruction on the commit.
+  const output = current?.["output"] as { title?: string; summary?: string } | undefined;
   if (
     current !== undefined &&
     current["status"] === said.status &&
     (current["conclusion"] ?? null) === said.conclusion &&
-    (current["output"] as { title?: string } | undefined)?.title === said.title
+    output?.title === said.title &&
+    output?.summary === said.summary
   ) {
     return;
   }

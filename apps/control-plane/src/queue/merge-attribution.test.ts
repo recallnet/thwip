@@ -1,6 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
-import { mergeCommitMessage as driverMergeCommitMessage } from "./driver.js";
 import { carriesQueueAttribution, externalPushFromWebhook } from "./external-push.js";
 import { mergeCommitMessage } from "./merge-commit.js";
 import { githubHttp, mergePullRequest } from "./github-port.js";
@@ -16,72 +14,13 @@ import { githubHttp, mergePullRequest } from "./github-port.js";
  * states something that never happened, which is the failure worth spending a
  * test on.
  *
- * The driver built its message by hand and left the trailer out. It never
- * shipped because `runTurn` has no production caller, and nothing in the code
- * said the two files depended on each other.
+ * A second merge path once built its message by hand and left the trailer out.
+ * It never shipped, because nothing called it, and nothing in the code said the
+ * two files depended on each other. Both are gone; `mergeCommitMessage` is the
+ * one message, and `mergePullRequest` refuses anything else.
  */
 
-const BASE = "1".repeat(40);
 const HEAD = "2".repeat(40);
-const CANDIDATE = "3".repeat(40);
-const TREE = "4".repeat(40);
-
-const git: GitSubject = {
-  objectFormat: "sha1",
-  repositoryId: "1315419165",
-  baseRef: "refs/heads/main",
-  baseSha: BASE,
-  headRepositoryId: "1315419165",
-  headSha: HEAD,
-  candidateSha: CANDIDATE,
-  candidateTreeOid: TREE,
-  candidateParentOids: [BASE, HEAD],
-};
-
-const ASSIGNMENT = `sha256:${"a".repeat(64)}` as Sha256;
-
-function pushOf(message: string) {
-  return {
-    ref: "refs/heads/main",
-    after: "f".repeat(40),
-    deleted: false,
-    repository: { id: 1315419165, default_branch: "main" },
-    head_commit: { id: "f".repeat(40), message },
-  };
-}
-
-describe("a merge the driver writes", () => {
-  it("is read back as the queue's own merge, not an external push", () => {
-    const message = driverMergeCommitMessage(
-      { attemptId: "att_1", transitionSequence: 9, pullRequestNumber: 42 },
-      git,
-      ASSIGNMENT,
-    );
-    expect(externalPushFromWebhook("push", pushOf(message))).toBeNull();
-  });
-
-  it("names the same operation the driver declares to the queue", () => {
-    const message = driverMergeCommitMessage(
-      { attemptId: "att_1", transitionSequence: 9, pullRequestNumber: 42 },
-      git,
-      ASSIGNMENT,
-    );
-    // The driver's operation id for an attempt, as `runTurn` builds it.
-    expect(message).toContain("thwip-queue-operation: merge_att_1");
-  });
-
-  it("still carries the evidence trailers a reader of the branch follows", () => {
-    const message = driverMergeCommitMessage(
-      { attemptId: "att_1", transitionSequence: 9, pullRequestNumber: 42 },
-      git,
-      ASSIGNMENT,
-    );
-    expect(message).toContain(`thwip-queue-attempt: att_1`);
-    expect(message).toContain(`thwip-queue-transition: 9`);
-    expect(message).toContain(`thwip-queue-assignment: ${ASSIGNMENT}`);
-    expect(message).toContain(`thwip-queue-tree: ${TREE}`);
-  });
-});
 
 /**
  * One predicate, used by the side that writes the commit and the side that
