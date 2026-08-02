@@ -455,3 +455,74 @@ describe("runTurn", () => {
     }
   });
 });
+
+/**
+ * The base the turn merges onto.
+ *
+ * The intent pins a base, a head and the tree the merge will produce, and that
+ * tree is what the candidate was verified against. GitHub's
+ * merge-pull-request API takes an expected head and no expected base, so a port
+ * handed only the head merges onto whatever the branch is at that instant. Pull
+ * requests 114, 117 and 119 did exactly that, three times, and GitHub reported
+ * every one of them as a success.
+ */
+describe("the base a turn merges onto", () => {
+  it("hands the port the base and the tree it verified, not only the head", async () => {
+    const queue = fakeQueue();
+    let policyDigest = "";
+    let asked: Record<string, unknown> | null = null;
+    const provider = fakeProvider({
+      readGuardFacts: async () => guardFacts({ policyDigest }),
+      merge: async (input) => {
+        asked = input as unknown as Record<string, unknown>;
+        return { status: 200, body: { merged: true, sha: MERGE, treeOid: TREE, parents: [BASE, HEAD] } };
+      },
+    });
+    const patched: QueuePort = {
+      ...queue.port,
+      candidatePrepared: async (input) => {
+        policyDigest = input.policyDigest;
+        return queue.port.candidatePrepared(input);
+      },
+    };
+
+    await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
+
+    expect(asked).toMatchObject({
+      expectedBaseSha: BASE,
+      expectedHeadSha: HEAD,
+      candidateTreeOid: TREE,
+      mergeMethod: "merge",
+    });
+  });
+
+  it("ends the turn when the base moved, rather than merging onto the new one", async () => {
+    const queue = fakeQueue();
+    let policyDigest = "";
+    const provider = fakeProvider({
+      readGuardFacts: async () => guardFacts({ policyDigest }),
+      // What GitHub answers a ref update that would not fast-forward: the base
+      // is no longer the commit this candidate was built on.
+      merge: async () => ({ status: 422, body: { message: "Update is not a fast forward" } }),
+      observeResult: async () => ({ merged: false, commit: null }),
+      baseContainsHead: async () => false,
+    });
+    const patched: QueuePort = {
+      ...queue.port,
+      candidatePrepared: async (input) => {
+        policyDigest = input.policyDigest;
+        return queue.port.candidatePrepared(input);
+      },
+    };
+
+    const result = await runTurn(context(), patched, provider.port, signer, { sleep: async () => {} });
+
+    expect(result.outcome).toBe("not-merged");
+    expect(result).toMatchObject({ reason: expect.stringContaining("BASE_MOVED") });
+    // Nothing was recorded as merged and nothing asked for a second write.
+    expect(queue.calls).toContain("confirmNotMerged");
+    expect(queue.calls).not.toContain("confirmMerge");
+    expect(queue.calls).not.toContain("recordTransition");
+    expect(provider.calls.filter((call) => call === "merge")).toHaveLength(1);
+  });
+});

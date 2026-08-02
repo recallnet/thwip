@@ -48,6 +48,20 @@ export interface QueueSnapshot {
   activeAttemptId: string | null;
   /** The entry whose attempt holds the lane, so a caller can act on the entry too. */
   activeEntryId: string | null;
+  /**
+   * What the active attempt pinned, which is what a merge for it must land.
+   *
+   * The reducer holds these immutable once the candidate is pinned, so this is
+   * the same triple the signed intent binds. Whoever performs the write reads
+   * the base from here rather than from its own view of the branch, because its
+   * own view is what moved.
+   */
+  activeCandidate: {
+    baseSha: string;
+    headSha: string;
+    candidateSha: string;
+    candidateTree: string;
+  } | null;
   chainHead: { sequence: number; digest: string } | null;
   /** The whole recorded chain, oldest first, so a reader can check the links. */
   transitions: readonly TransitionRow[];
@@ -70,6 +84,7 @@ export interface QueueSnapshot {
 export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
   const state = store.state();
   const head = state.transitions.at(-1);
+  const active = state.activeAttemptId === null ? undefined : state.attempts.get(state.activeAttemptId);
   return {
     generation: store.generation(),
     attemptRevision: store.attemptRevision(),
@@ -80,8 +95,21 @@ export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
     rebaselineRequired: state.rebaselineRequired,
     baseSha: state.baseSha,
     activeAttemptId: state.activeAttemptId,
-    activeEntryId:
-      state.activeAttemptId === null ? null : (state.attempts.get(state.activeAttemptId)?.entryId ?? null),
+    activeEntryId: active?.entryId ?? null,
+    // All four or nothing: a partly pinned candidate names no merge, and half a
+    // pin read as a whole one is how a merge lands on a base nobody chose.
+    activeCandidate:
+      active?.baseSha == null ||
+      active.headSha == null ||
+      active.candidateSha == null ||
+      active.candidateTree == null
+        ? null
+        : {
+            baseSha: active.baseSha,
+            headSha: active.headSha,
+            candidateSha: active.candidateSha,
+            candidateTree: active.candidateTree,
+          },
     chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
     transitions: store.transitionChain(),
     // Projected order only: an exact permanent position would be a lie, because
