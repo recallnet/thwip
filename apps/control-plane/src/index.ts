@@ -1645,7 +1645,16 @@ app.get("/admin/github/manifest", async (c) => {
     setup_url: `${origin}/dashboard`,
     setup_on_update: true,
     request_oauth_on_install: true,
-    public: false,
+    // Sign-in depends on this. A private App is visible only to members of the
+    // organization that owns it, so GitHub answers the authorize page with a
+    // 404 for everybody else, and everybody else now includes the outside
+    // collaborators this deployment can otherwise serve. They cannot reach the
+    // dashboard at all until the App itself says public.
+    //
+    // This manifest registers an App; it does not change one that already
+    // exists. An installed deployment needs the flag flipped in the App's own
+    // settings, which only its owner can do.
+    public: true,
     default_permissions: {
       checks: "write",
       contents: "read",
