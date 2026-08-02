@@ -30,8 +30,8 @@ import {
   wellFormedDeviceKeyId,
 } from "./runners.js";
 import { mayActOnRepository, REPOSITORY_FORBIDDEN } from "./repository-access.js";
-import { foldCapability } from "./readiness.js";
-import { turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
+import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./readiness.js";
+import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
 import {
@@ -1059,6 +1059,32 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     baseRef: string,
     headSha: string,
   ): Promise<RequiredCheckState | null>;
+  /**
+   * Whether the repository is still the one this queue's policy assumes.
+   *
+   * Three facts, and the queue authorized merges without any of them. The branch
+   * ruleset can be edited or deleted, so the checks and the ownership rule the
+   * queue was set up around stop being enforced and anybody can push to the
+   * branch the queue believes it owns. The App installation can lose a
+   * permission, so the merge the queue is about to certify is one it cannot
+   * perform. And the sponsor's repository access can be taken away between the
+   * offer and the merge, so the queue merges on behalf of somebody who may no
+   * longer write here.
+   *
+   * Read on the walk to a merge and nowhere else. A pull request waiting its
+   * turn asks this route once a minute, and none of the three can be settled
+   * without reading GitHub.
+   *
+   * Null when GitHub could not be read, which is unknown rather than a refusal,
+   * for the same reason `requiredCheckState` is: a bad minute at GitHub must not
+   * stop the queue.
+   */
+  platformHealth?(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+    sponsorGithubUserId: string,
+  ): Promise<PlatformHealth | null>;
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
@@ -2326,9 +2352,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const pullRequestNumber = body.pullRequestNumber;
     const headSha = body.headSha;
 
-    const baseReady = body.proofAccepted === true && body.draft !== true;
-    const basePrimaryReason: BlockingReason | null =
-      body.draft === true ? "PR_DRAFT" : body.proofAccepted === true ? null : "LOCAL_RECEIPT_MISSING";
+    // Through `deriveReadiness`, from the facts this route has read.
+    //
+    // It used to be two expressions here and two more in the pull-request
+    // webhook, each naming a couple of reasons out of the twenty the derivation
+    // knows. Neither copy consulted the ruleset, the App's permissions or the
+    // sponsor's access, so three reason codes with sentences on every surface
+    // described a state nothing ever checked for.
+    //
+    // Capability is left out and folded below: `foldCapability` is where runner
+    // presence is decided for every writer of `schedulerEligible`, and reading
+    // it in two places is how eligibility stopped being derived.
+    const base = deriveReadiness({
+      ...NO_OBJECTION,
+      draft: body.draft === true,
+      headProof: body.proofAccepted === true ? "accepted" : "missing",
+    });
+    const baseReady = base.ready;
+    const basePrimaryReason: BlockingReason | null = base.primaryReason;
 
     // Runner presence has to be read before the transaction, not inside it:
     // `onQueue`'s callback runs synchronously against the open store, and this
@@ -2545,6 +2586,52 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         (holder.state === "Active" ||
           (localRun !== null && (holder.state === "Verifying" || holder.state === "MergeGuard")));
       if (walkable && holder !== undefined) {
+        // Whether the repository is still the one the policy assumes.
+        //
+        // The queue's guarantee rests on facts about the repository that it does
+        // not own: the branch ruleset requiring the checks the queue publishes,
+        // the App holding the permissions the merge needs, and the sponsor
+        // holding write access. Any of the three can change after the turn was
+        // offered, and each has a reason code and a sentence that nothing was
+        // reaching.
+        //
+        // Here rather than on every ask, because each answer costs a GitHub
+        // read and a pull request waiting its turn asks once a minute. This is
+        // the same trade the required-check read below makes, and the same
+        // treatment of an unreadable answer: unknown is not a refusal.
+        //
+        // Read first, because a drifted repository is more actionable than a
+        // missing check on the head, and because refusing here saves the reads
+        // below.
+        const health =
+          deps.platformHealth === undefined
+            ? null
+            : await deps
+                .platformHealth(c.env, repositoryId, baseRef, sponsorGithubUserId)
+                .catch(() => null);
+        if (health !== null) {
+          const stillHolds = deriveReadiness({
+            ...NO_OBJECTION,
+            ownerAuthorized: health.sponsorAuthorized,
+            appPermissionsHealthy: health.appPermissionsHealthy,
+            rulesetEnforced: health.rulesetEnforced,
+          });
+          if (!stillHolds.ready && stillHolds.primaryReason !== null) {
+            return c.json({
+              authorized: false,
+              enforcing: true,
+              activationState: project.activationState,
+              reason: stillHolds.primaryReason,
+              // The sentence the check, the terminal and the dashboard already
+              // agree on. A fourth copy written here is how they came apart
+              // before.
+              detail: nextAction(stillHolds.primaryReason),
+              entryId,
+              operationId: null,
+            });
+          }
+        }
+
         // What the branch requires, before the queue commits to a merge.
         //
         // The merge is a PUT the caller makes once this returns an operation, and
