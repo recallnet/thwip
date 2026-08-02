@@ -7,6 +7,7 @@ import {
   type VerificationBundleV1,
 } from "@thwip/protocol";
 import { verifyProof, type GithubFacts, type VerifyResult } from "@thwip/verifier";
+import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 import { installationToken } from "./github-app.js";
 import { signPayload } from "./service-signing.js";
 import { verifySshSigEd25519 } from "./sshsig-verify.js";
@@ -767,7 +768,19 @@ export async function loadGithubProofTargets(token: string, request: AppProofReq
   return targets;
 }
 
-function checkSummary(evaluation: AppProofEvaluation, detailsUrl: string): string {
+/**
+ * What the check says, including what to do about it.
+ *
+ * Deleting the dead fields from the policy document changed its digest, which
+ * was the right change and made every proof already signed cite a policy that
+ * is no longer active. Those pull requests went red with `POLICY_NOT_ACTIVE`
+ * and a summary that named the code and nothing else, while the fix was to run
+ * `thwip run` again. The old digest is not kept acceptable for a window,
+ * because a merge certified against a document nobody activated is the exact
+ * thing the proof exists to rule out. So the check says what happened and what
+ * to do, from the sentence the vocabulary already holds for every code.
+ */
+export function checkSummary(evaluation: AppProofEvaluation, detailsUrl: string): string {
   const targets =
     evaluation.targets.length === 0
       ? "No proof target could be evaluated."
@@ -777,9 +790,14 @@ function checkSummary(evaluation: AppProofEvaluation, detailsUrl: string): strin
               `- \`${target.headSha.slice(0, 12)}\` tree \`${target.treeOid.slice(0, 12)}\`: \`${target.outcome}\``,
           )
           .join("\n");
+  const nextAction =
+    evaluation.outcome !== "PASS" && isReasonCode(evaluation.outcome)
+      ? `**What to do:** ${nextActionFor(evaluation.outcome, "check")}`
+      : "";
   return [
     `Exact-subject App verification concluded \`${evaluation.outcome}\`.`,
     evaluation.detail ?? "",
+    nextAction,
     targets,
     evaluation.policyDigest === null
       ? "No active policy digest was available."
