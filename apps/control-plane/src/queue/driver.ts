@@ -71,9 +71,21 @@ export interface ProviderPort {
     { accepted: true; resultDigest: Sha256; integrationEvidenceDigest: Sha256; checkRunId: string; actionRunId: string } | { accepted: false; reason: string }
   >;
   readGuardFacts(): Promise<GuardObservation>;
+  /**
+   * Land the merge on the base it was verified against, and on no other.
+   *
+   * `expectedBaseSha` and `candidateTreeOid` are not advisory. GitHub's
+   * merge-pull-request API takes an expected head and no expected base, so a
+   * port that only forwards the head merges onto whatever the branch happens to
+   * be — which is how pull requests 114, 117 and 119 landed trees no suite had
+   * run. An implementation must bind both or refuse.
+   */
   merge(input: {
     pullRequestNumber: number;
+    expectedBaseSha: string;
     expectedHeadSha: string;
+    candidateTreeOid: string;
+    mergeMethod: "merge" | "squash";
     commitTitle: string;
     commitMessage: string;
   }): Promise<{ status: number; transportError?: string; body?: Record<string, unknown> }>;
@@ -372,7 +384,10 @@ export async function runTurn(
   if (decision.action === "send") {
     const response = await provider.merge({
       pullRequestNumber: ctx.pullRequestNumber,
+      expectedBaseSha: git.baseSha,
       expectedHeadSha: git.headSha,
+      candidateTreeOid: git.candidateTreeOid,
+      mergeMethod: ctx.mergeMethod,
       commitTitle: mergeCommitTitle(ctx.pullRequestNumber),
       commitMessage,
     });
