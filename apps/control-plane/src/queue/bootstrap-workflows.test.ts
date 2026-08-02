@@ -100,4 +100,23 @@ describe("drift against this repository's own workflows", () => {
     const generated = parse(file(".github/workflows/thwip-merge.yml")) as { on: Record<string, unknown> };
     expect(Object.keys(generated.on).sort()).toEqual(Object.keys(live.on).sort());
   });
+
+  /**
+   * A lane is one pull request at a time on one base branch, and the concurrency
+   * group is what GitHub enforces that with. This repository's copy is linted by
+   * scripts/workflow-lint.mjs; the generated copy is not lint's to see, so it is
+   * held to the live file instead. Adopting repositories then get the group this
+   * repository proved, rather than the one pull requests 114, 117 and 119 merged
+   * unverified trees under.
+   */
+  it("agrees with .github/workflows/thwip-merge.yml on the lane", () => {
+    type Concurrency = { group: string; "cancel-in-progress": boolean };
+    const live = parse(readFileSync(join(repoRoot, ".github/workflows/thwip-merge.yml"), "utf8")) as {
+      concurrency: Concurrency;
+    };
+    const generated = parse(file(".github/workflows/thwip-merge.yml")) as { concurrency: Concurrency };
+    expect(generated.concurrency.group).toBe(live.concurrency.group);
+    expect(generated.concurrency["cancel-in-progress"]).toBe(false);
+    expect(live.concurrency["cancel-in-progress"]).toBe(false);
+  });
 });
