@@ -23,6 +23,7 @@ import { loadQueueState, withQueueState } from "./queue-state.js";
 import {
   capabilityFor,
   deviceKeyClaimedByAnother,
+  isPrincipalConnected,
   recordHeartbeat,
   requiresDeviceOnly,
   wellFormedDeviceKeyId,
@@ -38,12 +39,20 @@ import {
   reuseEvidenceFor,
   signReusedIntent,
   signReusedRecord,
+  signVerifiedIntent,
+  signVerifiedRecord,
   storeAttestation,
   transitionRecordFor,
+  verifiedEvidenceFor,
 } from "./attestation.js";
 import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
-import { parseTransitionRecord, type Sha256, type TransitionRecordV1 } from "@thwip/queue-protocol";
+import {
+  parseTransitionRecord,
+  requiredSuitesDigest,
+  type Sha256,
+  type TransitionRecordV1,
+} from "@thwip/queue-protocol";
 import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
@@ -52,8 +61,27 @@ import {
   candidateResultDigest,
   decideCandidate,
   requiresIntegratedRun,
+  requiresRemoteVerification,
 } from "./candidate-verdict.js";
 import { putEvidence, type R2Like } from "./evidence-store.js";
+import { localRunEvidenceFor } from "./local-run-gate.js";
+import { signLocalRunAssignment } from "./assignment.js";
+import {
+  acceptedReceiptFor,
+  issuedAssignment,
+  issuedAssignmentForAttempt,
+  recordAcceptedReceipt,
+  recordIssuedAssignment,
+} from "./assignment-store.js";
+import {
+  acceptIntegrationReceipt,
+  integrationReceiptBytes,
+  integrationReceiptDigest,
+  INTEGRATION_RECEIPT_NAMESPACE,
+  type SubmittedReceipt,
+} from "./integration-receipt.js";
+import { verifySshSigEd25519 } from "../sshsig-verify.js";
+import { DEFAULT_TIMINGS } from "./commands.js";
 import type { CandidateSuite } from "./store.js";
 import {
   candidateVerdict as readCandidateVerdict,
@@ -360,7 +388,8 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     // "candidate-verified-merge" record here too, and hardcoding "reused"
     // would misreport that merge as a reuse forever.
     const existing = await readAttestation(db, existingDigest);
-    const existingKind = existing?.kind === "candidate-verified-merge" ? "verified" : "reused";
+    const existingKind =
+      existing?.kind === "candidate-verified-merge" || existing?.kind === "verified-merge" ? "verified" : "reused";
     const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
       recordOnly(commands, store, {
         attemptId: input.attemptId,
@@ -383,15 +412,34 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   if (attempt.intentDigest == null) return skip("no signed merge intent to cite");
   if (input.pullRequestNumber === null) return skip("the merged entry could not be found");
 
-  const evidence = await reuseEvidenceFor(
-    attempt.receiptDigest as Sha256,
-    await deps.activePolicy(env, input.repositoryId),
-    await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
-    // Present exactly when the queue had the integrated candidate run, which is
-    // what decides whether the record claims a verified merge or a reuse.
-    attempt.verifierResultDigest,
-  );
+  // What the device did, read from storage rather than inferred from the queue
+  // document. Its presence is what makes this a verified merge: an assignment
+  // this queue issued and a receipt the device signed for the tree that landed.
+  const localRun = await acceptedReceiptFor(db, input.attemptId);
+  const activePolicy = await deps.activePolicy(env, input.repositoryId);
+  const evidence =
+    localRun === null || activePolicy === null
+      ? await reuseEvidenceFor(
+          attempt.receiptDigest as Sha256,
+          activePolicy,
+          await deps.proofCheckRunId(env, input.repositoryId, attempt.headSha),
+          // Present exactly when the queue had the integrated candidate run, which is
+          // what decides whether the record claims a candidate-verified merge or a reuse.
+          attempt.verifierResultDigest,
+        )
+      : verifiedEvidenceFor({
+          workReceiptDigest: attempt.receiptDigest as Sha256,
+          organizationId: activePolicy.organizationId,
+          policyDigest: activePolicy.policyDigest as Sha256,
+          pipelineDigest: activePolicy.pipelineDigest as Sha256 | null,
+          requiredSuitesDigest: await requiredSuitesDigest(activePolicy.requiredSuites),
+          assignmentDigest: localRun.assignmentDigest as Sha256,
+          integrationEvidenceDigest: localRun.receiptDigest as Sha256,
+          deviceKeyId: localRun.deviceKeyId,
+          rerun: null,
+        });
   if ("missing" in evidence) return skip(evidence.missing);
+  const verifiedMerge = "assignmentDigest" in evidence;
 
   // The tree the branch had before this merge. A transition that is not the
   // first in its epoch has to say where it started from, and only the commit
@@ -405,11 +453,11 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
   const mergeMethod = project?.mergeMethod ?? DEFAULT_MERGE_METHOD;
 
-  const signed = await signReusedRecord({
+  const recordSubject = {
     attemptId: input.attemptId,
     mergeMethod,
     git: {
-      objectFormat: "sha1",
+      objectFormat: "sha1" as const,
       repositoryId: input.repositoryId,
       baseRef: input.baseRef as `refs/heads/${string}`,
       baseSha: attempt.baseSha,
@@ -426,20 +474,27 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       previousTransitionDigest: (input.chainHead?.digest ?? null) as Sha256 | null,
     },
     pullRequestNumber: input.pullRequestNumber,
-    evidence,
     mergeIntentDigest: attempt.intentDigest as Sha256,
     before: { baseSha: attempt.baseSha, treeOid: before?.treeOid ?? null },
     final: { sha: input.mergeSha, treeOid: input.mergeTree, parentShas: input.parentShas },
     observedAt: new Date().toISOString(),
-    signer: { sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ) },
-  });
+    signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
+  };
+  const signed =
+    "assignmentDigest" in evidence
+      ? await signVerifiedRecord({ ...recordSubject, evidence })
+      : await signReusedRecord({ ...recordSubject, evidence });
   if ("error" in signed) return skip(`the queue refused to sign its own record: ${signed.error}`);
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
   const stored = await storeAttestation(db, {
     digest: signed.digest,
-    kind: evidence.verifierResultDigest === undefined ? "reused-proof-merge" : "candidate-verified-merge",
+    kind: verifiedMerge
+      ? "verified-merge"
+      : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
+        ? "candidate-verified-merge"
+        : "reused-proof-merge",
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
@@ -462,11 +517,14 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // is already stored and is what the transition has to cite — this call's
   // own signed bytes never occupy a link and are not persisted.
   let digest = signed.digest;
-  let kind = evidence.verifierResultDigest === undefined ? "reused" : "verified";
+  let kind =
+    verifiedMerge || ("verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined)
+      ? "verified"
+      : "reused";
   if (!stored.stored) {
     digest = stored.digest as Sha256;
     const winner = await readAttestation(db, stored.digest);
-    kind = winner?.kind === "candidate-verified-merge" ? "verified" : "reused";
+    kind = winner?.kind === "candidate-verified-merge" || winner?.kind === "verified-merge" ? "verified" : "reused";
   }
 
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
@@ -563,33 +621,44 @@ async function driveLane(
   repositoryId: string,
   snapshot: QueueSnapshot,
 ): Promise<DriveLaneOutcome> {
-  const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
+  const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+  // Under a device-only profile the run is over by the time the merge has to be
+  // written, and writing it is still Actions' job.
+  const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
+  if (running === undefined && ran === undefined) return { dispatched: false, reason: "LANE_IDLE" };
 
   // The security profile is a repository-wide setting, not a per-entry one,
   // so one lookup answers for whichever entry holds the lane. `fresh` and
-  // `audited` have no fallback to GitHub Actions at all: the offer is only
-  // ever claimed by a connected device, over the heartbeat response, so
-  // dispatching here would spend an Actions run to be told there is nothing
-  // for it to do. This is a narrowing, not a removal — every other profile
-  // still needs the dispatch, and still gets it.
+  // `audited` have no fallback to GitHub Actions for the run itself: the offer
+  // is only ever claimed by a connected device, over the heartbeat response, so
+  // dispatching while that device still holds the turn would spend an Actions
+  // run to be told there is nothing for it to do. Once the device's receipt has
+  // been accepted there is something to do, and it is dispatched then.
   //
   // This is the one place `driveTurn` is ever called. Every caller that wants
   // to drive a lane goes through here, so this predicate cannot be forgotten
   // at a call site the way it was at `/nudge` and the candidate-verdict
   // callback.
   const policy = await deps.activePolicy(env, repositoryId);
-  if (requiresDeviceOnly(policy?.securityProfile ?? null)) {
-    return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: holder.pullRequestNumber };
+  const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+
+  let holder = running;
+  if (deviceOnly) {
+    if (running !== undefined) {
+      return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: running.pullRequestNumber };
+    }
+    holder = ran;
   }
+  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
+  const pullRequestNumber = holder.pullRequestNumber;
 
   try {
-    await deps.driveTurn(env, repositoryId, holder.pullRequestNumber);
+    await deps.driveTurn(env, repositoryId, pullRequestNumber);
   } catch {
     /* the turn survives; a later tick or the drain asks again */
-    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber: holder.pullRequestNumber };
+    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber };
   }
-  return { dispatched: true, pullRequestNumber: holder.pullRequestNumber };
+  return { dispatched: true, pullRequestNumber };
 }
 
 /**
@@ -666,6 +735,11 @@ export async function runOnQueue<T>(
 }
 
 /** Read the queue without writing anything. */
+/** What a refused command said, for a caller that has to be told why. */
+function commandDetail(result: { readonly status: string; readonly detail?: string }): string {
+  return result.detail ?? result.status;
+}
+
 async function readQueue(
   env: QueueRouteEnv,
   repositoryId: string,
@@ -830,6 +904,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     organizationId: string;
     /** Null when no verifier is pinned, which only matters to a stronger profile. */
     verifier: { workflowRef: string; workflowSha: string | null } | null;
+    /**
+     * The activated document itself, which an assignment digests rather than
+     * trusting a digest handed alongside it, plus what the pipeline pins. Only
+     * the profiles that dispatch a run to a device read these.
+     */
+    document?: unknown;
+    version?: number;
+    daggerModuleDigest?: string | null;
+    daggerEngineDigest?: string | null;
+  } | null>;
+  /**
+   * The integrated candidate GitHub has computed for a pull request.
+   *
+   * What a device is dispatched to run under `fresh`, so it comes from GitHub
+   * rather than from the machine asking for work. Null while GitHub has not
+   * finished computing mergeability, or when the pull request cannot be merged
+   * at all, and either way there is nothing to hand out.
+   */
+  integratedCandidate?(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+    pullRequestNumber: number,
+  ): Promise<{
+    baseSha: string;
+    headSha: string;
+    candidateSha: string;
+    candidateTreeOid: string;
   } | null>;
   /**
    * Ask the pinned verifier to run the required suites against a candidate.
@@ -1239,6 +1341,428 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
 
     return c.json({ holdsOffer });
+  });
+
+  /**
+   * A device takes the turn it was offered, and is told what to run (plan.md §19.3).
+   *
+   * This is the half of `fresh` that had never been built. The queue holds the
+   * integrated candidate, signs an assignment naming that exact tree, this
+   * attempt and this device, and hands it over. The device can check the
+   * signature itself, which is why the signed record goes back rather than a
+   * summary of it.
+   *
+   * Nothing here is taken on trust from the body except which attempt is being
+   * claimed and from which machine. The principal comes from the session, the
+   * candidate comes from GitHub, the suites come from the activated policy, and
+   * the reducer decides whether this offer was still there to take.
+   */
+  app.post("/v1/queue/:repositoryId/claim", async (c) => {
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+    const who = c.get("caller");
+    const db = c.env.DB as unknown as D1Like;
+
+    const body = (await c.req.json().catch(() => ({}))) as { attemptId?: unknown; deviceKeyId?: unknown };
+    if (typeof body.attemptId !== "string" || body.attemptId.length === 0 || body.attemptId.length > 128) {
+      return c.json({ error: "attemptId required" }, 400);
+    }
+    if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
+      return c.json({ error: "deviceKeyId must be a device key id this deployment issues" }, 400);
+    }
+    const attemptId = body.attemptId;
+    const deviceKeyId = body.deviceKeyId;
+    if (await deviceKeyClaimedByAnother(db, deviceKeyId, who.githubUserId)) {
+      return c.json({ error: "that device key belongs to somebody else, or has been revoked" }, 403);
+    }
+
+    const project = await deps.queueProject(c.env, repositoryId, baseRef);
+    if (project === null) return c.json({ error: "no queue on this branch" }, 404);
+
+    // Only a profile that dispatches work to a device has an assignment to
+    // give. Under `fast` the evidence is the proof already on the head and the
+    // server claims its own offer, so a device asking for work here would be
+    // told to run something nothing would ever read.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    if (!requiresDeviceOnly(policy?.securityProfile ?? null)) {
+      return c.json({ error: "PROFILE_DOES_NOT_DISPATCH", detail: "this repository's profile runs no work on a device" }, 409);
+    }
+    if (policy === null || policy.requiredSuites.length === 0) {
+      return c.json(
+        { error: "NO_REQUIRED_SUITES", detail: "the active policy names no suite for a device to run" },
+        409,
+      );
+    }
+
+    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    if (snapshot.activeAttemptId !== attemptId) {
+      return c.json({ error: "ATTEMPT_NOT_CURRENT", detail: "that attempt does not hold the lane" }, 409);
+    }
+    const entry = snapshot.entries.find((e) => e.entryId === snapshot.activeEntryId);
+    if (entry === undefined) {
+      return c.json({ error: "ATTEMPT_NOT_CURRENT", detail: "that attempt does not hold the lane" }, 409);
+    }
+    if (entry.sponsorPrincipalId !== who.principalId) {
+      // The offer belongs to the pull request's sponsor. Somebody else running
+      // its suites is somebody else's account of code they do not own.
+      return c.json({ error: "NOT_YOUR_OFFER", detail: "this turn was offered to another principal" }, 403);
+    }
+    // A re-ask from the machine that already holds it gets the same assignment
+    // back. A device that lost its answer must not be pushed into a second turn,
+    // and a different machine must not be given work this attempt already
+    // assigned: the reducer holds an assignment immutable, and so does storage.
+    const already = await issuedAssignmentForAttempt(db, attemptId);
+    if (already !== null) {
+      if (already.deviceKeyId !== deviceKeyId) {
+        return c.json({ error: "ALREADY_CLAIMED", detail: "another machine holds this attempt" }, 409);
+      }
+      const record = await readAttestation(db, already.assignmentDigest);
+      return c.json({
+        assignmentId: already.assignmentId,
+        assignmentDigest: already.assignmentDigest,
+        assignment: record?.jws ?? null,
+        candidateSha: already.candidateSha,
+        candidateTreeOid: already.candidateTreeOid,
+        requiredSuites: already.requiredSuites,
+        executionSeconds: already.executionSeconds,
+      });
+    }
+
+    if (entry.state !== "Offered") {
+      return c.json({ error: "ALREADY_CLAIMED", detail: `the turn is ${entry.state}` }, 409);
+    }
+    if (!(await isPrincipalConnected(db, repositoryId, who.principalId, new Date().toISOString()))) {
+      return c.json(
+        { error: "RUNNER_NOT_CONNECTED", detail: "heartbeat first, so the queue knows this machine is here" },
+        409,
+      );
+    }
+
+    if (deps.integratedCandidate === undefined) {
+      return c.json({ error: "CANDIDATE_UNAVAILABLE", detail: "this deployment cannot resolve a candidate" }, 503);
+    }
+    const candidate = await deps.integratedCandidate(c.env, repositoryId, baseRef, entry.pullRequestNumber);
+    if (candidate === null) {
+      // GitHub computes mergeability asynchronously, and a pull request that
+      // cannot be integrated has no candidate at all. Neither is a reason to
+      // hand a device a tree to run.
+      return c.json(
+        { error: "CANDIDATE_UNAVAILABLE", detail: "GitHub has no integrated candidate for this pull request yet" },
+        409,
+      );
+    }
+
+    // The proof on the head, which the assignment binds. No digest means the
+    // required check has nothing to have accepted, so there is no turn to run.
+    const head = await deps.commitFacts(c.env, repositoryId, candidate.headSha);
+    const workReceiptDigest = head?.message === undefined ? null : await workReceiptDigestFrom(head.message);
+    if (workReceiptDigest === null) {
+      return c.json(
+        { error: "WORK_RECEIPT_UNREADABLE", detail: "the head commit carries no readable thwip proof" },
+        409,
+      );
+    }
+
+    // GitHub's own id for the account that owns the repository, which is what an
+    // assignment names. The organization id storage uses is this deployment's
+    // key for a tenant and means nothing to a device checking the record.
+    const owner = await db
+      .prepare(
+        `SELECT o.github_org_id AS ownerId
+           FROM projects p JOIN organizations o ON o.id = p.organization_id
+          WHERE p.github_repository_id = ?`,
+      )
+      .bind(repositoryId)
+      .first<{ ownerId: string }>();
+    if (owner === null || !/^[0-9]{1,32}$/.test(owner.ownerId)) {
+      return c.json({ error: "OWNER_UNKNOWN", detail: "this repository's owner has no GitHub id recorded" }, 409);
+    }
+
+    const assignmentId = `asg_${attemptId}`;
+    const issuedAt = new Date().toISOString();
+    const signed = await signLocalRunAssignment({
+      assignmentId,
+      attemptId,
+      ownerId: owner.ownerId,
+      git: {
+        objectFormat: "sha1",
+        repositoryId,
+        baseRef: baseRef as `refs/heads/${string}`,
+        baseSha: candidate.baseSha,
+        headRepositoryId: repositoryId,
+        headSha: candidate.headSha,
+        candidateSha: candidate.candidateSha,
+        candidateTreeOid: candidate.candidateTreeOid,
+        candidateParentOids:
+          project.mergeMethod === "squash" ? [candidate.baseSha] : [candidate.baseSha, candidate.headSha],
+      },
+      queue: {
+        queueEpoch: snapshot.queueEpoch,
+        turnSequence: snapshot.turnSequence,
+        entryId: entry.entryId,
+        pullRequestNumber: entry.pullRequestNumber,
+        sponsorPrincipalId: entry.sponsorPrincipalId,
+        queueDecisionDigest: `sha256:${"0".repeat(64)}`,
+      },
+      policy: {
+        version: policy.version ?? 1,
+        securityProfile: policy.securityProfile as "fresh" | "audited",
+        requiredSuites: policy.requiredSuites,
+        document: policy.document ?? {},
+        // Dagger where the activated pipeline pins both digests, a command
+        // pipeline otherwise. Neither is inferred from anything the caller sent.
+        ...(policy.daggerModuleDigest != null && policy.daggerEngineDigest != null
+          ? {
+              runner: "dagger" as const,
+              daggerModuleDigest: policy.daggerModuleDigest as Sha256,
+              daggerEngineDigest: policy.daggerEngineDigest as Sha256,
+            }
+          : { runner: "command" as const }),
+      },
+      workReceiptDigest,
+      previousTransitionDigest: (snapshot.chainHead?.digest ?? null) as Sha256 | null,
+      issuedAt,
+      executionSeconds: DEFAULT_TIMINGS.executionSeconds,
+      nonce: crypto.randomUUID(),
+      runnerPrincipalId: who.principalId,
+      deviceKeyId,
+      signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
+    });
+    if ("error" in signed) {
+      return c.json({ error: "ASSIGNMENT_INVALID", detail: signed.error }, 500);
+    }
+
+    // The document first, storage second. The queue document is what says this
+    // device holds the turn, and a row claiming an assignment the reducer
+    // refused would block the machine that really claimed it.
+    const { result: claimed } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+      if (store.state().activeAttemptId !== attemptId) return { ok: false as const, detail: "the lane moved" };
+      const claim = commands.claim({
+        idempotencyKey: `claim:${attemptId}:${deviceKeyId}`,
+        attemptId,
+        executionMode: "device",
+        deviceId: deviceKeyId,
+      });
+      if (claim.status !== "applied" && claim.status !== "duplicate") {
+        return { ok: false as const, detail: commandDetail(claim) };
+      }
+      commands.candidatePrepared({
+        idempotencyKey: `claim:candidate:${attemptId}`,
+        attemptId,
+        baseSha: candidate.baseSha,
+        headSha: candidate.headSha,
+        candidateSha: candidate.candidateSha,
+        candidateTree: candidate.candidateTreeOid,
+        policyDigest: policy.policyDigest,
+        runner: "local-run" as never,
+      });
+      const assigned = commands.assign({
+        idempotencyKey: `claim:assign:${attemptId}`,
+        attemptId,
+        assignmentDigest: signed.digest,
+      });
+      return assigned.status === "applied" || assigned.status === "duplicate"
+        ? { ok: true as const }
+        : { ok: false as const, detail: commandDetail(assigned) };
+    });
+    if (!claimed.ok) return c.json({ error: "ALREADY_CLAIMED", detail: claimed.detail }, 409);
+
+    await storeAttestation(db, {
+      digest: signed.digest,
+      kind: "integration-assignment",
+      repositoryId,
+      baseRef,
+      transitionSequence: null,
+      attemptId,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy.organizationId === undefined ? {} : { organizationId: policy.organizationId }),
+    });
+    const stored = await recordIssuedAssignment(db, {
+      assignmentId,
+      repositoryId,
+      baseRef,
+      attemptId,
+      assignmentDigest: signed.digest,
+      candidateSha: candidate.candidateSha,
+      candidateTreeOid: candidate.candidateTreeOid,
+      principalId: who.principalId,
+      deviceKeyId,
+      requiredSuites: policy.requiredSuites,
+      executionSeconds: DEFAULT_TIMINGS.executionSeconds,
+      issuedAt,
+    });
+    if (stored.status === "duplicate") {
+      // Another machine got there first. It holds the turn, and this one is told
+      // so rather than being handed a second assignment for the same attempt.
+      return c.json({ error: "ALREADY_CLAIMED", detail: "another machine holds this attempt" }, 409);
+    }
+
+    return c.json({
+      assignmentId,
+      assignmentDigest: signed.digest,
+      assignment: signed.jws,
+      candidateSha: candidate.candidateSha,
+      candidateTreeOid: candidate.candidateTreeOid,
+      requiredSuites: policy.requiredSuites,
+      executionSeconds: DEFAULT_TIMINGS.executionSeconds,
+    });
+  });
+
+  /**
+   * The device's account of what it ran (plan.md §19.3).
+   *
+   * Accepted only when it answers the assignment this queue issued, is about the
+   * tree that assignment named, comes from the device that was assigned it, and
+   * is signed by that device's key. `acceptIntegrationReceipt` decides the first
+   * three; the signature is checked here, because it needs key material that
+   * function must never see.
+   *
+   * Accepting one is not a merge. It is the evidence the merge gate refuses to
+   * proceed without, and the gate checks it again against the queue document.
+   */
+  app.post("/v1/queue/:repositoryId/receipt", async (c) => {
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+    const who = c.get("caller");
+    const db = c.env.DB as unknown as D1Like;
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      assignmentId?: unknown;
+      assignmentDigest?: unknown;
+      candidateTreeOid?: unknown;
+      deviceKeyId?: unknown;
+      suites?: unknown;
+      signature?: unknown;
+    };
+    if (typeof body.assignmentId !== "string" || typeof body.assignmentDigest !== "string") {
+      return c.json({ error: "assignmentId and assignmentDigest required" }, 400);
+    }
+    if (typeof body.candidateTreeOid !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.candidateTreeOid)) {
+      return c.json({ error: "candidateTreeOid must be a lowercase hex object id" }, 400);
+    }
+    if (!wellFormedDeviceKeyId(body.deviceKeyId)) {
+      return c.json({ error: "deviceKeyId must be a device key id this deployment issues" }, 400);
+    }
+    if (typeof body.signature !== "string" || body.signature.length === 0 || body.signature.length > 4096) {
+      return c.json({ error: "a receipt must be signed by the device that ran it" }, 400);
+    }
+    const suites = Array.isArray(body.suites) ? body.suites : null;
+    if (
+      suites === null ||
+      suites.length > 128 ||
+      !suites.every(
+        (s): s is { name: string; outcome: string } =>
+          typeof s === "object" && s !== null && typeof (s as { name?: unknown }).name === "string" &&
+          typeof (s as { outcome?: unknown }).outcome === "string",
+      )
+    ) {
+      return c.json({ error: "suites must be a list of { name, outcome }" }, 400);
+    }
+    const receipt: SubmittedReceipt = {
+      assignmentId: body.assignmentId,
+      assignmentDigest: body.assignmentDigest,
+      candidateTreeOid: body.candidateTreeOid,
+      deviceKeyId: body.deviceKeyId,
+      suites: suites.map((s) => ({ name: s.name, outcome: s.outcome })),
+    };
+
+    const issued = await issuedAssignment(db, receipt.assignmentId);
+    // One refusal for an assignment that does not exist and one for an
+    // assignment on another repository, so a caller cannot walk assignment ids
+    // and learn which are real.
+    if (issued === null || issued.repositoryId !== repositoryId || issued.baseRef !== baseRef) {
+      return c.json({ error: "ASSIGNMENT_UNKNOWN", detail: "no such assignment on this queue" }, 404);
+    }
+    if (issued.principalId !== who.principalId) {
+      return c.json({ error: "NOT_YOUR_ASSIGNMENT", detail: "this assignment was issued to another principal" }, 403);
+    }
+
+    // The key the receipt claims to be signed by, as this deployment knows it.
+    // A key it has never seen cannot verify anything, and a revoked one must
+    // not: both are refusals rather than a check quietly skipped.
+    const key = await db
+      .prepare(
+        "SELECT public_key AS publicKey, revoked_at AS revokedAt, github_user_id AS githubUserId FROM device_keys WHERE key_id = ?",
+      )
+      .bind(receipt.deviceKeyId)
+      .first<{ publicKey: string; revokedAt: string | null; githubUserId: string }>();
+    if (key === null || key.revokedAt !== null || key.githubUserId !== who.githubUserId) {
+      return c.json(
+        { error: "DEVICE_KEY_UNKNOWN", detail: "this deployment holds no usable public key for that device" },
+        403,
+      );
+    }
+    const signatureOk = await verifySshSigEd25519({
+      publicKey: key.publicKey,
+      namespace: INTEGRATION_RECEIPT_NAMESPACE,
+      message: integrationReceiptBytes(receipt),
+      signatureBase64: body.signature,
+    });
+    if (!signatureOk) {
+      return c.json({ error: "RECEIPT_SIGNATURE_INVALID", detail: "the receipt is not signed by that device" }, 403);
+    }
+
+    const verdict = acceptIntegrationReceipt(receipt, {
+      assignmentId: issued.assignmentId,
+      digest: issued.assignmentDigest,
+      candidateTreeOid: issued.candidateTreeOid,
+      deviceKeyId: issued.deviceKeyId,
+      requiredSuites: issued.requiredSuites,
+    });
+    if (!verdict.ok) return c.json({ error: verdict.code, detail: verdict.detail }, 409);
+
+    const receiptDigest = await integrationReceiptDigest(receipt);
+    const recorded = await recordAcceptedReceipt(db, {
+      assignmentId: issued.assignmentId,
+      receiptDigest,
+      suites: receipt.suites,
+      acceptedAt: new Date().toISOString(),
+    });
+    if (recorded.status === "unknown-assignment") {
+      return c.json({ error: "ASSIGNMENT_UNKNOWN", detail: "no such assignment on this queue" }, 404);
+    }
+    if (recorded.status === "duplicate") {
+      const held = await acceptedReceiptFor(db, issued.attemptId);
+      // The same receipt again is a retry and gets the same answer. A different
+      // one asks the queue to change what it will merge on after the gate may
+      // already have read the first, which is the revision the reducer refuses
+      // for a late verdict.
+      if (held?.receiptDigest !== receiptDigest) {
+        return c.json(
+          { error: "RECEIPT_ALREADY_ACCEPTED", detail: "a receipt for this assignment was already accepted" },
+          409,
+        );
+      }
+    }
+
+    const { result: submitted, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+      const attempt = store.state().attempts.get(issued.attemptId);
+      if (attempt === undefined) return { ok: false as const, detail: "the attempt is gone" };
+      if (attempt.receiptDigest !== null) {
+        return attempt.receiptDigest === receiptDigest
+          ? { ok: true as const }
+          : { ok: false as const, detail: "another receipt is already recorded for this attempt" };
+      }
+      const result = commands.submitReceipt({
+        idempotencyKey: `receipt:${issued.attemptId}`,
+        attemptId: issued.attemptId,
+        receiptDigest,
+      });
+      return result.status === "applied" || result.status === "duplicate"
+        ? { ok: true as const }
+        : { ok: false as const, detail: commandDetail(result) };
+    });
+    if (!submitted.ok) return c.json({ error: "RECEIPT_NOT_RECORDED", detail: submitted.detail }, 409);
+
+    // The run is over and the merge still has to be written, which happens in
+    // Actions. Under this profile nothing else asks for it: the lane was never
+    // driven while the device held the turn, on purpose.
+    await driveLane(c.env, deps, repositoryId, snapshot);
+
+    return c.json({ accepted: true });
   });
 
   /** Administrative pause, resume, and rebaseline (plan.md §28.5). */
@@ -1735,16 +2259,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // is a network round trip. Skipped entirely when `principalId` is null —
     // there is nobody to be connected — and when the profile has no device-only
     // requirement, `capabilityFor` never touches `queue_runners` at all.
+    //
+    // Read once and used everywhere below. The profile decides whether a runner
+    // has to be connected, whether the server may take the offer for itself, and
+    // what evidence the merge rests on, and three reads of it could disagree.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
     const capability =
       principalId === null
         ? { serverExecutable: true, compatibleRunnerConnected: false }
-        : await capabilityFor(
-            db,
-            repositoryId,
-            principalId,
-            new Date().toISOString(),
-            (await deps.activePolicy(c.env, repositoryId))?.securityProfile ?? null,
-          );
+        : await capabilityFor(db, repositoryId, principalId, new Date().toISOString(), policy?.securityProfile ?? null);
     const folded = foldCapability({ ready: baseReady, primaryReason: basePrimaryReason }, capability);
 
     // Enqueue, evaluate readiness, tick the scheduler and claim the offer, all
@@ -1769,6 +2293,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             readinessBucket: Math.floor(Date.now() / 60_000),
             tickBucket: Math.floor(Date.now() / 60_000),
             decisionDigest: `sha256:${"0".repeat(64)}`,
+            // Under `fresh` and `audited` the offer belongs to the developer's
+            // machine, which claims it at `/claim`. A server that claimed here
+            // would take the turn away from the runner it is waiting on and then
+            // merge on the head's own proof, which is the `fast` merge wearing
+            // another profile's name.
+            serverMayClaim: !deviceOnly,
           }),
     );
 
@@ -1789,7 +2319,28 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // run. Until this check existed the walk below used a constant in place of a
       // verifier result, so the queue recorded a verified transition for an
       // integration no suite had ever seen.
-      const policy = await deps.activePolicy(c.env, repositoryId);
+      //
+      // What the developer's machine did, from storage. Under `fresh` and
+      // `audited` a merge is refused here unless a receipt this queue accepted
+      // is about this attempt and this tree, and the walk below cannot be
+      // performed without the value this returns.
+      const evidence = await localRunEvidenceFor(db, {
+        securityProfile: policy?.securityProfile ?? null,
+        attemptId,
+        candidateTreeOid: cand.candidateTreeOid,
+      });
+      if (!evidence.ok) {
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: evidence.code,
+          detail: evidence.detail,
+          entryId,
+          operationId: null,
+        });
+      }
+      const localRun = evidence.evidence.localRun;
 
       // Under the fast profile the policy's own evidence is the proof on the head,
       // so there is nothing further to establish. Under every other profile the
@@ -1798,7 +2349,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // cannot be satisfied by anything, so it refuses rather than quietly weakening.
       // No active policy means no stronger claim is being made, so the head proof
       // stands, as it did before candidate verification existed.
-      const needsIntegratedRun = policy !== null && requiresIntegratedRun(policy.securityProfile);
+      //
+      // `fresh` is the one profile whose integrated run happens somewhere else.
+      // Its suites ran on the device, under an assignment this queue signed, and
+      // asking GitHub Actions to run them again is the fallback plan.md §5.0
+      // says `fresh` does not have. `audited` asks for both, and still does.
+      const needsIntegratedRun = policy !== null && requiresRemoteVerification(policy.securityProfile);
       // Null unless something actually ran. Under reuse nothing does, and the
       // constant that used to sit here was stored on the attempt as though a
       // verifier had spoken.
@@ -1898,7 +2454,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         candidatePolicyDigest = policy.policyDigest;
       }
 
-      if (holder !== undefined && holder.state === "Active") {
+      // A local run leaves the entry past `Active` before anything asks for the
+      // merge: the device claims the offer, runs, and its receipt moves the
+      // entry to `Verifying`. Only the walk itself moves a reuse entry that far,
+      // so the wider set is opened for the local-run path alone.
+      const walkable =
+        holder !== undefined &&
+        (holder.state === "Active" ||
+          (localRun !== null && (holder.state === "Verifying" || holder.state === "MergeGuard")));
+      if (walkable && holder !== undefined) {
         // The proof the developer signed, by its own digest.
         //
         // This was `sha256:2222…2222`, a constant, so everything downstream that
@@ -1938,29 +2502,50 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // basis. Under this profile the basis is the proof on the head, the
         // policy and pipeline it satisfied, and the check that verified it —
         // every one of which is a real value or the merge does not proceed.
-        const reuse = await reuseEvidenceFor(
-          workReceiptDigest,
-          policy,
-          await deps.proofCheckRunId(c.env, repositoryId, headSha),
-          verifiedResultDigest,
-        );
-        if ("missing" in reuse) {
+        //
+        // A device ran this candidate under an assignment this queue signed, so
+        // the intent says that rather than describing a reuse. The two are
+        // different claims and the schemas refuse to be each other.
+        const evidenceForIntent =
+          localRun === null || policy === null
+            ? await reuseEvidenceFor(
+                workReceiptDigest,
+                policy,
+                await deps.proofCheckRunId(c.env, repositoryId, headSha),
+                verifiedResultDigest,
+              )
+            : verifiedEvidenceFor({
+                workReceiptDigest,
+                organizationId: policy.organizationId,
+                policyDigest: policy.policyDigest as Sha256,
+                pipelineDigest: policy.pipelineDigest as Sha256 | null,
+                requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
+                assignmentDigest: localRun.assignmentDigest as Sha256,
+                integrationEvidenceDigest: localRun.receiptDigest as Sha256,
+                deviceKeyId: localRun.deviceKeyId,
+                // `audited` runs the suites again in Actions. That execution's
+                // run ids are not carried this far, so the record names the
+                // device's run rather than a rerun it cannot cite.
+                rerun: null,
+              });
+        if ("missing" in evidenceForIntent) {
           return c.json({
             authorized: false,
             enforcing: true,
             activationState: project.activationState,
             reason: "MERGE_EVIDENCE_INCOMPLETE",
-            detail: `nothing may be signed for this merge: ${reuse.missing}`,
+            detail: `nothing may be signed for this merge: ${evidenceForIntent.missing}`,
             entryId,
             operationId: null,
           });
         }
+        const evidenceOrganizationId = evidenceForIntent.organizationId;
 
-        const signedIntent = await signReusedIntent({
+        const intentSubject = {
           operationId: mergeOperationId(attemptId),
           attemptId,
           git: {
-            objectFormat: "sha1",
+            objectFormat: "sha1" as const,
             repositoryId,
             baseRef: baseRef as `refs/heads/${string}`,
             baseSha,
@@ -1979,11 +2564,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             previousTransitionDigest: (held.chainHead?.digest ?? null) as Sha256 | null,
           },
           pullRequestNumber: body.pullRequestNumber,
-          evidence: reuse,
           mergeMethod: project.mergeMethod,
           createdAt: new Date().toISOString(),
-          signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
-        });
+          signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(c.env, bytes, typ) },
+        };
+        const signedIntent =
+          "assignmentDigest" in evidenceForIntent
+            ? await signVerifiedIntent({ ...intentSubject, evidence: evidenceForIntent })
+            : await signReusedIntent({ ...intentSubject, evidence: evidenceForIntent });
         if ("error" in signedIntent) {
           return c.json({
             authorized: false,
@@ -2004,7 +2592,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           attemptId,
           bytes: signedIntent.bytes,
           jws: signedIntent.jws,
-          organizationId: reuse.organizationId,
+          organizationId: evidenceOrganizationId,
           mirror: (input) =>
             storeEvidence(c.env, {
               organizationId: input.organizationId,
@@ -2030,18 +2618,37 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             candidateSha,
             candidateTree,
             policyDigest: candidatePolicyDigest,
-            runner: needsIntegratedRun ? "verified-candidate" : "reuse",
-            // Nothing was dispatched, so there is no assignment to issue. The
-            // reducer no longer demands one for an attempt nobody assigned.
-            assignmentDigest: null,
+            runner: localRun !== null ? "local-run" : needsIntegratedRun ? "verified-candidate" : "reuse",
+            evidence: evidence.evidence,
             receiptDigest: workReceiptDigest,
-            verifierResultDigest: verifiedResultDigest,
+            // What the merge rests on having been run. A device's accepted
+            // receipt is that account under `fresh`; under `audited` the second
+            // execution in Actions is, and it is the stronger of the two.
+            verifierResultDigest: verifiedResultDigest ?? localRun?.receiptDigest ?? null,
             intentDigest: signedIntent.digest,
             operationId: mergeOperationId(attemptId),
           });
         });
         operationId = walked.operationId;
         latest = walked.snapshot;
+        // Say why the evidence was refused, rather than falling through to
+        // "waiting for turn" and leaving an operator to guess. Only the
+        // evidence refusals are answered here: a walk stopped by a pause or a
+        // moved base already has a better answer below, from the snapshot.
+        const evidenceRefusal =
+          walked.refusal !== undefined &&
+          (walked.refusal.startsWith("INTEGRATION_") || walked.refusal === "CANDIDATE_CHANGED");
+        if (walked.operationId === null && evidenceRefusal) {
+          return c.json({
+            authorized: false,
+            enforcing: true,
+            activationState: project.activationState,
+            reason: walked.refusal,
+            detail: "the queue document and the evidence for this merge do not agree",
+            entryId,
+            operationId: null,
+          });
+        }
       }
     }
 

@@ -130,9 +130,7 @@ function bundle(keyId = "key_test", signerId = SIGNER_ID): VerificationBundleV1 
       securityProfile: "fast",
       minimumPermission: "write",
       allowAuthorAsSigner: true,
-      evaluationMode: "head-tree",
       allowedKeyAlgorithms: ["ssh-ed25519"],
-      requireGithubKeyPresence: false,
       lease: { required: false, maxAgeSeconds: 1800 },
       pipeline: {
         digest: PIPELINE_DIGEST,
@@ -140,7 +138,6 @@ function bundle(keyId = "key_test", signerId = SIGNER_ID): VerificationBundleV1 
         requiredSuites: ["test"],
       },
       proofMaxAgeSeconds: 86400,
-      audit: { basisPoints: 0, mandatoryPaths: [] },
     },
     keys: [
       {

@@ -26,6 +26,20 @@ export function requiresIntegratedRun(securityProfile: string): boolean {
   return securityProfile !== "fast";
 }
 
+/**
+ * Which of those profiles want that run performed by the pinned verifier in
+ * GitHub Actions.
+ *
+ * `fresh` runs the integration on the developer's own machine and has no
+ * fallback to Actions (plan.md §5.0), so asking a pinned verifier for a verdict
+ * would refuse every `fresh` merge for want of a workflow the profile does not
+ * use. `audited` is `fresh` plus that second execution, so it wants both, and
+ * `remote` is the second execution alone.
+ */
+export function requiresRemoteVerification(securityProfile: string): boolean {
+  return requiresIntegratedRun(securityProfile) && securityProfile !== "fresh";
+}
+
 export type CandidateRefusal =
   | "CANDIDATE_NOT_VERIFIED"
   | "CANDIDATE_TREE_MISMATCH"

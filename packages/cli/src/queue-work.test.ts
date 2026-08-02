@@ -103,7 +103,7 @@ describe("watchForOffer", () => {
 });
 
 describe("runQueueWork", () => {
-  it("reports the offer plainly and exits 0 without attempting to claim it", async () => {
+  it("reports the offer plainly and names the command that takes it", async () => {
     const emit = vi.fn();
     const heartbeat = vi.fn(async (): Promise<HeartbeatOutcome> => ({ ok: true, status: 200, holdsOffer: true }));
 
@@ -111,9 +111,10 @@ describe("runQueueWork", () => {
 
     expect(code).toBe(EXIT.ok);
     expect(emit).toHaveBeenCalledWith(expect.stringMatching(/holds an offer/));
-    // The claim endpoint does not exist yet; this reports the gap by name
-    // rather than pretending to have claimed anything.
-    expect(emit).toHaveBeenCalledWith(expect.stringMatching(/not.*built yet/));
+    // This command watches from outside a checkout, so it cannot run a
+    // candidate. It says which command can, rather than claiming an offer it
+    // has nowhere to execute.
+    expect(emit).toHaveBeenCalledWith(expect.stringMatching(/thwip ship --wait/));
   });
 
   it("on interrupt, says the machine is no longer available and exits the interrupted code", async () => {

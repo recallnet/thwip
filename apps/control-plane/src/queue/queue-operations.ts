@@ -1,4 +1,5 @@
 import { QueueCommands, type QueueTimings } from "./commands.js";
+import type { MergeEvidence } from "./local-run-gate.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
 
@@ -156,6 +157,18 @@ export interface AdmitInput {
   readinessBucket: number;
   tickBucket: number;
   decisionDigest: string;
+  /**
+   * Whether the server may take the offer for itself.
+   *
+   * False under a profile that dispatches the run to a device. The server
+   * claiming on its own behalf is what makes a `fast` reuse work — the required
+   * check is the only consumer, and an unclaimed offer would expire — but under
+   * `fresh` the developer's machine is the consumer, and a server that claims
+   * first takes the turn away from the runner it is waiting on, then merges on
+   * the head's own proof. The one bypass that would have made `fresh` mean
+   * nothing.
+   */
+  serverMayClaim: boolean;
 }
 
 /**
@@ -207,7 +220,7 @@ export function admit(commands: QueueCommands, store: QueueStateStore, input: Ad
   // wait forever (plan.md §8.2).
   const state = store.state();
   const attemptId = state.activeAttemptId;
-  if (attemptId !== null && state.entries.get(input.entryId)?.state === "Offered") {
+  if (input.serverMayClaim && attemptId !== null && state.entries.get(input.entryId)?.state === "Offered") {
     commands.claim({
       idempotencyKey: `authorize:claim:${attemptId}`,
       attemptId,
@@ -226,11 +239,20 @@ export interface WalkInput {
   policyDigest: string;
   runner: string;
   /**
-   * Null where nothing was dispatched. An assignment is the queue telling a
-   * runner to run something, and a reuse merge tells no one anything, so there
-   * is none to issue rather than one to invent.
+   * What the developer's machine did, read from storage by `localRunEvidenceFor`
+   * and by nothing else.
+   *
+   * A caller cannot assemble one, so a merge under a profile that dispatches
+   * work to a device cannot be walked without the stored receipt having been
+   * read. Where the profile dispatches nothing, the evidence carries no local
+   * run and the walk is the reuse walk it has always been.
    */
-  assignmentDigest: string | null;
+  evidence: MergeEvidence;
+  /**
+   * The receipt a reuse merge rests on: the digest of the proof on the head.
+   * Ignored where a device ran the integration, because the receipt that
+   * decides that merge is the one the device signed.
+   */
   receiptDigest: string;
   /** Null where nothing ran to produce one. */
   verifierResultDigest: string | null;
@@ -243,45 +265,89 @@ export interface WalkInput {
  *
  * Each step is still a separate event in the log and the reducer still refuses
  * any it considers out of order.
+ *
+ * The local-run half of this is a refusal, not a step. Under `fresh` and
+ * `audited` the merge rests on a run that happened on somebody's machine, and
+ * the only account of it is a receipt this queue accepted. So the receipt is
+ * checked against the queue document itself — the tree the attempt pinned, the
+ * device that claimed the offer, the assignment that device was issued — and a
+ * disagreement stops the walk here, where a route cannot go around it.
  */
 export function walkToMergeReady(
   commands: QueueCommands,
   store: QueueStateStore,
   input: WalkInput,
-): { operationId: string | null; snapshot: QueueSnapshot } {
+): { operationId: string | null; snapshot: QueueSnapshot; refusal?: string } {
   const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
-  const done = (operationId: string | null) => ({ operationId, snapshot: buildSnapshot(store) });
-
-  const prepared = commands.candidatePrepared({
-    idempotencyKey: `authorize:candidate:${input.attemptId}`,
-    attemptId: input.attemptId,
-    baseSha: input.baseSha,
-    headSha: input.headSha,
-    candidateSha: input.candidateSha,
-    candidateTree: input.candidateTree,
-    policyDigest: input.policyDigest,
-    runner: input.runner as never,
+  const done = (operationId: string | null, refusal?: string) => ({
+    operationId,
+    snapshot: buildSnapshot(store),
+    ...(refusal === undefined ? {} : { refusal }),
   });
-  if (!ok(prepared)) return done(null);
 
-  if (input.assignmentDigest !== null) {
-    commands.assign({
-      idempotencyKey: `authorize:assign:${input.attemptId}`,
+  const attempt = store.state().attempts.get(input.attemptId);
+  if (attempt === undefined) return done(null, "NO_SUCH_ATTEMPT");
+  const localRun = input.evidence.localRun;
+
+  if (localRun !== null) {
+    // Everything about this receipt has to be about this attempt. The digests
+    // were written by the claim and receipt routes into the queue document as
+    // well as into storage, so a receipt that satisfied the gate but names an
+    // assignment or a tree the queue never recorded is two accounts of one turn
+    // disagreeing, and neither may be merged on.
+    if (attempt.assignmentDigest !== localRun.assignmentDigest) {
+      return done(null, "INTEGRATION_ASSIGNMENT_MISMATCH");
+    }
+    if (attempt.receiptDigest !== localRun.receiptDigest) {
+      return done(null, "INTEGRATION_RECEIPT_MISMATCH");
+    }
+    if (attempt.candidateTree !== localRun.candidateTreeOid || input.candidateTree !== localRun.candidateTreeOid) {
+      return done(null, "INTEGRATION_RECEIPT_TREE_MISMATCH");
+    }
+    // The offer was claimed by a device, and the receipt has to come from that
+    // device. `acceptIntegrationReceipt` checks the receipt against the
+    // assignment; this checks it against who the queue let take the turn.
+    if (attempt.deviceId !== localRun.deviceKeyId) {
+      return done(null, "INTEGRATION_RECEIPT_DEVICE_MISMATCH");
+    }
+  }
+
+  // Pinned already where a device was dispatched: the candidate is what the
+  // assignment was built over, and the reducer holds it immutable. Re-issuing
+  // the command would be rejected and stop a merge that is in order.
+  if (attempt.candidateSha === null) {
+    const prepared = commands.candidatePrepared({
+      idempotencyKey: `authorize:candidate:${input.attemptId}`,
       attemptId: input.attemptId,
-      assignmentDigest: input.assignmentDigest,
+      baseSha: input.baseSha,
+      headSha: input.headSha,
+      candidateSha: input.candidateSha,
+      candidateTree: input.candidateTree,
+      policyDigest: input.policyDigest,
+      runner: input.runner as never,
+    });
+    if (!ok(prepared)) return done(null, "CANDIDATE_NOT_PINNED");
+  } else if (attempt.candidateTree !== input.candidateTree || attempt.candidateSha !== input.candidateSha) {
+    // The caller is about to merge something other than what this attempt was
+    // run against.
+    return done(null, "CANDIDATE_CHANGED");
+  }
+
+  // A device's receipt was submitted when it arrived. Only the reuse walk
+  // submits one here, and only the reuse walk has one to submit.
+  if (attempt.receiptDigest === null) {
+    commands.submitReceipt({
+      idempotencyKey: `authorize:receipt:${input.attemptId}`,
+      attemptId: input.attemptId,
+      receiptDigest: input.receiptDigest,
     });
   }
-  commands.submitReceipt({
-    idempotencyKey: `authorize:receipt:${input.attemptId}`,
-    attemptId: input.attemptId,
-    receiptDigest: input.receiptDigest,
-  });
   const started = commands.startVerification({
     idempotencyKey: `authorize:verify:${input.attemptId}`,
     attemptId: input.attemptId,
   });
   const nonce = "nonce" in started ? (started as { nonce: string }).nonce : undefined;
-  if (nonce === undefined) return done(null);
+  if (nonce === undefined) return done(null, "VERIFICATION_NOT_STARTED");
 
   commands.completeVerification({
     idempotencyKey: `authorize:verdict:${input.attemptId}`,
@@ -301,7 +367,7 @@ export function walkToMergeReady(
   // insert a merge_operations row for a write that never begins, and the next
   // caller reads that row as already-started and is handed an operation id to
   // merge with.
-  if (!ok(intent)) return done(null);
+  if (!ok(intent)) return done(null, "MERGE_NOT_PERMITTED");
   const begun = commands.beginMergeWrite({
     idempotencyKey: `authorize:write:${input.attemptId}`,
     attemptId: input.attemptId,

@@ -24,6 +24,7 @@ import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
+import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
 import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
@@ -1808,6 +1809,38 @@ app.route(
       // the record say the opposite of what happened.
       const run = body.check_runs?.find((r) => r.conclusion === "success");
       return run?.id === undefined ? null : String(run.id);
+    },
+    /**
+     * The integrated candidate GitHub has computed for a pull request.
+     *
+     * What a device is handed to run under `fresh`. It comes from GitHub, never
+     * from the machine asking for work, so a runner cannot choose the tree it
+     * will be credited with having tested. Null while GitHub is still computing
+     * mergeability, and null for a pull request that cannot be integrated at
+     * all: neither is a tree anybody should be asked to run.
+     */
+    async integratedCandidate(env: Env, repositoryId: string, baseRef: string, pullRequestNumber: number) {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const [owner, repo] = project.github_name.split("/");
+      if (owner === undefined || repo === undefined) return null;
+      const token = await installationToken(env, project.installation_id);
+      const pinned = await resolveCandidate(
+        githubHttp(token),
+        { owner, repo, repositoryId, baseRef },
+        pullRequestNumber,
+      );
+      if (pinned.status !== "pinned") return null;
+      return {
+        baseSha: pinned.subject.baseSha,
+        headSha: pinned.subject.headSha,
+        candidateSha: pinned.subject.candidateSha,
+        candidateTreeOid: pinned.subject.candidateTreeOid,
+      };
     },
     async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
       const { key, kid } = await serviceKey(env);
