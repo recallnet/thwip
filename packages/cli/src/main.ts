@@ -16,8 +16,10 @@ import {
   currentTree,
   freezeSubject,
   headMessage,
+  readTips,
   requireCleanTree,
   showFileAtHead,
+  tryGit,
 } from "./git.js";
 import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
@@ -29,7 +31,10 @@ import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "
 import { EXIT } from "./queue-exit.js";
 import { attachTrailer, buildStatement, signStatement } from "./proof.js";
 import { acquireRunLease, httpLeasePorts } from "./run-lease.js";
-import { executeCli, type CommandInvocation } from "./cli-args.js";
+import { type CommandInvocation } from "./cli-args.js";
+import { classifyFailure, failureDetail, runCliProcess } from "./cli-failure.js";
+import { forceArgs, planPush } from "./push-plan.js";
+import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
 import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
@@ -495,7 +500,23 @@ async function cmdShip(argv: string[]): Promise<number> {
       return { ok: true };
     },
     async push() {
-      await run("git", ["push", "--set-upstream", "origin", "HEAD"], cwd);
+      const { branch } = await readGitState(cwd);
+      const attempt = await tryGit(cwd, ["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`]);
+      const plan = planPush(attempt, await readTips(cwd, branch));
+
+      if (plan.kind === "done") return {};
+      if (plan.kind === "stop") {
+        process.stderr.write(`[thwip] ${plan.detail}\n`);
+        return { reasonCode: plan.reasonCode };
+      }
+
+      process.stderr.write(`[thwip] ${plan.why}\n`);
+      const forced = await tryGit(cwd, forceArgs(plan));
+      if (forced.ok) return {};
+      // The lease named one commit and the remote holds another, so somebody
+      // pushed while this ran. That is theirs to keep.
+      process.stderr.write(`[thwip] ${failureDetail({ stderr: forced.stderr })}\n`);
+      return { reasonCode: "PUSH_REJECTED" };
     },
     async openOrUpdatePullRequest() {
       // gh handles the difference between opening and updating, and is already a
@@ -821,6 +842,59 @@ async function cmdQueue(argv: string[]): Promise<number> {
 }
 
 /**
+ * `thwip queue doctor`. What it asks for and what it makes of the answers live
+ * in queue-doctor.ts; this performs the reads and stops asking once a probe
+ * makes the ones below it meaningless.
+ */
+async function cmdQueueDoctor(argv: string[]): Promise<number> {
+  const parsed = planQueueCommand(["doctor", ...argv]);
+  if (!parsed.ok) {
+    process.stderr.write(parsed.message + "\n");
+    return parsed.exitCode;
+  }
+  const repo = flag(argv, "--repo") ?? "";
+  const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
+  const strict = argv.includes("--strict");
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const auth = await apiAuthHeader();
+  if (auth === null) {
+    process.stderr.write("not signed in: run `thwip login`\n");
+    return EXIT.authRequired;
+  }
+
+  const observations: DoctorObservation[] = [];
+  let repositoryId: string | null = null;
+
+  for (const probe of doctorProbes({ repo, ref, events: argv.includes("--explain") ? 25 : 5 })) {
+    if (probe.path.includes("{repositoryId}") && repositoryId === null) break;
+    const path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    // A section that cannot be read is a fact to report, so a network failure
+    // is recorded as status 0 rather than ending the command.
+    const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
+      headers: { authorization: auth },
+    })
+      .then(async (res) => ({
+        status: res.status,
+        body: (await res.json().catch(() => null)) as Record<string, unknown> | null,
+      }))
+      .catch(() => ({ status: 0, body: null }));
+    observations.push({ section: probe.section, ...answer });
+    if (probe.section === "repository" && answer.status === 200) {
+      const id = answer.body?.["repositoryId"];
+      repositoryId = typeof id === "string" ? id : null;
+    }
+  }
+
+  const report = reportDoctor(observations, { repo, ref, strict });
+  if (argv.includes("--json")) {
+    process.stdout.write(JSON.stringify({ repo, ref, sections: observations, unread: report.unread }) + "\n");
+  } else {
+    process.stdout.write(report.lines.join("\n") + "\n");
+  }
+  return report.exitCode;
+}
+
+/**
  * `thwip queue work --watch`. Validation and the watch loop itself live in
  * queue-commands.ts and queue-work.ts; this only resolves identity, the
  * registered signing key (its fingerprint is the device key id a heartbeat
@@ -881,6 +955,7 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
     case "queue": {
       const [subcommand, ...rest] = invocation.argv;
       if (subcommand === "work") return cmdQueueWork(rest);
+      if (subcommand === "doctor") return cmdQueueDoctor(rest);
       return cmdQueue([...invocation.argv]);
     }
     case "login":
@@ -902,13 +977,24 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const code = await executeCli(process.argv.slice(2), {
+  const code = await runCliProcess(process.argv.slice(2), {
     dispatch: dispatchCli,
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
   });
   process.exit(code);
 }
+
+/**
+ * A rejection that never reached the command's own await chain still has to end
+ * the way every other failure ends. The interrupt handler runs detached, so this
+ * is the only place that can catch what it throws.
+ */
+process.on("unhandledRejection", (error) => {
+  const failure = classifyFailure(error);
+  process.stderr.write(failure.text + "\n");
+  process.exit(failure.exitCode);
+});
 
 void main();
 export { verifySshSignature };

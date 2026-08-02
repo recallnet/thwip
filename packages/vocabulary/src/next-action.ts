@@ -74,6 +74,12 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   CANDIDATE_UNAVAILABLE:
     "This machine cannot fetch the merged commit the queue built, so there is nothing to run the suites against. Check that you can reach origin, then run thwip ship again.",
 
+  /* The local machine stopped before it could name anything better. */
+  PUSH_REJECTED:
+    "The remote branch holds a commit this machine does not have, so nothing was pushed. Fetch and rebase onto it, then run thwip ship again.",
+  LOCAL_FAILURE:
+    "Thwip stopped on a failure it has no reason code for. The line above is what failed; if it repeats, send it to whoever runs the queue.",
+
   /* The work itself failed. */
   SUITE_FAILED: "A required suite failed on your machine. Fix it and run thwip ship again.",
   SUITE_NOT_PASSED: "A required suite did not pass. Fix it and run thwip run again.",
