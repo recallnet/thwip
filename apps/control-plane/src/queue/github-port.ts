@@ -344,6 +344,55 @@ export async function dispatchVerifier(
   });
 }
 
+/** One check run on a head, as far as a required-status-check rule cares. */
+export interface CheckRunFact {
+  readonly name: string;
+  readonly status: string;
+  readonly conclusion: string | null;
+}
+
+/** What the branch requires and what the head says about it. */
+export interface RequiredCheckState {
+  /** Contexts a `required_status_checks` rule names for this branch. */
+  readonly required: readonly string[];
+  /** The latest run per name on the head. */
+  readonly runs: readonly CheckRunFact[];
+}
+
+/** Conclusions GitHub counts as satisfying a required status check. */
+const SATISFYING = new Set(["success", "neutral", "skipped"]);
+
+/**
+ * Required checks this head will certainly be refused on.
+ *
+ * The queue used to find this out from GitHub's rejection. It would offer a turn,
+ * authorize the merge, and the PUT came back 405 because a required check was
+ * missing — and the attempt then held the lane while everything behind it
+ * stopped. Both facts are readable before the ask: the branch rules name the
+ * contexts, and the head carries the runs.
+ *
+ * Only the certain cases. A context with no run at all cannot pass, and one that
+ * concluded badly goes on refusing until something re-runs it. A run still in
+ * progress is left alone: it may yet pass, and refusing on it would turn every
+ * ordinary race into a refusal.
+ */
+export function unsatisfiedRequiredChecks(
+  state: RequiredCheckState,
+): Array<{ context: string; state: "absent" | "failed" }> {
+  const unsatisfied: Array<{ context: string; state: "absent" | "failed" }> = [];
+  for (const context of state.required) {
+    const matching = state.runs.filter((run) => run.name === context);
+    if (matching.length === 0) {
+      unsatisfied.push({ context, state: "absent" });
+      continue;
+    }
+    if (matching.some((run) => run.status === "completed" && SATISFYING.has(run.conclusion ?? ""))) continue;
+    if (matching.some((run) => run.status !== "completed")) continue;
+    unsatisfied.push({ context, state: "failed" });
+  }
+  return unsatisfied;
+}
+
 /** Facts the final guard re-reads immediately before the write (plan.md §18.3). */
 export async function readFinalGuardFacts(
   http: GitHubHttp,
