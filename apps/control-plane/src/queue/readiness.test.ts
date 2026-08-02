@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { blockedOnlyByCapability, deriveReadiness, isKnownReason, type ReadinessFacts } from "./readiness.js";
+import {
+  blockedOnlyByCapability,
+  deriveReadiness,
+  isKnownReason,
+  NO_OBJECTION,
+  type ReadinessFacts,
+} from "./readiness.js";
 import { nextAction } from "./turn-check.js";
 
 function facts(over: Partial<ReadinessFacts> = {}): ReadinessFacts {
@@ -152,6 +158,22 @@ describe("deriveReadiness", () => {
   it("orders repository problems before review problems", () => {
     const readiness = deriveReadiness(facts({ draft: true, reviewsSatisfied: false }));
     expect(readiness.primaryReason).toBe("PR_DRAFT");
+  });
+
+  describe("the facts nobody has read", () => {
+    it("objects to nothing on their own", () => {
+      expect(deriveReadiness(NO_OBJECTION)).toEqual({
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+        secondaryReasons: [],
+      });
+    });
+
+    it("carry the reason for whichever fact a caller did read", () => {
+      const readiness = deriveReadiness({ ...NO_OBJECTION, rulesetEnforced: false });
+      expect(readiness).toMatchObject({ ready: false, primaryReason: "RULESET_DRIFT" });
+    });
   });
 
   it("is a pure function of its facts", () => {

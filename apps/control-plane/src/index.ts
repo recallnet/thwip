@@ -20,7 +20,7 @@ import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
-import { foldCapability } from "./queue/readiness.js";
+import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
@@ -1413,10 +1413,23 @@ export async function queueFromPullRequest(env: Env, payload: {
           .first<{ id: string }>();
   if (principal === null) return { handled: false, detail: "author has no activated principal" };
 
+  // Through `deriveReadiness`, from the two facts this event carries.
+  //
+  // The pair of expressions that used to stand here named two reasons out of
+  // the twenty the derivation knows, and `/authorize` had a second, differently
+  // narrow copy. Neither reached the ruleset, the App's permissions or the
+  // sponsor's access. Nothing about those three is readable from a webhook
+  // payload, so this writer states what the event says and `/authorize` reads
+  // the rest on the walk to a merge, where the cost is one merge's worth.
   const draft = pr?.draft === true;
   const open = pr?.state === "open";
-  const ready = !draft && open;
-  const basePrimaryReason: BlockingReason | null = draft ? "PR_DRAFT" : !open ? "PR_CLOSED" : null;
+  const base = deriveReadiness({
+    ...NO_OBJECTION,
+    draft,
+    pullRequestState: open ? "open" : "closed",
+  });
+  const ready = base.ready;
+  const basePrimaryReason: BlockingReason | null = base.primaryReason;
 
   // A developer who is already heartbeating when the pull request is opened
   // must not need an absent-to-present transition to become eligible — the
@@ -2131,6 +2144,113 @@ app.route(
             ),
         ],
       };
+    },
+    /**
+     * Whether the repository is still the one this queue's policy assumes.
+     *
+     * Three questions the queue never asked before it merged. The branch rules
+     * say whether the checks the queue publishes are still required and whether
+     * the branch can still be force-pushed or deleted; the installation says
+     * whether the App can still perform the merge it is about to certify; and
+     * the collaborator permission says whether the person whose turn this is may
+     * still write here.
+     *
+     * Three reads, once, on the walk to a merge. `requiredCheckState` already
+     * reads the same rules endpoint a moment later, and the duplicate is left
+     * standing rather than threading a cache through the dependency boundary:
+     * one extra read per merge against an hourly budget this account uses a
+     * fraction of is not worth a second cached shape that can go stale.
+     *
+     * Null on any unreadable answer, all the way down. Refusing a merge because
+     * GitHub had a bad minute would stop the queue for everyone, and that is a
+     * worse failure than the one this exists to catch.
+     */
+    async platformHealth(
+      env: Env,
+      repositoryId: string,
+      baseRef: string,
+      sponsorGithubUserId: string,
+    ): Promise<PlatformHealth | null> {
+      const project = await env.DB.prepare(
+        `SELECT p.github_name, o.installation_id, o.id AS organization_id
+           FROM projects p JOIN organizations o ON o.id = p.organization_id
+          WHERE p.github_repository_id = ?`,
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null; organization_id: string }>();
+      if (project === null || project.installation_id === null) return null;
+
+      // The sponsor by the name GitHub's permission endpoint takes. A numeric id
+      // will not address it, and guessing a login would ask about somebody else.
+      const sponsor = await env.DB.prepare(
+        "SELECT github_login FROM principals WHERE organization_id = ? AND github_user_id = ?",
+      )
+        .bind(project.organization_id, sponsorGithubUserId)
+        .first<{ github_login: string | null }>();
+      if (sponsor?.github_login == null) return null;
+
+      const token = await installationToken(env, project.installation_id);
+      const read = async <T>(path: string): Promise<T | null> => {
+        const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+          headers: {
+            authorization: `Bearer ${token}`,
+            accept: "application/vnd.github+json",
+            "user-agent": "thwip-control-plane",
+          },
+        }).catch(() => null);
+        if (res === null || !res.ok) return null;
+        return (await res.json().catch(() => null)) as T | null;
+      };
+
+      const branch = baseRef.replace(/^refs\/heads\//, "");
+      const rules = await read<
+        Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
+      >(`/rules/branches/${encodeURIComponent(branch)}`);
+      if (rules === null) return null;
+      const ruleTypes = new Set(rules.map((rule) => rule.type));
+      const requiredContexts = new Set(
+        rules
+          .filter((rule) => rule.type === "required_status_checks")
+          .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+          .map((check) => check.context),
+      );
+      // What the queue's own guarantee rests on, and nothing wider. The turn
+      // check is what stops a merge out of turn and the proof check is what
+      // stops an unproven one, so a branch that no longer requires both is a
+      // branch the queue cannot speak for. Force-push and deletion are the two
+      // ways the merged history it signs can be rewritten underneath it.
+      const rulesetEnforced =
+        requiredContexts.has(TURN_CHECK) &&
+        requiredContexts.has(PROOF_CHECK) &&
+        ruleTypes.has("non_fast_forward") &&
+        ruleTypes.has("deletion");
+
+      const permission = await read<{ permission?: string }>(
+        `/collaborators/${encodeURIComponent(sponsor.github_login)}/permission`,
+      );
+      if (permission === null) return null;
+      const sponsorAuthorized =
+        permission.permission === "admin" ||
+        permission.permission === "maintain" ||
+        permission.permission === "write";
+
+      // The installation's permissions, from the App's own view of it.
+      //
+      // Only the three the merge itself depends on: writing the branch,
+      // performing the merge, and publishing the check GitHub requires. `actions`
+      // is not among them deliberately — a verifier that cannot be dispatched
+      // stops the attempt long before this point, and refusing here would name
+      // the wrong problem.
+      const installations = await listInstallations(env).catch(() => null);
+      if (installations === null) return null;
+      const installation = installations.find((i) => String(i.id) === project.installation_id);
+      if (installation?.permissions === undefined) return null;
+      const permissions = installation.permissions;
+      const appPermissionsHealthy = ["contents", "pull_requests", "checks"].every(
+        (scope) => permissions[scope] === "write",
+      );
+
+      return { rulesetEnforced, appPermissionsHealthy, sponsorAuthorized };
     },
     /**
      * The candidate verdict, as a check on the pull request head.

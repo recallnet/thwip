@@ -60,6 +60,62 @@ export interface ReadinessFacts {
   readonly serverExecutable: boolean;
 }
 
+/**
+ * The three facts about the repository itself, as one read answers them.
+ *
+ * Named apart from `ReadinessFacts` because they are the subset that costs a
+ * GitHub round trip, so a caller can see what it is buying. `sponsorAuthorized`
+ * is `ownerAuthorized` under the name the person reading it would use: the
+ * sponsor is whose turn it is, and their access is what was revoked.
+ */
+export interface PlatformHealth {
+  readonly rulesetEnforced: boolean;
+  readonly appPermissionsHealthy: boolean;
+  readonly sponsorAuthorized: boolean;
+}
+
+/**
+ * Facts nobody has read yet.
+ *
+ * A caller spreads this and overrides what it knows, so `deriveReadiness` stays
+ * one derivation rather than growing a second, narrower copy for every place
+ * that holds only part of the picture. That is how the queue ended up with two
+ * hand-rolled readiness checks that between them consulted neither the ruleset,
+ * nor the App's permissions, nor the sponsor's access.
+ *
+ * Every value here means "no objection", because an unread fact is not a
+ * refusal. A blank that blocked would stop the queue on everything a caller had
+ * not got round to reading, which is the opposite failure and a worse one.
+ */
+export const NO_OBJECTION: ReadinessFacts = {
+  projectEnabled: true,
+  queuePaused: false,
+  managedBaseRef: "",
+  pullRequestState: "open",
+  draft: false,
+  baseRef: "",
+  mergeable: null,
+  ownerAuthorized: true,
+  authorIsBot: false,
+  sponsorPrincipalId: null,
+  headProof: "accepted",
+  activePolicyDigest: null,
+  proofPolicyDigest: null,
+  reviewsSatisfied: true,
+  codeOwnerReviewSatisfied: true,
+  approvalAfterPushSatisfied: true,
+  conversationsResolved: true,
+  nonThwipChecks: "passing",
+  appPermissionsHealthy: true,
+  rulesetEnforced: true,
+  cancelled: false,
+  needsRepair: false,
+  cooldownUntil: null,
+  now: "",
+  compatibleRunnerConnected: false,
+  serverExecutable: true,
+};
+
 export interface Readiness {
   readonly ready: boolean;
   readonly schedulerEligible: boolean;
