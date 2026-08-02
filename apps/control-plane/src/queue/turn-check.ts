@@ -1,3 +1,4 @@
+import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 import type { QueueSnapshot } from "./queue-operations.js";
 
 /**
@@ -19,6 +20,13 @@ import type { QueueSnapshot } from "./queue-operations.js";
  * So waiting is reported as still running. That blocks the merge, which is the
  * point, without claiming anything failed and without leaving a red check behind
  * that somebody has to clear.
+ *
+ * Waiting is also where the developer finds out why. The queue derives a
+ * blocking reason for every entry and used to publish none of it, so a pull
+ * request held up by a review and one held up by a conflict both read "waiting
+ * for a turn". The sentence for each reason comes from @thwip/vocabulary, which
+ * the CLI and the dashboard read as well, so the three surfaces cannot tell a
+ * developer three different things about one event.
  *
  * `unplaceable` is the exception, and it exists because this check is required.
  * A pull request the queue cannot place — an author with no activated principal,
@@ -57,6 +65,9 @@ export type TurnState = "holds" | "waiting" | "halted" | "unplaceable";
 const HOLDING = new Set(["Offered", "Active", "Verifying", "MergeGuard", "Merging"]);
 const FINISHED = new Set(["Merged", "Cancelled"]);
 
+/** Which of the two things that halt a queue happened, since only one waits itself out. */
+export type HaltReason = "EXTERNAL_TRANSITION" | "PAUSED";
+
 export interface TurnCheckUpdate {
   readonly entryId: string;
   readonly pullRequestNumber: number;
@@ -64,12 +75,80 @@ export interface TurnCheckUpdate {
   readonly state: TurnState;
   /** How many others are waiting, so the check can say something useful. */
   readonly waiting: number;
+  /**
+   * What the queue decided is holding this entry up, when something is.
+   *
+   * Read off the entry, never derived here. Readiness is re-derived from every
+   * current fact on every GitHub event, and a check that recomputed its own
+   * version of it would eventually disagree with the queue that scheduled it.
+   */
+  readonly primaryReason?: string | null;
+  /** Set only for `halted`. */
+  readonly haltReason?: HaltReason | null;
 }
 
 export function turnStateOf(snapshot: QueueSnapshot, entryState: string): TurnState {
   if (snapshot.paused || snapshot.rebaselineRequired) return "halted";
   if (snapshot.activeAttemptId !== null && HOLDING.has(entryState)) return "holds";
   return "waiting";
+}
+
+/**
+ * A branch that moved outside the queue needs a person; an ordinary pause needs
+ * an administrator to change their mind. Telling the reader "one or the other"
+ * made them go and find out which.
+ */
+export function haltReasonOf(snapshot: QueueSnapshot): HaltReason {
+  return snapshot.rebaselineRequired || snapshot.pauseReason === "EXTERNAL_TRANSITION"
+    ? "EXTERNAL_TRANSITION"
+    : "PAUSED";
+}
+
+/**
+ * The plain-language next action for a blocking reason, looked up rather than
+ * written here.
+ *
+ * @thwip/vocabulary holds one sentence per reason and the CLI and the dashboard
+ * read the same table, so a developer cannot be told one thing by a check and
+ * another by their terminal for the same event. The table is a `Record` over the
+ * closed union the queue's vocabulary feeds, so a blocking reason added without
+ * a sentence fails to compile.
+ *
+ * An unrecognized reason is named rather than explained. Inventing guidance for
+ * a code this build does not know is worse than quoting it.
+ */
+export function nextAction(reason: string | null): string | null {
+  if (reason === null) return null;
+  return isReasonCode(reason) ? nextActionFor(reason, "check") : `Blocked: ${reason}.`;
+}
+
+/**
+ * A title that names the problem, so the check list on a pull request is
+ * readable without opening anything.
+ */
+function titleFor(reason: string): string {
+  switch (reason) {
+    case "AGENT_OFFLINE":
+    case "NO_COMPATIBLE_RUNNER":
+      return "Waiting for a machine";
+    case "REVIEW_REQUIRED":
+    case "CODEOWNER_REVIEW_REQUIRED":
+    case "APPROVAL_AFTER_PUSH_REQUIRED":
+      return "Waiting for review";
+    case "MERGE_CONFLICT":
+      return "Conflict with the base branch";
+    case "REQUIRED_CHECK_FAILED":
+      return "A required check failed";
+    case "VERIFICATION_REJECTED":
+      return "The verifier refused the candidate";
+    case "REQUIRED_CHECK_PENDING":
+      return "Waiting for a required check";
+    case "LOCAL_RECEIPT_MISSING":
+    case "LOCAL_RECEIPT_REJECTED":
+      return "No accepted proof on this commit";
+    default:
+      return "Not ready to merge";
+  }
 }
 
 /**
@@ -125,9 +204,12 @@ export function turnCheckRun(update: TurnCheckUpdate): TurnCheckRun {
       return {
         status: "in_progress",
         conclusion: null,
-        title: "The queue is paused",
+        title:
+          update.haltReason === "EXTERNAL_TRANSITION" ? "The branch moved outside the queue" : "The queue is paused",
         summary:
-          "Thwip Queue is not offering turns. An administrator paused it, or the base branch moved outside the queue and a rebaseline is pending.",
+          update.haltReason === "EXTERNAL_TRANSITION"
+            ? "Thwip Queue is not offering turns. The base branch moved outside the queue, so an administrator has to rebaseline before merging resumes."
+            : "Thwip Queue is not offering turns. An administrator paused it, and can resume it.",
       };
     case "unplaceable":
       return {
@@ -139,12 +221,34 @@ export function turnCheckRun(update: TurnCheckUpdate): TurnCheckRun {
       };
     default: {
       const ahead = Math.max(0, update.waiting - 1);
+      const others = `${ahead} other pull request${ahead === 1 ? "" : "s"}`;
+      const action = nextAction(update.primaryReason ?? null);
+
+      // Nothing is blocking it, so the only true thing to say is that it is in
+      // line. Reporting a problem here would send somebody looking for one.
+      if (action === null) {
+        return {
+          status: "in_progress",
+          conclusion: null,
+          title: `Waiting for a turn, behind ${others}`,
+          summary:
+            "Thwip Queue merges one pull request at a time onto this branch. This check completes when it is this pull request's turn; nothing is wrong with it.",
+        };
+      }
+
+      // Still in progress, however bad the reason. A required check that has
+      // failed goes on refusing the merge until something re-runs it, so a
+      // blocked pull request that later clears would stay blocked by its own
+      // check. Being blocked is a reason to say more, not to go red.
       return {
         status: "in_progress",
         conclusion: null,
-        title: `Waiting for a turn, behind ${ahead} other pull request${ahead === 1 ? "" : "s"}`,
-        summary:
-          "Thwip Queue merges one pull request at a time onto this branch. This check completes when it is this pull request's turn; nothing is wrong with it.",
+        title: titleFor(update.primaryReason!),
+        summary: [
+          action,
+          `Thwip Queue merges one pull request at a time onto this branch, with ${others} waiting. That order changes as reviews and checks change.`,
+          "This pull request keeps its place in line while this is unresolved.",
+        ].join("\n\n"),
       };
     }
   }
@@ -163,6 +267,8 @@ export function turnCheckUpdates(before: QueueSnapshot | null, after: QueueSnaps
     (entry) => !FINISHED.has(entry.state) && turnStateOf(after, entry.state) === "waiting",
   ).length;
 
+  const halted = haltReasonOf(after);
+
   const updates: TurnCheckUpdate[] = [];
   for (const entry of after.entries) {
     if (FINISHED.has(entry.state)) continue;
@@ -172,11 +278,19 @@ export function turnCheckUpdates(before: QueueSnapshot | null, after: QueueSnaps
     const previous = before?.entries.find((e) => e.entryId === entry.entryId);
     // An entry nobody has published for yet needs its first check, and one whose
     // commit has moved needs one against the new commit.
-    const was =
-      previous === undefined || previous.headSha !== entry.headSha
-        ? null
-        : turnStateOf(before!, previous.state);
-    if (was === now) continue;
+    const unsaid = previous === undefined || previous.headSha !== entry.headSha;
+    // The reason is part of what the check says, so it is part of what counts as
+    // a change. Comparing turn alone left a pull request whose review landed and
+    // whose branch then conflicted reading the sentence about the review, since
+    // it had been waiting both times and nothing republished.
+    //
+    // The waiting count is deliberately not compared. It moves whenever anyone
+    // joins or leaves, and publishing the whole queue for that would be one
+    // GitHub request per entry per command.
+    const said = unsaid
+      ? null
+      : { state: turnStateOf(before!, previous.state), reason: previous.primaryReason, halt: haltReasonOf(before!) };
+    if (said !== null && said.state === now && said.reason === entry.primaryReason && said.halt === halted) continue;
 
     updates.push({
       entryId: entry.entryId,
@@ -184,6 +298,8 @@ export function turnCheckUpdates(before: QueueSnapshot | null, after: QueueSnaps
       headSha: entry.headSha,
       state: now,
       waiting,
+      primaryReason: entry.primaryReason,
+      haltReason: now === "halted" ? halted : null,
     });
   }
   return updates;
