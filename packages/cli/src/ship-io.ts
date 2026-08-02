@@ -18,7 +18,12 @@ export interface ShipPorts {
   /** Reads the world. Called once per loop turn, because it changes underneath us. */
   observe(): Promise<ShipState>;
   runSuites(): Promise<{ ok: boolean; reasonCode?: string }>;
-  push(): Promise<void>;
+  /**
+   * Reports a refusal rather than throwing one. Attaching the proof rewrote the
+   * commit, so a rejected push is an expected outcome of the step before it, and
+   * letting git's error escape ended the process on a stack trace and exit 1.
+   */
+  push(): Promise<{ reasonCode?: string }>;
   openOrUpdatePullRequest(): Promise<{ pullRequestNumber: number }>;
   joinQueue(): Promise<{ reasonCode?: string }>;
   /**
@@ -124,8 +129,7 @@ async function perform(ports: ShipPorts, step: string): Promise<{ reasonCode?: s
       return result.ok ? {} : { reasonCode: result.reasonCode ?? "SUITE_FAILED" };
     }
     case "push":
-      await ports.push();
-      return {};
+      return ports.push();
     case "open-or-update-pr":
       await ports.openOrUpdatePullRequest();
       return {};
