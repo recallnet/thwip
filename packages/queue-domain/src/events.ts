@@ -135,6 +135,12 @@ export type QueueEvent = EventEnvelope &
         readonly type: "AttemptTerminated";
         readonly attemptId: string;
         readonly outcome: AttemptOutcome;
+        /**
+         * How long the entry waits before it competes again, for an outcome that
+         * defers. Optional because terminations written before this field existed
+         * do not carry one, and those entries are Deferred with no cooldown.
+         */
+        readonly cooldownUntil?: string;
       }
     | {
         readonly type: "TransitionRecorded";
