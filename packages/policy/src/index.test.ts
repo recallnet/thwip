@@ -66,14 +66,16 @@ policy:
     }
   });
 
-  it("refuses the two that need a receipt nothing signs", async () => {
+  /**
+   * These two were refused while nothing signed an integration receipt. The
+   * queue issues a signed assignment now, the device signs a receipt over the
+   * tree it built, and the merge gate refuses without one, so selecting them
+   * delivers what their names claim.
+   */
+  it("accepts the two that require an integration receipt", async () => {
     for (const profile of ["fresh", "audited"]) {
-      await expect(derive(profile), profile).rejects.toThrow(/integration receipt/i);
+      await expect(derive(profile), profile).resolves.toBeDefined();
     }
-  });
-
-  it("says what to use instead, rather than only saying no", async () => {
-    await expect(derive("fresh")).rejects.toThrow(/remote/);
   });
 
   it("still refuses a profile that is not one at all", async () => {
