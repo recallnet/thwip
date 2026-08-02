@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node ../../scripts/generate-prompt-docs.mjs && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "deploy:staging": "pnpm -w -r build && node ../../scripts/predeploy.mjs && wrangler deploy --env staging --var BUILD_SHA:\"$(node ../../scripts/build-sha.mjs)\"",
+    "deploy:staging": "pnpm -w -r build && node ../../scripts/predeploy.mjs --env staging && wrangler deploy --env staging --var BUILD_SHA:\"$(node ../../scripts/build-sha.mjs)\"",
     "dev": "wrangler dev --env staging",
     "test:workers": "vitest run --config vitest.workers.config.ts"
   },

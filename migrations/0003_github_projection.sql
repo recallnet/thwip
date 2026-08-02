@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- GitHub organization projection extensions: installation linkage, org roles,
 -- Better Auth linkage, teams, team membership, and team repo permissions.
 ALTER TABLE organizations ADD COLUMN installation_id TEXT;

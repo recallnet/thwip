@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 ALTER TABLE policy_bundles ADD COLUMN source_ref TEXT;
 ALTER TABLE policy_bundles ADD COLUMN source_sha TEXT;
 

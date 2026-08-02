@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- App-native proof verification and organization-managed defaults.
 --
 -- Repository thwip.yaml remains authoritative when present. The organization

@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Move candidate verdicts and dispatch claims out of the Durable Object.
 --
 -- Both lived in the object's own SQLite, so the merge workflow woke the

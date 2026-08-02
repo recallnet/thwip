@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- migrations/0017_chain_publication.sql
 --
 -- Publication is opt-in, per project. A chain names pull request numbers, head

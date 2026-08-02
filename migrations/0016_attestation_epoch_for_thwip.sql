@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Link 42 is the first signed record on this repository's chain.
 --
 -- Everything below it is a merge commit id padded with zeroes, written before
