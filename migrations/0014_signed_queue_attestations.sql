@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- The queue's signed records, kept by the digest that names them.
 --
 -- Until now a chain link was the merge commit id padded out to look like a

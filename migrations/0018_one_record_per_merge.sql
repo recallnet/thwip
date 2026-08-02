@@ -1,3 +1,10 @@
+-- DEPLOY ORDER: after-worker
+--
+-- The one migration in this directory that goes after the Worker that ships
+-- with it. The unique index below refuses the second record for a merge, and a
+-- recording path that does not expect that refusal turns it into a failed
+-- merge. Deploy the Worker that catches the constraint, then apply this.
+--
 -- Two racing merge runs each signed their own record for one merge, so the
 -- chain carried two links claiming one position (sequence 47). Recording
 -- looked for an existing record before signing, which narrows that window

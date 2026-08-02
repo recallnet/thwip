@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- migrations/0015_service_key_history.sql
 -- Every key the service has ever signed with.
 --

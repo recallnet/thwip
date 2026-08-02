@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Let the projection answer a dashboard read on its own.
 --
 -- The projection was built so organization-wide reads never have to touch a

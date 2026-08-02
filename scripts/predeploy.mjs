@@ -17,8 +17,24 @@
  * left unbuilt ships the previous version of itself. That put a worker live
  * whose protocol did not know a record kind the same commit had added, and the
  * queue — correctly — refused to sign anything and stopped merging.
+ * The fourth mistake is the database. Code shipped against a schema that had
+ * not been migrated: 0020 and 0021 sat unapplied on staging while the Worker
+ * reading their tables was live, and `/authorize` under the `fresh` profile
+ * answered 500 for four deploys. Each migration now declares which side of the
+ * deploy it belongs on, and the block below refuses while one the code needs is
+ * still pending. See `scripts/schema-guard.mjs` for why that is a declaration
+ * rather than a rule.
  */
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import {
+  blockingMigrations,
+  formatSchemaRefusal,
+  parseUnappliedMigrations,
+  readMigrations,
+  undeclaredMigrations,
+} from "./schema-guard.mjs";
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
@@ -72,4 +88,56 @@ if (branch !== "main") {
     );
     process.exit(1);
   }
+}
+
+// --- The database the code is about to run against -------------------------
+
+const envArgIndex = process.argv.indexOf("--env");
+const targetEnv = envArgIndex === -1 ? "staging" : (process.argv[envArgIndex + 1] ?? "staging");
+const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
+const migrations = readMigrations(migrationsDir);
+
+const undeclared = undeclaredMigrations(migrations);
+if (undeclared.length > 0) {
+  console.error(
+    `\nRefusing: these migrations do not say which side of the deploy they belong on:\n` +
+      undeclared.map((name) => `  ${name}`).join("\n") +
+      `\n\nAdd "-- DEPLOY ORDER: before-worker" or "-- DEPLOY ORDER: after-worker" as the first line.`,
+  );
+  process.exit(1);
+}
+
+let listing = null;
+try {
+  listing = execFileSync("wrangler", ["d1", "migrations", "list", "DB", "--env", targetEnv, "--remote"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+} catch (error) {
+  listing = null;
+  console.error(`\nCould not ask ${targetEnv} which migrations it has: ${error.message.split("\n")[0]}`);
+}
+
+const unapplied = listing === null ? null : parseUnappliedMigrations(listing);
+if (unapplied === null) {
+  // An unreadable answer is not a clean one. Reading it as "nothing pending" is
+  // the exact shape of the failure this check was added for.
+  if (!allow) {
+    console.error(
+      `\nRefusing: the ${targetEnv} database could not be read, so nothing here knows whether the schema\n` +
+        `is ahead of or behind this code. Fix the wrangler credentials, or set THWIP_DEPLOY_ANYWAY=1.`,
+    );
+    process.exit(1);
+  }
+} else {
+  const blockers = blockingMigrations(migrations, unapplied);
+  if (blockers.length > 0 && !allow) {
+    console.error(`\n${formatSchemaRefusal(blockers, targetEnv)}`);
+    process.exit(1);
+  }
+  const deferred = unapplied.filter((name) => !blockers.includes(name));
+  console.log(
+    `schema: ${targetEnv} is ${unapplied.length === 0 ? "level with this tree" : `missing ${unapplied.length} migration(s)`}` +
+      (deferred.length > 0 ? `, ${deferred.length} of which apply after this deploy: ${deferred.join(", ")}` : ""),
+  );
 }

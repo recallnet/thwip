@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- A projected transition may not know when it was observed.
 --
 -- The Durable Object only began recording the observation time of a transition

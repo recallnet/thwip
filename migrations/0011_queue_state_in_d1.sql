@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- The queue's authoritative state, moved out of the Durable Object.
 --
 -- One row per branch queue, holding the whole document the reducer works on.

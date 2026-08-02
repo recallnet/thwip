@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- The projection needs each entry's head commit.
 --
 -- A check can be answered from the projection when it is plainly not this pull
