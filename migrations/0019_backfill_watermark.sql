@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- The backfill's query had no WHERE and no cursor: it read the same oldest
 -- page every run, copied it, and reported nothing left even though rows past
 -- the page limit had never been touched. A backlog larger than one page

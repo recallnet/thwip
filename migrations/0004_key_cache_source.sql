@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- device_keys is a cache of keys seen in proofs plus an organization deny
 -- list, not a key directory: GitHub owns the key-to-identity binding. Record
 -- where each row came from so the dashboard never presents a cached or

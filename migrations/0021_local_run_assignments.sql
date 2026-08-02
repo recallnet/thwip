@@ -1,3 +1,5 @@
+-- DEPLOY ORDER: before-worker
+--
 -- What the queue dispatched to a developer's own machine, and what came back
 -- (plan.md 19.3, 21.1).
 --
@@ -7,10 +9,10 @@
 -- no row here for the attempt, or the row carries no accepted receipt, or the
 -- receipt is about another tree or another device.
 --
--- DEPLOY ORDER: this migration goes before the Worker that reads it, like 0015,
--- 0017, 0019 and 0020. 0018 is the one exception in this directory and it goes
--- after its Worker, for the reason its own header gives. A Worker deployed
--- ahead of this file would throw on every claim instead of refusing one.
+-- A Worker deployed ahead of this file throws on every claim instead of
+-- refusing one, which is how staging spent four deploys answering 500 on the
+-- `fresh` path. `scripts/schema-guard.mjs` reads the header above and the
+-- deploy refuses while this is unapplied.
 --
 -- The receipt lives in the same row as the assignment rather than in a table of
 -- its own, because a receipt with no assignment is not a thing the system has a

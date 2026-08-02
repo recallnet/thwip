@@ -1,3 +1,4 @@
+-- DEPLOY ORDER: before-worker
 -- Thwip Queue projection (plan.md §41.1).
 -- The Durable Object is live authority; these tables serve organization-wide
 -- reads, the dashboard, and exports, and may lag behind the object.

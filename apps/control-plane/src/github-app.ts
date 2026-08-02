@@ -1,5 +1,6 @@
 import { SignJWT, importPKCS8 } from "jose";
 import type { Env } from "./env.js";
+import { GithubApiError } from "./github-error.js";
 
 const API = "https://api.github.com";
 
@@ -24,7 +25,7 @@ async function gh<T>(token: string, path: string, init?: RequestInit): Promise<T
       ...(init?.headers ?? {}),
     },
   });
-  if (!res.ok) throw new Error(`GitHub ${path} -> ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new GithubApiError(path, res.status, await res.text());
   return res.json() as Promise<T>;
 }
 
@@ -69,7 +70,17 @@ export async function installationToken(env: Env, installationId: string): Promi
 }
 
 export async function listInstallations(env: Env): Promise<
-  Array<{ id: number; account: { id: number; login: string; type: string }; repository_selection: string }>
+  Array<{
+    id: number;
+    account: { id: number; login: string; type: string };
+    repository_selection: string;
+    permissions?: Record<string, string>;
+    /**
+     * What this installation actually delivers. Absent on older responses, and
+     * a caller must not read that absence as "subscribed to nothing".
+     */
+    events?: string[];
+  }>
 > {
   const jwt = await appJwt(env);
   return gh(jwt, `/app/installations`);

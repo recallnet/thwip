@@ -6,6 +6,7 @@ import {
 } from "@thwip/policy";
 import { canonicalJson } from "@thwip/protocol";
 import { installationToken } from "./github-app.js";
+import { GithubApiError } from "./github-error.js";
 import type { Env } from "./env.js";
 
 const API = "https://api.github.com";
@@ -25,7 +26,7 @@ async function githubJson<T>(token: string, path: string): Promise<T> {
       "user-agent": "thwip-control-plane",
     },
   });
-  if (!response.ok) throw new Error(`GitHub ${path} -> ${response.status}: ${await response.text()}`);
+  if (!response.ok) throw new GithubApiError(path, response.status, await response.text());
   return response.json() as Promise<T>;
 }
 
