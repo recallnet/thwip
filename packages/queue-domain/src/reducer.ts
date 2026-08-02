@@ -380,13 +380,21 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       const entry = requireEntry(state, event.entryId);
       const primary = checkReason(event.primaryReason);
       for (const secondary of event.secondaryReasons) checkReason(secondary);
+
+      // A finished entry takes nothing from a readiness evaluation, not even
+      // the reason it carries. This used to guard the state alone, and write
+      // the reason and eligibility first, so a heartbeat could report a
+      // permanently Cancelled entry as ready to run and erase the reason it
+      // was not running. Terminal means terminal, everywhere.
+      if (entry.state === "Merged" || entry.state === "Cancelled") break;
+
       entry.primaryReason = primary;
       entry.secondaryReasons = [...event.secondaryReasons];
       // A capability reason suppresses scheduling without unsetting readiness,
       // so an offline laptop keeps its place (plan.md §7.1).
       entry.schedulerEligible = event.schedulerEligible;
       const capabilityOnly = primary !== null && isCapabilityReason(primary);
-      if (entry.currentAttemptId === null && entry.state !== "Merged" && entry.state !== "Cancelled") {
+      if (entry.currentAttemptId === null) {
         if (event.ready || capabilityOnly) {
           // A deferred entry returns to Ready once its cooldown has elapsed
           // (§9.3 "cooldown complete and capable"). Without this edge an entry
