@@ -156,7 +156,16 @@ export function classifyMergeResponse(response: {
     };
   }
   if (response.status === 409 || response.status === 405 || response.status === 422) {
-    return { kind: "rejected", reason: response.body?.message ?? `status ${response.status}` };
+    const message = response.body?.message ?? `status ${response.status}`;
+    // The base moved between the intent being signed and the write. GitHub
+    // refuses a ref update that is not a fast forward, which is the one way to
+    // say "merge only onto the base this candidate was verified against". It is
+    // named rather than folded into the other refusals, because what follows is
+    // a new turn against a new base, not another try at this one.
+    if (/not a fast forward/i.test(message)) {
+      return { kind: "rejected", reason: `BASE_MOVED: ${message}` };
+    }
+    return { kind: "rejected", reason: message };
   }
   return { kind: "unknown", reason: `unhandled status ${response.status}` };
 }
