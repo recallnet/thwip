@@ -69,7 +69,17 @@ export async function installationToken(env: Env, installationId: string): Promi
 }
 
 export async function listInstallations(env: Env): Promise<
-  Array<{ id: number; account: { id: number; login: string; type: string }; repository_selection: string }>
+  Array<{
+    id: number;
+    account: { id: number; login: string; type: string };
+    repository_selection: string;
+    permissions?: Record<string, string>;
+    /**
+     * What this installation actually delivers. Absent on older responses, and
+     * a caller must not read that absence as "subscribed to nothing".
+     */
+    events?: string[];
+  }>
 > {
   const jwt = await appJwt(env);
   return gh(jwt, `/app/installations`);
