@@ -4,6 +4,8 @@ import type { D1Like } from "./projection.js";
 import { DEFAULT_TIMINGS } from "./commands.js";
 import {
   GRACE_SECONDS,
+  deviceKeyClaimedByAnother,
+  enrolDeviceKey,
   HEARTBEAT_INTERVAL_SECONDS,
   SWEEP_INTERVAL_SECONDS,
   isPrincipalConnected,
@@ -141,5 +143,48 @@ describe("retireStaleRunners", () => {
     const later = new Date(new Date(T0).getTime() + (GRACE_SECONDS + 1) * 1000).toISOString();
     expect(await retireStaleRunners(db, REPO, later)).toEqual([]);
     expect(await isPrincipalConnected(db, "other_repo", "alice", later)).toBe(false);
+  });
+});
+
+/**
+ * What a device key is called, and why it can only be one thing.
+ *
+ * Every reader of `device_keys` looks a key up by `key_id` holding a
+ * fingerprint: the receipt route resolves the key a device signed with, the
+ * heartbeat route checks the key is not somebody else's or revoked, and the
+ * verification bundle caches GitHub-published keys under it. Enrolment minted
+ * its own `key_...` id instead, so a key enrolled through `POST /v1/devices`
+ * answered none of those lookups — and because the fingerprint column is
+ * unique, its row also kept the bundle from ever caching the same key under the
+ * id the readers do use. The documented way to enrol a device produced a key
+ * that could not sign anything this deployment would accept.
+ */
+describe("enrolDeviceKey", () => {
+  const PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0000000000000000000000000000000000000000 laptop";
+
+  it("names an enrolled key by its fingerprint, which is what every reader looks it up by", async () => {
+    const db = d1();
+    const enrolled = await enrolDeviceKey(db, { githubUserId: "1", publicKey: PUBLIC_KEY, label: "laptop" });
+    expect(enrolled).not.toBeNull();
+    expect(enrolled!.keyId).toBe(enrolled!.fingerprint);
+
+    const row = await db
+      .prepare("SELECT github_user_id AS githubUserId FROM device_keys WHERE key_id = ?")
+      .bind(enrolled!.fingerprint)
+      .first<{ githubUserId: string }>();
+    expect(row?.githubUserId).toBe("1");
+  });
+
+  it("lets the heartbeat route recognize the key it just enrolled", async () => {
+    const db = d1();
+    const enrolled = await enrolDeviceKey(db, { githubUserId: "1", publicKey: PUBLIC_KEY, label: "laptop" });
+    expect(await deviceKeyClaimedByAnother(db, enrolled!.keyId, "1")).toBe(false);
+    expect(await deviceKeyClaimedByAnother(db, enrolled!.keyId, "2")).toBe(true);
+  });
+
+  it("refuses a key already enrolled, rather than issuing a second id for it", async () => {
+    const db = d1();
+    await enrolDeviceKey(db, { githubUserId: "1", publicKey: PUBLIC_KEY, label: "laptop" });
+    expect(await enrolDeviceKey(db, { githubUserId: "1", publicKey: PUBLIC_KEY, label: "again" })).toBeNull();
   });
 });

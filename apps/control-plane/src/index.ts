@@ -17,7 +17,7 @@ import { mintRunLease } from "./run-lease.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
-import { capabilityFor, requiresDeviceOnly } from "./queue/runners.js";
+import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
 import { foldCapability } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
@@ -860,19 +860,16 @@ app.post("/v1/devices", async (c) => {
   });
   if (!popOk) return c.json({ error: "proof of possession failed" }, 400);
 
-  const keyId = randomId("key");
-  const fingerprint = await sha256Fingerprint(body.publicKey);
-  const algorithm = body.publicKey.trim().split(/\s+/)[0]!;
-  try {
-    await c.env.DB.prepare(
-      "INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-      .bind(keyId, githubUserId, algorithm, body.publicKey.trim(), fingerprint, body.label ?? "device")
-      .run();
-  } catch {
-    return c.json({ error: "key already enrolled" }, 409);
-  }
-  return c.json({ keyId, fingerprint, githubUserId });
+  // The key is its own name. Minting a separate identifier here produced keys
+  // nothing could look up: every reader of `device_keys` resolves a key by
+  // `key_id` holding a fingerprint.
+  const enrolled = await enrolDeviceKey(c.env.DB as unknown as D1Like, {
+    githubUserId,
+    publicKey: body.publicKey,
+    label: body.label ?? "device",
+  });
+  if (enrolled === null) return c.json({ error: "key already enrolled" }, 409);
+  return c.json({ keyId: enrolled.keyId, fingerprint: enrolled.fingerprint, githubUserId });
 });
 
 app.post("/v1/devices/:keyId/revoke", async (c) => {

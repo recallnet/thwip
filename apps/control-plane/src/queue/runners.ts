@@ -1,4 +1,5 @@
 import type { D1Like } from "./projection.js";
+import { sha256Fingerprint } from "../sshsig-verify.js";
 
 /**
  * Runner liveness: is a connected machine here to take a `fresh` turn (plan.md §5.0).
@@ -97,11 +98,11 @@ export function requiresDeviceOnly(securityProfile: string | null): boolean {
  * The two shapes a device id can have in this deployment.
  *
  * `thwip queue work` sends the fingerprint of the signing key it also signs
- * proofs with, and `verification-bundle.ts` caches GitHub-published keys with
- * `key_id = fingerprint`, so `SHA256:` plus 43 base64 characters is the shape
- * a real runner carries. `key_` plus 32 hex is the legacy enrollment id that
- * `/v1/devices/enroll` mints (`randomId("key")`), still valid for a machine
- * enrolled before keys came from GitHub.
+ * proofs with, `verification-bundle.ts` caches GitHub-published keys with
+ * `key_id = fingerprint`, and `enrolDeviceKey` now stores an enrolled key the
+ * same way, so `SHA256:` plus 43 base64 characters is the shape every key
+ * issued today carries. `key_` plus 32 hex is the identifier enrolment used to
+ * mint, still accepted for a machine enrolled while it did.
  *
  * This is a bound on damage, not an authorization check. A device id becomes
  * part of `queue_runners`'s primary key, so every distinct string the route
@@ -139,6 +140,42 @@ export async function deviceKeyClaimedByAnother(
     .first<{ githubUserId: string; revokedAt: string | null }>();
   if (row === null) return false;
   return row.revokedAt !== null || row.githubUserId !== githubUserId;
+}
+
+/**
+ * Enrol a device key, under the only name anything reads it by.
+ *
+ * `device_keys.key_id` holds a fingerprint everywhere else: the receipt route
+ * resolves a signing key by it, the heartbeat route checks ownership and
+ * revocation by it, and `verification-bundle.ts` caches GitHub-published keys
+ * with `key_id = fingerprint`. Enrolment used to mint a `key_...` identifier of
+ * its own, so an enrolled key answered none of those lookups, and — because the
+ * fingerprint column is unique — its row also blocked the bundle from ever
+ * caching the same key under the id the readers do use. Enrolling a device made
+ * that device permanently unusable.
+ *
+ * Null when this key is already enrolled. There is nothing to issue: the key is
+ * its own name, so a second enrolment would be the same row.
+ */
+export async function enrolDeviceKey(
+  db: D1Like,
+  input: { githubUserId: string; publicKey: string; label: string },
+): Promise<{ keyId: string; fingerprint: string } | null> {
+  const publicKey = input.publicKey.trim();
+  const fingerprint = await sha256Fingerprint(publicKey);
+  const algorithm = publicKey.split(/\s+/)[0] ?? "unknown";
+  try {
+    await db
+      .prepare(
+        `INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label, source)
+         VALUES (?, ?, ?, ?, ?, ?, 'enrolled')`,
+      )
+      .bind(fingerprint, input.githubUserId, algorithm, publicKey, fingerprint, input.label)
+      .run();
+  } catch {
+    return null;
+  }
+  return { keyId: fingerprint, fingerprint };
 }
 
 /**
