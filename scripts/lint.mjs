@@ -34,18 +34,29 @@ for (const f of workerSources) {
   }
 }
 
-if (failures > 0) {
-  console.error(`lint: ${failures} problem(s)`);
-  process.exit(1);
-}
 // Workflows must parse. One that does not is silently not run by GitHub, which is
-// worse than one that fails — I shipped exactly that mistake once.
+// worse than one that fails — I shipped exactly that mistake once. And a workflow
+// that moves a branch ref must serialise on the queue it drives.
+//
+// Reported like every other problem here rather than thrown. A stack trace tells
+// a reader where the check lives; the message tells them what is wrong with their
+// workflow, and that is the part worth reading.
 {
   const dir = ".github/workflows";
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"))) {
     const path = `${dir}/${f}`;
-    validateWorkflow(path, readFileSync(path, "utf8"));
+    try {
+      validateWorkflow(path, readFileSync(path, "utf8"));
+    } catch (e) {
+      console.error(`lint: ${e.message}`);
+      failures++;
+    }
   }
+}
+
+if (failures > 0) {
+  console.error(`lint: ${failures} problem(s)`);
+  process.exit(1);
 }
 
 console.log("lint: ok");

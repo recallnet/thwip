@@ -222,17 +222,23 @@ on:
   repository_dispatch:
     types: [thwip-queue-turn]
 
-# One merge run per pull request, not one per trigger. The drain re-runs every
-# blocked check at once, and each of those fires a merge run; without this the
-# same pull request gets several, all asking the queue the same question and each
-# waiting up to thirty minutes on the same verdict.
+# One merge run at a time, because there is one lane at a time.
 #
-# Keyed per pull request rather than globally, so two different pull requests
-# still make progress at the same time. The queue decides which of them may
-# merge; this only stops us asking twice about one of them.
+# This was keyed per pull request, and a pull request is not what is being
+# serialised. The lane belongs to a base branch: one pull request holds it, is
+# integrated against the base, verified, and merged, and nothing else merges
+# meanwhile. Two pull requests meant two groups meant two runs driving one lane.
+#
+# The group cannot name the base ref as well. This workflow is reached by two
+# triggers, repository_dispatch carries only a pull request number and
+# workflow_run carries a base ref only for same-repository pull requests, so
+# reading the base here would put two triggers for one lane into two groups. A
+# group keyed on the repository holds every lane in it: a repository with two
+# queues merges a little slower and never merges twice at once.
 concurrency:
-  group: >-
-    thwip-merge-\${{ github.event.client_payload.pullRequestNumber || github.event.workflow_run.head_sha }}
+  group: thwip-merge-\${{ github.repository }}
+  # Never cancel. A run past the ref update has moved the branch and has not yet
+  # told the queue, and a cancel there is a merge with no transition record.
   cancel-in-progress: false
 
 permissions:
