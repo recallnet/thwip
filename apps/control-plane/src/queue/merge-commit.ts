@@ -58,3 +58,17 @@ export function queueAttributionTrailer(operationId: string): string {
 export function mergeCommitMessage(operationId: string): string {
   return `Integrated by Thwip Queue.\n\n${queueAttributionTrailer(operationId)}\n`;
 }
+
+/**
+ * The whole message of a merge commit the queue writes itself.
+ *
+ * GitHub's merge-pull-request API takes a title and a body and joins them. A git
+ * commit has one message, so a merge written through the git data API has to do
+ * the joining, and the result must be the same text either route produced —
+ * otherwise the commit that lands under one route reads differently from the
+ * commit that lands under the other, and the trailer everything downstream keys
+ * on moves.
+ */
+export function mergeCommitText(pullRequestNumber: number, operationId: string): string {
+  return `${mergeCommitTitle(pullRequestNumber)}\n\n${mergeCommitMessage(operationId)}`;
+}
