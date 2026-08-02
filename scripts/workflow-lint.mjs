@@ -20,6 +20,7 @@ export function validateWorkflow(filename, source) {
   }
 
   checkLaneConcurrency(filename, source, workflow);
+  checkMergeBindsBase(filename, source);
 }
 
 // A PATCH or POST to git/refs/heads is a branch moving, which is what a merge is.
@@ -73,6 +74,66 @@ function checkLaneConcurrency(filename, source, workflow) {
     throw new Error(
       `${filename}: cancel-in-progress must be false; cancelling a run mid-merge can ` +
         `move the branch with nothing recording that it moved`,
+    );
+  }
+}
+
+// The merge-pull-request API. It takes an expected head and no expected base.
+const MERGE_PULL_REQUEST_API = /pulls\/[^"'\s]+\/merge/;
+
+// The pins the queue answers `authorize` with: the base the intent bound, the
+// tree the verifier ran, and the parents the merge commit gets.
+const PINNED_BASE = /merge\.baseSha/;
+const PINNED_TREE = /merge\.treeOid/;
+const PINNED_PARENTS = /merge\.parentShas/;
+
+const FORCE_FALSE = /force\s*:\s*false/;
+const FORCE_TRUE = /force\s*:\s*true/;
+
+/**
+ * A merge lands the tree that was verified, on the base it was verified against.
+ *
+ * GitHub's merge-pull-request API cannot say that. It takes an expected head and
+ * nothing about the base, so it merges onto whatever the branch is at that
+ * instant. Pull requests 114, 117, 119 and 121 were each signed against one base
+ * and merged onto another, each producing a tree no suite had run, and GitHub
+ * reported all four as successes.
+ *
+ * The only base-binding primitive GitHub offers is a ref update without force:
+ * it succeeds only where the branch is an ancestor of the new commit, and the
+ * only branch that is an ancestor of a commit whose first parent is the pinned
+ * base is that base. So a workflow that merges composes the commit from what the
+ * queue pinned and moves the ref without force, and this is what says so.
+ */
+function checkMergeBindsBase(filename, source) {
+  if (MERGE_PULL_REQUEST_API.test(source)) {
+    throw new Error(
+      `${filename}: merges through the pull-request merge API, which takes an expected head and no ` +
+        `expected base, so it merges onto whatever the branch is at that moment; compose the merge ` +
+        `commit on the base the queue pinned and move the ref with force:false`,
+    );
+  }
+
+  if (!MOVES_A_REF.test(source)) return;
+
+  if (FORCE_TRUE.test(source)) {
+    throw new Error(
+      `${filename}: moves a branch ref with force; the update that does not force is the whole ` +
+        `guard, because it is what makes GitHub refuse a base that moved`,
+    );
+  }
+  if (!FORCE_FALSE.test(source)) {
+    throw new Error(
+      `${filename}: moves a branch ref without saying force:false; GitHub defaults to it, and a ` +
+        `merge whose only guard is a default is a merge whose author did not decide`,
+    );
+  }
+
+  if (!PINNED_BASE.test(source) || !PINNED_TREE.test(source) || !PINNED_PARENTS.test(source)) {
+    throw new Error(
+      `${filename}: moves a branch ref to a commit it did not compose on the base the queue pinned; ` +
+        `read merge.baseSha, merge.treeOid and merge.parentShas from the authorize answer, because a ` +
+        `base this run read for itself is not the base the record binds`,
     );
   }
 }
