@@ -166,6 +166,37 @@ describe("the heartbeat endpoint", () => {
     expect(entry?.primaryReason).toBe("AGENT_OFFLINE");
   });
 
+  /**
+   * A cancelled entry is finished. The reducer has said so since a merged entry
+   * was flipped to Cancelled by a late eject, and this path went around it: the
+   * heartbeat re-derived readiness onto whatever carried AGENT_OFFLINE, so a
+   * permanently cancelled entry came back from a heartbeat claiming to be
+   * schedulable with nothing blocking it.
+   */
+  it("leaves a cancelled entry finished", async () => {
+    const e = env();
+    queueProject();
+    const db = e.DB as unknown as D1Like;
+    await readyButOffline(db, "entry_a", "alice", 41);
+    await withQueueState(db, REPO, REF, (store) => {
+      commandsFor(store).cancel({
+        idempotencyKey: "cancel-entry-a",
+        entryId: "entry_a",
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    const response = await heartbeat(routes("alice"), e);
+    expect(response.status).toBe(200);
+
+    const snapshot = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    const entry = snapshot.entries.find((x) => x.entryId === "entry_a");
+    expect(entry?.state).toBe("Cancelled");
+    expect(entry?.schedulerEligible).toBe(false);
+    expect(entry?.primaryReason).toBe("AGENT_OFFLINE");
+  });
+
   it("reports holding an offer in the same call once the entry has been offered a turn", async () => {
     const e = env();
     queueProject();
