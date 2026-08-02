@@ -415,6 +415,53 @@ describe("the tick offers a turn, not just advances the clock", () => {
     });
   }
 
+  /**
+   * A Deferred entry with no cooldown at all, which is where PR 118 sat: it
+   * forfeited a turn, the termination that ended the turn carried no cooldown,
+   * and the entry kept `schedulerEligible` true with `primaryReason` and
+   * `cooldownUntil` null beside an idle lane. Nothing but a `pull_request`
+   * webhook moved it, and the App was not subscribed to those, so nothing did.
+   *
+   * The termination is appended rather than commanded so this stays the shape
+   * the live history has, now that `terminateAttempt` stamps a cooldown.
+   */
+  async function deferredWithNoCooldown(
+    db: D1Like,
+    repositoryId: string,
+    entryId: string,
+    principal: string,
+    pr: number,
+  ): Promise<void> {
+    await withQueueState(db, repositoryId, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.requestQueue({
+        idempotencyKey: `req-${entryId}`,
+        entryId,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: principal,
+        sponsorGithubUserId: pr.toString(),
+        headSha: "h".repeat(40),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: `ready-${entryId}`,
+        entryId,
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+      const offer = commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+      const attemptId = (offer as { attemptId?: string }).attemptId;
+      if (attemptId === undefined) throw new Error("test setup expected an offer");
+      store.append({
+        idempotencyKey: `terminate-${entryId}`,
+        at: new Date().toISOString(),
+        type: "AttemptTerminated",
+        attemptId,
+        outcome: "HEAD_MOVED",
+      });
+    });
+  }
+
   it("offers and drives the turn of a Ready entry sitting behind an idle lane", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
@@ -453,6 +500,30 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(entryFrom(after, "entry_a")?.state).not.toBe("Deferred");
+    expect(["Offered", "Active"]).toContain(entryFrom(after, "entry_a")?.state);
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+  });
+
+  it("un-sticks a Deferred entry with no cooldown at all, and offers it a turn", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await deferredWithNoCooldown(db, "1", "entry_a", "alice", 118);
+
+    const before = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(before, "entry_a")?.state).toBe("Deferred");
+    expect(entryFrom(before, "entry_a")?.cooldownUntil).toBeNull();
+    expect(entryFrom(before, "entry_a")?.schedulerEligible).toBe(true);
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(["Offered", "Active"]).toContain(entryFrom(after, "entry_a")?.state);
     expect(drives).toBe(1);
     expect(result.driven).toBe(1);

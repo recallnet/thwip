@@ -571,44 +571,63 @@ function dump(store: AnyStore): unknown {
 }
 
 /**
- * An entry that forfeited a turn is Deferred with a cooldown, and it used to
- * return to Ready only when an external readiness call arrived. With nothing
- * calling, four entries sat Deferred past their cooldown while the lane was free
- * and the queue reported no eligible entry.
+ * An entry that forfeited a turn is Deferred, and it used to return to Ready
+ * only when a readiness evaluation arrived from a GitHub webhook. With nothing
+ * calling, PR 118 sat Deferred with no cooldown beside an idle lane for forty
+ * minutes and every tick answered "no eligible entry".
+ *
+ * These call `eligibleEntries()` and `nextTurn()`. The tests they replace spelled
+ * the filter predicate out again inside the assertion, so they passed whatever
+ * the store actually did.
  */
-describe.each(IMPLEMENTATIONS)("$name: a cooled-down entry competes again on its own", ({ backing, open }) => {
-  it("is eligible once its cooldown is set, and the scheduler applies the clock", () => {
-    const store = open(backing(), IDENTITY);
-    request(store, "e1", "alice", 7);
+describe.each(IMPLEMENTATIONS)("$name: a deferred entry competes again on its own", ({ backing, open }) => {
+  const DIGEST = `sha256:${"0".repeat(64)}`;
+
+  /** Offer `entryId` a turn, then end it with an outcome that defers. */
+  function forfeitATurn(store: AnyStore, entryId: string, cooldownUntil?: string): void {
     store.append(
       ev({
-        type: "ReadinessEvaluated",
-        entryId: "e1",
-        ready: false,
-        schedulerEligible: true,
-        primaryReason: "COOLDOWN_ACTIVE",
-        secondaryReasons: [],
+        type: "TurnOffered",
+        entryId,
+        attemptId: `att_${entryId}`,
+        offerDeadline: "2026-07-29T12:05:00.000Z",
+        decisionDigest: DIGEST,
       }),
     );
-    const entry = store.state().entries.get("e1")!;
-    expect(entry.state).toBe("Blocked");
+    store.append(ev({ type: "AttemptTerminated", attemptId: `att_${entryId}`, outcome: "HEAD_MOVED", cooldownUntil }));
+  }
 
-    // Deferred with a cooldown is the state the live queue was stuck in.
-    const deferred = { ...entry, state: "Deferred" as const, cooldownUntil: "2026-07-31T00:49:00.000Z" };
-    const withCooldown = { ...store.state(), entries: new Map([["e1", deferred]]) };
-    expect(
-      [...withCooldown.entries.values()].filter(
-        (e) => e.schedulerEligible && (e.state === "Ready" || (e.state === "Deferred" && e.cooldownUntil !== null)),
-      ),
-    ).toHaveLength(1);
+  it("comes back on its own once the cooldown a forfeited turn left has elapsed", () => {
+    const store = open(backing(), IDENTITY);
+    request(store, "e1", "alice", 7);
+    forfeitATurn(store, "e1", "2026-07-29T12:30:00.000Z");
+
+    expect(store.state().entries.get("e1")!.state).toBe("Deferred");
+    expect(store.eligibleEntries().map((e) => e.entryId)).toEqual(["e1"]);
+    // Eligible, and still held: the cooldown is what stops a forfeited turn
+    // from being handed straight back to the entry that just gave it up.
+    expect(store.nextTurn("2026-07-29T12:10:00.000Z")).toBeNull();
+    expect(store.nextTurn("2026-07-29T12:31:00.000Z")?.entryId).toBe("e1");
   });
 
-  it("leaves a Deferred entry with no cooldown alone, so a forfeited turn is not handed straight back", () => {
-    const noCooldown = { state: "Deferred" as const, cooldownUntil: null, schedulerEligible: true };
-    const eligible =
-      noCooldown.schedulerEligible &&
-      (noCooldown.state === "Ready" ||
-        (noCooldown.state === "Deferred" && noCooldown.cooldownUntil !== null));
-    expect(eligible).toBe(false);
+  it("comes back on its own when the defer left no cooldown at all", () => {
+    const store = open(backing(), IDENTITY);
+    request(store, "e1", "alice", 7);
+    // The shape PR 118's history has: a termination written before terminations
+    // carried a cooldown, so the entry is Deferred with `cooldownUntil` null.
+    forfeitATurn(store, "e1");
+
+    const entry = store.state().entries.get("e1")!;
+    expect(entry.state).toBe("Deferred");
+    expect(entry.cooldownUntil).toBeNull();
+    expect(store.eligibleEntries().map((e) => e.entryId)).toEqual(["e1"]);
+    expect(store.nextTurn("2026-07-29T12:10:00.000Z")?.entryId).toBe("e1");
+  });
+
+  it("stamps a cooldown when a turn ends in a defer, so a re-offer is paced", () => {
+    const store = open(backing(), IDENTITY);
+    request(store, "e1", "alice", 7);
+    forfeitATurn(store, "e1", "2026-07-29T12:30:00.000Z");
+    expect(store.state().entries.get("e1")!.cooldownUntil).toBe("2026-07-29T12:30:00.000Z");
   });
 });

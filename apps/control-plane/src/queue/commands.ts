@@ -525,13 +525,18 @@ export class QueueCommands {
   }
 
   terminateAttempt(input: { idempotencyKey: string; attemptId: string; outcome: AttemptOutcome }): CommandResult {
+    const now = this.clock.now();
     return this.store.append(
       {
         idempotencyKey: input.idempotencyKey,
-        at: this.clock.now(),
+        at: now,
         type: "AttemptTerminated",
         attemptId: input.attemptId,
         outcome: input.outcome,
+        // Sent for every outcome; the reducer keeps it only for the ones that
+        // defer. Same interval an unclaimed offer serves, because it answers the
+        // same question: how long before this entry competes for the lane again.
+        cooldownUntil: plusSeconds(now, this.timings.noClaimCooldownSeconds),
       },
       {
         clearDeadlines: [

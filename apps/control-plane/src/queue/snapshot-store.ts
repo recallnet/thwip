@@ -355,14 +355,10 @@ export class SnapshotQueueStore {
   /** Entries the scheduler may consider right now (plan.md §7.1). */
   eligibleEntries(): EligibleEntry[] {
     return [...this.state().entries.values()]
-      .filter(
-        (entry) =>
-          entry.schedulerEligible &&
-          // A Deferred entry serving a cooldown comes back on its own; selectNext
-          // still enforces the cooldown, so filtering it out here would only stop
-          // the scheduler from ever seeing it.
-          (entry.state === "Ready" || (entry.state === "Deferred" && entry.cooldownUntil !== null)),
-      )
+      // Same rule as BranchQueueStore, and for the same reason: a Deferred entry
+      // competes, and selectNext holds it until its cooldown elapses. Requiring
+      // a cooldown here hid an entry that had none from the scheduler for good.
+      .filter((entry) => entry.schedulerEligible && (entry.state === "Ready" || entry.state === "Deferred"))
       .map((entry) => ({
         entryId: entry.entryId,
         sponsorPrincipalId: entry.sponsorPrincipalId,

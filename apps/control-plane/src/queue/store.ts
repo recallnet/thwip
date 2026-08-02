@@ -603,28 +603,20 @@ export class BranchQueueStore {
   eligibleEntries(): EligibleEntry[] {
     const state = this.state();
     return [...state.entries.values()]
-      // Deferred is not out of the running. An entry that forfeited a turn is
-      // Deferred with a cooldown, and it only returned to Ready when an external
-      // readiness call happened to arrive. With nothing calling, four entries sat
-      // Deferred past their cooldown and the queue reported no eligible entry
-      // while its lane was free.
+      // Deferred is not out of the running. An entry that forfeited a turn keeps
+      // its place, and the only thing that ever put it back to Ready was a
+      // readiness evaluation off a GitHub webhook. PR 118 sat Deferred with no
+      // cooldown beside an idle lane for forty minutes, and every tick, nudge
+      // and cron answered "no eligible entry"; it moved when its author force
+      // pushed, and nothing else would have moved it.
       //
-      // selectNext already takes `now` and reads cooldownUntil, so the cooldown
-      // is still enforced. This just stops filtering the candidate out before the
-      // scheduler can apply its own rule.
+      // A cooldown is not a condition of competing. selectNext takes `now` and
+      // reads cooldownUntil, so an entry still serving one cannot win the round;
+      // requiring one here only hid the entries that had none from the scheduler
+      // entirely. The reducer stamps a cooldown on every defer, so what pacing a
+      // re-offer needs is there without this filter enforcing it a second time.
       .filter(
-        (entry) =>
-          entry.schedulerEligible &&
-          (entry.state === "Ready" ||
-            // A Deferred entry that is serving a cooldown comes back on its own.
-            // It used to need an external readiness call to return to Ready, so
-            // with nothing calling, four entries sat Deferred past their cooldown
-            // while the lane was free and the queue reported no eligible entry.
-            //
-            // Only when a cooldown is actually set. Deferred with no cooldown means
-            // something else has to happen first, and re-offering immediately would
-            // hand the turn straight back to an entry that just stepped aside.
-            (entry.state === "Deferred" && entry.cooldownUntil !== null)),
+        (entry) => entry.schedulerEligible && (entry.state === "Ready" || entry.state === "Deferred"),
       )
       .map((entry) => ({
         entryId: entry.entryId,

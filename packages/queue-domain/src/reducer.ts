@@ -737,6 +737,13 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
         // the developer read depended on which sweep got there first.
         const ending = ENDING_FOR_OUTCOME[event.outcome as AttemptOutcome];
         if (ending.kind === "defer") {
+          // The cooldown is what paces a re-offer. The scheduler now considers a
+          // Deferred entry whether or not it carries one, so an entry deferred
+          // for a reason that has not gone away would otherwise be offered the
+          // lane, forfeit it, and be offered it again on the next sweep. With a
+          // cooldown it waits the same interval an unclaimed offer waits, and
+          // whatever is behind it gets the lane meanwhile.
+          entry.cooldownUntil = event.cooldownUntil ?? null;
           setEntryState(entry, "Deferred");
         } else {
           blockEntry(entry, ending.reason);
