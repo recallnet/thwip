@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
-import { setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
+import { setupPullRequestBody, setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
 import { PROOF_CHECK } from "./turn-check.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -85,12 +85,45 @@ const { validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint
   validateWorkflow: (filename: string, source: string) => void;
 };
 
+const { PRODUCTION_ENDPOINT } = (await import(join(repoRoot, "scripts/generate-workflows.mjs"))) as {
+  PRODUCTION_ENDPOINT: string;
+};
+
 describe("the generated workflows under the workflow lint", () => {
   for (const generated of files.filter((f) => f.path.startsWith(".github/workflows/"))) {
     it(`passes every rule for ${generated.path}`, () => {
       expect(() => validateWorkflow(generated.path, generated.content)).not.toThrow();
     });
   }
+});
+
+/**
+ * A squash commit has one parent and does not contain the pull request head, so
+ * the branch's own required checks refuse the ref update and GitHub cannot see
+ * that the pull request was merged. There is no other primitive to bind it with.
+ * Refusing costs a squash repository its merges; merging anyway costs everyone
+ * the one claim this queue makes.
+ */
+describe("a merge method the queue cannot bind", () => {
+  const merge = file(".github/workflows/thwip-merge.yml");
+
+  it("refuses it by name instead of performing it", () => {
+    expect(merge).toContain('if [ "$method" != "merge" ]; then');
+    expect(merge).toMatch(/::error::this repository merges by \$method/);
+  });
+
+  it("hands the lane back rather than holding it until a deadline", () => {
+    const refusal = merge.slice(merge.indexOf('if [ "$method" != "merge" ]'));
+    expect(refusal.slice(0, refusal.indexOf("exit 1"))).toContain("/not-merged");
+  });
+
+  it("says so in the pull request a repository reviews before enabling the queue", () => {
+    const body = setupPullRequestBody({
+      endpoint: "https://thwip.example.test",
+      actionRef: "recallnet/thwip@v1.2.3",
+    });
+    expect(body).toMatch(/squash/i);
+  });
 });
 
 describe("drift against this repository's own workflows", () => {
@@ -114,30 +147,22 @@ describe("drift against this repository's own workflows", () => {
     expect(generated.jobs[PROOF_CHECK]?.name).toBe(live.jobs[PROOF_CHECK]?.name);
   });
 
-  it("agrees with .github/workflows/thwip-merge.yml on its triggers", () => {
-    const live = parse(readFileSync(join(repoRoot, ".github/workflows/thwip-merge.yml"), "utf8")) as {
-      on: Record<string, unknown>;
-    };
-    const generated = parse(file(".github/workflows/thwip-merge.yml")) as { on: Record<string, unknown> };
-    expect(Object.keys(generated.on).sort()).toEqual(Object.keys(live.on).sort());
-  });
-
   /**
-   * A lane is one pull request at a time on one base branch, and the concurrency
-   * group is what GitHub enforces that with. This repository's copy is linted by
-   * scripts/workflow-lint.mjs; the generated copy is not lint's to see, so it is
-   * held to the live file instead. Adopting repositories then get the group this
-   * repository proved, rather than the one pull requests 114, 117 and 119 merged
-   * unverified trees under.
+   * The merge is not compared any more, because there is one of it.
+   *
+   * Comparing was what this test used to do, and it compared the triggers and
+   * the concurrency group while the two copies disagreed about the thing that
+   * mattered: this repository composed its merge on the base the queue pinned
+   * and every adopted repository asked GitHub to merge onto whatever the branch
+   * was. So the checked-in file is now what the template renders, byte for byte,
+   * and a change to either is a change to both.
    */
-  it("agrees with .github/workflows/thwip-merge.yml on the lane", () => {
-    type Concurrency = { group: string; "cancel-in-progress": boolean };
-    const live = parse(readFileSync(join(repoRoot, ".github/workflows/thwip-merge.yml"), "utf8")) as {
-      concurrency: Concurrency;
-    };
-    const generated = parse(file(".github/workflows/thwip-merge.yml")) as { concurrency: Concurrency };
-    expect(generated.concurrency.group).toBe(live.concurrency.group);
-    expect(generated.concurrency["cancel-in-progress"]).toBe(false);
-    expect(live.concurrency["cancel-in-progress"]).toBe(false);
+  it("is what .github/workflows/thwip-merge.yml is written from", () => {
+    const live = readFileSync(join(repoRoot, ".github/workflows/thwip-merge.yml"), "utf8");
+    expect(live).toBe(
+      setupPullRequestFiles({ endpoint: PRODUCTION_ENDPOINT, actionRef: "recallnet/thwip@v1" }).find(
+        (f) => f.path === ".github/workflows/thwip-merge.yml",
+      )?.content,
+    );
   });
 });
