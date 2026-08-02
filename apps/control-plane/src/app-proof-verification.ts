@@ -9,6 +9,7 @@ import {
 import { verifyProof, type GithubFacts, type VerifyResult } from "@thwip/verifier";
 import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 import { installationToken } from "./github-app.js";
+import { GithubApiError } from "./github-error.js";
 import { signPayload } from "./service-signing.js";
 import { verifySshSigEd25519 } from "./sshsig-verify.js";
 import {
@@ -651,7 +652,7 @@ async function github<T>(token: string, repository: string, path: string, init?:
     },
   });
   if (!response.ok) {
-    throw new Error(`GitHub ${repository}${path} -> ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    throw new GithubApiError(`${repository}${path}`, response.status, await response.text());
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
