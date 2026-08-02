@@ -147,11 +147,9 @@ const ALLOWED = [
   { symbol: "apps/control-plane/src/queue/github-port.ts#dispatchVerifier", why: "merge write" },
   { symbol: "apps/control-plane/src/queue/github-port.ts#classify", why: "merge write" },
 
-  /* Readiness. `deriveReadiness` names ten blocking reasons in a deliberate
-     order and nothing calls it; `routes.ts` and `index.ts` each derive a
-     narrower readiness by hand. That is the drift this check exists to find,
-     and unpicking it is its own change. */
-  { symbol: "apps/control-plane/src/queue/readiness.ts#deriveReadiness", why: "readiness drift" },
+  /* Readiness. `deriveReadiness` is now what `routes.ts` and `index.ts` both
+     derive from, so it is off this list. The two below report a reason rather
+     than decide one, and nothing renders a readiness result yet. */
   { symbol: "apps/control-plane/src/queue/readiness.ts#isKnownReason", why: "readiness drift" },
   { symbol: "apps/control-plane/src/queue/readiness.ts#blockedOnlyByCapability", why: "readiness drift" },
 
