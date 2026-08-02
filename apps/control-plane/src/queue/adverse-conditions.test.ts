@@ -106,6 +106,13 @@ interface Verdict {
   reason: string;
   entryId: string;
   operationId: string | null;
+  merge?: {
+    baseRef: string;
+    baseSha: string;
+    headSha: string;
+    treeOid: string;
+    parentShas: string[];
+  } | null;
 }
 
 type App = ReturnType<typeof routes>;
@@ -1726,5 +1733,60 @@ describe("the sha a record says the base branch became", () => {
     expect(reported.transitionDigest).toBeNull();
     expect(reported.detail).toMatch(/could not be asked/);
     expect(links()).toBe(0);
+  });
+});
+
+/**
+ * What the answer tells the workflow to merge.
+ *
+ * The workflow used to compute the base for itself and hand GitHub an expected
+ * head and nothing else, so the merge landed on whatever the branch was at that
+ * instant. Pull requests 114, 117 and 119 landed on bases their intents never
+ * named, with trees nobody had run.
+ *
+ * The queue signs the intent, so the queue is what names the base. The answer
+ * carries the same triple the intent binds, and the workflow merges that or
+ * merges nothing.
+ */
+describe("the base the queue authorizes a merge onto", () => {
+  it("names the base, head and tree the intent bound", async () => {
+    const e = env();
+    const app = routes();
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+
+    expect(holder.operationId).not.toBeNull();
+    expect(holder.merge).toEqual({
+      baseRef: REF,
+      baseSha: "b".repeat(40),
+      headSha: String(59).padStart(40, "a"),
+      treeOid: TREE,
+      // A merge commit's second parent is the pull request head.
+      parentShas: ["b".repeat(40), String(59).padStart(40, "a")],
+    });
+  });
+
+  it("names nothing to merge for a pull request that does not hold the lane", async () => {
+    const e = env();
+    const app = routes();
+    await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    const waiting = await authorize(app, e, 61);
+    expect(waiting.operationId).toBeNull();
+    expect(waiting.merge ?? null).toBeNull();
   });
 });

@@ -2812,6 +2812,33 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // In observe the answer is always yes, and the reason says what it would have
     // been. That is what makes adoption reversible.
     const authorized = enforcing ? holdsUsableTurn : true;
+
+    // The commit this merge must produce, from the queue document rather than
+    // from the caller's own reads.
+    //
+    // The workflow used to compute the base for itself and then hand GitHub an
+    // expected head and nothing else, so the merge landed on whatever the branch
+    // was at that instant. Pull requests 114, 117 and 119 were signed against
+    // one base and merged onto another, and every one of them produced a tree no
+    // suite had run. The base the intent bound is a fact the queue holds, so the
+    // queue is what says it, and the writer merges that or merges nothing.
+    const pinned = snapshot.activeCandidate;
+    const merge =
+      operationId === null || pinned === null
+        ? null
+        : {
+            baseRef,
+            baseSha: pinned.baseSha,
+            headSha: pinned.headSha,
+            treeOid: pinned.candidateTree,
+            // A merge commit's second parent is the pull request head; a squash
+            // has none, because it never becomes a parent of anything.
+            parentShas:
+              project.mergeMethod === "squash"
+                ? [pinned.baseSha]
+                : [pinned.baseSha, pinned.headSha],
+          };
+
     return c.json({
       authorized,
       enforcing,
@@ -2819,6 +2846,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // What the workflow must tell GitHub when it performs this merge, so the
       // method it uses and the method the signed record binds can never drift.
       mergeMethod: project.mergeMethod,
+      merge,
       reason: halted
         ? snapshot.rebaselineRequired
           ? "REBASELINE_REQUIRED"
