@@ -121,7 +121,9 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
   list: `Usage: thwip queue list --repo OWNER/NAME [--branch BRANCH] [--json] [--watch]\n`,
   join:
     `Usage: thwip queue join --repo OWNER/NAME --pr NUMBER [--branch BRANCH] ` +
-    `[--sponsor LOGIN] [--wait]\n`,
+    `[--head-sha OID] [--wait]\n\n` +
+    `Queue a pull request. The head sha comes from GitHub unless you name one.\n` +
+    `The pull request's author sponsors the entry, so there is no sponsor flag.\n`,
   leave: `Usage: thwip queue leave --repo OWNER/NAME --pr NUMBER [--branch BRANCH]\n`,
   pause: `Usage: thwip queue pause --repo OWNER/NAME --reason TEXT [--branch BRANCH]\n`,
   resume: `Usage: thwip queue resume --repo OWNER/NAME [--branch BRANCH] [--reason TEXT]\n`,

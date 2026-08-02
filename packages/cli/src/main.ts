@@ -826,6 +826,28 @@ async function cmdQueue(argv: string[]): Promise<number> {
     path = path.replaceAll("{repositoryId}", repositoryId);
   }
 
+  // The head of the pull request being queued, which is what the entry binds.
+  // Read from GitHub rather than from this machine, because the pull request
+  // named on the command line is often not the branch checked out here.
+  let body = parsed.plan.body;
+  if (body?.["headSha"] === "{headSha}") {
+    const pr = flag(argv, "--pr") ?? "";
+    const headSha = await run(
+      "gh",
+      ["pr", "view", pr, "--repo", repo, "--json", "headRefOid", "-q", ".headRefOid"],
+      process.cwd(),
+    )
+      .then((out) => out.trim())
+      .catch(() => "");
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headSha)) {
+      process.stderr.write(
+        `cannot read the head of ${repo}#${pr} from GitHub; pass --head-sha <oid> or check that gh is signed in\n`,
+      );
+      return EXIT.setupInvalid;
+    }
+    body = { ...body, headSha };
+  }
+
   const res = await fetch(endpoint + path, {
     method: parsed.plan.method,
     headers: {
@@ -835,7 +857,7 @@ async function cmdQueue(argv: string[]): Promise<number> {
         ? {}
         : { "idempotency-key": parsed.plan.idempotencyKey }),
     },
-    ...(parsed.plan.body === undefined ? {} : { body: JSON.stringify(parsed.plan.body) }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   process.stdout.write((await res.text()) + "\n");
   return res.ok ? 0 : res.status === 403 ? EXIT.permission : EXIT.unavailable;

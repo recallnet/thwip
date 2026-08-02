@@ -130,22 +130,36 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
     }
 
     case "join": {
-      const unknown = rejectUnknown(flags, ["repo", "branch", "pr", "sponsor", "wait"]);
+      // Named before the unknown-flag check, so somebody who still passes it
+      // reads why it went rather than that it is not a flag. The route derives
+      // the sponsor from the pull request's author now: the same pull request
+      // queued through the route and through the webhook was producing two
+      // entries with two different sponsors.
+      if (flags.values.has("sponsor")) {
+        return usage("--sponsor is no longer accepted; the pull request's author sponsors it");
+      }
+      const unknown = rejectUnknown(flags, ["repo", "branch", "pr", "head-sha", "wait"]);
       if (unknown !== null) return unknown;
       const repo = requireRepo(flags);
       if (isPlan(repo)) return repo;
       const pr = requirePr(flags);
       if (isPlan(pr)) return pr;
-      const sponsor = flags.values.get("sponsor");
+
+      // The route refuses an entry with no head sha, and join never sent one, so
+      // every join anybody ran was answered 400. It is the head of the pull
+      // request being queued, which is not necessarily this machine's HEAD, so
+      // the caller resolves it from GitHub unless it was named here.
+      const given = flags.values.get("head-sha");
+      if (given !== undefined && !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(given)) {
+        return usage("--head-sha must be a lowercase hex object id");
+      }
+
       return {
         ok: true,
         plan: {
           method: "POST",
           path: `/v1/queue/{repositoryId}/entries?ref=${encodeURIComponent(requireRef(flags))}`,
-          body: {
-            pullRequestNumber: pr,
-            ...(sponsor === undefined || sponsor === "" ? {} : { sponsorLogin: sponsor }),
-          },
+          body: { pullRequestNumber: pr, headSha: given ?? "{headSha}" },
           idempotencyKey: key(["join", repo, requireRef(flags), pr]),
           requiresAdmin: false,
         },

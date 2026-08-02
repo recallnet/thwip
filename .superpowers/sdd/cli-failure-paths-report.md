@@ -8,13 +8,14 @@ Status: done. Worktree `/Users/devrel/Projects/_wt/recallnet/thwip/cli-failure-p
 | --- | --- |
 | `4f7691a` | fix(cli): end a thrown failure with an exit class and a sentence |
 | `e28095f` | fix(ship): finish the push the proof made non-fast-forward |
-| `3cd06fb` | fix(queue): let a member run doctor |
+| `7fb414f` | fix(queue): let a member run doctor |
+| tip | fix(queue): send the head sha join has always been refused for |
 
-Opened as [PR 118](https://github.com/recallnet/thwip/pull/118), with a proof attached by `node packages/cli/dist/main.js run`.
+The tip's sha moves each time the proof is reattached, so it is named by subject. Opened as [PR 118](https://github.com/recallnet/thwip/pull/118). Each push carries a proof attached by `node packages/cli/dist/main.js run`.
 
 ## Tests
 
-Before: 106 files, 1672 tests. After: 110 files, 1702 tests. Four new files, 30 new tests, nothing removed.
+Before: 106 files, 1672 tests. After: 111 files, 1708 tests. Five new files, 36 new tests, nothing removed.
 
 Red before, green after:
 
@@ -25,8 +26,8 @@ Error: Cannot find module './queue-doctor.js' imported from .../queue-doctor.tes
 ```
 
 ```
- Test Files  110 passed (110)
-      Tests  1702 passed (1702)
+ Test Files  111 passed (111)
+      Tests  1708 passed (1708)
 ```
 
 `pnpm typecheck` clean across every package. `node scripts/lint.mjs` prints `lint: ok`.
@@ -96,6 +97,33 @@ EXIT=0
 ```
 
 Two output bugs were caught by running it live and fixed with tests: merged and cancelled entries were counted as waiting (twenty-two of them, against two live entries), and "1 ruleset apply".
+
+## Defect 3: `thwip queue join` has never worked
+
+Handed over mid-task by the agent on PR 119. Confirmed against main, not taken on trust: the route has required `headSha` since it was written, `join` has never sent one, so every `thwip queue join` anybody ran was answered 400. It also sent `sponsorLogin`, which no version of the route has ever read.
+
+Fixed in the CLI, coded against the route as PR 119 leaves it (read from `origin/queue-routes-fixes`, since 119 had not landed):
+
+- `join` sends `headSha`. The head of the pull request being queued is read from GitHub with `gh pr view <n> --repo <owner/name> --json headRefOid`, not from this machine's HEAD, because the pull request named on the command line is often not the branch checked out here. `--head-sha OID` overrides it and is validated as an object id.
+- `--sponsor` is gone. PR 119 derives the sponsor from the pull request's author, because the same pull request queued through the route and through the webhook was producing two entries with two different sponsors. Passing `--sponsor` now gets "--sponsor is no longer accepted; the pull request's author sponsors it" and exit 2, rather than the generic unknown-flag message.
+
+Live against production, where it used to return 400:
+
+```
+$ thwip queue join --repo recallnet/thwip --pr 118 --branch main
+{"entryId":"entry_1315419165_118","result":{"status":"duplicate",...}}
+EXIT=0
+```
+
+### Why nothing noticed
+
+Both sides were tested against themselves. `queue-commands.test.ts` asserts the body the planner builds, written beside the planner. The route's tests post a body the route's own tests compose. Each half stayed correct against its own idea of the wire for as long as it existed, which is exactly the arrangement that lets two correct halves disagree.
+
+It is the same shape as the doctor defect in this branch: a plan asserted against expectations written next to it and never against the server that answers it. And the same shape as the drift `one-vocabulary.test.ts` was written to catch, where three surfaces each held a correct copy of a sentence and the copies came apart.
+
+Two other things kept it invisible. Ship's own `joinQueue` port builds its request by hand and has always sent `headSha`, so the path most people are on worked and the standalone command was the only broken one. And the command's failure was a 400 body printed to stdout with a non-zero exit, which reads like a queue that refused you rather than a client that cannot form a request.
+
+`one-wire.test.ts` is the missing half. It reads `apps/control-plane/src/queue/routes.ts` as source, extracts what the entries handler declares it will read and what it refuses the request for missing, and holds the CLI's plan against both. It fails if the CLI sends a field the route ignores, or omits one the route demands. It also asserts the handler still declares a body at all, so a rewrite cannot make it pass by finding nothing.
 
 ## Reconciling with PR 116
 
