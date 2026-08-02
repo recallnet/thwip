@@ -146,21 +146,98 @@ jobs:
             echo "queue did not authorize a merge: $(printf '%s' "$abody" | jq -r .reason)"; exit 0
           fi
 
+          # The base, the tree and the parents the queue signed for this merge.
+          #
+          # This run used to read the base for itself and then hand GitHub an
+          # expected head and nothing else, because the merge-pull-request API
+          # has no expected base. Pull requests 114, 117 and 119 were each
+          # signed against one base, merged onto another, and produced a tree no
+          # suite had ever run — and GitHub called all three a success. The base
+          # the intent bound is a fact the queue holds, so the queue is what
+          # says it.
+          base_pin=$(printf '%s' "$abody" | jq -r '.merge.baseSha // empty')
+          tree_pin=$(printf '%s' "$abody" | jq -r '.merge.treeOid // empty')
+          parents=$(printf '%s' "$abody" | jq -c '.merge.parentShas // []')
+          if [ -z "$base_pin" ] || [ -z "$tree_pin" ] || [ "$parents" = "[]" ]; then
+            echo "::error::the queue named no base for this merge; nothing will be merged"
+            exit 1
+          fi
+          if [ "$method" != "merge" ]; then
+            # A squash commit does not contain the pull request head, so the
+            # branch's own required checks refuse the ref update below, and
+            # GitHub offers no other way to say "merge only onto this base".
+            # Refusing costs a squash repository its merges. Merging anyway
+            # costs everyone the one claim this queue exists to make.
+            echo "::error::a $method merge cannot be bound to the base the queue verified; not merging"
+            exit 1
+          fi
+
+          title="Merge pull request #$PR (Thwip Queue)"
           # printf, so the trailer's blank line never appears literally in YAML.
-          msg=$(printf 'Integrated by Thwip Queue.\n\nthwip-queue-operation: %s\n' "$op")
-          resp=$(curl -sS -w '\n%{http_code}' -X PUT \
+          trailer=$(printf 'Integrated by Thwip Queue.\n\nthwip-queue-operation: %s\n' "$op")
+          # GitHub's merge API joined a title and a body; a git commit has one
+          # message, so this run does the joining.
+          msg=$(printf '%s\n\n%s' "$title" "$trailer")
+
+          # Write the merge commit ourselves: the pinned base as the first
+          # parent, the pull request head as the second, and the tree the
+          # verifier ran. Nothing is computed here, so nothing can drift from
+          # what the record binds.
+          written=$(curl -sS -w '\n%{http_code}' -X POST \
             -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \
             -H "content-type: application/json" \
-            -d "$(jq -nc --arg sha "$HEAD_SHA" --arg title "Merge pull request #$PR (Thwip Queue)" \
-                  --arg msg "$msg" --arg method "$method" \
-                  '{sha:$sha, merge_method:$method, commit_title:$title, commit_message:$msg}')" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR/merge" || true)
-          mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
-          echo "merge: http $mcode"
-          landed=$(printf '%s' "$payload" | jq -r '.sha // empty')
+            -d "$(jq -nc --arg msg "$msg" --arg tree "$tree_pin" --argjson parents "$parents" \
+                  '{message:$msg, tree:$tree, parents:$parents}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/commits" || true)
+          wcode=$(printf '%s' "$written" | tail -n1); wbody=$(printf '%s' "$written" | sed '$d')
+          if [ "$wcode" != "201" ] && [ "$wcode" != "200" ]; then
+            echo "::error::could not write the merge commit ($wcode: $(printf '%s' "$wbody" | jq -r '.message // "no message"')); nothing was merged"
+            exit 1
+          fi
+          composed=$(printf '%s' "$wbody" | jq -r '.sha // empty')
+          if [ -z "$composed" ]; then
+            echo "::error::GitHub wrote the merge commit and named no sha; nothing was merged"; exit 1
+          fi
+          echo "composed $composed on base $base_pin with tree $tree_pin"
 
-          if [ "$mcode" != "200" ]; then
+          # Move the branch to it, without force.
+          #
+          # This is the whole guard. GitHub accepts a ref update without force
+          # only where the branch is an ancestor of the new commit, and the only
+          # branch that is an ancestor of this commit is the base it was
+          # composed on. If the base moved, GitHub answers 422 "Update is not a
+          # fast forward" and the merge does not happen at all.
+          resp=$(curl -sS -w '\n%{http_code}' -X PATCH \
+            -H "authorization: Bearer $MERGE_TOKEN" -H "accept: application/vnd.github+json" \
+            -H "content-type: application/json" \
+            -d "$(jq -nc --arg sha "$composed" '{sha:$sha, force:false}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/${BASE_REF#refs/heads/}" || true)
+          mcode=$(printf '%s' "$resp" | tail -n1); payload=$(printf '%s' "$resp" | sed '$d')
+          echo "land: http $mcode"
+          landed=""
+          if [ "$mcode" = "200" ] || [ "$mcode" = "201" ]; then
+            landed=$(printf '%s' "$payload" | jq -r '.object.sha // empty')
+          fi
+
+          if [ -z "$landed" ]; then
             reason=$(printf '%s' "$payload" | jq -r '.message // "no message"')
+
+            # A base that moved is not a refusal to retry. The candidate was
+            # verified against a base that no longer exists, so the queue takes
+            # the turn back, pins the new base, and runs the suites again. What
+            # must never happen is this run reaching for the new base itself.
+            case "$reason" in
+              *"not a fast forward"*)
+                curl -sS -o /dev/null -X POST -H "authorization: Bearer $(oidc)" \
+                  -H "content-type: application/json" \
+                  -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "${op#merge_}" --arg op "$op" \
+                        --arg detail "BASE_MOVED off $base_pin" \
+                        '{baseRef:$base, attemptId:$attempt, operationId:$op, detail:$detail}')" \
+                  "$THWIP_ENDPOINT/v1/queue/$REPO_ID/not-merged" || true
+                echo "::error::BASE_MOVED: the base branch is no longer $base_pin, which is what this candidate was verified against; nothing was merged"
+                exit 1
+                ;;
+            esac
 
             # The status code says what this call did, not what happened to the
             # pull request.
