@@ -70,6 +70,7 @@ function routes() {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
   });
