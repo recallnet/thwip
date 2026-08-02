@@ -5,7 +5,6 @@ import {
   type CommitFacts,
   type PullRequestFacts,
 } from "./candidate.js";
-import type { MergeAttemptOutcome } from "./turn.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
 import { carriesQueueAttribution, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
@@ -73,6 +72,26 @@ export function githubHttp(token: string, fetchImpl: typeof fetch = fetch): GitH
     },
   };
 }
+
+/**
+ * What happened to a merge request. A transport failure is a typed nonterminal
+ * outcome, never an exception thrown into a retry policy (plan.md §40.1).
+ *
+ * This lived in `turn.ts` next to a second classifier that read the same
+ * statuses and returned a different shape. Neither had a caller, and the pair
+ * would have drifted the way the receipt signing bytes and the reason-code
+ * sentences did. The one that classifies a response this file actually sends is
+ * the one that stayed.
+ */
+export type MergeAttemptOutcome =
+  | {
+      readonly kind: "merged";
+      readonly mergeSha: string;
+      readonly mergeTree: string;
+      readonly parentShas: readonly string[];
+    }
+  | { readonly kind: "rejected"; readonly reason: string }
+  | { readonly kind: "unknown"; readonly reason: string };
 
 export interface RepoRef {
   readonly owner: string;
