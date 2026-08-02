@@ -40,6 +40,7 @@ function routes(authOk: boolean) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => null,
     principalFor: async () => null,
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
     driveTurn: async () => {},
     commitFacts: async () => null,
     signRecordBytes: async () => "jws",

@@ -1,4 +1,4 @@
-import { QueueCommands, type QueueTimings } from "./commands.js";
+import { QueueCommands, type CommandResult, type QueueTimings } from "./commands.js";
 import type { MergeEvidence } from "./local-run-gate.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
@@ -145,6 +145,48 @@ export function diagnose(store: SnapshotQueueStore, limit = 25): QueueDiagnosis 
   };
 }
 
+/**
+ * Ask for a turn for a pull request, whether or not it has had one before.
+ *
+ * The reducer discards a request for an entry that already exists, which is
+ * what stops one pull request holding two places. A finished entry is the case
+ * that rule gets wrong: closing and reopening a pull request leaves it
+ * Cancelled, and every later request was answered "duplicate" against an entry
+ * that could never run again, so the pull request became permanently
+ * unqueueable and the only way out was opening a new one. A terminal entry is
+ * rebuilt instead, at the back of the line, because a new turn is what is being
+ * asked for.
+ *
+ * The key is varied by the ordinal being replaced, so the rebuild is not
+ * deduplicated against the request that first placed the entry, while a
+ * redelivery of either one still is.
+ *
+ * Every path that places an entry goes through here — the join route, the merge
+ * gate, and the `pull_request` webhook — because a reopened pull request is
+ * placed by whichever of them arrives first.
+ */
+export function requestTurn(
+  commands: QueueCommands,
+  store: QueueStateStore,
+  input: {
+    idempotencyKey: string;
+    entryId: string;
+    pullRequestNumber: number;
+    sponsorPrincipalId: string;
+    sponsorGithubUserId: string;
+    headSha: string;
+  },
+): CommandResult {
+  const existing = store.state().entries.get(input.entryId);
+  const finished = existing !== undefined && (existing.state === "Merged" || existing.state === "Cancelled");
+  return commands.requestQueue({
+    ...input,
+    ...(finished
+      ? { idempotencyKey: `${input.idempotencyKey}:again:${existing.fairnessOrdinal}`, resetOrdinal: true }
+      : {}),
+  });
+}
+
 export interface AdmitInput {
   entryId: string;
   pullRequestNumber: number;
@@ -178,7 +220,7 @@ export interface AdmitInput {
  * still decides each step and each is still its own event in the log.
  */
 export function admit(commands: QueueCommands, store: QueueStateStore, input: AdmitInput): QueueSnapshot {
-  commands.requestQueue({
+  requestTurn(commands, store, {
     idempotencyKey: `authorize:request:${input.entryId}`,
     entryId: input.entryId,
     pullRequestNumber: input.pullRequestNumber,

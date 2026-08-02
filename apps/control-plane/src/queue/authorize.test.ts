@@ -68,6 +68,7 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
     driveTurn: async (_e, _r, pullRequestNumber) => {
       driven.push(pullRequestNumber);
     },
