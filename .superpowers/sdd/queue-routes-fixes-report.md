@@ -128,6 +128,25 @@ with the caller that set them. No shipped client sent either. plan.md 8.1's
 human sponsor for a bot pull request has no route until one is built on the
 author.
 
+## The sweep's reconciled count, asked for and not added
+
+The coordinator asked for `reconciled` to go into the scheduled heartbeat's log
+line in `index.ts`, so a fleet repeatedly settling merges out of `Reconciling` is
+visible in `wrangler tail`.
+
+It is not here to add. PR 117 (`reconcile-deadline`) is still open, `origin/main`
+is `1511515`, and `tickAllQueues` on this base returns `{ ticked, driven,
+failed }` with no `reconciled` field. Logging one would print `undefined` and
+would not compile against the current signature.
+
+The line to change is `index.ts`'s
+
+    `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed}`
+
+and it wants ` reconciled=${result.reconciled}` appended once PR 117 lands.
+Whoever merges second should make that edit; it is one line and no test asserts
+the log's shape.
+
 ## Verification
 
 Baseline on `1511515`: 106 files, 1672 tests, green.
