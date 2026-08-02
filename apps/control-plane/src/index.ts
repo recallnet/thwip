@@ -1335,14 +1335,23 @@ export async function queueFromPullRequest(env: Env, payload: {
   // ejected it by hand. That happened three times in one night, to pull
   // requests 78, 96 and 97, each already merged.
   if (action === "closed") {
-    const { snapshot } = await runOnQueue(env, String(repositoryId), ref, ({ commands }) => {
-      commands.cancel({
-        idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
-        entryId,
-        actorPrincipalId: "github",
-        reason: "the pull request was closed",
-      });
-    });
+    const { snapshot } = await runOnQueue(
+      env,
+      String(repositoryId),
+      ref,
+      ({ commands }) => {
+        commands.cancel({
+          idempotencyKey: `webhook:closed:${entryId}:${headSha}`,
+          entryId,
+          actorPrincipalId: "github",
+          reason: "the pull request was closed",
+        });
+      },
+      // Cancelling frees the lane, and the settle that follows offers it to
+      // whoever is next. That pull request's turn has changed and its check has
+      // to say so.
+      (update) => publishTurnCheckFor(env, String(repositoryId), update),
+    );
 
     // Cancelling a closed entry that held the lane frees it exactly like an
     // eject does, and the same ninety-second offer expires unclaimed unless
@@ -1410,29 +1419,41 @@ export async function queueFromPullRequest(env: Env, payload: {
     : { serverExecutable: true, compatibleRunnerConnected: false };
   const folded = foldCapability({ ready, primaryReason: basePrimaryReason }, capability);
 
-  await runOnQueue(env, String(repositoryId), ref, ({ store, commands }) => {
-    // Through `requestTurn`, so a pull request that was closed and reopened is
-    // placed again instead of being discarded against the entry its close
-    // cancelled. Reopening is the case this webhook exists to notice.
-    requestTurn(commands, store, {
-      idempotencyKey: `webhook:request:${entryId}`,
-      entryId,
-      pullRequestNumber: number,
-      sponsorPrincipalId: principal.id,
-      sponsorGithubUserId: String(authorId),
-      headSha,
-    });
+  await runOnQueue(
+    env,
+    String(repositoryId),
+    ref,
+    ({ store, commands }) => {
+      // Through `requestTurn`, so a pull request that was closed and reopened is
+      // placed again instead of being discarded against the entry its close
+      // cancelled. Reopening is the case this webhook exists to notice.
+      requestTurn(commands, store, {
+        idempotencyKey: `webhook:request:${entryId}`,
+        entryId,
+        pullRequestNumber: number,
+        sponsorPrincipalId: principal.id,
+        sponsorGithubUserId: String(authorId),
+        headSha,
+      });
 
-    // Readiness is re-derived from what GitHub just told us plus what it already
-    // said; the event alone never decides it.
-    commands.evaluateReadiness({
-      idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
-      entryId,
-      ready,
-      schedulerEligible: folded.schedulerEligible,
-      primaryReason: folded.primaryReason,
-    });
-  });
+      // Readiness is re-derived from what GitHub just told us plus what it
+      // already said; the event alone never decides it.
+      commands.evaluateReadiness({
+        idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
+        entryId,
+        ready,
+        schedulerEligible: folded.schedulerEligible,
+        primaryReason: folded.primaryReason,
+      });
+    },
+    // This is where almost every entry starts, because GitHub delivers `opened`
+    // before the required workflow runs. Publishing only on a change is what
+    // keeps the check cheap, and it depends on whoever makes the change saying
+    // so. This writer did not, so `/authorize` arrived to find the entry already
+    // waiting, changed nothing, and published nothing: a pull request that was
+    // never offered the lane got no `thwip / turn` at all and could not merge.
+    (update) => publishTurnCheckFor(env, String(repositoryId), update),
+  );
 
   return { handled: true, detail: `placed in ${project.activation_state}` };
 }
@@ -1670,6 +1691,81 @@ async function driveTurnFor(env: Env, repositoryId: string, pullRequestNumber: n
       client_payload: { pullRequestNumber },
     }),
   });
+}
+
+/**
+ * Publish whose turn it is, as a check GitHub can require.
+ *
+ * Waiting is reported as still running rather than failed. A required check that
+ * has failed goes on refusing the merge until something re-runs it, so reporting
+ * "not your turn" as a failure meant GitHub kept refusing after the queue had
+ * authorized, and the queue offered the same turn to a pull request that could
+ * not take it.
+ *
+ * Module-level for the same reason `driveTurnFor` is. The routes reach it
+ * through their deps object; the pull-request webhook has no deps object and
+ * used to publish nothing at all, which left every pull request that waited
+ * without the check the branch requires.
+ */
+async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnCheckUpdate): Promise<void> {
+  const project = await env.DB.prepare(
+    "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+  )
+    .bind(repositoryId)
+    .first<{ github_name: string; installation_id: string | null }>();
+  if (project === null || project.installation_id === null) return;
+  const token = await installationToken(env, project.installation_id);
+  const said = turnCheckRun(update);
+  const call = (path: string, init?: RequestInit) =>
+    fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "thwip-control-plane",
+        ...(init?.headers ?? {}),
+      },
+    });
+
+  // What this commit already says, if anything.
+  //
+  // One read buys two things. Creating a check run per publish left a pile of
+  // them on a pull request that waited through several turns, and publishing
+  // unconditionally — which the unplaceable path did — made a new one on every
+  // poll. Neither broke the gate, because GitHub reads the latest, but both were
+  // unbounded writes to say something already said.
+  const existing = await call(
+    `/commits/${encodeURIComponent(update.headSha)}/check-runs?check_name=${encodeURIComponent(TURN_CHECK)}`,
+  )
+    .then((r) => (r.ok ? (r.json() as Promise<{ check_runs?: Array<Record<string, unknown>> }>) : null))
+    .catch(() => null);
+  const current = existing?.check_runs?.[0];
+
+  if (
+    current !== undefined &&
+    current["status"] === said.status &&
+    (current["conclusion"] ?? null) === said.conclusion &&
+    (current["output"] as { title?: string } | undefined)?.title === said.title
+  ) {
+    return;
+  }
+
+  const body = JSON.stringify({
+    name: TURN_CHECK,
+    head_sha: update.headSha,
+    status: said.status,
+    ...(said.conclusion === null ? {} : { conclusion: said.conclusion }),
+    details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
+    output: { title: said.title, summary: said.summary },
+  });
+
+  const id = current?.["id"];
+  if (typeof id === "number") {
+    await call(`/check-runs/${id}`, { method: "PATCH", body });
+    return;
+  }
+  await call("/check-runs", { method: "POST", body });
 }
 
 /* The queue's own routes. Authorization reuses the GitHub projection: a viewer
@@ -1939,75 +2035,7 @@ app.route(
       // base already contains it.
       return compared.status === "behind" || compared.status === "identical";
     },
-    /**
-     * Publish whose turn it is, as a check GitHub can require.
-     *
-     * Waiting is reported as still running rather than failed. A required check
-     * that has failed goes on refusing the merge until something re-runs it, so
-     * reporting "not your turn" as a failure meant GitHub kept refusing after the
-     * queue had authorized, and the queue offered the same turn to a pull request
-     * that could not take it.
-     */
-    async publishTurnCheck(env: Env, repositoryId: string, update: TurnCheckUpdate) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return;
-      const token = await installationToken(env, project.installation_id);
-      const said = turnCheckRun(update);
-      const call = (path: string, init?: RequestInit) =>
-        fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
-          ...init,
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "content-type": "application/json",
-            "user-agent": "thwip-control-plane",
-            ...(init?.headers ?? {}),
-          },
-        });
-
-      // What this commit already says, if anything.
-      //
-      // One read buys two things. Creating a check run per publish left a pile of
-      // them on a pull request that waited through several turns, and publishing
-      // unconditionally — which the unplaceable path did — made a new one on every
-      // poll. Neither broke the gate, because GitHub reads the latest, but both
-      // were unbounded writes to say something already said.
-      const existing = await call(
-        `/commits/${encodeURIComponent(update.headSha)}/check-runs?check_name=${encodeURIComponent(TURN_CHECK)}`,
-      )
-        .then((r) => (r.ok ? (r.json() as Promise<{ check_runs?: Array<Record<string, unknown>> }>) : null))
-        .catch(() => null);
-      const current = existing?.check_runs?.[0];
-
-      if (
-        current !== undefined &&
-        current["status"] === said.status &&
-        (current["conclusion"] ?? null) === said.conclusion &&
-        (current["output"] as { title?: string } | undefined)?.title === said.title
-      ) {
-        return;
-      }
-
-      const body = JSON.stringify({
-        name: TURN_CHECK,
-        head_sha: update.headSha,
-        status: said.status,
-        ...(said.conclusion === null ? {} : { conclusion: said.conclusion }),
-        details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
-        output: { title: said.title, summary: said.summary },
-      });
-
-      const id = current?.["id"];
-      if (typeof id === "number") {
-        await call(`/check-runs/${id}`, { method: "PATCH", body });
-        return;
-      }
-      await call("/check-runs", { method: "POST", body });
-    },
+    publishTurnCheck: publishTurnCheckFor,
     /**
      * The candidate verdict, as a check on the pull request head.
      *
