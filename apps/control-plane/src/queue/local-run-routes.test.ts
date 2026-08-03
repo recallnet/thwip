@@ -588,6 +588,36 @@ describe("the receipt the machine signs", () => {
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
     expect(driven).toEqual([PR]);
   });
+
+  /**
+   * The operator's way back in, for the one state it could not see.
+   *
+   * `/nudge` picked the holder itself, and only ever looked for `Offered` or
+   * `Active`. An attempt that had returned its receipt is `Verifying`, so the
+   * one lane in flight read as no lane at all: the route answered `LANE_IDLE`
+   * and returned before `driveLane` — which does understand `Verifying` — was
+   * ever called. Every operator tool reported an idle queue while an attempt
+   * held the lane, which is how the merge that never happened stayed invisible.
+   */
+  it("nudges a lane held by an attempt whose receipt is already in", async () => {
+    const e = env();
+    const routes = app();
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    driven.length = 0;
+
+    const response = await post(routes, e, "nudge", {});
+    expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: PR, state: "Verifying" });
+    expect(driven).toEqual([PR]);
+  });
+
+  it("still reports an idle lane as idle", async () => {
+    const e = env();
+    const routes = app();
+    const response = await post(routes, e, "nudge", {});
+    expect(await response.json()).toMatchObject({ nudged: false, reason: "LANE_IDLE" });
+    expect(driven).toEqual([]);
+  });
 });
 
 /**
