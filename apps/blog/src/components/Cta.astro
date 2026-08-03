@@ -1,0 +1,12 @@
+---
+interface Props {
+  href: string;
+  label: string;
+  variant?: "primary" | "ghost";
+}
+const { href, label, variant = "primary" } = Astro.props;
+const cls = variant === "ghost" ? "eb-cta eb-cta--ghost" : "eb-cta";
+---
+<p class="eb-cta-row">
+  <a class={cls} href={href}>{label}</a>
+</p>

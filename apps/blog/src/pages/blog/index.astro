@@ -1,0 +1,63 @@
+---
+import BlogLayout from "../../layouts/BlogLayout.astro";
+import { publishedPosts } from "../../lib/posts";
+
+const posts = await publishedPosts();
+const site = Astro.site ?? new URL("https://thwip.recall.net");
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Blog",
+  name: "thwip blog",
+  description: "Product updates and guides for commit-carried CI evidence.",
+  url: new URL("/blog/", site).href,
+  publisher: {
+    "@type": "Organization",
+    name: "thwip",
+    url: site.href,
+  },
+};
+---
+<BlogLayout
+  title="Blog · thwip"
+  description="Product updates and guides for commit-carried CI evidence on agent-run pipelines."
+  canonicalPath="/blog/"
+  jsonLd={jsonLd}
+  wide
+>
+  <h1 class="eb-index-title">Blog</h1>
+  <p class="eb-index-lede">
+    Product announcements and practical guides for teams that want signed proof
+    of what ran, on which tree, without replaying CI in the cloud.
+  </p>
+  <ul class="eb-list">
+    {
+      posts.map((post) => (
+        <li>
+          <a class="eb-card" href={`/blog/${post.id}/`}>
+            <p class="eb-card__meta">
+              <time datetime={post.data.pubDate.toISOString()}>
+                {post.data.pubDate.toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                  timeZone: "UTC",
+                })}
+              </time>
+              {" · "}
+              {post.data.author}
+            </p>
+            <h2 class="eb-card__title">{post.data.title}</h2>
+            <p class="eb-card__desc">{post.data.description}</p>
+            {post.data.tags.length > 0 && (
+              <div class="eb-tags">
+                {post.data.tags.map((tag) => (
+                  <span class="eb-tag">{tag}</span>
+                ))}
+              </div>
+            )}
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</BlogLayout>

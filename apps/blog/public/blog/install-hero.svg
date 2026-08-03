@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Install checklist">
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <rect x="0" y="0" width="1200" height="8" fill="#005ea2"/>
+  <text x="80" y="100" font-family="ui-sans-serif, system-ui, sans-serif" font-size="36" font-weight="600" fill="#1b1b1b">Install checklist</text>
+  <text x="80" y="150" font-family="ui-sans-serif, system-ui, sans-serif" font-size="22" fill="#565c65">CLI · login · signing key · first run</text>
+  <g font-family="ui-monospace, monospace" font-size="20" fill="#1b1b1b">
+    <rect x="80" y="210" width="1040" height="64" fill="#eceef0" stroke="#dfe1e2"/>
+    <text x="110" y="250">npm install -g @recallnet/thwip</text>
+    <rect x="80" y="290" width="1040" height="64" fill="#eceef0" stroke="#dfe1e2"/>
+    <text x="110" y="330">thwip login</text>
+    <rect x="80" y="370" width="1040" height="64" fill="#eceef0" stroke="#dfe1e2"/>
+    <text x="110" y="410">thwip keys status  →  GitHub Signing Key</text>
+    <rect x="80" y="450" width="1040" height="64" fill="#eceef0" stroke="#dfe1e2"/>
+    <text x="110" y="490">thwip init &&amp; thwip run</text>
+  </g>
+  <text x="80" y="580" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#71767a">Full agent prompt: thwip.recall.net/install</text>
+</svg>

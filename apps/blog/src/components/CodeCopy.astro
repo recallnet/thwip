@@ -1,0 +1,38 @@
+---
+---
+<script>
+  function wireCopy() {
+    const blocks = document.querySelectorAll(
+      ".eb-prose pre, .eb-prose .astro-code",
+    );
+    for (const block of blocks) {
+      if (!(block instanceof HTMLElement)) continue;
+      if (block.querySelector(".eb-copy")) continue;
+      if (getComputedStyle(block).position === "static") {
+        block.style.position = "relative";
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "eb-copy";
+      btn.textContent = "Copy";
+      btn.addEventListener("click", async () => {
+        const code = block.querySelector("code") ?? block;
+        const text = code.textContent ?? "";
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.dataset.copied = "true";
+          btn.textContent = "Copied";
+          setTimeout(() => {
+            btn.dataset.copied = "false";
+            btn.textContent = "Copy";
+          }, 1600);
+        } catch {
+          btn.textContent = "Failed";
+        }
+      });
+      block.appendChild(btn);
+    }
+  }
+  wireCopy();
+  document.addEventListener("astro:page-load", wireCopy);
+</script>

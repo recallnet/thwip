@@ -1,0 +1,129 @@
+---
+title: Beta sign-up and install
+description: Install the thwip CLI, sign in, register a signing key with GitHub, and run your first proof. Copy-paste commands for humans and agents.
+pubDate: 2026-08-03T12:00:00.000Z
+author: thwip
+tags:
+  - guide
+  - beta
+  - install
+heroImage: /blog/install-hero.svg
+heroAlt: Checklist from CLI install through first signed proof
+---
+
+This is the human-readable path from zero to a signed proof. For a paste-ready
+agent prompt, use [/install](/install) or run `thwip setup` after the CLI is on
+your PATH.
+
+{% callout type="note" title="Requirements" %}
+Node 22 or newer. A GitHub account. Repository admin access when you enable a
+project on the org.
+{% /callout %}
+
+{% steps %}
+{% step title="Install the CLI" %}
+
+The package is `@recallnet/thwip`. The command is `thwip`.
+
+```bash
+npm install -g @recallnet/thwip
+thwip --help
+```
+
+Prefer no global install? Use `npx @recallnet/thwip` wherever this guide says
+`thwip`.
+
+{% /step %}
+{% step title="Sign in" %}
+
+Device flow only. Run this in **your** terminal so the browser approval is
+yours—do not hand a blocked login to an unattended agent.
+
+```bash
+thwip login
+```
+
+Approve the code at the printed URL. Wait until the CLI reports signed in.
+
+{% /step %}
+{% step title="Register a signing key" %}
+
+Proofs are signed with an OpenSSH ed25519 key enrolled as a **Signing Key** on
+the same GitHub account the CLI uses.
+
+```bash
+thwip keys status
+```
+
+If no key exists:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+```
+
+Print the public half and add it at
+[github.com/settings/ssh/new](https://github.com/settings/ssh/new):
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+{% callout type="warning" title="Common mistake" %}
+GitHub defaults new keys to **Authentication**. thwip only reads **Signing**
+keys. Wrong type means proofs fail with a revoked-or-missing key style error
+even though the key “exists” on your account.
+{% /callout %}
+
+Confirm:
+
+```bash
+thwip keys status
+```
+
+You want `registeredWithGithub: true` for the key that will sign.
+
+{% /step %}
+{% step title="Open the dashboard and enable a project" %}
+
+1. Go to [thwip.recall.net/dashboard](https://thwip.recall.net/dashboard).
+2. Install the thwip GitHub App on your org if you have not already.
+3. Enable a repository. Organization defaults apply until a protected
+   `thwip.yaml` on the default branch overrides them.
+
+Repository bootstrap is a **separate** agent prompt on the project page. Machine
+setup ends here; repo setup starts there.
+
+{% /step %}
+{% step title="Initialize and run in a clone" %}
+
+From a checkout of a project thwip already knows:
+
+```bash
+thwip init --required "lint,typecheck,test"
+thwip run
+```
+
+`thwip run` executes the required checks, signs the proof, and amends the commit
+trailer. Push the branch and open a PR as you usually would. The App evaluates
+the exact head subject.
+
+{% /step %}
+{% /steps %}
+
+{% product-shot src="/blog/install-hero.svg" alt="Install, sign in, register key, run proof" caption="Machine setup is CLI + GitHub signing key. Project setup is on the dashboard." /%}
+
+## What success looks like
+
+- `thwip keys status` shows a registered signing key for your GitHub login.
+- The org appears under the dashboard after App install.
+- A PR on an enabled project gets a thwip proof check that can pass without
+  replaying your suite in Actions (fast profile), or with GitHub-run checks
+  (remote profile).
+
+## Next
+
+{% cta href="/dashboard" label="Open the dashboard" /%}
+{% cta href="/blog/beta/" label="Read the beta announcement" variant="ghost" /%}
+
+Deeper product questions: [FAQ](/faq) and [FAQ markdown](/faq.md). Full agent
+setup text: [install](/install) and [install.md](/install.md).
