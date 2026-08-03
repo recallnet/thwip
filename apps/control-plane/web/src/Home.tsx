@@ -179,13 +179,8 @@ const SEQUENCE: Array<{ step: string; asks: string; codes: string[] }> = [
     codes: ["SUBJECT_TREE_MISMATCH", "SUBJECT_ANCESTRY_MISMATCH", "SUBJECT_BASE_MISMATCH"],
   },
   {
-    step: "Policy",
-    asks: "Is the policy the proof names active for this repository, in the same evaluation mode?",
-    codes: ["POLICY_NOT_ACTIVE"],
-  },
-  {
     step: "Pipeline",
-    asks: "Do the pipeline digest and runner match that active policy exactly?",
+    asks: "Do the pipeline digest and runner match the policy in force right now?",
     codes: ["PIPELINE_DIGEST_MISMATCH"],
   },
   {

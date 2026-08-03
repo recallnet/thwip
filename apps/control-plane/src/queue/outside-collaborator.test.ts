@@ -105,7 +105,7 @@ function routes(session: { principalId: string; githubUserId: string; isAdmin?: 
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async () => null,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "31", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "31", baseRef: REF, authorIsBot: false }),
     driveTurn: async (_e, _r, pullRequestNumber) => {
       dispatched.push(pullRequestNumber);
     },

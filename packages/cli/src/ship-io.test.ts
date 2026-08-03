@@ -11,7 +11,6 @@ import type { ShipState } from "./ship.js";
 
 function state(over: Partial<ShipState> = {}): ShipState {
   return {
-    authenticated: true,
     workingTreeClean: true,
     headProof: "accepted",
     pushedHeadMatchesLocal: true,

@@ -52,7 +52,7 @@ describe("exhaustiveness", () => {
         "SIGNATURE_INVALID",
         "SIGNER_KEY_REVOKED",
         "SIGNER_KEY_UNKNOWN",
-        "POLICY_NOT_ACTIVE",
+        "SUITE_MISSING",
         "PIPELINE_DIGEST_MISMATCH",
         "SUITE_NOT_PASSED",
         "PROOF_EXPIRED",

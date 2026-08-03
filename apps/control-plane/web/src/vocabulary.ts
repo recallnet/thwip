@@ -59,7 +59,6 @@ const OUTCOME_STYLE: Record<ProtocolReasonCode | "BOOTSTRAP_PENDING", Omit<Outco
   SUBJECT_TREE_MISMATCH: { label: "Proof covers different code", tone: "bad" },
   SUBJECT_ANCESTRY_MISMATCH: { label: "Proof covers a different history", tone: "bad" },
   SUBJECT_BASE_MISMATCH: { label: "Proof was run against an older base", tone: "bad" },
-  POLICY_NOT_ACTIVE: { label: "Policy is not the active one", tone: "bad" },
   PIPELINE_DIGEST_MISMATCH: { label: "Pipeline does not match the policy", tone: "bad" },
   SUITE_MISSING: { label: "A required suite did not run", tone: "bad" },
   SUITE_DUPLICATE: { label: "A suite was reported twice", tone: "bad" },

@@ -1,12 +1,14 @@
-import { parseMergeIntent, requiredSuitesDigest } from "@thwip/queue-protocol";
+import { parseMergeIntent } from "@thwip/queue-protocol";
 import type { GitSubject, MergeIntentV1, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
   buildReusedProofRecord,
   buildTransitionRecord,
+  reuseEquivalenceDigests,
   signMergeIntent,
   signTransitionRecord,
 } from "./evidence.js";
+import { proofShortfall, type ProofBinding } from "./work-receipt.js";
 import type { Signer, SignedRecord } from "./evidence.js";
 import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
 import type { MergeMethod } from "./merge-commit.js";
@@ -47,12 +49,33 @@ export interface ReuseEvidence {
 }
 
 /**
+ * Why a merge may not be signed.
+ *
+ * `reason` names the blocking reason a developer already has a sentence for.
+ * Without one the caller reports that the evidence is incomplete, which is what
+ * an absent value is; a policy the proof never bound is a different thing and
+ * the developer acts on it differently.
+ */
+export interface EvidenceRefusal {
+  readonly missing: string;
+  readonly reason?: "POLICY_CHANGED";
+}
+
+/**
  * Gather what a reuse merge rests on, or say what is missing.
  *
  * Every value here is read from something that already happened. Where one
  * cannot be read the answer is what is absent, never a substitute: the whole
  * point of signing these records is that a reader can believe them, and a record
  * assembled around a stand-in is worth less than no record at all.
+ *
+ * The three equivalence digests come from the repository's current policy, and
+ * for a while nothing compared them to the proof being reused. So a repository
+ * could add a required suite, keep the green check the old proof earned, and
+ * merge under a signed record stamping the new policy's digests over work that
+ * never satisfied it. Reuse skips a Dagger run, never a current-authorization
+ * check (plan.md §21.5), so the proof has to bind the policy in force here or
+ * there is nothing to sign.
  */
 export async function reuseEvidenceFor(
   workReceiptDigest: Sha256,
@@ -64,18 +87,43 @@ export async function reuseEvidenceFor(
   } | null,
   proofCheckRunId: string | null,
   verifierResultDigest: string | null,
-): Promise<ReuseEvidence | { missing: string }> {
+  proof: ProofBinding | null,
+): Promise<ReuseEvidence | EvidenceRefusal> {
   if (policy === null) return { missing: "the repository has no active policy" };
   if (policy.pipelineDigest === null) return { missing: "the active policy names no pipeline" };
   if (proofCheckRunId === null) {
     return { missing: "no passing proof check was found for this head" };
   }
+  const equivalence = await reuseEquivalenceDigests({
+    policyDigest: policy.policyDigest as Sha256,
+    pipelineDigest: policy.pipelineDigest as Sha256,
+    requiredSuites: policy.requiredSuites,
+  });
+
+  if (proof === null) return { missing: "the head's proof binds no policy this merge can read" };
+
+  // One comparison, shared with readiness, so the two cannot reach different
+  // verdicts about the same head. That split is the bug family this change
+  // closes, and a second copy here would reopen it the first time one moved.
+  //
+  // The policy's digest is deliberately not part of it. A digest changes when
+  // anything in the policy changes, including settings a proof cannot fail: the
+  // minimum permission, the allowed key algorithms, the lease rules. Refusing on
+  // identity made a cosmetic edit invalidate every proof in flight, which is what
+  // the App's twenty-four hour grace list existed to paper over. That list is
+  // gone. What a proof can fail is the pipeline it ran and the suites it passed.
+  const shortfall = proofShortfall(proof, {
+    pipelineDigest: equivalence.pipelineDigest,
+    requiredSuites: policy.requiredSuites,
+  });
+  if (shortfall !== null) return { missing: shortfall, reason: "POLICY_CHANGED" };
+
   return {
     workReceiptDigest,
     organizationId: policy.organizationId,
-    policyDigest: policy.policyDigest as Sha256,
-    pipelineDigest: policy.pipelineDigest as Sha256,
-    requiredSuitesDigest: await requiredSuitesDigest(policy.requiredSuites),
+    policyDigest: equivalence.policyDigest,
+    pipelineDigest: equivalence.pipelineDigest,
+    requiredSuitesDigest: equivalence.requiredSuitesDigest,
     proofCheckRunId,
     ...(verifierResultDigest === null ? {} : { verifierResultDigest: verifierResultDigest as Sha256 }),
   };
@@ -226,7 +274,7 @@ export function verifiedEvidenceFor(input: {
     readonly checkRunId: string | null;
     readonly actionRunId: string | null;
   } | null;
-}): VerifiedEvidence | { missing: string } {
+}): VerifiedEvidence | EvidenceRefusal {
   if (input.assignmentDigest === null) return { missing: "no assignment was issued for this attempt" };
   if (input.integrationEvidenceDigest === null) {
     return { missing: "no integration receipt was signed for this attempt" };

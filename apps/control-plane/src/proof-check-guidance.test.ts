@@ -7,11 +7,9 @@ import { checkSummary, type AppProofEvaluation } from "./app-proof-verification.
 /**
  * What the check tells a developer to do about the verdict.
  *
- * Deleting the dead fields from the policy document was right, and it changed
- * the document's digest. Every proof already signed cited the old one, so those
- * pull requests turned red with `POLICY_NOT_ACTIVE` and a summary that named
- * the code and stopped there. Re-running `thwip run` fixes it in seconds, and
- * nothing on the pull request said so.
+ * A policy edit that adds a required suite turns an open pull request red, and
+ * the summary used to name the code and stop there. Re-running `thwip run`
+ * fixes it in seconds, and nothing on the pull request said so.
  *
  * The sentence has existed the whole time, in `@thwip/vocabulary`, written once
  * for all three surfaces. The check simply never read it.
@@ -32,11 +30,11 @@ function evaluation(outcome: string): AppProofEvaluation {
 const detailsUrl = "https://thwip.example/v1/proof-verifications/proof_1";
 
 describe("the check's account of a rejected proof", () => {
-  it("tells a developer whose proof cites a superseded policy to sign again", () => {
-    const summary = checkSummary(evaluation("POLICY_NOT_ACTIVE"), detailsUrl);
+  it("tells a developer whose proof no longer satisfies the policy to sign again", () => {
+    const summary = checkSummary(evaluation("SUITE_MISSING"), detailsUrl);
 
-    expect(summary).toContain("POLICY_NOT_ACTIVE");
-    expect(summary).toContain(NEXT_ACTION.POLICY_NOT_ACTIVE);
+    expect(summary).toContain("SUITE_MISSING");
+    expect(summary).toContain(NEXT_ACTION.SUITE_MISSING);
     expect(summary).toMatch(/thwip run/);
   });
 

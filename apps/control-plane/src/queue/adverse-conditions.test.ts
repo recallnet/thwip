@@ -3,6 +3,7 @@ import { testD1 } from "../../test/d1.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
+import { b64stdEncode, encodeCarrier, utf8Encode } from "@thwip/protocol";
 import type { Env } from "../env.js";
 
 // `../index.js` statically re-exports the Durable Object class, which needs
@@ -53,9 +54,59 @@ const REF = "refs/heads/main";
 // A real object id: the signed records refuse anything that is not one.
 const TREE = "7".repeat(40);
 
-/** A commit message carrying a readable proof, as a shipped head does. */
-const PROVEN =
-  "feat: something\n\nthwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5RdmRqRWlmUT09Iiwic2lnbmF0dXJlcyI6W3sia2V5aWQiOiJTSEEyNTY6ayIsInNpZyI6IkFBQUEifV19\n";
+/**
+ * A commit message carrying a readable proof, as a shipped head does.
+ *
+ * The payload is a real predicate rather than an empty statement, because the
+ * merge gate reads what the proof bound: the policy and pipeline it satisfied,
+ * and the suites it ran. Defaults match the policy `routes()` stubs.
+ */
+function provenCommit(
+  over: {
+    policyDigest?: string;
+    pipelineDigest?: string;
+    suites?: Array<{ id: string; status: "passed" | "failed" }>;
+  } = {},
+): string {
+  const statement = {
+    _type: "https://in-toto.io/Statement/v1",
+    subject: [{ name: "git-tree", digest: { sha1: TREE } }],
+    predicateType: "urn:thwip:attestation:ci-run:v1",
+    predicate: {
+      schemaVersion: "1",
+      repository: { provider: "github", ownerId: "1", repositoryId: REPO },
+      git: {
+        objectFormat: "sha1",
+        treeOid: TREE,
+        parentOids: ["b".repeat(40)],
+        baseRef: REF,
+        baseSha: "b".repeat(40),
+        evaluationMode: "head-tree",
+      },
+      policy: { digest: over.policyDigest ?? `sha256:${"b".repeat(64)}`, version: 1 },
+      pipeline: { digest: over.pipelineDigest ?? `sha256:${"c".repeat(64)}`, runner: "command" },
+      run: {
+        startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:01:00.000Z",
+        networkMode: "disabled",
+        cacheMode: "disabled",
+        suites: (over.suites ?? [{ id: "unit", status: "passed" as const }]).map((s) => ({
+          ...s,
+          durationMs: 1,
+        })),
+      },
+      signer: { keyId: `SHA256:${"k".repeat(43)}`, githubUserId: "1" },
+    },
+  };
+  const envelope = {
+    payloadType: "application/vnd.in-toto+json",
+    payload: b64stdEncode(utf8Encode(JSON.stringify(statement))),
+    signatures: [{ keyid: `SHA256:${"k".repeat(43)}`, sig: "AAAA" }],
+  };
+  return `feat: something\n\n${encodeCarrier(envelope as never)}\n`;
+}
+
+const PROVEN = provenCommit();
 
 const published: TurnCheckUpdate[] = [];
 
@@ -84,7 +135,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
     // A refusal the queue can confirm: GitHub says not merged and the base does
@@ -1028,6 +1079,85 @@ describe("the record behind a merge", () => {
     expect(holder.authorized).toBe(false);
     expect(holder.reason).toBe("MERGE_EVIDENCE_INCOMPLETE");
     expect(holder.operationId).toBeNull();
+  });
+
+  /**
+   * A repository adds a required suite. The proof on the head was signed before
+   * that, so it never ran the new suite, and its check is still green because
+   * nothing re-verified the head. Stamping the new policy's digests over it
+   * would sign a binding the proof does not carry.
+   */
+  it("refuses a reuse whose proof predates a required suite the policy now names", async () => {
+    const e = env();
+    const app = routes({
+      activePolicy: async () => ({
+        policyDigest: `sha256:${"d".repeat(64)}`,
+        pipelineDigest: `sha256:${"e".repeat(64)}`,
+        requiredSuites: ["unit", "integration"],
+        securityProfile: "fast",
+        organizationId: "org_1",
+        verifier: null,
+      }),
+      // Signed under the policy that required "unit" alone.
+      commitFacts: async () => ({
+        treeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+        message: PROVEN,
+      }),
+    });
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.authorized).toBe(false);
+    expect(holder.reason).toBe("POLICY_CHANGED");
+    expect(holder.operationId).toBeNull();
+  });
+
+  /**
+   * The mirror, and the reason the policy's own digest is not compared here.
+   *
+   * Editing anything in a policy changes its digest, including settings a proof
+   * cannot fail: the minimum permission, the allowed key algorithms, the lease
+   * rules. Refusing on identity made a cosmetic edit invalidate every proof in
+   * flight, and the App carried a twenty-four hour list of retired digests to
+   * hide that. The list is gone. A proof is good while it satisfies what the
+   * policy requires, so the same pipeline and the same suites still merge under
+   * a policy whose digest has moved.
+   */
+  it("allows a reuse under a policy edit that changed no requirement", async () => {
+    const e = env();
+    const app = routes({
+      activePolicy: async () => ({
+        // A different policy digest, same pipeline, same required suites.
+        policyDigest: `sha256:${"d".repeat(64)}`,
+        pipelineDigest: `sha256:${"c".repeat(64)}`,
+        requiredSuites: ["unit"],
+        securityProfile: "fast",
+        organizationId: "org_1",
+        verifier: null,
+      }),
+      commitFacts: async () => ({
+        treeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+        message: PROVEN,
+      }),
+    });
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), "6".repeat(40)],
+      },
+    });
+    expect(holder.reason).not.toBe("POLICY_CHANGED");
   });
 
   /** The same, where the proof check cannot be found for the head. */

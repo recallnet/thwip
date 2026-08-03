@@ -40,12 +40,13 @@ import {
   deriveReadiness,
   foldCapability,
   nonThwipCheckState,
-  NO_OBJECTION,
+  reviewGates,
   type PlatformHealth,
+  type PullRequestGates,
   type ReadinessFacts,
 } from "./readiness.js";
 import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
-import { workReceiptDigestFrom } from "./work-receipt.js";
+import { proofBindingFrom, proofShortfall, workReceiptDigestFrom, type ProofBinding } from "./work-receipt.js";
 import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
 import {
   authorizationFor,
@@ -280,6 +281,28 @@ async function storeEvidence(
  * authorization itself and does nothing if the answer is no.
  */
 /**
+ * What the proof on a head bound, for a caller holding only the sha.
+ *
+ * The commit is fetched again here rather than carried on the attempt, because
+ * the attempt keeps the receipt's digest and the binding is inside the receipt.
+ */
+async function proofBindingForHead<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  deps: {
+    commitFacts(
+      env: TEnv,
+      repositoryId: string,
+      sha: string,
+    ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
+  },
+  repositoryId: string,
+  headSha: string,
+): Promise<ProofBinding | null> {
+  const head = await deps.commitFacts(env, repositoryId, headSha);
+  return head?.message === undefined ? null : proofBindingFrom(head.message);
+}
+
+/**
  * Build, sign, store and record the transition for a merge that landed.
  *
  * The chain link is the digest of the record, so the record has to exist before
@@ -442,6 +465,11 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
           // Present exactly when the queue had the integrated candidate run, which is
           // what decides whether the record claims a candidate-verified merge or a reuse.
           attempt.verifierResultDigest,
+          // The same comparison the authorize gate made, made again from the
+          // head this record is about. A policy activated between the two
+          // leaves the merge landed and unrecorded rather than recorded under a
+          // binding the proof never carried.
+          await proofBindingForHead(env, deps, input.repositoryId, attempt.headSha),
         )
       : verifiedEvidenceFor({
           workReceiptDigest: attempt.receiptDigest as Sha256,
@@ -1007,18 +1035,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * Who wrote a pull request and which branch it targets, from GitHub.
    *
-   * Both facts settle something a caller must not get to choose. The author is
+   * All three settle something a caller must not get to choose. The author is
    * the entry's sponsor, so a turn is offered to the person whose work it is
-   * rather than to whoever happened to run the command; and the base branch is
+   * rather than to whoever happened to run the command; the base branch is
    * which queue the entry belongs on, so one pull request cannot be placed on
-   * two of them. Null when the pull request could not be read, which is a
-   * refusal rather than a licence to guess either one.
+   * two of them; and whether the author is a bot decides whether there is a
+   * person to be accountable for the turn at all. Null when the pull request
+   * could not be read, which is a refusal rather than a licence to guess.
    */
   pullRequestPlacement(
     env: TEnv,
     repositoryId: string,
     pullRequestNumber: number,
-  ): Promise<{ authorGithubUserId: string; baseRef: string } | null>;
+  ): Promise<{ authorGithubUserId: string; baseRef: string; authorIsBot: boolean } | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
   driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /**
@@ -1126,6 +1155,31 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     baseRef: string,
     sponsorGithubUserId: string,
   ): Promise<PlatformHealth | null>;
+  /**
+   * What GitHub's own pull-request rule asks of this pull request, and whether
+   * it is met.
+   *
+   * Reviews, code owners, approval after the last push, conversation
+   * resolution and mergeability. GitHub enforces every one of them at the ref
+   * update the merge workflow performs, and nothing here read any of them: the
+   * four review facts had no writer at all, so a pull request with no approval
+   * was called ready, took the lane ahead of everyone waiting, ran the whole
+   * pipeline, and collected a signed merge intent for a merge GitHub was never
+   * going to permit. The 422 came last and the sentence explaining it stayed in
+   * an Actions log.
+   *
+   * Read where `requiredCheckState` is read, on the same terms: only when
+   * nothing else already blocks the entry, so a waiting pull request asking
+   * once a minute costs nothing. Null when GitHub could not be read, which is
+   * unknown rather than a refusal.
+   */
+  pullRequestGates?(
+    env: TEnv,
+    repositoryId: string,
+    baseRef: string,
+    pullRequestNumber: number,
+    headSha: string,
+  ): Promise<PullRequestGates | null>;
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
@@ -1274,14 +1328,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * Join the queue. Durable: accepted before reviews finish, and the entry keeps
    * its place through failure (plan.md §7.1).
    *
-   * Who sponsors the entry and which queue it lands on both come from GitHub,
-   * never from the request. This route used to sponsor whoever called it while
-   * the `pull_request` webhook sponsored the author, so the same pull request
-   * had two sponsors depending on which arrived first — and under `fresh` the
-   * turn then went to one person while the queue waited for a machine belonging
-   * to the other. The branch was the caller's to name too, so a pull request
-   * could be placed on a queue it does not target, which is how one pull request
-   * came to hold two places in line.
+   * Which queue the entry lands on comes from GitHub, never from the request:
+   * the branch was the caller's to name once, so a pull request could be placed
+   * on a queue it does not target, which is how one pull request came to hold
+   * two places in line.
+   *
+   * The sponsor is the author when the author is a person. This route used to
+   * sponsor whoever called it while the `pull_request` webhook sponsored the
+   * author, so the same pull request had two sponsors depending on which
+   * arrived first, and under `fresh` the turn went to one person while the
+   * queue waited for a machine belonging to the other. What stops that
+   * returning is that the sponsor is decided once, at entry creation, and no
+   * later path recomputes it: `QueueRequested` on an entry that already exists
+   * is a no-op, and the webhook never overwrites a recorded sponsor.
+   *
+   * A bot has no principal and no fairness share, so a bot's pull request could
+   * not be queued by anyone. The human who joins sponsors it, and takes the
+   * accountability along with the share. Nobody can name a sponsor other than
+   * themselves, which is the part that had to stay.
    */
   app.post("/v1/queue/:repositoryId/entries", async (c) => {
     const selected = requestedQueue(c);
@@ -1312,7 +1376,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         409,
       );
     }
-    const sponsorPrincipalId = await deps.principalFor(c.env, placement.authorGithubUserId);
+    const who = c.get("caller");
+    const sponsorPrincipalId = placement.authorIsBot
+      ? who.principalId
+      : await deps.principalFor(c.env, placement.authorGithubUserId);
     if (sponsorPrincipalId === null) {
       return c.json(
         { error: "AUTHOR_NOT_ACTIVATED", detail: "the pull request's author has no activated principal here" },
@@ -1323,7 +1390,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const entryId = `entry_${repositoryId}_${body.pullRequestNumber}`;
     const headSha = body.headSha;
     const pullRequestNumber = body.pullRequestNumber;
-    const sponsorGithubUserId = placement.authorGithubUserId;
+    const sponsorGithubUserId = placement.authorIsBot ? who.githubUserId : placement.authorGithubUserId;
     const { result } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) =>
       requestTurn(commands, store, {
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `request:${entryId}`),
@@ -2373,6 +2440,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       placed?.sponsorPrincipalId ?? (await deps.principalFor(c.env, String(body.authorGithubUserId ?? "")));
     const sponsorGithubUserId = placed?.sponsorGithubUserId ?? String(body.authorGithubUserId ?? "");
 
+    // Why there is nobody, when there is nobody.
+    //
+    // A bot author and an unactivated person both leave the queue with no
+    // sponsor, and they need different things done about them: one is cleared
+    // by a colleague joining the queue, the other by whoever runs the
+    // installation. Read only in that case, so an ordinary ask spends no GitHub
+    // request on it. Unknown stays unknown.
+    const unsponsored =
+      sponsorPrincipalId === null
+        ? await deps
+            .pullRequestPlacement(c.env, repositoryId, body.pullRequestNumber)
+            .catch(() => null)
+        : null;
+    const unplaceableReason = unsponsored?.authorIsBot === true ? "SPONSOR_REQUIRED" : null;
+
     // The queue has nobody to give the turn to, so say so on the check.
     //
     // Without an activated principal there is no entry, so nothing moves and the
@@ -2390,7 +2472,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         await deps.publishTurnCheck(
           c.env,
           repositoryId,
-          unplaceableUpdate({ entryId, pullRequestNumber: body.pullRequestNumber, headSha: body.headSha }),
+          unplaceableUpdate({
+            entryId,
+            pullRequestNumber: body.pullRequestNumber,
+            headSha: body.headSha,
+            reason: unplaceableReason,
+          }),
         );
       } catch {
         /* the check may lag; the answer below is unaffected */
@@ -2422,6 +2509,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const pullRequestNumber = body.pullRequestNumber;
     const headSha = body.headSha;
 
+    // Read once and used everywhere below. The profile decides whether a runner
+    // has to be connected, whether the server may take the offer for itself, and
+    // what evidence the merge rests on, and three reads of it could disagree.
+    const policy = await deps.activePolicy(c.env, repositoryId);
+    const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+
     // Through `deriveReadiness`, from the facts this route has read.
     //
     // It used to be two expressions here and two more in the pull-request
@@ -2430,38 +2523,88 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // sponsor's access, so three reason codes with sentences on every surface
     // described a state nothing ever checked for.
     //
+    // Every field is stated, because the permissive constant this used to spread
+    // meant a field nobody thought about was silently no objection. A fact this
+    // route cannot answer says `"unread"` rather than a value that reads as
+    // fine, so a reviewer can tell the difference.
+    //
     // Capability is left out and folded below: `foldCapability` is where runner
-    // presence is decided for every writer of `schedulerEligible`, and reading
-    // it in two places is how eligibility stopped being derived.
+    // presence is decided for every writer of `schedulerEligible`.
     const stated: ReadinessFacts = {
-      ...NO_OBJECTION,
+      // Closing is carried by the `pull_request` webhook, which cancels the
+      // entry outright. Nothing on this request says whether it is open.
+      pullRequestState: "unread",
       draft: body.draft === true,
+      // The three that cost a GitHub read each. They are read on the walk to a
+      // merge, below, where one merge's worth is the right price for them.
+      ownerAuthorized: "unread",
+      appPermissionsHealthy: "unread",
+      rulesetEnforced: "unread",
+      authorIsBot: unsponsored === null ? "unread" : unsponsored.authorIsBot,
+      sponsorPrincipalId,
       headProof: body.proofAccepted === true ? "accepted" : "missing",
+      proofShortfall: "unread",
+      reviewsSatisfied: "unread",
+      codeOwnerReviewSatisfied: "unread",
+      approvalAfterPushSatisfied: "unread",
+      conversationsResolved: "unread",
+      nonThwipChecks: "unread",
+      mergeable: "unread",
     };
 
-    // What the branch requires of this head, before the entry is called ready.
+    // What GitHub says about this head and this pull request, before the entry
+    // is called ready.
     //
-    // `nonThwipChecks` had no writer. Both callers spread `NO_OBJECTION`, whose
-    // default is "passing", so `REQUIRED_CHECK_FAILED` and
-    // `REQUIRED_CHECK_PENDING` were unreachable and a pull request with red CI
-    // read as ready. It took a turn, ran it on somebody's machine, and the walk
-    // below refused the merge on rules and runs that were readable before the
-    // offer ever went out.
+    // Five facts had no writer. Both callers spread a permissive constant, so
+    // `REQUIRED_CHECK_FAILED`, `REQUIRED_CHECK_PENDING`, `REVIEW_REQUIRED`,
+    // `CODEOWNER_REVIEW_REQUIRED`, `APPROVAL_AFTER_PUSH_REQUIRED`,
+    // `CONVERSATION_UNRESOLVED`, `MERGE_CONFLICT` and `POLICY_CHANGED` were all
+    // unreachable. A pull request with red CI, or with no approval, read as
+    // ready: it took a turn, ran on somebody's machine, collected a signed merge
+    // intent, and then GitHub refused the merge on facts that were readable
+    // before the offer ever went out.
     //
     // Read only when nothing else already blocks the entry, so a blocked pull
-    // request asking once a minute costs no GitHub reads and the read happens
-    // where it can change the answer. The walk below reuses this answer rather
+    // request asking once a minute costs no GitHub reads and each read happens
+    // where it can change the answer. The walk below reuses these answers rather
     // than asking again, so the two gates cannot disagree about one head.
-    // Unknown is not a refusal, here as there.
+    // Unknown is not a refusal, in every one of them.
+    const clear = deriveReadiness(stated).ready;
     const branchChecks =
-      !deriveReadiness(stated).ready || deps.requiredCheckState === undefined
+      !clear || deps.requiredCheckState === undefined
         ? null
         : await deps.requiredCheckState(c.env, repositoryId, baseRef, headSha).catch(() => null);
+    const gates =
+      !clear || deps.pullRequestGates === undefined
+        ? null
+        : await deps
+            .pullRequestGates(c.env, repositoryId, baseRef, pullRequestNumber, headSha)
+            .catch(() => null);
+    const review = gates === null ? null : reviewGates(gates.review);
+    // What the head's proof does not cover of the policy in force. The merge
+    // gate makes the same two comparisons when it assembles the evidence, by
+    // which point the pull request has spent its turn; here the developer reads
+    // it first. No active policy means nothing to compare, so no read is spent.
+    const headCommit =
+      !clear || policy === null ? null : await deps.commitFacts(c.env, repositoryId, headSha).catch(() => null);
 
-    const base = deriveReadiness({
+    const facts: ReadinessFacts = {
       ...stated,
-      nonThwipChecks: branchChecks === null ? "passing" : nonThwipCheckState(branchChecks),
-    });
+      proofShortfall:
+        headCommit === null
+          ? "unread"
+          : proofShortfall(
+              headCommit.message === undefined ? null : proofBindingFrom(headCommit.message),
+              policy,
+            ),
+      reviewsSatisfied: review?.reviewsSatisfied ?? "unread",
+      codeOwnerReviewSatisfied: review?.codeOwnerReviewSatisfied ?? "unread",
+      approvalAfterPushSatisfied: review?.approvalAfterPushSatisfied ?? "unread",
+      conversationsResolved: review?.conversationsResolved ?? "unread",
+      nonThwipChecks: branchChecks === null ? "unread" : nonThwipCheckState(branchChecks),
+      mergeable: gates === null ? "unread" : gates.mergeable,
+    };
+    const base = deriveReadiness(facts);
     const baseReady = base.ready;
     const basePrimaryReason: BlockingReason | null = base.primaryReason;
 
@@ -2470,12 +2613,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // is a network round trip. Skipped entirely when there is no sponsor — there
     // is nobody to be connected — and when the profile has no device-only
     // requirement, `capabilityFor` never touches `queue_runners` at all.
-    //
-    // Read once and used everywhere below. The profile decides whether a runner
-    // has to be connected, whether the server may take the offer for itself, and
-    // what evidence the merge rests on, and three reads of it could disagree.
-    const policy = await deps.activePolicy(c.env, repositoryId);
-    const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
     const capability =
       sponsorPrincipalId === null
         ? { serverExecutable: true, compatibleRunnerConnected: false }
@@ -2703,8 +2840,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
                 .platformHealth(c.env, repositoryId, baseRef, sponsorGithubUserId)
                 .catch(() => null);
         if (health !== null) {
+          // The pull request's own facts with the three refreshed, rather than a
+          // fresh permissive object. Spreading a constant that objected to
+          // nothing meant this gate could only ever produce the three reasons it
+          // set, and the other twenty read as satisfied here whatever the
+          // derivation above had just decided about them.
           const stillHolds = deriveReadiness({
-            ...NO_OBJECTION,
+            ...facts,
             ownerAuthorized: health.sponsorAuthorized,
             appPermissionsHealthy: health.appPermissionsHealthy,
             rulesetEnforced: health.rulesetEnforced,
@@ -2780,7 +2922,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // No digest means no receipt, and the merge stops. Falling back to a
         // placeholder is how an empty claim ends up inside a record that reads as
         // evidence, and this is the path that record is built from.
-        const head = await deps.commitFacts(c.env, repositoryId, headSha);
+        // Reused from the readiness read above when that happened, so one head
+        // is read once and the two gates cannot see different proofs on it.
+        const head = headCommit ?? (await deps.commitFacts(c.env, repositoryId, headSha));
         const workReceiptDigest =
           head?.message === undefined ? null : await workReceiptDigestFrom(head.message);
         if (workReceiptDigest === null) {
@@ -2820,6 +2964,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
                 policy,
                 await deps.proofCheckRunId(c.env, repositoryId, headSha),
                 verifiedResultDigest,
+                // What the proof itself bound, so the record's equivalence
+                // digests are compared against the work rather than copied
+                // over it.
+                head?.message === undefined ? null : proofBindingFrom(head.message),
               )
             : verifiedEvidenceFor({
                 workReceiptDigest,
@@ -2836,12 +2984,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
                 rerun: null,
               });
         if ("missing" in evidenceForIntent) {
+          // A proof that does not bind the policy in force has its own reason
+          // code and its own sentence, because the developer's next move is to
+          // sign the head again rather than to chase absent evidence.
+          const refusal = evidenceForIntent.reason;
           return c.json({
             authorized: false,
             enforcing: true,
             activationState: project.activationState,
-            reason: "MERGE_EVIDENCE_INCOMPLETE",
-            detail: `nothing may be signed for this merge: ${evidenceForIntent.missing}`,
+            reason: refusal ?? "MERGE_EVIDENCE_INCOMPLETE",
+            detail:
+              refusal === undefined
+                ? `nothing may be signed for this merge: ${evidenceForIntent.missing}`
+                : `${nextAction(refusal)} ${evidenceForIntent.missing}.`,
             entryId,
             operationId: null,
           });
@@ -3039,7 +3194,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           : "QUEUE_PAUSED"
         : holdsLane
           ? "HOLDS_TURN"
-          : (entry?.primaryReason ?? "WAITING_FOR_TURN"),
+          : // No entry means no sponsor, and `unplaceableReason` says whether
+            // that is a bot with nobody behind it, which a person can clear.
+            (entry?.primaryReason ?? unplaceableReason ?? "WAITING_FOR_TURN"),
       entryId,
       operationId,
       queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
