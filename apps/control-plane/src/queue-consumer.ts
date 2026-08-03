@@ -84,10 +84,3 @@ export async function processQueueMessage(
   }
 }
 
-/** Runs a whole batch of messages through {@link processQueueMessage}, in order. */
-export async function runConsumer(messages: QueueConsumerMessage[], deps: QueueConsumerDeps = {}): Promise<void> {
-  const synced = new Set<string>();
-  for (const body of messages) {
-    await processQueueMessage(body, synced, deps);
-  }
-}
