@@ -199,17 +199,27 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
   }
   if (pred.git.baseSha !== facts.baseSha) return res("SUBJECT_BASE_MISMATCH", undefined, { statement });
 
-  // 6. Policy binding.
-  const policyEligible =
-    pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
-  if (!policyEligible) return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
-
-  // 7. Pipeline binding.
+  // 6. Pipeline binding. This and the required suites below are the two things
+  // the proof carries that the policy can invalidate, so they are compared
+  // against the policy in force right now.
+  //
+  // The proof's own `policy.digest` is not compared to the active one. It was,
+  // and because the digest covers the whole policy document any edit at all
+  // retired every proof already signed. A twenty-four hour grace list of
+  // recently retired digests hid that, and cost two things: an edit that added
+  // a required suite went unenforced for a day, and for that same day the merge
+  // gate refused proofs the check still showed green. Every other field of the
+  // policy is read from this bundle as the check runs, so a change to one takes
+  // effect on the next check with no proof needing to be re-signed.
   if (pred.pipeline.digest !== bundle.policy.pipeline.digest || pred.pipeline.runner !== bundle.policy.pipeline.runner) {
-    return res("PIPELINE_DIGEST_MISMATCH", undefined, { statement });
+    return res(
+      "PIPELINE_DIGEST_MISMATCH",
+      `this project now runs pipeline ${bundle.policy.pipeline.digest} on ${bundle.policy.pipeline.runner} and the proof ran ${pred.pipeline.digest} on ${pred.pipeline.runner}; run \`thwip run\` again`,
+      { statement },
+    );
   }
 
-  // 8. Signer binding and current authorization.
+  // 7. Signer binding and current authorization.
   if (pred.signer.keyId !== keyid) return res("SIGNER_MISMATCH", "predicate keyId != envelope keyid", { statement });
   if (pred.signer.githubUserId !== key.githubUserId) {
     return res("SIGNER_MISMATCH", "predicate user != enrolled key user", { statement });
@@ -237,7 +247,9 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     }
   }
 
-  // 9. Required suites: each exactly once, each passed.
+  // 8. Required suites: each exactly once, each passed. Read from the policy in
+  // force, so a suite added a minute ago is required a minute ago. Named in the
+  // refusal, because the developer's next move is to run that suite.
   const seen = new Set<string>();
   for (const s of pred.run.suites) {
     if (seen.has(s.id)) return res("SUITE_DUPLICATE", s.id, { statement });
@@ -245,11 +257,19 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
   }
   for (const required of bundle.policy.pipeline.requiredSuites) {
     const suite = pred.run.suites.find((s) => s.id === required);
-    if (!suite) return res("SUITE_MISSING", required, { statement });
-    if (suite.status !== "passed") return res("SUITE_NOT_PASSED", required, { statement });
+    if (!suite) {
+      return res(
+        "SUITE_MISSING",
+        `this project requires ${required} and the proof does not report it; run \`thwip run\` again`,
+        { statement },
+      );
+    }
+    if (suite.status !== "passed") {
+      return res("SUITE_NOT_PASSED", `${required} is ${suite.status} in this proof`, { statement });
+    }
   }
 
-  // 10. Remote suites: proven by GitHub's own run, not by the signer. A check
+  // 9. Remote suites: proven by GitHub's own run, not by the signer. A check
   // GitHub has not concluded is not a failed check, and a read GitHub would not
   // answer says nothing at all, so both wait rather than rejecting work that is
   // fine. `settleRemoteSuites` holds that rule.
@@ -276,7 +296,7 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     if (settlement.kind === "unsettled") return res("VERIFICATION_PENDING", settlement.reason, { statement });
   }
 
-  // 11. Run window and proof age. A run that finished after now, or before it
+  // 10. Run window and proof age. A run that finished after now, or before it
   // started, describes no real run, and a forward-dated one would sit inside
   // every age window forever.
   const started = Date.parse(pred.run.startedAt);
@@ -301,7 +321,7 @@ export async function verifyProof(input: VerifyInput, deps: VerifyDeps): Promise
     return res("PROOF_EXPIRED", undefined, { statement });
   }
 
-  // 12. Lease. Where the policy requires one, it is the evidence that the run
+  // 11. Lease. Where the policy requires one, it is the evidence that the run
   // happened inside a window this service opened for this exact tree, so every
   // part of it is checked: the signature under the project's issuer keys, the
   // age against `lease.maxAgeSeconds`, and the context against this run.

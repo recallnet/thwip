@@ -124,20 +124,3 @@ export function assertInvariants(state: BranchQueueState): void {
     );
   }
 }
-
-/**
- * Distinct-principal witness depth (plan.md §24.1): how many separate people
- * have certified transitions on top of a given point in the chain. One person
- * merging ten times is depth one.
- */
-export function witnessDepth(state: BranchQueueState, fromSequence: number): number {
-  const principals = new Set<string>();
-  for (const transition of state.transitions) {
-    if (transition.transitionSequence <= fromSequence) continue;
-    // A reuse merge is witnessed by the same people in the same way; what
-    // differs is what was checked, not who certified it.
-    if (transition.kind !== "verified" && transition.kind !== "reused") continue;
-    for (const principal of transition.witnessPrincipalIds) principals.add(principal);
-  }
-  return principals.size;
-}

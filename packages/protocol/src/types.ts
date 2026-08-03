@@ -126,7 +126,6 @@ export interface VerificationBundleV1 {
   repositoryId: DecimalId;
   ownerId: DecimalId;
   activePolicyDigest: Sha256;
-  gracePolicyDigests: Sha256[];
   policy: PolicyBundleV1;
   keys: EnrolledKey[];
   grants: SignerGrant[];
@@ -178,7 +177,10 @@ export const REASON_CODES = [
   "SUBJECT_TREE_MISMATCH",
   "SUBJECT_ANCESTRY_MISMATCH",
   "SUBJECT_BASE_MISMATCH",
-  "POLICY_NOT_ACTIVE",
+  // No POLICY_NOT_ACTIVE. A proof used to be refused for citing a superseded
+  // policy digest, which turned every open pull request red whenever anyone
+  // edited the document. What a proof has to satisfy is the pipeline and the
+  // required suites, and those have codes of their own.
   "PIPELINE_DIGEST_MISMATCH",
   "SUITE_MISSING",
   "SUITE_DUPLICATE",

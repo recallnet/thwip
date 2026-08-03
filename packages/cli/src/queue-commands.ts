@@ -389,19 +389,3 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
       return usage(`unknown subcommand \`queue ${subcommand}\``);
   }
 }
-
-/** Subcommands that change state, for the confirmation and audit surfaces. */
-export const MUTATING_SUBCOMMANDS = [
-  "reconcile",
-  "join",
-  "leave",
-  "pause",
-  "resume",
-  "rebaseline",
-  "eject",
-  "bypass",
-] as const;
-
-export function isMutating(subcommand: string): boolean {
-  return (MUTATING_SUBCOMMANDS as readonly string[]).includes(subcommand);
-}

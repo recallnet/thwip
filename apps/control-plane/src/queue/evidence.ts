@@ -453,28 +453,31 @@ export async function buildBaseCorrectionRecord(input: {
   };
 }
 
-/**
- * The equivalence digests a fast-path reuse claim binds (plan.md §21.5). Exposed
- * so the verifier and the scheduler compute them the same way; a difference here
- * would let reuse certify a tree nobody integrated.
- */
-export async function reuseEquivalenceDigests(input: {
-  readonly requiredSuites: readonly string[];
-  readonly pipelineDocument: unknown;
-  readonly policyDocument: unknown;
-}): Promise<{ policyDigest: Sha256; pipelineDigest: Sha256; requiredSuitesDigest: Sha256 }> {
-  const [policyDigest, pipelineDigest, suitesDigest] = await Promise.all([
-    recordDigest(input.policyDocument),
-    recordDigest(input.pipelineDocument),
-    requiredSuitesDigest(input.requiredSuites),
-  ]);
-  return { policyDigest, pipelineDigest, requiredSuitesDigest: suitesDigest };
+/** The three digests a fast-path reuse claim binds (plan.md §21.5). */
+export interface ReuseEquivalence {
+  readonly policyDigest: Sha256;
+  readonly pipelineDigest: Sha256;
+  readonly requiredSuitesDigest: Sha256;
 }
 
 /**
- * Digest of the live guard facts, so an override records exactly which GitHub
- * controls still held at the moment it was authorized (§21.7).
+ * The equivalence digests a fast-path reuse claim binds (plan.md §21.5).
+ *
+ * One producer, so the record and the check that lets the record be signed
+ * cannot compute the triple differently. It took a pipeline document before,
+ * which is the reason it went uncalled: the activated bundle keeps the
+ * pipeline's digest and not the pipeline itself, so no caller at the merge gate
+ * could satisfy the signature. Required suites are digested here rather than
+ * carried as a list because that is the form the record stores.
  */
-export async function liveGuardDigest(facts: Record<string, unknown>): Promise<Sha256> {
-  return recordDigest(facts);
+export async function reuseEquivalenceDigests(input: {
+  readonly requiredSuites: readonly string[];
+  readonly pipelineDigest: Sha256;
+  readonly policyDigest: Sha256;
+}): Promise<ReuseEquivalence> {
+  return {
+    policyDigest: input.policyDigest,
+    pipelineDigest: input.pipelineDigest,
+    requiredSuitesDigest: await requiredSuitesDigest(input.requiredSuites),
+  };
 }

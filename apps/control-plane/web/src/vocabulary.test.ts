@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { BLOCKING_REASONS, ENTRY_STATES, TRANSITION_KINDS } from "@thwip/queue-domain";
 import { REASON_CODES } from "@thwip/protocol";
 import {
-  BLOCKED_NEXT_ACTION,
   blockedNextAction,
   entryStateText,
   ownerGithubUrl,
@@ -66,12 +65,6 @@ describe("queue entry states", () => {
 });
 
 describe("queue guidance", () => {
-  it("covers every blocking reason the domain defines", () => {
-    for (const reason of BLOCKING_REASONS) {
-      expect(Object.keys(BLOCKED_NEXT_ACTION), `no guidance for ${reason}`).toContain(reason);
-    }
-  });
-
   it("never shows a bare reason code, known or not", () => {
     for (const reason of [...BLOCKING_REASONS, "SOMETHING_NEW"]) {
       const said = blockedNextAction(reason);
@@ -86,7 +79,7 @@ describe("queue guidance", () => {
 
   it("says the place is kept wherever that is the reassuring truth", () => {
     for (const reason of ["REVIEW_REQUIRED", "REQUIRED_CHECK_FAILED", "NEEDS_REPAIR"] as const) {
-      expect(BLOCKED_NEXT_ACTION[reason], reason).toMatch(/place/);
+      expect(blockedNextAction(reason), reason).toMatch(/place/);
     }
   });
 });

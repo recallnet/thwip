@@ -1,12 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_MERGE_METHOD,
-  mergeCommitMessage,
-  mergeCommitText,
-  mergeCommitTitle,
-} from "./merge-commit.js";
+import { DEFAULT_MERGE_METHOD, mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
+import { mergeCommitText } from "../../test/merge-commit-text.js";
 
 /**
  * The signed intent says what commit the merge will produce. That claim is only

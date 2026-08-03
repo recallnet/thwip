@@ -86,14 +86,6 @@ export async function resolveRepositoryIds(
   return ids;
 }
 
-export async function deriveConfig(
-  y: ThwipYaml,
-  cwd: string,
-  ids: { ownerId: string; repositoryId: string },
-): Promise<ProjectConfig> {
-  return deriveEffectiveProjectConfig(null, JSON.stringify(y), ids, new GitHeadSnapshot(cwd));
-}
-
 async function organizationDefaults(
   endpoint: string,
   authHeader: string | null,

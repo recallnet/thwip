@@ -1,6 +1,16 @@
 import type { AttemptOutcome, BlockingReason, ExecutionMode, TransitionKind } from "@thwip/queue-domain";
-import { isSyntheticExecutionMode } from "@thwip/queue-domain";
+import { isSyntheticExecutionMode, runRound } from "@thwip/queue-domain";
+import {
+  MAX_EXPLAINED_PRINCIPALS,
+  parseQueueDecision,
+  recordDigest,
+  SCHEDULER_ALGORITHM,
+  type EligiblePrincipalHead,
+  type QueueDecisionV1,
+  type Sha256,
+} from "@thwip/queue-protocol";
 import type { AppendResult, Deadline, QueueStateStore } from "./store.js";
+import { SWEEP_INTERVAL_SECONDS } from "./runners.js";
 
 /**
  * The commands a branch queue accepts (plan.md §39).
@@ -40,30 +50,14 @@ export const DEFAULT_TIMINGS: QueueTimings = {
   executionSeconds: 20 * 60,
   heartbeatSeconds: 20,
   graceSeconds: 60,
-  noClaimCooldownSeconds: 5 * 60,
+  // An offer that expires unclaimed means the runner is probably gone, and the
+  // entry must stay in cooldown until the sweep can retire it. Any shorter and
+  // the queue hands the same dead machine a second offer, and a third, which is
+  // the repeating lost turn plan.md:1208 rules out. Written as the sweep
+  // interval rather than as `5 * 60` again, so the two cannot be moved apart.
+  noClaimCooldownSeconds: SWEEP_INTERVAL_SECONDS,
   mergeConfirmSeconds: 60,
 };
-
-export const TIMING_LIMITS = {
-  offerSeconds: { min: 15, max: 5 * 60 },
-  executionSeconds: { min: 5 * 60, max: 45 * 60 },
-} as const;
-
-export function validateTimings(timings: QueueTimings): { ok: true } | { ok: false; detail: string } {
-  if (
-    timings.offerSeconds < TIMING_LIMITS.offerSeconds.min ||
-    timings.offerSeconds > TIMING_LIMITS.offerSeconds.max
-  ) {
-    return { ok: false, detail: "offer window must be between 15 seconds and 5 minutes" };
-  }
-  if (
-    timings.executionSeconds < TIMING_LIMITS.executionSeconds.min ||
-    timings.executionSeconds > TIMING_LIMITS.executionSeconds.max
-  ) {
-    return { ok: false, detail: "execution window must be between 5 and 45 minutes" };
-  }
-  return { ok: true };
-}
 
 function plusSeconds(iso: string, seconds: number): string {
   return new Date(Date.parse(iso) + seconds * 1000).toISOString();
@@ -71,12 +65,90 @@ function plusSeconds(iso: string, seconds: number): string {
 
 export type CommandResult = AppendResult | { readonly status: "noop"; readonly detail: string };
 
+/**
+ * A digest of all zeros is syntactically a sha256 and names nothing. Every offer
+ * made before the queue produced a decision record carries one, so anything that
+ * reads a prior decision has to tell that apart from a real one.
+ */
+export function namesNoDecision(digest: string): boolean {
+  return /^sha256:0+$/.test(digest);
+}
+
+/**
+ * The scheduling choice this queue is about to make, or null when there is no
+ * choice to explain.
+ *
+ * Everything here comes from the round the scheduler ran. The entry, the
+ * principal heads it weighed and their order are `runRound`'s own output, so the
+ * record cannot name a selection the queue did not make.
+ */
+export function planQueueDecision(store: QueueStateStore, now: string): QueueDecisionV1 | null {
+  const state = store.state();
+  // The same two refusals `nextTurn` makes: a paused queue offers nothing, and
+  // an occupied lane is not the scheduler's to hand out.
+  if (state.paused || state.activeAttemptId !== null) return null;
+  const round = runRound(store.eligibleEntries(), state.lastServedTurn, now);
+  if (round === null) return null;
+
+  // Ranked order already, so the winner is first and a lane with more principals
+  // than the explanation may carry drops only principals that were served more
+  // recently than the winner. Truncating anywhere else would produce a record
+  // the validator refuses, which is the point of doing it here.
+  const heads: EligiblePrincipalHead[] = round.heads.slice(0, MAX_EXPLAINED_PRINCIPALS).map((head) => ({
+    sponsorPrincipalId: head.sponsorPrincipalId,
+    sponsorGithubUserId: head.sponsorGithubUserId.toString(),
+    lastServedTurn: (state.lastServedTurn.get(head.sponsorPrincipalId) ?? 0n).toString(),
+    oldestReadyEntryId: head.entryId,
+    fairnessOrdinal: head.fairnessOrdinal.toString(),
+  }));
+
+  // The decision the last turn was offered under, so an auditor can walk the
+  // decisions back. Null where there is none to name; an offer made before this
+  // producer existed carries zeros, and pointing at those would be the same lie
+  // one link further along.
+  const previous = [...state.attempts.values()].at(-1)?.decisionDigest ?? null;
+
+  return {
+    schemaVersion: "1",
+    algorithm: SCHEDULER_ALGORITHM,
+    repositoryId: store.repositoryId,
+    baseRef: store.baseRef,
+    queueEpoch: store.queueEpoch(),
+    // The turn this offer creates, which is the turn the record explains.
+    turnSequence: Number(state.turnSequence + 1n),
+    inputStateVersion: store.generation(),
+    selected: {
+      entryId: round.selected.entryId,
+      pullRequestNumber: round.selected.pullRequestNumber,
+      sponsorPrincipalId: round.selected.sponsorPrincipalId,
+      fairnessOrdinal: round.selected.fairnessOrdinal.toString(),
+    },
+    eligiblePrincipalHeads: heads,
+    priorDecisionDigest: previous === null || namesNoDecision(previous) ? null : (previous as Sha256),
+    decidedAt: now,
+  };
+}
+
+/**
+ * Digest a decision and put it somewhere a reader can fetch it, returning the
+ * digest the offer will bind.
+ *
+ * Injected because storage belongs to the deployment and the digest does not.
+ * A recorder that cannot store must throw rather than return a digest, since the
+ * offer would then name a record nobody can read.
+ */
+export type DecisionRecorder = (decision: QueueDecisionV1) => Promise<Sha256>;
+
+/** Digest without archiving, for a deployment that has no evidence bucket. */
+export const digestDecisionOnly: DecisionRecorder = (decision) => recordDigest(decision);
+
 export class QueueCommands {
   constructor(
     private readonly store: QueueStateStore,
     private readonly clock: QueueClock,
     private readonly ids: QueueIds,
     private readonly timings: QueueTimings = DEFAULT_TIMINGS,
+    private readonly recordDecision: DecisionRecorder = digestDecisionOnly,
   ) {}
 
   /**
@@ -165,11 +237,32 @@ export class QueueCommands {
   /**
    * Run the scheduler and offer a turn if one is due. Returns noop rather than
    * an error when nothing is eligible, because that is the normal case.
+   *
+   * The decision record is written before the offer, and the offer binds its
+   * digest. Order matters: a `TurnOffered` whose decision was never recorded
+   * names an explanation nobody can fetch, which is the state every one of these
+   * callers was in while they passed a constant of zeros.
    */
-  tick(input: { idempotencyKey: string; decisionDigest: string }): CommandResult & { attemptId?: string } {
+  async tick(input: { idempotencyKey: string }): Promise<CommandResult & { attemptId?: string }> {
     const now = this.clock.now();
-    const chosen = this.store.nextTurn(now);
-    if (chosen === null) return { status: "noop", detail: "no eligible entry" };
+    const decision = planQueueDecision(this.store, now);
+    if (decision === null) return { status: "noop", detail: "no eligible entry" };
+
+    // Checked against the reader that will check it, before anything binds it.
+    // A record the validator refuses is a producer bug, and refusing the turn is
+    // how it surfaces as one instead of as an unverifiable assignment weeks on.
+    const checked = parseQueueDecision(decision);
+    if (!checked.ok) return { status: "rejected", detail: `queue decision is malformed: ${checked.detail}` };
+
+    let decisionDigest: Sha256;
+    try {
+      decisionDigest = await this.recordDecision(checked.value);
+    } catch (error) {
+      return {
+        status: "rejected",
+        detail: `queue decision could not be recorded: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
 
     const attemptId = this.ids.attemptId();
     const offerDeadline = plusSeconds(now, this.timings.offerSeconds);
@@ -178,10 +271,10 @@ export class QueueCommands {
         idempotencyKey: input.idempotencyKey,
         at: now,
         type: "TurnOffered",
-        entryId: chosen.entryId,
+        entryId: decision.selected.entryId,
         attemptId,
         offerDeadline,
-        decisionDigest: input.decisionDigest,
+        decisionDigest,
       },
       {
         setDeadlines: [{ kind: "offer", attemptId, dueAt: offerDeadline }],
@@ -189,7 +282,11 @@ export class QueueCommands {
           {
             kind: "offer-created",
             attemptId,
-            payload: { entryId: chosen.entryId, sponsorPrincipalId: chosen.sponsorPrincipalId, offerDeadline },
+            payload: {
+              entryId: decision.selected.entryId,
+              sponsorPrincipalId: decision.selected.sponsorPrincipalId,
+              offerDeadline,
+            },
           },
         ],
       },
@@ -630,7 +727,7 @@ export class QueueCommands {
    * each action carries a deadline-derived idempotency key and a second delivery
    * finds nothing left to do.
    */
-  runAlarm(): { handled: Deadline[]; results: CommandResult[]; nextAlarm: string | null } {
+  async runAlarm(): Promise<{ handled: Deadline[]; results: CommandResult[]; nextAlarm: string | null }> {
     const now = this.clock.now();
     const due = this.store.dueDeadlines(now);
     const results: CommandResult[] = [];
@@ -692,11 +789,7 @@ export class QueueCommands {
     // That is exactly how a repository stayed stuck after an outage: the lane was
     // free, four entries were ready and eligible, and no turn was ever offered.
     if (due.length > 0 && this.store.state().activeAttemptId === null) {
-      const offered = this.tick({
-        idempotencyKey: `alarm:tick:${this.clock.now()}`,
-        decisionDigest: `sha256:${"0".repeat(64)}`,
-      });
-      results.push(offered);
+      results.push(await this.tick({ idempotencyKey: `alarm:tick:${this.clock.now()}` }));
     }
 
     return { handled: due, results, nextAlarm: this.store.earliestDeadline() };

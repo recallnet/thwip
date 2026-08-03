@@ -161,7 +161,7 @@ interface Held {
 async function deviceHoldsTurn(
   input: { deviceKeyId?: string; receiptDigest?: string; assignmentDigest?: string; candidateTree?: string } = {},
 ): Promise<Held> {
-  return withQueueState(db, REPO, REF, (store) => {
+  return withQueueState(db, REPO, REF, async (store) => {
     const commands = commandsFor(store);
     commands.requestQueue({
       idempotencyKey: "req",
@@ -178,7 +178,7 @@ async function deviceHoldsTurn(
       schedulerEligible: true,
       primaryReason: null,
     });
-    commands.tick({ idempotencyKey: "tick", decisionDigest: `sha256:${"0".repeat(64)}` });
+    await commands.tick({ idempotencyKey: "tick"});
     const attemptId = store.state().activeAttemptId;
     if (attemptId === null) throw new Error("no offer was made");
     commands.claim({

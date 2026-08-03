@@ -4068,7 +4068,7 @@ Keep GitHub API types/adapters out of the pure domain packages. Keep Dagger and 
 | TQ-FR-024 | Record verified, override, external, and genesis transition kinds distinctly. |
 | TQ-FR-025 | Pause on unrecognized base movement and require rebaseline. |
 | TQ-FR-026 | Preserve immutable failed attempts and typed DAG edges. |
-| TQ-FR-027 | Calculate distinct-principal witness depth. |
+| TQ-FR-027 | Calculate distinct-principal witness depth. **Unimplemented.** Needs two things it does not have: transitions that record the principals whose integration receipts bind a descendant base (today every writer stores the merging principal alone), and a count taken over the D1 transition projection, because `state.transitions` keeps only a bounded tail and would under-report. |
 | TQ-FR-028 | Support pause, resume, cancel, retry, transfer, expedite, bypass, reconcile, rebaseline, and disable. |
 | TQ-FR-029 | Expose stable checks, optional sticky comment, dashboard, CLI, and NDJSON state. |
 | TQ-FR-030 | Generate/validate minimal `thwip.yaml` Queue config. |

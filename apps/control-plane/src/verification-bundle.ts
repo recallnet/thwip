@@ -104,11 +104,6 @@ export async function resolveVerificationBundle(
     throw new VerificationBundleError(500, "ACTIVE_POLICY_UNAVAILABLE", "active policy record is unavailable");
   }
 
-  const grace = await env.DB.prepare(
-    "SELECT digest FROM policy_bundles WHERE project_id = ? AND status = 'retired' AND activated_at > datetime('now','-1 day')",
-  )
-    .bind(project.id)
-    .all<{ digest: string }>();
   const grants = await env.DB.prepare(
     "SELECT github_user_id, github_login, permission, active, synced_at FROM repository_grants WHERE project_id = ?",
   )
@@ -256,8 +251,11 @@ export async function resolveVerificationBundle(
     projectId: project.id,
     repositoryId: project.github_repository_id,
     ownerId: project.github_org_id,
+    // Retired digests used to ride along here for a day so an edited policy did
+    // not turn every open pull request red at once. The verifier no longer asks
+    // which policy a proof was signed under, only whether it satisfies the one
+    // in force, so there is nothing for a grace list to hold open.
     activePolicyDigest: policyRow.digest as VerificationBundleV1["activePolicyDigest"],
-    gracePolicyDigests: grace.results.map((row) => row.digest as VerificationBundleV1["activePolicyDigest"]),
     policy,
     keys: githubKeys,
     grants: refreshed,

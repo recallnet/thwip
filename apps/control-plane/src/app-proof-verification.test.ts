@@ -120,7 +120,6 @@ function bundle(keyId = "key_test", signerId = SIGNER_ID): VerificationBundleV1 
     repositoryId: REPOSITORY_ID,
     ownerId: OWNER_ID,
     activePolicyDigest: POLICY_DIGEST,
-    gracePolicyDigests: [],
     policy: {
       schemaVersion: "1",
       projectId: "project_1",

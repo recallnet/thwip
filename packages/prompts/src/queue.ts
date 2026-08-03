@@ -138,22 +138,16 @@ export function withQueuePointer(existing: string): string {
   return `${existing}${separator}${pointer}\n`;
 }
 
-export function hasQueuePointer(existing: string): boolean {
-  const start = existing.indexOf(POINTER_START);
-  const end = existing.indexOf(POINTER_END);
-  return start !== -1 && end !== -1 && end > start;
-}
-
 /** The agent prompt for adding the queue to a repository (plan.md §31.3). */
 export function queueSetupPrompt(repositoryName: string): string {
   return `Add Thwip Queue to ${repositoryName}.
 
-Work through this in order. Several steps need my approval, and two need me to
-click something in GitHub that you cannot.
+Work through this in order. Enrolment is one request, and it stops in the middle
+for things only I can do.
 
 1. Read what is already here: AGENTS.md, CLAUDE.md, THWIP.md, thwip.yaml, any
    Dagger module, .github/workflows, CODEOWNERS, and the live repository rulesets.
-   Report anything that already merges automatically — a second auto-merge system
+   Report anything that already merges automatically. A second auto-merge system
    racing the queue is the one conflict that must be resolved before setup.
 
 2. Run "thwip queue doctor --json" and show me the whole output.
@@ -165,30 +159,38 @@ click something in GitHub that you cannot.
      commit and does not change while the commit does not.
    - "thwip / turn" says it is this pull request's turn to merge. The queue
      publishes it itself the moment it offers the lane, and it sits in progress
-     rather than failing while a pull request waits — a required check that has
+     rather than failing while a pull request waits. A required check that has
      failed goes on refusing the merge after the queue has authorized it.
 
-4. Ensure THWIP.md states the exact shipping, repair, and no-manual-merge rules,
-   and add only the bounded pointer to existing agent instruction files. Do not
-   rewrite instructions someone else authored.
+4. Write the repository's own instructions: run "thwip queue setup --write". It
+   writes THWIP.md and adds only the bounded pointer to the AGENTS.md and
+   CLAUDE.md that already exist. Show me the diff. Do not rewrite instructions
+   someone else authored.
 
-5. Open a setup pull request. The proposed configuration must not judge itself:
-   it merges under the repository's existing controls, before the queue's checks
-   are required.
+5. Start enrolment: the "Set up" tab of this project in the dashboard, or POST
+   /v1/queue/<repository id>/bootstrap. It enrols the repository and opens a
+   setup pull request carrying the two workflows and a thwip.yaml, then stops.
+   The proposed configuration must not judge itself, so that pull request merges
+   under the controls this repository already has, before any Thwip check is
+   required.
 
 6. Tell me what I have to do myself, because you cannot:
-   - grant the thwip App "checks: write", which raises a consent prompt;
-   - add "thwip" and "thwip / turn" to the branch ruleset as required checks.
-     Preserve all unrelated rules and required checks: a ruleset that drops one
-     somebody else added is a broken branch, not a tidier one;
-   - pin each to the source that publishes it, which GitHub can only do after
-     that source has published the check once.
+   - merge the setup pull request, which is where enrolment is waiting;
+   - add the THWIP_ENQUEUE_TOKEN repository secret the merge workflow reads;
+   - grant the thwip App "checks: write", which raises a consent prompt.
+   Then start enrolment again. It builds the branch ruleset itself: it requires
+   "thwip" and "thwip / turn", pins each to the source that publishes it, which
+   GitHub allows only after that source has published the check, and refuses a
+   payload that would drop a rule or a required check somebody else added. Do
+   not edit that ruleset by hand.
 
-7. Prove it before enforcing it. Push a pull request and confirm both checks
-   appear and go green on it. A required check that nothing publishes blocks
-   every merge on the branch, and that is the failure this order exists to
-   avoid.
+7. Prove it before enforcing it. Enrolment activates the ruleset only after
+   GitHub has stored both source pins, and leaves the queue observing, so it
+   reports and blocks nothing. Push a pull request and confirm both checks appear
+   and go green on it before I move the queue to enforced. A required check that
+   nothing publishes blocks every merge on the branch, and that is the failure
+   this order exists to avoid.
 
-Report: files changed, App permissions required, ruleset commands, doctor
-results, and any conflicting auto-merge system you found.`;
+Report: files changed, what enrolment answered, doctor results, the pull request
+I have to merge, and any conflicting auto-merge system you found.`;
 }

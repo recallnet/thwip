@@ -101,6 +101,22 @@ export function isOrganizationMember(githubOrgRole: string | null): boolean {
   return githubOrgRole !== "outside";
 }
 
+/**
+ * Who counts as an administrator for queue operations.
+ *
+ * GitHub's projections use `owner` for the people who created or own the
+ * organization and `admin` for org administrators, and both can change rulesets.
+ * Checking only for `admin` locked out owners, the people most likely to be
+ * running setup in the first place.
+ *
+ * It lives beside `isOrganizationMember` because setup and the doctor both ask
+ * it, and two copies of the answer is how one of them starts saying something
+ * else.
+ */
+export function isOrgAdmin(githubOrgRole: string | null): boolean {
+  return githubOrgRole === "admin" || githubOrgRole === "owner";
+}
+
 export interface RepositoryCaller {
   readonly principalId: string;
   readonly githubUserId: string;

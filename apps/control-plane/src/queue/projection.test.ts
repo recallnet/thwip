@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { projectionLag, projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
+import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
 
 /**
  * The projection is fed by an at-least-once queue with no ordering guarantee, so
@@ -234,34 +234,6 @@ describe("projectQueueState", () => {
     // Two entries and one mark, or none of it.
     expect((await rows(db, "queue_entries_index")).results).toHaveLength(2);
     expect((await rows(db, "queue_projection_marks")).results).toHaveLength(1);
-  });
-});
-
-describe("projectionLag", () => {
-  it("reports how far behind the projection is", async () => {
-    const db = d1();
-    await projectQueueState(db, message({ generation: 5 }));
-    expect(await projectionLag(db, "1315419165", "refs/heads/main", 9)).toEqual({
-      projected: 5,
-      live: 9,
-      behind: 4,
-    });
-  });
-
-  it("reports zero rather than a negative when the projection is current", async () => {
-    const db = d1();
-    await projectQueueState(db, message({ generation: 9 }));
-    expect(await projectionLag(db, "1315419165", "refs/heads/main", 9)).toMatchObject({ behind: 0 });
-    expect(await projectionLag(db, "1315419165", "refs/heads/main", 5)).toMatchObject({ behind: 0 });
-  });
-
-  it("treats an unprojected branch as fully behind", async () => {
-    const db = d1();
-    expect(await projectionLag(db, "1315419165", "refs/heads/never", 4)).toEqual({
-      projected: 0,
-      live: 4,
-      behind: 4,
-    });
   });
 });
 

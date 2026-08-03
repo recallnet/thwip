@@ -77,7 +77,6 @@ function makeBundle(overrides?: (b: VerificationBundleV1) => void): Verification
     repositoryId: "1315419165",
     ownerId: "162603603",
     activePolicyDigest: POLICY_DIGEST,
-    gracePolicyDigests: [],
     policy: {
       schemaVersion: "1",
       projectId: "prj_thwip",
@@ -310,11 +309,20 @@ describe("ADVERSARIAL: proof-path defences that already hold", () => {
     );
   });
 
-  it("refuses a proof whose policy digest is no longer active", async () => {
+  it("refuses a proof that no longer runs the pipeline in force", async () => {
     const bundle = makeBundle((b) => {
       b.activePolicyDigest = `sha256:${"9".repeat(64)}`;
+      b.policy.pipeline.digest = `sha256:${"a".repeat(64)}`;
     });
-    expect((await run({ bundle })).code).toBe("POLICY_NOT_ACTIVE");
+    expect((await run({ bundle })).code).toBe("PIPELINE_DIGEST_MISMATCH");
+  });
+
+  it("refuses a proof that skipped a suite the policy in force requires", async () => {
+    const bundle = makeBundle((b) => {
+      b.activePolicyDigest = `sha256:${"9".repeat(64)}`;
+      b.policy.pipeline.requiredSuites = ["lint", "typecheck", "test", "audit"];
+    });
+    expect((await run({ bundle })).code).toBe("SUITE_MISSING");
   });
 
   it("refuses an expired proof", async () => {

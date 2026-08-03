@@ -773,13 +773,13 @@ export async function loadGithubProofTargets(token: string, request: AppProofReq
  * What the check says, including what to do about it.
  *
  * Deleting the dead fields from the policy document changed its digest, which
- * was the right change and made every proof already signed cite a policy that
- * is no longer active. Those pull requests went red with `POLICY_NOT_ACTIVE`
- * and a summary that named the code and nothing else, while the fix was to run
- * `thwip run` again. The old digest is not kept acceptable for a window,
- * because a merge certified against a document nobody activated is the exact
- * thing the proof exists to rule out. So the check says what happened and what
- * to do, from the sentence the vocabulary already holds for every code.
+ * was the right change and turned every open pull request red with
+ * `POLICY_NOT_ACTIVE` over an edit that changed nothing a proof had to satisfy.
+ * The verifier judges a proof against what the policy requires now, so an edit
+ * like that leaves the check green and an edit that adds a required suite turns
+ * it red at once, under `SUITE_MISSING` naming the suite. Whatever the code,
+ * the check says what happened and what to do, from the sentence the vocabulary
+ * already holds for every code.
  */
 export function checkSummary(evaluation: AppProofEvaluation, detailsUrl: string): string {
   const targets =

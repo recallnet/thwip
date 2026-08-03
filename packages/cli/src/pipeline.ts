@@ -1,32 +1,6 @@
 import { spawn } from "node:child_process";
-import { canonicalDigest, type Sha256, type SuiteResult } from "@thwip/protocol";
-
-export interface PipelineDefinition {
-  schemaVersion: "1";
-  runner: "command" | "dagger";
-  suites: Array<{ id: string; command: string[] }>;
-  /** dagger runner only: the module and pinned engine the policy approves */
-  module?: string;
-  daggerVersion?: string;
-  moduleDigest?: string;
-}
-
-export function parsePipelineDefinition(jsonText: string): PipelineDefinition {
-  const v = JSON.parse(jsonText) as PipelineDefinition;
-  if (v.schemaVersion !== "1") throw new Error("unsupported pipeline schemaVersion");
-  if (v.runner !== "command" && v.runner !== "dagger") throw new Error("unsupported pipeline runner");
-  if (!Array.isArray(v.suites) || v.suites.length === 0) throw new Error("pipeline must declare suites");
-  for (const s of v.suites) {
-    if (typeof s.id !== "string" || !Array.isArray(s.command) || s.command.length === 0) {
-      throw new Error("invalid suite entry");
-    }
-  }
-  return v;
-}
-
-export async function pipelineDigest(definitionJsonText: string): Promise<Sha256> {
-  return canonicalDigest(JSON.parse(definitionJsonText));
-}
+import type { SuiteResult } from "@thwip/protocol";
+import type { PipelineDefinition } from "@thwip/policy";
 
 function runCommand(command: string[], cwd: string): Promise<number> {
   return new Promise((resolve, reject) => {

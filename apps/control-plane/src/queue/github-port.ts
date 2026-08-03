@@ -1,37 +1,18 @@
-import {
-  actionForMergeStatus,
-  pinCandidate,
-  validateMergeResult,
-  type CommitFacts,
-  type PullRequestFacts,
-} from "./candidate.js";
-import { confirmMergeAbsence } from "./merge-absence.js";
+import { pinCandidate, type CommitFacts, type PullRequestFacts } from "./candidate.js";
 
 /**
  * The real GitHub side of an integration turn.
  *
- * One rule shapes this whole file: a merge request must never raise. The rest of
- * the control plane uses a helper that throws on any non-2xx response, which is
- * right for reads and fatal for the one call that mutates a branch — an
- * exception there would be caught by a retry policy somewhere and could send a
- * second PUT (plan.md §40.1). So mutations go through `raw`, which reports a
- * status or a transport error and never throws.
+ * Reads only. The merge write lives in Actions, and every call here throws on a
+ * non-2xx response, which is what a read should do.
  */
 
 const API = "https://api.github.com";
 const USER_AGENT = "thwip-control-plane";
 
-export interface RawResponse {
-  readonly status: number;
-  readonly body?: Record<string, unknown>;
-  readonly transportError?: string;
-}
-
 export interface GitHubHttp {
   /** Throws on non-2xx. For reads, where failing loudly is correct. */
   json<T>(path: string, init?: RequestInit): Promise<T>;
-  /** Never throws. For mutations, where an exception could cause a second write. */
-  raw(path: string, init?: RequestInit): Promise<RawResponse>;
 }
 
 export function githubHttp(token: string, fetchImpl: typeof fetch = fetch): GitHubHttp {
@@ -49,48 +30,8 @@ export function githubHttp(token: string, fetchImpl: typeof fetch = fetch): GitH
       if (!res.ok) throw new Error(`GitHub ${path} -> ${res.status}: ${await res.text()}`);
       return (await res.json()) as T;
     },
-
-    async raw(path: string, init?: RequestInit): Promise<RawResponse> {
-      try {
-        const res = await fetchImpl(`${API}${path}`, { ...init, headers: headers(init?.headers) });
-        const text = await res.text();
-        let body: Record<string, unknown> | undefined;
-        if (text.length > 0) {
-          try {
-            body = JSON.parse(text) as Record<string, unknown>;
-          } catch {
-            body = { message: text.slice(0, 512) };
-          }
-        }
-        return body === undefined ? { status: res.status } : { status: res.status, body };
-      } catch (error) {
-        // A network failure is not a failure to merge: the request may have been
-        // delivered. It becomes a typed unknown outcome, never an exception.
-        return { status: 0, transportError: error instanceof Error ? error.message : "unknown transport error" };
-      }
-    },
   };
 }
-
-/**
- * What happened to a merge request. A transport failure is a typed nonterminal
- * outcome, never an exception thrown into a retry policy (plan.md §40.1).
- *
- * This lived in `turn.ts` next to a second classifier that read the same
- * statuses and returned a different shape. Neither had a caller, and the pair
- * would have drifted the way the receipt signing bytes and the reason-code
- * sentences did. The one that classifies a response this file actually sends is
- * the one that stayed.
- */
-export type MergeAttemptOutcome =
-  | {
-      readonly kind: "merged";
-      readonly mergeSha: string;
-      readonly mergeTree: string;
-      readonly parentShas: readonly string[];
-    }
-  | { readonly kind: "rejected"; readonly reason: string }
-  | { readonly kind: "unknown"; readonly reason: string };
 
 export interface RepoRef {
   readonly owner: string;
@@ -104,7 +45,6 @@ interface PullResponse {
   state: string;
   draft?: boolean;
   mergeable: boolean | null;
-  merged?: boolean;
   merge_commit_sha: string | null;
   base: { ref: string; sha: string; repo: { id: number; node_id?: string } };
   head: { sha: string; repo: { id: number } | null };
@@ -187,129 +127,6 @@ export async function resolveCandidate(
  * came to disagree about the attribution trailer.
  */
 
-/**
- * Whether the base branch already contains a commit.
- *
- * Git ancestry, not the pull request's own merged flag: the flag lagged its own
- * write by seconds and the ancestry did not. Null when the comparison cannot be
- * read, which is not the same as "no".
- */
-export async function baseContainsCommit(
-  http: GitHubHttp,
-  repo: RepoRef,
-  sha: string,
-): Promise<boolean | null> {
-  const branch = repo.baseRef.replace(/^refs\/heads\//, "");
-  const compared = await http
-    .json<{ status?: string }>(`/repos/${repo.owner}/${repo.repo}/compare/${branch}...${sha}`)
-    .catch(() => null);
-  if (compared?.status === undefined) return null;
-  return compared.status === "behind" || compared.status === "identical";
-}
-
-/**
- * Read what actually happened, for reconciliation after an unknown outcome. This
- * is the only way out of an ambiguous merge: never another write, always a read
- * (plan.md §40.1 step 3).
- */
-export async function observeMergeResult(
-  http: GitHubHttp,
-  repo: RepoRef,
-  input: {
-    readonly pullRequestNumber: number;
-    readonly assigned: {
-      readonly baseSha: string;
-      readonly headSha: string;
-      readonly candidateTreeOid: string;
-    };
-    readonly mergeMethod: "merge" | "squash";
-    /** The backoff between confirmation reads. Overridden in tests. */
-    readonly sleep?: (ms: number) => Promise<void>;
-  },
-): Promise<MergeAttemptOutcome> {
-  const readPull = async () => {
-    const pull = await http
-      .json<PullResponse>(`/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}`)
-      .catch(() => null);
-    return pull === null ? null : { merged: pull.merged === true, mergeCommitSha: pull.merge_commit_sha };
-  };
-
-  // A negative needs more than one read of a pull request that is eventually
-  // consistent with its own merge, so this asks repeatedly and asks git too.
-  const absence = await confirmMergeAbsence(
-    {
-      readPull,
-      baseContainsHead: () => baseContainsCommit(http, repo, input.assigned.headSha),
-    },
-    input.sleep === undefined ? {} : { sleep: input.sleep },
-  );
-  if (absence.kind === "not-merged") {
-    // The attempt ends; a later turn may try again with a new assignment, nonce,
-    // and operation.
-    return { kind: "rejected", reason: absence.reason };
-  }
-  if (absence.kind === "unknown") return { kind: "unknown", reason: absence.reason };
-
-  const pull = await http.json<PullResponse>(
-    `/repos/${repo.owner}/${repo.repo}/pulls/${input.pullRequestNumber}`,
-  );
-  if (pull.merged !== true) return { kind: "unknown", reason: absence.reason };
-
-  const mergeSha = pull.merge_commit_sha;
-  if (mergeSha === null) return { kind: "unknown", reason: "merged with no merge commit reported" };
-
-  const commit = await http.json<CommitResponse>(`/repos/${repo.owner}/${repo.repo}/git/commits/${mergeSha}`);
-  const validation = validateMergeResult({
-    mergeMethod: input.mergeMethod,
-    assigned: {
-      objectFormat: input.assigned.baseSha.length === 64 ? "sha256" : "sha1",
-      repositoryId: repo.repositoryId,
-      baseRef: repo.baseRef as `refs/heads/${string}`,
-      baseSha: input.assigned.baseSha,
-      headRepositoryId: repo.repositoryId,
-      headSha: input.assigned.headSha,
-      candidateSha: mergeSha,
-      candidateTreeOid: input.assigned.candidateTreeOid,
-      candidateParentOids: [input.assigned.baseSha, input.assigned.headSha],
-    },
-    finalCommit: { sha: commit.sha, treeOid: commit.tree.sha, parentShas: commit.parents.map((p) => p.sha) },
-    pullRequestMerged: true,
-  });
-
-  if (!validation.ok) {
-    // A merged branch whose tree is not the verified tree is an incident, not an
-    // outcome to record as success.
-    return { kind: "unknown", reason: validation.reason };
-  }
-
-  return {
-    kind: "merged",
-    mergeSha: commit.sha,
-    mergeTree: commit.tree.sha,
-    parentShas: commit.parents.map((p) => p.sha),
-  };
-}
-
-/** Dispatch the pinned verifier workflow (plan.md §17.1). */
-export async function dispatchVerifier(
-  http: GitHubHttp,
-  repo: RepoRef,
-  input: { readonly attemptId: string; readonly nonce: string; readonly candidateSha: string },
-): Promise<RawResponse> {
-  return http.raw(`/repos/${repo.owner}/${repo.repo}/dispatches`, {
-    method: "POST",
-    body: JSON.stringify({
-      event_type: "thwip-queue-verify",
-      client_payload: {
-        attemptId: input.attemptId,
-        nonce: input.nonce,
-        candidateSha: input.candidateSha,
-      },
-    }),
-    headers: { "content-type": "application/json" },
-  });
-}
-
 /** One check run on a head, as far as a required-status-check rule cares. */
 export interface CheckRunFact {
   readonly name: string;
@@ -357,36 +174,4 @@ export function unsatisfiedRequiredChecks(
     unsatisfied.push({ context, state: "failed" });
   }
   return unsatisfied;
-}
-
-/** Facts the final guard re-reads immediately before the write (plan.md §18.3). */
-export async function readFinalGuardFacts(
-  http: GitHubHttp,
-  repo: RepoRef,
-  pullRequestNumber: number,
-): Promise<{
-  baseSha: string;
-  headSha: string;
-  pullRequestOpen: boolean;
-  draft: boolean;
-  mergeableState: boolean | null;
-}> {
-  const pull = await http.json<PullResponse>(
-    `/repos/${repo.owner}/${repo.repo}/pulls/${pullRequestNumber}`,
-  );
-  return {
-    baseSha: pull.base.sha,
-    headSha: pull.head.sha,
-    pullRequestOpen: pull.state === "open",
-    draft: pull.draft === true,
-    mergeableState: pull.mergeable,
-  };
-}
-
-/** Convenience for callers that want the classified action in one step. */
-export function classify(response: RawResponse) {
-  if (response.transportError !== undefined) {
-    return { kind: "reconcile" as const, reason: `transport: ${response.transportError}` };
-  }
-  return actionForMergeStatus(response.status, response.body?.["message"] as string | undefined);
 }

@@ -10,14 +10,15 @@ import { sha256Fingerprint } from "../sshsig-verify.js";
  * simply withholds an offer, per the specification (plan.md §452) — it must
  * never freeze the branch behind a closed laptop.
  *
- * The interval and the grace window live in one place on purpose. A grace
- * window shorter than the heartbeat interval would retire a healthy runner
- * every cycle, so the relationship between the two is asserted directly
- * against these constants rather than restated as literals in a test.
+ * This file holds the grace window and the sweep interval. The heartbeat
+ * interval belongs to the CLI, which is the only thing that sleeps by it
+ * (`HEARTBEAT_INTERVAL_SECONDS` in `packages/cli/src/queue-work.ts`). A second
+ * copy stood here for a while and a test compared it against `GRACE_SECONDS`,
+ * which stayed green while the number a runner actually sleeps by was free to
+ * drift past the window and retire every healthy machine. `queue-work.test.ts`
+ * imports `GRACE_SECONDS` from here and holds that relationship against the
+ * literal in force, so it is held once, on the constant that runs.
  */
-
-/** How often a watching runner is expected to say it is still here. */
-export const HEARTBEAT_INTERVAL_SECONDS = 15;
 
 /**
  * How long a runner is still considered present after its last heartbeat.
@@ -32,12 +33,10 @@ export const HEARTBEAT_INTERVAL_SECONDS = 15;
  * that cooldown has to last at least until the next sweep retires the
  * runner, or a second offer can reach the same dead machine before it is
  * ever retired, and a third, unboundedly. plan.md:1208 permits exactly one
- * bounded lost turn, not a repeating one. Today `noClaimCooldownSeconds`
- * (300s, `commands.ts`) equals `SWEEP_INTERVAL_SECONDS` (300s, below) only
- * because both were written as `5 * 60` independently; `runners.test.ts`
- * asserts `noClaimCooldownSeconds >= SWEEP_INTERVAL_SECONDS` directly, so
- * moving either one without the other fails a test instead of silently
- * reopening the gap.
+ * bounded lost turn, not a repeating one. `commands.ts` sets
+ * `noClaimCooldownSeconds` to `SWEEP_INTERVAL_SECONDS` below rather than
+ * writing `5 * 60` a second time, so the two cannot be moved apart, and
+ * `runners.test.ts` holds the inequality and the cron string as well.
  */
 export const GRACE_SECONDS = 45;
 
@@ -45,8 +44,10 @@ export const GRACE_SECONDS = 45;
  * How often the scheduled tick — index.ts's every-five-minutes cron trigger —
  * sweeps stale runners out of `queue_runners`. Cloudflare's cron trigger is a
  * string, not an importable value, so this is not that string's source of
- * truth — it is what the string has to keep meaning for the cooldown bound
- * documented above to hold.
+ * truth. It is what the string has to keep meaning for the cooldown bound
+ * documented above to hold, and `runners.test.ts` reads the string out of
+ * wrangler.jsonc and compares, so changing the cron alone fails there rather
+ * than quietly deploying a sweep the cooldown no longer outlasts.
  */
 export const SWEEP_INTERVAL_SECONDS = 5 * 60;
 

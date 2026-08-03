@@ -85,11 +85,6 @@ const ALL: readonly string[] = [
   ...LOCAL_REASONS,
 ];
 
-/** Every code the union covers, deduplicated, for exhaustiveness tests. */
-export function reasonCodes(): ReasonCode[] {
-  return [...new Set(ALL)] as ReasonCode[];
-}
-
 export function isReasonCode(value: string): value is ReasonCode {
   return ALL.includes(value);
 }

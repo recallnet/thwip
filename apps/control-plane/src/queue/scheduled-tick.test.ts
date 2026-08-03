@@ -160,7 +160,7 @@ async function readyEntry(
   principal: string,
   pr: number,
 ): Promise<void> {
-  await withQueueState(db, repositoryId, REF, (store) => {
+  await withQueueState(db, repositoryId, REF, async (store) => {
     const commands = commandsFor(store);
     commands.requestQueue({
       idempotencyKey: `req-${entryId}`,
@@ -188,7 +188,7 @@ async function offeredEntry(
   principal: string,
   pr: number,
 ): Promise<void> {
-  await withQueueState(db, repositoryId, REF, (store) => {
+  await withQueueState(db, repositoryId, REF, async (store) => {
     const commands = commandsFor(store);
     commands.requestQueue({
       idempotencyKey: `req-${entryId}`,
@@ -205,7 +205,7 @@ async function offeredEntry(
       schedulerEligible: true,
       primaryReason: null,
     });
-    commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+    await commands.tick({ idempotencyKey: `tick-${entryId}`});
   });
 }
 
@@ -307,9 +307,9 @@ describe("stale-runner retirement on the tick", () => {
     // next touch directly rather than adding a second way to offer a turn.
     await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
 
-    const after = await withQueueState(db, "1", REF, (store) => {
+    const after = await withQueueState(db, "1", REF, async (store) => {
       const commands = commandsFor(store);
-      commands.tick({ idempotencyKey: "next", decisionDigest: `sha256:${"0".repeat(64)}` });
+      await commands.tick({ idempotencyKey: "next"});
       return buildSnapshot(store);
     });
 
@@ -410,7 +410,7 @@ describe("driving a held lane against the active profile", () => {
 
 /**
  * `runAlarm()` advances the clock; it never asks the scheduler to hand a freed
- * lane to whatever is waiting. `runOnQueue` settles that with `commands.tick()`
+ * lane to whatever is waiting. `runOnQueue` settles that with `await commands.tick()`
  * after every command (routes.ts); the heartbeat did not, so a queue whose
  * entries came off cooldown between two pieces of unrelated traffic sat frozen
  * with an idle lane and work waiting. These fail against the code before that
@@ -425,7 +425,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
     principal: string,
     pr: number,
   ): Promise<void> {
-    await withQueueState(db, repositoryId, REF, (store) => {
+    await withQueueState(db, repositoryId, REF, async (store) => {
       const commands = commandsFor(store);
       commands.requestQueue({
         idempotencyKey: `req-${entryId}`,
@@ -459,7 +459,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
     principal: string,
     pr: number,
   ): Promise<void> {
-    await withQueueState(db, repositoryId, REF, (store) => {
+    await withQueueState(db, repositoryId, REF, async (store) => {
       const commands = commandsFor(store, {
         offerSeconds: 90,
         executionSeconds: 20 * 60,
@@ -483,7 +483,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
         schedulerEligible: true,
         primaryReason: null,
       });
-      const offer = commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+      const offer = await commands.tick({ idempotencyKey: `tick-${entryId}`});
       const attemptId = (offer as { attemptId?: string }).attemptId;
       if (attemptId === undefined) throw new Error("test setup expected an offer");
       commands.expireOffer({ idempotencyKey: `expire-${entryId}`, attemptId });
@@ -507,7 +507,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
     principal: string,
     pr: number,
   ): Promise<void> {
-    await withQueueState(db, repositoryId, REF, (store) => {
+    await withQueueState(db, repositoryId, REF, async (store) => {
       const commands = commandsFor(store);
       commands.requestQueue({
         idempotencyKey: `req-${entryId}`,
@@ -524,7 +524,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
         schedulerEligible: true,
         primaryReason: null,
       });
-      const offer = commands.tick({ idempotencyKey: `tick-${entryId}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+      const offer = await commands.tick({ idempotencyKey: `tick-${entryId}`});
       const attemptId = (offer as { attemptId?: string }).attemptId;
       if (attemptId === undefined) throw new Error("test setup expected an offer");
       store.append({

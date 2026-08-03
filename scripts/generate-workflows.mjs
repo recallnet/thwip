@@ -16,7 +16,10 @@
  */
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { setupPullRequestFiles } from "../apps/control-plane/src/queue/bootstrap-workflows.ts";
+import {
+  QUEUE_ACTION_REF,
+  setupPullRequestFiles,
+} from "../apps/control-plane/src/queue/bootstrap-workflows.ts";
 
 /** Where the deployed control plane answers. Same value as wrangler.jsonc. */
 export const PRODUCTION_ENDPOINT = "https://thwip.recall.net";
@@ -32,7 +35,7 @@ export const RENDERED_HERE = ".github/workflows/thwip-merge.yml";
 export function generatedWorkflows() {
   const files = setupPullRequestFiles({
     endpoint: PRODUCTION_ENDPOINT,
-    actionRef: "recallnet/thwip@v1",
+    actionRef: QUEUE_ACTION_REF,
   });
   return Object.fromEntries(
     files.filter((f) => f.path.startsWith(".github/workflows/")).map((f) => [f.path, f.content]),

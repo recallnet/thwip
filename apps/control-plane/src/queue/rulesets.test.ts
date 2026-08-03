@@ -5,7 +5,6 @@ import {
   checkRulesetForBackend,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
-  isBootstrapCheck,
   managedOwnershipRuleset,
   mayActivate,
   nativeMergeQueueRuleset,
@@ -254,12 +253,5 @@ describe("bootstrapCheckRun", () => {
     expect(bootstrapCheckRun({ headSha: "a".repeat(40), policyEnforcement: "active" })).toMatchObject({
       ok: false,
     });
-  });
-
-  it("marks bootstrap checks so they are never mistaken for a verdict", () => {
-    expect(isBootstrapCheck("bootstrap:abc")).toBe(true);
-    expect(isBootstrapCheck("attempt:abc")).toBe(false);
-    expect(isBootstrapCheck(null)).toBe(false);
-    expect(isBootstrapCheck(undefined)).toBe(false);
   });
 });

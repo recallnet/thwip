@@ -74,7 +74,6 @@ function makeBundle(overrides?: (b: VerificationBundleV1) => void): Verification
     repositoryId: "1315419165",
     ownerId: "162603603",
     activePolicyDigest: POLICY_DIGEST,
-    gracePolicyDigests: [],
     policy: {
       schemaVersion: "1",
       projectId: "prj_thwip",
@@ -225,19 +224,33 @@ describe("verifyProof decision table", () => {
     expect((await run({ facts: makeFacts({ baseSha: "9".repeat(40) }) })).code).toBe("SUBJECT_BASE_MISMATCH");
   });
 
-  it("fails on retired policy digest", async () => {
+  it("passes when a policy edit changed nothing the proof has to satisfy", async () => {
     const bundle = makeBundle((b) => {
       b.activePolicyDigest = `sha256:${"7".repeat(64)}`;
-    });
-    expect((await run({ bundle })).code).toBe("POLICY_NOT_ACTIVE");
-  });
-
-  it("passes on grace-eligible previous policy", async () => {
-    const bundle = makeBundle((b) => {
-      b.activePolicyDigest = `sha256:${"7".repeat(64)}`;
-      b.gracePolicyDigests = [POLICY_DIGEST];
+      b.policy.version = 2;
+      b.policy.proofMaxAgeSeconds = 43200;
     });
     expect((await run({ bundle })).code).toBe("PASS");
+  });
+
+  it("refuses at once when the policy adds a required suite, and names it", async () => {
+    const bundle = makeBundle((b) => {
+      b.activePolicyDigest = `sha256:${"7".repeat(64)}`;
+      b.policy.version = 2;
+      b.policy.pipeline.requiredSuites = ["lint", "typecheck", "test", "e2e"];
+    });
+    const result = await run({ bundle });
+    expect(result.code).toBe("SUITE_MISSING");
+    expect(result.detail).toContain("e2e");
+  });
+
+  it("refuses a settings change the proof no longer satisfies, from the active policy alone", async () => {
+    const bundle = makeBundle((b) => {
+      b.activePolicyDigest = `sha256:${"7".repeat(64)}`;
+      b.policy.minimumPermission = "admin";
+      b.grants = [{ githubUserId: "264261678", permission: "write", active: true }];
+    });
+    expect((await run({ bundle })).code).toBe("SIGNER_PERMISSION_INSUFFICIENT");
   });
 
   it("fails on pipeline digest mismatch", async () => {

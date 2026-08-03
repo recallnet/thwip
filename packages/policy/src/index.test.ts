@@ -3,7 +3,6 @@ import { bytesDigest } from "@thwip/protocol";
 import {
   deriveEffectiveProjectConfig,
   deriveProjectConfig,
-  deriveProjectConfigFromText,
   parseThwipYaml,
   resolveThwipYaml,
   type RepositorySnapshot,
@@ -51,10 +50,11 @@ required: [lint, test]
 policy:
   minimum_permission: maintain
 `;
-  const derive = (profile: string) => {
+  // Async so a parse rejection reaches `.rejects`, the same as the config path.
+  const derive = async (profile: string) => {
     const yaml = withProfile(profile);
-    return deriveProjectConfigFromText(
-      yaml,
+    return deriveProjectConfig(
+      parseThwipYaml(yaml),
       { ownerId: "10", repositoryId: "20" },
       new MemorySnapshot({ "thwip.yaml": yaml, "pnpm-lock.yaml": "lockfileVersion: '9.0'" }),
     );
@@ -93,8 +93,8 @@ remote: [build-darwin]
 policy:
   minimum_permission: maintain
 `;
-    const config = await deriveProjectConfigFromText(
-      yaml,
+    const config = await deriveProjectConfig(
+      parseThwipYaml(yaml),
       { ownerId: "10", repositoryId: "20" },
       new MemorySnapshot({ "thwip.yaml": yaml, "pnpm-lock.yaml": "lockfileVersion: '9.0'" }),
     );
@@ -127,8 +127,8 @@ required: [check]
 pipeline:
   module: ./dagger
 `;
-    const config = await deriveProjectConfigFromText(
-      yaml,
+    const config = await deriveProjectConfig(
+      parseThwipYaml(yaml),
       { ownerId: "10", repositoryId: "20" },
       new MemorySnapshot({
         "thwip.yaml": yaml,
