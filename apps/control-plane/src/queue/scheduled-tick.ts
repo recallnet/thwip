@@ -157,11 +157,23 @@ export async function tickAllQueues(
 
       // Only a held lane needs driving. Dispatching for an idle queue would
       // spend a CI run to be told there is nothing to do — and under `fresh`
-      // or `audited` there is no Actions fallback at all, so a held lane
-      // there is not this tick's to drive; the connected device claims it
-      // itself, over the heartbeat response (plan.md §5.0).
-      const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-      if (holder !== undefined && !deviceOnly) {
+      // or `audited` there is no Actions fallback for the run, so a lane still
+      // being run on a device is not this tick's to drive; the connected device
+      // claims it itself, over the heartbeat response (plan.md §5.0).
+      //
+      // Past the run, it is. `Verifying` and `MergeGuard` mean the device's
+      // receipt is in and the merge write is still Actions' job, and the only
+      // thing that ever asked for it was one fire-and-forget dispatch from the
+      // receipt route. A dispatch GitHub dropped, or a run that answered before
+      // some other fact settled, left the attempt in `RECEIPT_SUBMITTED` with
+      // the lane held until its execution deadline and nothing willing to ask
+      // again. This is the asking again. It is the same split `driveLane` makes
+      // in routes.ts, and it costs a run only while an attempt really is
+      // waiting to be merged.
+      const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
+      const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
+      const holder = deviceOnly ? (running === undefined ? ran : undefined) : (running ?? ran);
+      if (holder !== undefined) {
         await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
         driven += 1;
       }
