@@ -3,10 +3,14 @@ interface Props {
   src: string;
   alt: string;
   caption?: string;
+  width?: number | string;
+  height?: number | string;
 }
-const { src, alt, caption } = Astro.props;
+const { src, alt, caption, width = 1200, height = 630 } = Astro.props;
+const w = Number(width);
+const h = Number(height);
 ---
 <figure class="eb-shot">
-  <img src={src} alt={alt} loading="lazy" />
+  <img src={src} alt={alt} width={w} height={h} loading="lazy" decoding="async" />
   {caption && <figcaption>{caption}</figcaption>}
 </figure>
