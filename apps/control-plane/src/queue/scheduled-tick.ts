@@ -107,25 +107,6 @@ export async function tickAllQueues(
     .bind()
     .all<{ repositoryId: string; baseRef: string; epochStartsAt: number }>();
 
-  // The queue's own chain, checked the way an outside verifier checks it: read
-  // the links this tick already has a D1 connection for, and verify each
-  // signature against the keys this service has itself published. Nothing here
-  // touches the network, because `verificationKeys` reads the same table
-  // `/.well-known/thwip-keys` serves from. A queue with no attestations reads an
-  // empty chain and
-  // never calls `verifyChainSignature` at all, so an isolate that has not
-  // signed anything does not need the key published before its first tick.
-  const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
-  const verificationKeySet = createLocalJWKSet(publishedKeys);
-  const verifyChainSignature = async (jws: string, bytes: Uint8Array): Promise<boolean> => {
-    try {
-      const { payload } = await compactVerify(jws, verificationKeySet);
-      return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
-    } catch {
-      return false;
-    }
-  };
-
   const now = new Date().toISOString();
   // Retire stale runners once per repository, not once per queue: the table is
   // keyed on repository and principal, not on a base ref, and a repository can
@@ -279,6 +260,31 @@ export async function tickAllQueues(
       // Last, after everything that can add or repair a link this tick. A
       // finding is read and reported, never acted on: the sweep above is what
       // repairs a chain, and this is only the queue looking at what it wrote.
+      //
+      // The key set is read here, after `sweepOrphanedWrites`, not once for the
+      // whole tick. `sweepOrphanedWrites` can call `recordMergeFromIntent`,
+      // which signs through `serviceKey()` and inserts a row into
+      // `service_keys` the first time this isolate uses that kid — inside the
+      // same per-queue pass this check runs in. A key set taken before that
+      // insert would check the record the sweep just signed against a key
+      // published after the record was made, and report it as `BAD_SIGNATURE`:
+      // a false alarm on the exact signal this feature exists to make
+      // trustworthy, and one that clears itself on the next tick, which makes
+      // it rarer and harder to diagnose rather than less bad. `verificationKeys`
+      // is a plain D1 select, so reading it once per queue rather than once per
+      // tick costs one extra read on a queue with a chain to check, not one per
+      // link.
+      const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
+      const verificationKeySet = createLocalJWKSet(publishedKeys);
+      const verifyChainSignature = async (jws: string, bytes: Uint8Array): Promise<boolean> => {
+        try {
+          const { payload } = await compactVerify(jws, verificationKeySet);
+          return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
+        } catch {
+          return false;
+        }
+      };
+
       const chainLinks = await readChain(db, row.repositoryId, row.baseRef);
       const chainCheck = await checkOwnChain(chainLinks, {
         epochStartsAt: row.epochStartsAt,
