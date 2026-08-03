@@ -1,0 +1,10 @@
+---
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+<li class="eb-step">
+  <h3 class="eb-step__title">{title}</h3>
+  <slot />
+</li>
