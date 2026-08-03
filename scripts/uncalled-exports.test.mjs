@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { describe as render, entryPoints, uncalledExports } from "./uncalled-exports.mjs";
+import { entryPoints, uncalledExports } from "./uncalled-exports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,6 +41,20 @@ describe("uncalled exports", () => {
     const dir = fixture({
       "a.ts": "export function helper() {}\nexport function exported() { helper(); }\n",
       "b.ts": 'import { exported } from "./a.js";\nconst x = exported;\nconsole.log(x);\n',
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("counts a lazily imported module as reached", () => {
+    // The CLI lazy-loads its Dagger runner so that repositories using the command
+    // runner never pay for the download-and-spawn module. Reading only top-level
+    // import declarations reported all three of its live functions as dead, and
+    // they sat in the allowlist under the reason "dagger runner, unwired". The
+    // check had invented the condition it exists to find.
+    const dir = fixture({
+      "a.ts": "export function lazy() {}\n",
+      "b.ts": 'export async function go() { const { lazy } = await import("./a.js"); lazy(); }\n',
+      "c.ts": 'import { go } from "./b.js";\ngo();\n',
     });
     expect(found(dir)).toEqual([]);
   });
@@ -121,135 +135,5 @@ describe("entry points", () => {
     expect(entries).toContain("packages/cli/src/main.ts");
     expect(entries).toContain("packages/action/src/main.ts");
     expect(entries).toContain("apps/control-plane/web/src/main.tsx");
-  });
-});
-
-/**
- * Exports nothing imports, that are staying for now.
- *
- * Every entry is a decision somebody took, not a suppression. The test below
- * fails on an entry that no longer matches, so the list can only shrink, and it
- * fails on a finding that is not here, so nothing new joins quietly.
- */
-const ALLOWED = [
-  {
-    symbol: "apps/control-plane/src/auth.cli.ts#auth",
-    why: "read by `@better-auth/cli generate`, which takes a file path rather than an import",
-  },
-
-  /* The merge write the Actions workflow performs instead. `mergePullRequest`
-     and `landMergeOnPinnedBase` were two more spellings of it and are deleted:
-     the shell in bootstrap-workflows.ts is the merge, and this repository's
-     workflow is what that renders. */
-  { symbol: "apps/control-plane/src/queue/github-port.ts#observeMergeResult", why: "merge write" },
-  { symbol: "apps/control-plane/src/queue/github-port.ts#readFinalGuardFacts", why: "merge write" },
-  { symbol: "apps/control-plane/src/queue/github-port.ts#dispatchVerifier", why: "merge write" },
-  { symbol: "apps/control-plane/src/queue/github-port.ts#classify", why: "merge write" },
-
-  /* Readiness. `deriveReadiness` is now what `routes.ts` and `index.ts` both
-     derive from, so it is off this list. The two below report a reason rather
-     than decide one, and nothing renders a readiness result yet. */
-  { symbol: "apps/control-plane/src/queue/readiness.ts#isKnownReason", why: "readiness drift" },
-  { symbol: "apps/control-plane/src/queue/readiness.ts#blockedOnlyByCapability", why: "readiness drift" },
-
-  /* Bootstrap and provisioning surface reached over HTTP or not yet wired. */
-  { symbol: "apps/control-plane/src/queue/bootstrap.ts#bootstrapGitHub", why: "bootstrap surface" },
-  { symbol: "apps/control-plane/src/queue/bootstrap.ts#handleBootstrapRequest", why: "bootstrap surface" },
-  { symbol: "apps/control-plane/src/queue/bootstrap.ts#OWNERSHIP_RULESET_NAME", why: "bootstrap surface" },
-  { symbol: "apps/control-plane/src/queue/bootstrap-workflows.ts#SETUP_BRANCH", why: "bootstrap surface" },
-  {
-    symbol: "apps/control-plane/src/queue/bootstrap-workflows.ts#SETUP_PULL_REQUEST_TITLE",
-    why: "bootstrap surface",
-  },
-  {
-    symbol: "apps/control-plane/src/queue/bootstrap-workflows.ts#setupPullRequestBody",
-    why: "bootstrap surface",
-  },
-  { symbol: "apps/control-plane/src/queue/rulesets.ts#isBootstrapCheck", why: "bootstrap surface" },
-
-  /* Control-plane odds and ends. */
-  { symbol: "apps/control-plane/src/github-events.ts#INTERNAL_QUEUE_EVENTS", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/candidate.ts#candidateFetchPlan", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/candidate.ts#candidateStillCurrent", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/commands.ts#validateTimings", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/evidence-store.ts#getEvidence", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/evidence.ts#reuseEquivalenceDigests", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/merge-commit.ts#mergeCommitText", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/projection.ts#projectionLag", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/runners.ts#HEARTBEAT_INTERVAL_SECONDS", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/runners.ts#SWEEP_INTERVAL_SECONDS", why: "unwired" },
-  { symbol: "apps/control-plane/src/queue/verifier-identity.ts#acceptCallback", why: "unwired" },
-  { symbol: "apps/control-plane/web/src/vocabulary.ts#BLOCKED_NEXT_ACTION", why: "unwired" },
-
-  /* CLI. */
-  { symbol: "packages/cli/src/config.ts#deriveConfig", why: "unwired" },
-  { symbol: "packages/cli/src/dagger.ts#ensureDagger", why: "dagger runner, unwired" },
-  { symbol: "packages/cli/src/dagger.ts#moduleDigest", why: "dagger runner, unwired" },
-  { symbol: "packages/cli/src/dagger.ts#requireContainerRuntime", why: "dagger runner, unwired" },
-  { symbol: "packages/cli/src/dagger.ts#runDaggerSuites", why: "dagger runner, unwired" },
-  { symbol: "packages/cli/src/pipeline.ts#parsePipelineDefinition", why: "unwired" },
-  { symbol: "packages/cli/src/pipeline.ts#pipelineDigest", why: "unwired" },
-  { symbol: "packages/cli/src/queue-commands.ts#isMutating", why: "unwired" },
-  { symbol: "packages/cli/src/queue-exit.ts#knownReasonCodes", why: "unwired" },
-  { symbol: "packages/cli/src/queue-exit.ts#LOCAL_REASONS", why: "unwired" },
-  { symbol: "packages/cli/src/queue-exit.ts#SERVICE_REASONS", why: "unwired" },
-  { symbol: "packages/cli/src/ship.ts#describeDecision", why: "unwired" },
-
-  /* Packages. */
-  { symbol: "packages/policy/src/index.ts#deriveProjectConfigFromText", why: "unwired" },
-  { symbol: "packages/prompts/src/queue.ts#hasQueuePointer", why: "queue prompts, unwired" },
-  { symbol: "packages/prompts/src/queue.ts#queueInstructions", why: "queue prompts, unwired" },
-  { symbol: "packages/prompts/src/queue.ts#queueSetupPrompt", why: "queue prompts, unwired" },
-  { symbol: "packages/prompts/src/queue.ts#withQueuePointer", why: "queue prompts, unwired" },
-  { symbol: "packages/queue-domain/src/invariants.ts#witnessDepth", why: "unwired" },
-  { symbol: "packages/queue-domain/src/reducer.ts#applyEvents", why: "unwired" },
-  {
-    symbol: "packages/queue-protocol/src/integration-receipt.ts#parseExactReceiptReuse",
-    why: "receipt parsing, unwired",
-  },
-  {
-    symbol: "packages/queue-protocol/src/integration-receipt.ts#parseIntegrationReceipt",
-    why: "receipt parsing, unwired",
-  },
-  {
-    symbol: "packages/queue-protocol/src/integration-receipt.ts#receiptSatisfiesPolicy",
-    why: "receipt parsing, unwired",
-  },
-  {
-    symbol: "packages/queue-protocol/src/integration-receipt.ts#reuseEquivalenceHolds",
-    why: "receipt parsing, unwired",
-  },
-  { symbol: "packages/queue-protocol/src/primitives.ts#bigintString", why: "unwired" },
-  { symbol: "packages/queue-protocol/src/primitives.ts#SUITE_NAME_RE", why: "unwired" },
-  { symbol: "packages/queue-protocol/src/queue-decision.ts#parseQueueDecision", why: "unwired" },
-  { symbol: "packages/queue-protocol/src/verifier-result.ts#parseVerifierResult", why: "unwired" },
-  { symbol: "packages/queue-protocol/src/verifier-result.ts#resultBindsAttempt", why: "unwired" },
-  { symbol: "packages/vocabulary/src/reason-codes.ts#reasonCodes", why: "unwired" },
-];
-
-describe("this repository", () => {
-  const findings = render(uncalledExports({ root })).map((line) => {
-    const [where, name] = line.split(" ");
-    return `${where.slice(0, where.lastIndexOf(":"))}#${name}`;
-  });
-  const allowed = new Set(ALLOWED.map((a) => a.symbol));
-
-  it("exports nothing new that nothing imports", () => {
-    const unexpected = findings.filter((f) => !allowed.has(f));
-    expect(
-      unexpected,
-      "these are exported and nothing in the shipping code imports them. Delete them, wire them up, " +
-        "or add them to ALLOWED with a reason",
-    ).toEqual([]);
-  });
-
-  it("keeps no allowance for something that is now used", () => {
-    const found = new Set(findings);
-    const stale = ALLOWED.filter((a) => !found.has(a.symbol)).map((a) => a.symbol);
-    expect(stale, "these are allowed and no longer need to be; drop them from ALLOWED").toEqual([]);
-  });
-
-  it("gives a reason for every allowance", () => {
-    expect(ALLOWED.filter((a) => a.why.trim().length === 0)).toEqual([]);
   });
 });

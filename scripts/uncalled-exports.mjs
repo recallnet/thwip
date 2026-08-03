@@ -170,6 +170,27 @@ function readModule(root, file) {
     ) {
       mentioned.add(node.text);
     }
+
+    // `await import("./x.js")`, which is an expression rather than a statement.
+    //
+    // Reading only top-level import declarations reported the whole Dagger runner
+    // as dead: `main.ts` lazy-loads it so that repositories using the command
+    // runner never pay for the download-and-spawn module. Three live functions
+    // were sitting in the allowlist under the reason "dagger runner, unwired",
+    // where they would have hidden a genuine regression in that path.
+    //
+    // The module counts as wholly reached rather than picking names out of the
+    // destructuring pattern. A check whose failure mode is crying wolf should
+    // over-count reach, not under-count it.
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      imports.push({ specifier: node.arguments[0].text, all: true });
+    }
+
     ts.forEachChild(node, walk);
   };
 
