@@ -462,6 +462,7 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
       expectedBaseSha: "b".repeat(40),
       expectedHeadSha: "h".repeat(40),
       expectedTreeOid: "t".repeat(40),
+      pullRequestNumber: 42,
       at: "2026-07-29T12:20:00Z",
     };
 
@@ -480,13 +481,26 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
       expect(restarted.beginMergeOperation(op)).toMatchObject({ status: "already-started" });
     });
 
-    it("remembers how an operation resolved", () => {
+    it("remembers how an operation resolved", async () => {
       const store = open(backing(), IDENTITY);
       store.beginMergeOperation(op);
-      store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
+      await store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
       expect(store.mergeOperation("op-1")).toMatchObject({ attemptId: "a1", outcome: "MERGED" });
       expect(store.beginMergeOperation(op)).toEqual({ status: "already-started", outcome: "MERGED" });
       expect(store.mergeOperation("nope")).toBeNull();
+    });
+
+    /**
+     * The pull request a write was sent for, carried on the row rather than
+     * looked up through the attempt: the attempt is exactly what the sweep
+     * cannot rely on once it is stranded.
+     */
+    it("carries the pull request the write was sent for", () => {
+      const store = open(backing(), IDENTITY);
+      store.beginMergeOperation(op);
+      expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([
+        expect.objectContaining({ operationId: "op-1", pullRequestNumber: 42 }),
+      ]);
     });
 
     /**
@@ -515,15 +529,16 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
             expectedBaseSha: "b".repeat(40),
             expectedHeadSha: "h".repeat(40),
             expectedTreeOid: "t".repeat(40),
+            pullRequestNumber: 42,
             writeStartedAt: "2026-07-29T12:20:00Z",
           },
         ]);
       });
 
-      it("leaves a resolved write alone", () => {
+      it("leaves a resolved write alone", async () => {
         const store = open(backing(), IDENTITY);
         store.beginMergeOperation(op);
-        store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
+        await store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
         expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([]);
       });
 

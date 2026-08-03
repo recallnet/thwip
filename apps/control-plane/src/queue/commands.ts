@@ -493,6 +493,8 @@ export class QueueCommands {
     if (attempt.baseSha === null || attempt.headSha === null || attempt.candidateTree === null) {
       return { status: "rejected", detail: "candidate is not pinned" };
     }
+    const entry = state.entries.get(attempt.entryId);
+    if (entry === undefined) return { status: "rejected", detail: `unknown entry ${attempt.entryId}` };
     const now = this.clock.now();
     const begun = this.store.beginMergeOperation({
       operationId: input.operationId,
@@ -501,6 +503,7 @@ export class QueueCommands {
       expectedBaseSha: attempt.baseSha,
       expectedHeadSha: attempt.headSha,
       expectedTreeOid: attempt.candidateTree,
+      pullRequestNumber: entry.pullRequestNumber,
       at: now,
     });
     if (begun.status === "already-started") return begun;
