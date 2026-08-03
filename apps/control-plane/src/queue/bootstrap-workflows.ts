@@ -34,6 +34,17 @@ export const SETUP_BRANCH = "thwip/setup";
 export const SETUP_PULL_REQUEST_TITLE = "Set up Thwip Queue" as const;
 
 /**
+ * The published action the rendered workflows call.
+ *
+ * One constant because there are two renderers. The bootstrap route writes these
+ * workflows into a customer repository and `scripts/generate-workflows.mjs`
+ * writes this repository's own copy; a literal in each is how the two drift, and
+ * drift here means an adopted repository running a different action from the one
+ * this repository tests.
+ */
+export const QUEUE_ACTION_REF = "recallnet/thwip@v1";
+
+/**
  * A default `thwip.yaml`. Committed rather than assumed, because policy is
  * derived from what the repository says about itself and a repository with no
  * file has said nothing.

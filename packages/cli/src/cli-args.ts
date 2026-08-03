@@ -103,6 +103,7 @@ const QUEUE_SUBCOMMANDS = [
   "reconcile",
   "doctor",
   "work",
+  "setup",
 ] as const;
 
 type QueueSubcommand = (typeof QUEUE_SUBCOMMANDS)[number];
@@ -111,7 +112,7 @@ const QUEUE_HELP = `Usage: thwip queue <subcommand> [options]
 
 Subcommands:
   status, list, join, leave, pause, resume, rebaseline, eject, bypass,
-  explain, reconcile, doctor, work
+  explain, reconcile, doctor, work, setup
 
 Run \`thwip queue <subcommand> --help\` for its accepted options.
 `;
@@ -152,6 +153,12 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
     `Make this machine available for a fresh/audited turn: heartbeat on an\n` +
     `interval so it stays scheduler-eligible, and report the moment it holds\n` +
     `an offer. Exits cleanly on interrupt; queued work keeps its place in line.\n`,
+  setup:
+    `Usage: thwip queue setup [--repo OWNER/NAME] [--branch BRANCH] [--write]\n\n` +
+    `Print the prompt for adding this repository to the queue. Enrolment itself\n` +
+    `is a request an organization administrator makes from the dashboard.\n` +
+    `--write writes THWIP.md and refreshes the bounded pointer in the AGENTS.md\n` +
+    `and CLAUDE.md this repository already has, leaving the rest of them alone.\n`,
 };
 
 function isQueueSubcommand(value: string | undefined): value is QueueSubcommand {
@@ -205,6 +212,12 @@ function queueCommand(argv: readonly string[]): CliAction {
   }
   if (!isQueueSubcommand(subcommand)) return error(`unknown subcommand \`queue ${subcommand}\``);
   if (wantsHelp(rest)) return { kind: "help", text: QUEUE_SUBCOMMAND_HELP[subcommand] };
+  // Setup prints a prompt and writes two files here. There is no request to
+  // plan, so its flags are checked the way a top-level command's are.
+  if (subcommand === "setup") {
+    const invalid = validateOptions(rest, { boolean: ["--write"], value: ["--repo", "--branch"] });
+    return invalid === null ? command("queue", argv) : error(invalid);
+  }
   const planned = planQueueCommand(argv);
   return planned.ok ? command("queue", argv) : error(planned.message);
 }

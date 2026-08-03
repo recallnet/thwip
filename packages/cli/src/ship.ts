@@ -16,7 +16,6 @@ import { EXIT, exitCodeFor, isRetryable, nextActionFor, type ExitCode, type Outc
  */
 
 export type ShipStep =
-  | "check-auth"
   | "check-clean-tree"
   | "run-suites"
   | "push"
@@ -28,7 +27,6 @@ export type ShipStep =
   | "done";
 
 export interface ShipState {
-  readonly authenticated: boolean;
   /** Uncommitted changes; the proof binds a committed tree, so this must be clean. */
   readonly workingTreeClean: boolean;
   /** Whether HEAD already carries an accepted proof for its exact tree. */
@@ -49,17 +47,14 @@ export type ShipDecision =
 /**
  * The next thing to do. Deterministic, so two runs from the same state agree and
  * an interrupted run resumes at the same place rather than starting over.
+ *
+ * Being signed in is not among the states. `cmdShip` reads the API auth header
+ * and exits with `LOGIN_REQUIRED` before it builds any of this, so the planner
+ * never sees an unauthenticated run: the field that used to carry it was
+ * written `true` at the one call site and nowhere else, and the branch below it
+ * could not fire.
  */
 export function nextShipStep(state: ShipState): ShipDecision {
-  if (!state.authenticated) {
-    return {
-      kind: "stop",
-      reasonCode: "LOGIN_REQUIRED",
-      exitCode: EXIT.authRequired,
-      why: nextActionFor("LOGIN_REQUIRED"),
-    };
-  }
-
   // A proof binds a committed tree. Signing with a dirty tree would attest to
   // something no reviewer can see, so this is refused rather than worked around.
   if (!state.workingTreeClean) {
@@ -190,16 +185,4 @@ export function planInterrupt(state: ShipState): InterruptPlan {
       ? "detached; you are still queued and will be offered a turn"
       : "detached",
   };
-}
-
-/** Human-readable one-liner for a decision, for the non-JSON output mode. */
-export function describeDecision(decision: ShipDecision): string {
-  switch (decision.kind) {
-    case "step":
-      return `${decision.step}: ${decision.why}`;
-    case "done":
-      return decision.outcome;
-    case "stop":
-      return `${decision.reasonCode}: ${decision.why}`;
-  }
 }

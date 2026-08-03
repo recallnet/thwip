@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  acceptCallback,
   verifyVerifierIdentity,
-  type CallbackLedger,
   type OidcVerifierClaims,
   type PinnedVerifier,
 } from "./verifier-identity.js";
@@ -162,53 +160,5 @@ describe("verifyVerifierIdentity", () => {
   it("refuses a non-decimal id rather than coercing it", () => {
     expect(verifyVerifierIdentity(claims({ repository_id: "13154e5" }), pinned)).toMatchObject({ ok: false });
     expect(verifyVerifierIdentity(claims({ run_id: -1 }), pinned)).toMatchObject({ ok: false });
-  });
-});
-
-describe("acceptCallback", () => {
-  function ledger(): CallbackLedger & { entries: Map<string, string> } {
-    const entries = new Map<string, string>();
-    return {
-      entries,
-      seen: (jti) => entries.has(jti),
-      remember: (jti, attemptId) => void entries.set(jti, attemptId),
-    };
-  }
-
-  const expected = { attemptId: "att-1", nonce: "nonce-1" };
-
-  it("accepts one matching callback", () => {
-    expect(
-      acceptCallback({ ledger: ledger(), jti: "j1", attemptId: "att-1", nonce: "nonce-1", expected }),
-    ).toEqual({ accepted: true });
-  });
-
-  it("refuses the same token twice, even for the same attempt", () => {
-    const l = ledger();
-    acceptCallback({ ledger: l, jti: "j1", attemptId: "att-1", nonce: "nonce-1", expected });
-    expect(
-      acceptCallback({ ledger: l, jti: "j1", attemptId: "att-1", nonce: "nonce-1", expected }),
-    ).toMatchObject({ accepted: false, code: "REPLAYED_TOKEN" });
-  });
-
-  it("refuses a mismatched nonce", () => {
-    expect(
-      acceptCallback({ ledger: ledger(), jti: "j1", attemptId: "att-1", nonce: "other", expected }),
-    ).toMatchObject({ accepted: false, code: "NONCE_MISMATCH" });
-  });
-
-  it("refuses a result for an attempt nobody is awaiting", () => {
-    expect(
-      acceptCallback({ ledger: ledger(), jti: "j1", attemptId: "att-9", nonce: "nonce-1", expected }),
-    ).toMatchObject({ accepted: false, code: "STALE_ATTEMPT" });
-    expect(
-      acceptCallback({ ledger: ledger(), jti: "j1", attemptId: "att-1", nonce: "nonce-1", expected: null }),
-    ).toMatchObject({ accepted: false, code: "STALE_ATTEMPT" });
-  });
-
-  it("does not record a rejected token, so a later valid use is still possible", () => {
-    const l = ledger();
-    acceptCallback({ ledger: l, jti: "j1", attemptId: "att-9", nonce: "nonce-1", expected });
-    expect(l.entries.size).toBe(0);
   });
 });

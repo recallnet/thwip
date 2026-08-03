@@ -1,4 +1,4 @@
-import { QueueCommands, type CommandResult, type QueueTimings } from "./commands.js";
+import { QueueCommands, type CommandResult, type DecisionRecorder, type QueueTimings } from "./commands.js";
 import type { MergeEvidence } from "./local-run-gate.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
@@ -21,7 +21,16 @@ import type { QueueStateStore, TransitionRow } from "./store.js";
  * turns deterministically, and a queue whose fairness depends on wall-clock time
  * cannot be tested any other way.
  */
-export function commandsFor(store: QueueStateStore, timings?: QueueTimings): QueueCommands {
+export function commandsFor(
+  store: QueueStateStore,
+  timings?: QueueTimings,
+  /**
+   * Where a scheduling decision is written before the turn that binds it. A
+   * deployment with an evidence bucket passes one that archives; without it the
+   * digest is still taken over the real record.
+   */
+  recordDecision?: DecisionRecorder,
+): QueueCommands {
   return new QueueCommands(
     store,
     { now: () => new Date().toISOString() },
@@ -32,6 +41,7 @@ export function commandsFor(store: QueueStateStore, timings?: QueueTimings): Que
       claimToken: () => crypto.randomUUID(),
     },
     timings,
+    recordDecision,
   );
 }
 
@@ -62,6 +72,11 @@ export interface QueueSnapshot {
     candidateSha: string;
     candidateTree: string;
   } | null;
+  /**
+   * The queue decision the active turn was offered under, which is what an
+   * assignment for that turn binds. Null when no attempt holds the lane.
+   */
+  activeDecisionDigest: string | null;
   chainHead: { sequence: number; digest: string } | null;
   /** The whole recorded chain, oldest first, so a reader can check the links. */
   transitions: readonly TransitionRow[];
@@ -110,6 +125,7 @@ export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
             candidateSha: active.candidateSha,
             candidateTree: active.candidateTree,
           },
+    activeDecisionDigest: active?.decisionDigest ?? null,
     chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
     transitions: store.transitionChain(),
     // Projected order only: an exact permanent position would be a lie, because
@@ -226,7 +242,6 @@ export interface AdmitInput {
   primaryReason: string | null;
   readinessBucket: number;
   tickBucket: number;
-  decisionDigest: string;
   /**
    * Whether the server may take the offer for itself.
    *
@@ -247,7 +262,11 @@ export interface AdmitInput {
  * Enqueue, evaluate readiness, tick the scheduler, claim the offer. The reducer
  * still decides each step and each is still its own event in the log.
  */
-export function admit(commands: QueueCommands, store: QueueStateStore, input: AdmitInput): QueueSnapshot {
+export async function admit(
+  commands: QueueCommands,
+  store: QueueStateStore,
+  input: AdmitInput,
+): Promise<QueueSnapshot> {
   requestTurn(commands, store, {
     idempotencyKey: `authorize:request:${input.entryId}`,
     entryId: input.entryId,
@@ -313,9 +332,8 @@ export function admit(commands: QueueCommands, store: QueueStateStore, input: Ad
     schedulerEligible: input.schedulerEligible,
     primaryReason: input.primaryReason as never,
   });
-  commands.tick({
+  await commands.tick({
     idempotencyKey: `authorize:tick:${input.entryId}:${input.headSha}:${input.tickBucket}`,
-    decisionDigest: input.decisionDigest,
   });
 
   // Claim on the server's behalf. In this gate the required check is the

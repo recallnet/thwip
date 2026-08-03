@@ -346,14 +346,6 @@ export async function deriveProjectConfig(
   return { policy, policyDigest, pipeline, pipelineDigest };
 }
 
-export async function deriveProjectConfigFromText(
-  yamlText: string,
-  ids: { ownerId: string; repositoryId: string },
-  snapshot: RepositorySnapshot,
-): Promise<ProjectConfig> {
-  return deriveProjectConfig(parseThwipYaml(yamlText), ids, snapshot);
-}
-
 export async function deriveEffectiveProjectConfig(
   globalDefaults: ThwipYaml | null,
   repositoryYamlText: string | null,

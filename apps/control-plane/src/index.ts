@@ -22,7 +22,15 @@ import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
-import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./queue/readiness.js";
+import { isOrgAdmin } from "./queue/repository-access.js";
+import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
+import {
+  deriveReadiness,
+  foldCapability,
+  type PlatformHealth,
+  type PullRequestGates,
+} from "./queue/readiness.js";
+import { loadQueueState } from "./queue/queue-state.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
@@ -31,7 +39,14 @@ import { requestTurn } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
-import { CANDIDATE_CHECK, PROOF_CHECK, TURN_CHECK, turnCheckRun, type TurnCheckUpdate } from "./queue/turn-check.js";
+import {
+  CANDIDATE_CHECK,
+  PROOF_CHECK,
+  TURN_CHECK,
+  turnCheckRun,
+  unplaceableUpdate,
+  type TurnCheckUpdate,
+} from "./queue/turn-check.js";
 import { externalPushFromWebhook } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { backfillAttestations } from "./queue/attestation-backfill.js";
@@ -979,18 +994,6 @@ app.post("/admin/sync", async (c) => {
  * App can actually publish the check it would require; making that operator-only
  * would mean the people doing the setup cannot check their own work.
  */
-/**
- * Who counts as an administrator for queue operations.
- *
- * GitHub's projections use `owner` for the people who created or own the
- * organization and `admin` for org administrators, and both can change rulesets.
- * Checking only for `admin` locked out owners — the people most likely to be
- * running setup in the first place.
- */
-function isOrgAdmin(role: string | null): boolean {
-  return role === "admin" || role === "owner";
-}
-
 async function queueDoctor(env: Env, repo: string): Promise<Response> {
   const installations = await listInstallations(env);
   const owner = repo.split("/")[0];
@@ -1066,6 +1069,28 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
     .first<{ github_name: string }>();
   if (row === null) return c.json({ error: "unknown repository" }, 404);
   return queueDoctor(c.env, row.github_name);
+});
+
+/**
+ * Setup, as a request.
+ *
+ * Enrolling `recallnet/thwip-test` took a hand-written D1 row, two workflows
+ * copied in, a secret set by hand, and a ruleset built with `gh api`. The code
+ * that does all of it has been here and tested since; what was missing was this.
+ * Same administrator as the doctor, because this writes what the doctor reads.
+ */
+app.post("/v1/queue/:repositoryId/bootstrap", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  const body = await c.req.json().catch(() => ({}));
+  const result = await bootstrapRouteResponse(c.env, viewer, c.req.param("repositoryId"), body);
+  return c.json(result.body as never, result.status as never);
+});
+
+/** Where setup got to. Polled while the setup pull request waits for review. */
+app.get("/v1/queue/:repositoryId/bootstrap", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  const result = await bootstrapStatusResponse(c.env, viewer, c.req.param("repositoryId"));
+  return c.json(result.body as never, result.status as never);
 });
 
 // Resolve a repository's GitHub numeric ids from its full name. The
@@ -1414,31 +1439,85 @@ export async function queueFromPullRequest(env: Env, payload: {
     .first<{ activation_state: string }>();
   if (project === null) return { handled: false, detail: "no queue configured for this branch" };
 
-  // The sponsor is the pull request's author, resolved through the projection so a
-  // fairness share belongs to a person rather than to a login string.
+  // Who the turn belongs to, decided once and never recomputed.
+  //
+  // An entry that already exists keeps the sponsor it was created with. That is
+  // what stops one pull request having two sponsors, which it had while this
+  // webhook and the join route each decided it from different facts and
+  // whichever ran last won: under `fresh` the turn went to one person while the
+  // queue waited for a machine belonging to the other. One row read against the
+  // document this handler is about to open anyway.
+  const placed = (await loadQueueState(env.DB as unknown as D1Like, String(repositoryId), ref)).store
+    .state()
+    .entries.get(entryId);
+
+  // A bot has no principal and no fairness share, so it cannot sponsor its own
+  // pull request. `user.type` was read from GitHub, declared on this payload,
+  // and never used, which is why `SPONSOR_REQUIRED` had no writer and a
+  // `renovate[bot]` pull request read as unplaceable with no fix at all.
+  const authorIsBot = pr?.user?.type === "Bot";
   const authorId = pr?.user?.id;
-  const principal =
-    authorId == null
+  const author =
+    authorIsBot || authorId == null
       ? null
       : await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
           .bind(String(authorId))
           .first<{ id: string }>();
-  if (principal === null) return { handled: false, detail: "author has no activated principal" };
+  const sponsorPrincipalId = placed?.sponsorPrincipalId ?? author?.id ?? null;
+  const sponsorGithubUserId = placed?.sponsorGithubUserId ?? String(authorId);
 
-  // Through `deriveReadiness`, from the two facts this event carries.
+  if (sponsorPrincipalId === null) {
+    // A required check that never arrives blocks the merge forever with nothing
+    // on the page explaining it, so the one case a person can act on says so.
+    // A human sponsor clears it by joining the queue for this pull request.
+    if (authorIsBot) {
+      try {
+        await publishTurnCheckFor(
+          env,
+          String(repositoryId),
+          unplaceableUpdate({ entryId, pullRequestNumber: number, headSha, reason: "SPONSOR_REQUIRED" }),
+        );
+      } catch {
+        /* the check may lag; the answer below is unaffected */
+      }
+      return { handled: false, detail: "a bot pull request needs a human sponsor before it can queue" };
+    }
+    return { handled: false, detail: "author has no activated principal" };
+  }
+
+  // Through `deriveReadiness`, from the facts this event carries.
   //
   // The pair of expressions that used to stand here named two reasons out of
   // the twenty the derivation knows, and `/authorize` had a second, differently
   // narrow copy. Neither reached the ruleset, the App's permissions or the
-  // sponsor's access. Nothing about those three is readable from a webhook
-  // payload, so this writer states what the event says and `/authorize` reads
-  // the rest on the walk to a merge, where the cost is one merge's worth.
+  // sponsor's access.
+  //
+  // Every field is stated. This used to spread a permissive constant, so the
+  // twenty-two facts a webhook payload cannot answer all read as no objection
+  // and nothing distinguished them from the two it did answer. A fact this
+  // handler cannot read says `"unread"`, and `/authorize` reads the rest on the
+  // walk to a merge, where the cost is one merge's worth.
   const draft = pr?.draft === true;
   const open = pr?.state === "open";
   const base = deriveReadiness({
-    ...NO_OBJECTION,
-    draft,
     pullRequestState: open ? "open" : "closed",
+    draft,
+    authorIsBot,
+    sponsorPrincipalId,
+    // Nothing about the repository, the head's proof or GitHub's own gates is
+    // on a pull_request payload, and a read per webhook delivery would buy an
+    // answer `/authorize` reads again a moment later on every ask.
+    ownerAuthorized: "unread",
+    appPermissionsHealthy: "unread",
+    rulesetEnforced: "unread",
+    headProof: "unread",
+    proofShortfall: "unread",
+    reviewsSatisfied: "unread",
+    codeOwnerReviewSatisfied: "unread",
+    approvalAfterPushSatisfied: "unread",
+    conversationsResolved: "unread",
+    nonThwipChecks: "unread",
+    mergeable: "unread",
   });
   const ready = base.ready;
   const basePrimaryReason: BlockingReason | null = base.primaryReason;
@@ -1454,7 +1533,7 @@ export async function queueFromPullRequest(env: Env, payload: {
     ? await capabilityFor(
         env.DB as unknown as D1Like,
         String(repositoryId),
-        principal.id,
+        sponsorPrincipalId,
         new Date().toISOString(),
         policy?.securityProfile ?? null,
       )
@@ -1473,8 +1552,8 @@ export async function queueFromPullRequest(env: Env, payload: {
         idempotencyKey: `webhook:request:${entryId}`,
         entryId,
         pullRequestNumber: number,
-        sponsorPrincipalId: principal.id,
-        sponsorGithubUserId: String(authorId),
+        sponsorPrincipalId,
+        sponsorGithubUserId,
         headSha,
       });
 
@@ -1866,9 +1945,10 @@ app.route(
       return row?.id ?? null;
     },
     /**
-     * Who wrote a pull request and which branch it targets, read from GitHub so
-     * neither is the caller's to choose. Null on anything that is not an answer:
-     * no installation, a refused read, a payload missing either field.
+     * Who wrote a pull request, whether that author is a bot, and which branch
+     * it targets, read from GitHub so none of it is the caller's to choose. Null
+     * on anything that is not an answer: no installation, a refused read, a
+     * payload missing a field.
      */
     async pullRequestPlacement(env: Env, repositoryId: string, pullRequestNumber: number) {
       const project = await env.DB.prepare(
@@ -1886,11 +1966,17 @@ app.route(
         },
       });
       if (!res.ok) return null;
-      const pull = (await res.json()) as { user?: { id?: number }; base?: { ref?: string } };
+      const pull = (await res.json()) as { user?: { id?: number; type?: string }; base?: { ref?: string } };
       const authorId = pull.user?.id;
       const ref = pull.base?.ref;
       if (typeof authorId !== "number" || typeof ref !== "string" || ref === "") return null;
-      return { authorGithubUserId: String(authorId), baseRef: `refs/heads/${ref}` };
+      return {
+        authorGithubUserId: String(authorId),
+        baseRef: `refs/heads/${ref}`,
+        // The same field the `pull_request` webhook carries, so one source
+        // decides bot-ness for both paths.
+        authorIsBot: pull.user?.type === "Bot",
+      };
     },
     async commitFacts(env: Env, repositoryId: string, sha: string) {
       const project = await env.DB.prepare(
@@ -2272,6 +2358,121 @@ app.route(
       );
 
       return { rulesetEnforced, appPermissionsHealthy, sponsorAuthorized };
+    },
+    /**
+     * What the branch's `pull_request` rule asks of this pull request, and
+     * whether GitHub says it is met.
+     *
+     * Two reads. The rules endpoint says which of the four gates apply, because
+     * a branch that does not require a code owner must never be told one is
+     * missing. GraphQL answers all of the rest in one round trip: the review
+     * decision GitHub itself computed under those rules, the outstanding code
+     * owner request, which commit each approval names, the open review threads,
+     * and mergeability.
+     *
+     * The decision is what refuses. Counting approvals here would refuse merges
+     * GitHub allows, because the rule can be satisfied by reviewers this queue
+     * cannot enumerate; the counts are only used to say which rule is unmet once
+     * GitHub has already said one is.
+     *
+     * Null on any unreadable answer, all the way down, for the same reason
+     * `requiredCheckState` is: a bad minute at GitHub must not stop the queue
+     * for everyone.
+     */
+    async pullRequestGates(
+      env: Env,
+      repositoryId: string,
+      baseRef: string,
+      pullRequestNumber: number,
+      headSha: string,
+    ): Promise<PullRequestGates | null> {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) return null;
+      const [owner, repo] = project.github_name.split("/");
+      if (owner === undefined || repo === undefined) return null;
+      const token = await installationToken(env, project.installation_id);
+      const headers = {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      };
+
+      const branch = baseRef.replace(/^refs\/heads\//, "");
+      const rulesRes = await fetch(
+        `https://api.github.com/repos/${project.github_name}/rules/branches/${encodeURIComponent(branch)}`,
+        { headers },
+      ).catch(() => null);
+      if (rulesRes === null || !rulesRes.ok) return null;
+      const rules = (await rulesRes.json().catch(() => null)) as Array<{
+        type?: string;
+        parameters?: {
+          required_approving_review_count?: number;
+          require_code_owner_review?: boolean;
+          require_last_push_approval?: boolean;
+          required_review_thread_resolution?: boolean;
+        };
+      }> | null;
+      if (rules === null) return null;
+      const pullRule = rules.find((rule) => rule.type === "pull_request")?.parameters ?? {};
+
+      const graphRes = await fetch("https://api.github.com/graphql", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          query:
+            "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeable reviewDecision reviewRequests(first:100){nodes{asCodeOwner}} reviewThreads(first:100){nodes{isResolved isOutdated}} latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}",
+          variables: { owner, name: repo, number: pullRequestNumber },
+        }),
+      }).catch(() => null);
+      if (graphRes === null || !graphRes.ok) return null;
+      const answer = (await graphRes.json().catch(() => null)) as {
+        data?: {
+          repository?: {
+            pullRequest?: {
+              mergeable?: string;
+              reviewDecision?: string | null;
+              reviewRequests?: { nodes?: Array<{ asCodeOwner?: boolean }> };
+              reviewThreads?: { nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean }> };
+              latestOpinionatedReviews?: { nodes?: Array<{ state?: string; commit?: { oid?: string } }> };
+            } | null;
+          } | null;
+        };
+      } | null;
+      const pull = answer?.data?.repository?.pullRequest;
+      if (pull == null) return null;
+
+      const approving = (pull.latestOpinionatedReviews?.nodes ?? []).filter((r) => r.state === "APPROVED");
+      const decision =
+        pull.reviewDecision === "APPROVED" ||
+        pull.reviewDecision === "CHANGES_REQUESTED" ||
+        pull.reviewDecision === "REVIEW_REQUIRED"
+          ? pull.reviewDecision
+          : null;
+
+      return {
+        // `UNKNOWN` is GitHub still computing it, which is not a conflict.
+        mergeable:
+          pull.mergeable === "MERGEABLE" ? true : pull.mergeable === "CONFLICTING" ? false : null,
+        review: {
+          requiredApprovingReviewCount: pullRule.required_approving_review_count ?? 0,
+          requireCodeOwnerReview: pullRule.require_code_owner_review === true,
+          requireLastPushApproval: pullRule.require_last_push_approval === true,
+          requireThreadResolution: pullRule.required_review_thread_resolution === true,
+          reviewDecision: decision,
+          pendingCodeOwnerReview: (pull.reviewRequests?.nodes ?? []).some((r) => r.asCodeOwner === true),
+          approvals: approving.length,
+          approvalsOnHead: approving.filter((r) => r.commit?.oid === headSha).length,
+          // An outdated thread no longer applies to the head, and GitHub does
+          // not hold the merge on one.
+          unresolvedThreads: (pull.reviewThreads?.nodes ?? []).filter(
+            (t) => t.isResolved !== true && t.isOutdated !== true,
+          ).length,
+        },
+      };
     },
     /**
      * The candidate verdict, as a check on the pull request head.

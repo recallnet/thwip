@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
@@ -6,7 +8,6 @@ import {
   GRACE_SECONDS,
   deviceKeyClaimedByAnother,
   enrolDeviceKey,
-  HEARTBEAT_INTERVAL_SECONDS,
   SWEEP_INTERVAL_SECONDS,
   isPrincipalConnected,
   recordHeartbeat,
@@ -35,12 +36,6 @@ afterEach(() => {
 const REPO = "1315419165";
 const T0 = "2026-07-31T00:00:00.000Z";
 
-describe("the interval and the grace window", () => {
-  it("gives a runner room for a couple of missed beats before it is considered gone", () => {
-    expect(GRACE_SECONDS).toBeGreaterThan(HEARTBEAT_INTERVAL_SECONDS);
-  });
-});
-
 describe("the cooldown and the sweep", () => {
   // plan.md:1208 permits exactly one bounded lost turn to a dead runner, not
   // a repeating one. A dead runner's entry keeps its stale eligibility until
@@ -54,6 +49,20 @@ describe("the cooldown and the sweep", () => {
   it("holds a runner's unclaimed offer in cooldown at least until the sweep can retire it", () => {
     expect(DEFAULT_TIMINGS.noClaimCooldownSeconds).toBeGreaterThanOrEqual(SWEEP_INTERVAL_SECONDS);
   });
+
+  // The other half of that bound was open. Cloudflare's cron trigger is a
+  // string in wrangler.jsonc, so nothing tied it to the constant that claims to
+  // describe it: changing it to `*/15 * * * *` deploys a 900-second sweep
+  // against a 300-second cooldown, every test stays green, and the queue starts
+  // losing repeated turns to dead machines. Reading the string and comparing is
+  // the only way this constant can keep meaning what it says.
+  it("matches the cron trigger that actually runs the sweep", () => {
+    const config = readFileSync(fileURLToPath(new URL("../../../../wrangler.jsonc", import.meta.url)), "utf8");
+    const crons = /"crons":\s*\[([^\]]*)\]/.exec(config)?.[1] ?? "";
+    const everyNMinutes = /"\*\/(\d+) \* \* \* \*"/.exec(crons)?.[1];
+    expect(everyNMinutes, "no every-N-minutes cron is configured").toBeDefined();
+    expect(Number(everyNMinutes) * 60).toBe(SWEEP_INTERVAL_SECONDS);
+  });
 });
 
 describe("recordHeartbeat", () => {
@@ -66,7 +75,8 @@ describe("recordHeartbeat", () => {
   it("does not report a transition on a second heartbeat from the same device", async () => {
     const db = d1();
     await recordHeartbeat(db, { repositoryId: REPO, principalId: "alice", deviceKeyId: "d1", now: T0 });
-    const T1 = new Date(new Date(T0).getTime() + HEARTBEAT_INTERVAL_SECONDS * 1000).toISOString();
+    // One beat later, well inside the grace window.
+    const T1 = new Date(new Date(T0).getTime() + 1000).toISOString();
     const outcome = await recordHeartbeat(db, { repositoryId: REPO, principalId: "alice", deviceKeyId: "d1", now: T1 });
     expect(outcome.wasOffline).toBe(false);
   });

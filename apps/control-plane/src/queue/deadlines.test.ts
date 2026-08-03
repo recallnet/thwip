@@ -70,7 +70,7 @@ function routes() {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
   });
@@ -198,7 +198,7 @@ function queueProject(repositoryId: string): void {
  * reads it, which is the same condition without waiting out the clock.
  */
 async function reconcilingLane(db: D1Like): Promise<string> {
-  return withQueueState(db, REPO, REF, (store) => {
+  return withQueueState(db, REPO, REF, async (store) => {
     const commands = commandsFor(store, {
       offerSeconds: 90,
       executionSeconds: 0,
@@ -228,7 +228,7 @@ async function reconcilingLane(db: D1Like): Promise<string> {
       });
     }
 
-    const offer = commands.tick({ idempotencyKey: "offer-114", decisionDigest: `sha256:${"0".repeat(64)}` });
+    const offer = await commands.tick({ idempotencyKey: "offer-114"});
     const attemptId = (offer as { attemptId?: string }).attemptId;
     if (attemptId === undefined) throw new Error("test setup expected an offer");
 
@@ -376,7 +376,7 @@ describe("a merge outcome nobody could settle, past its deadline", () => {
     const db = e.DB as unknown as D1Like;
     queueProject(REPO);
 
-    await withQueueState(db, REPO, REF, (store) => {
+    await withQueueState(db, REPO, REF, async (store) => {
       const commands = commandsFor(store);
       commands.requestQueue({
         idempotencyKey: "req-e114",
@@ -393,7 +393,7 @@ describe("a merge outcome nobody could settle, past its deadline", () => {
         schedulerEligible: true,
         primaryReason: null,
       });
-      const offer = commands.tick({ idempotencyKey: "offer", decisionDigest: `sha256:${"0".repeat(64)}` });
+      const offer = await commands.tick({ idempotencyKey: "offer"});
       const attemptId = (offer as { attemptId?: string }).attemptId!;
       commands.claim({ idempotencyKey: "claim", attemptId, executionMode: "remote" });
       commands.candidatePrepared({

@@ -2,7 +2,6 @@ export {
   LOCAL_REASONS,
   SERVICE_REASONS,
   isReasonCode,
-  reasonCodes,
   type ReasonCode,
 } from "./reason-codes.js";
 export {

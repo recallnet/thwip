@@ -156,7 +156,7 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId 
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async () => "alice",
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async (_e, _r, pullRequestNumber) => {
       driven.push(pullRequestNumber);
     },

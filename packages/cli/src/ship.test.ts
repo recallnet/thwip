@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXIT } from "./queue-exit.js";
 import {
-  describeDecision,
   nextShipStep,
   planInterrupt,
   reactToReason,
@@ -10,7 +9,6 @@ import {
 
 function state(over: Partial<ShipState> = {}): ShipState {
   return {
-    authenticated: true,
     workingTreeClean: true,
     headProof: "accepted",
     pushedHeadMatchesLocal: true,
@@ -27,12 +25,6 @@ describe("nextShipStep", () => {
     // A proof over an uncommitted tree attests to something no reviewer can see.
     const decision = nextShipStep(state({ workingTreeClean: false }));
     expect(decision).toMatchObject({ kind: "stop", reasonCode: "UNCOMMITTED_CHANGES" });
-  });
-
-  it("sends the developer to login rather than trying to authenticate for them", () => {
-    const decision = nextShipStep(state({ authenticated: false }));
-    expect(decision).toMatchObject({ kind: "stop", exitCode: EXIT.authRequired });
-    if (decision.kind === "stop") expect(decision.why).toMatch(/your own terminal/);
   });
 
   it("runs the suites when the head has no proof", () => {
@@ -185,19 +177,5 @@ describe("planInterrupt", () => {
   it("never reports an interrupt as a queue request being lost", () => {
     const plan = planInterrupt(state({ turn: "offered", queueEntryExists: true }));
     expect(plan.message).not.toMatch(/cancel|remove|lost/i);
-  });
-});
-
-describe("describeDecision", () => {
-  it("renders each decision shape as one line", () => {
-    expect(describeDecision({ kind: "step", step: "push", why: "remote is behind" })).toBe(
-      "push: remote is behind",
-    );
-    expect(describeDecision({ kind: "done", outcome: "MERGE_CONFIRMED", exitCode: EXIT.ok })).toBe(
-      "MERGE_CONFIRMED",
-    );
-    expect(
-      describeDecision({ kind: "stop", reasonCode: "REVIEW_REQUIRED", exitCode: EXIT.humanRequired, why: "ask" }),
-    ).toBe("REVIEW_REQUIRED: ask");
   });
 });

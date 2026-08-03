@@ -212,6 +212,18 @@ export function turnCheckRun(update: TurnCheckUpdate): TurnCheckRun {
             : "Thwip Queue is not offering turns. An administrator paused it, and can resume it.",
       };
     case "unplaceable":
+      // A bot author is the one unplaceable case with a fix a developer can
+      // perform, so it says what that fix is. Everything else here is an
+      // activation problem for whoever runs the queue.
+      if (update.primaryReason === "SPONSOR_REQUIRED") {
+        return {
+          status: "completed",
+          conclusion: "failure",
+          title: "This pull request needs a human sponsor",
+          summary:
+            "A bot opened this pull request, so no fairness share belongs to it and the queue has nobody to give the turn to. Join the queue for this pull request and you become its sponsor. It will not resolve on its own.",
+        };
+      }
       return {
         status: "completed",
         conclusion: "failure",
@@ -258,8 +270,17 @@ export function unplaceableUpdate(input: {
   entryId: string;
   pullRequestNumber: number;
   headSha: string;
+  /** Why, when the queue knows. `SPONSOR_REQUIRED` is the one a person can clear. */
+  reason?: string | null;
 }): TurnCheckUpdate {
-  return { ...input, state: "unplaceable", waiting: 0 };
+  return {
+    entryId: input.entryId,
+    pullRequestNumber: input.pullRequestNumber,
+    headSha: input.headSha,
+    state: "unplaceable",
+    waiting: 0,
+    primaryReason: input.reason ?? null,
+  };
 }
 
 export function turnCheckUpdates(before: QueueSnapshot | null, after: QueueSnapshot): TurnCheckUpdate[] {

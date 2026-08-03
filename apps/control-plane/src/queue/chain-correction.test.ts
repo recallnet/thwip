@@ -142,7 +142,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async () => null,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
     baseContainsSha: onMain,

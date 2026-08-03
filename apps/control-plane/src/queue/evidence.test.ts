@@ -3,7 +3,6 @@ import {
   buildAssignment,
   buildMergeIntent,
   buildTransitionRecord,
-  liveGuardDigest,
   reuseEquivalenceDigests,
   signAssignment,
   signMergeIntent,
@@ -298,13 +297,13 @@ describe("reuseEquivalenceDigests", () => {
   it("normalizes suite order, because the same suites are the same work", async () => {
     const a = await reuseEquivalenceDigests({
       requiredSuites: ["lint", "test"],
-      pipelineDocument: { runner: "dagger" },
-      policyDocument: { profile: "fast" },
+      pipelineDigest: D("c"),
+      policyDigest: D("b"),
     });
     const b = await reuseEquivalenceDigests({
       requiredSuites: ["test", "lint"],
-      pipelineDocument: { runner: "dagger" },
-      policyDocument: { profile: "fast" },
+      pipelineDigest: D("c"),
+      policyDigest: D("b"),
     });
     expect(b.requiredSuitesDigest).toBe(a.requiredSuitesDigest);
   });
@@ -312,28 +311,14 @@ describe("reuseEquivalenceDigests", () => {
   it("changes when the suite set changes", async () => {
     const a = await reuseEquivalenceDigests({
       requiredSuites: ["lint"],
-      pipelineDocument: {},
-      policyDocument: {},
+      pipelineDigest: D("c"),
+      policyDigest: D("b"),
     });
     const b = await reuseEquivalenceDigests({
       requiredSuites: ["lint", "test"],
-      pipelineDocument: {},
-      policyDocument: {},
+      pipelineDigest: D("c"),
+      policyDigest: D("b"),
     });
     expect(b.requiredSuitesDigest).not.toBe(a.requiredSuitesDigest);
-  });
-});
-
-describe("liveGuardDigest", () => {
-  it("is stable regardless of fact ordering", async () => {
-    const a = await liveGuardDigest({ baseSha: BASE, headSha: HEAD, reviews: true });
-    const b = await liveGuardDigest({ reviews: true, headSha: HEAD, baseSha: BASE });
-    expect(b).toBe(a);
-  });
-
-  it("changes when any fact changes", async () => {
-    const a = await liveGuardDigest({ baseSha: BASE, reviews: true });
-    const b = await liveGuardDigest({ baseSha: BASE, reviews: false });
-    expect(b).not.toBe(a);
   });
 });

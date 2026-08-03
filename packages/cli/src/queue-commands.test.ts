@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXIT } from "./queue-exit.js";
-import { isMutating, MUTATING_SUBCOMMANDS, planQueueCommand } from "./queue-commands.js";
+import { planQueueCommand } from "./queue-commands.js";
 
 /**
  * Parsing is where the damaging mistakes live. A destructive command that ran with
@@ -252,13 +252,6 @@ describe("reconcile", () => {
   it("requires a reason and admin standing", () => {
     expect(planQueueCommand(["reconcile", ...REPO, "--observed", "not-merged"])).toMatchObject({ ok: false });
     expect(plan([...base, "--observed", "not-merged"]).requiresAdmin).toBe(true);
-  });
-});
-
-describe("isMutating", () => {
-  it("agrees with the plans that carry an idempotency key", () => {
-    for (const subcommand of MUTATING_SUBCOMMANDS) expect(isMutating(subcommand)).toBe(true);
-    for (const subcommand of ["status", "list", "doctor", "work"]) expect(isMutating(subcommand)).toBe(false);
   });
 });
 

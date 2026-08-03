@@ -1,29 +1,17 @@
 import { describe, expect, it } from "vitest";
-import {
-  evidenceKey,
-  getEvidence,
-  hasEvidence,
-  putEvidence,
-  type EvidenceKind,
-  type R2Like,
-} from "./evidence-store.js";
+import { evidenceKey, hasEvidence, putEvidence, type EvidenceKind, type R2Like } from "./evidence-store.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 
 /**
  * Digest-addressed storage is only worth its complexity if the digest is checked
- * on both sides. These tests make the two dishonest cases fail: bytes whose name
- * does not match them going in, and bytes that do not match their name coming out.
+ * against the bytes. These tests make the dishonest case fail: bytes whose name
+ * does not match them going in.
  */
 
 function bucket() {
   const objects = new Map<string, Uint8Array>();
   const meta = new Map<string, Record<string, string>>();
   const impl: R2Like = {
-    async get(key) {
-      const bytes = objects.get(key);
-      if (bytes === undefined) return null;
-      return { arrayBuffer: async () => bytes.slice().buffer as ArrayBuffer };
-    },
     async put(key, value, options) {
       objects.set(key, value instanceof Uint8Array ? value : new Uint8Array(value));
       if (options?.customMetadata !== undefined) meta.set(key, options.customMetadata);
@@ -166,62 +154,6 @@ describe("putEvidence", () => {
     expect(await hasEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d })).toBe(
       true,
     );
-  });
-});
-
-describe("getEvidence", () => {
-  it("returns bytes that match their name", async () => {
-    const { impl } = bucket();
-    const bytes = bytesOf('{"a":1}');
-    const d = await digest(bytes);
-    await putEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes });
-    const got = await getEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d });
-    expect(got).toMatchObject({ found: true });
-    if (got.found) expect(new TextDecoder().decode(got.bytes)).toBe('{"a":1}');
-  });
-
-  it("reports a miss plainly", async () => {
-    const { impl } = bucket();
-    expect(
-      await getEvidence(impl, {
-        organizationId: ORG,
-        repositoryId: REPO,
-        kind: KIND,
-        digest: `sha256:${"f".repeat(64)}`,
-      }),
-    ).toEqual({ found: false, reason: "MISSING" });
-  });
-
-  it("refuses to hand back bytes that do not match their name", async () => {
-    // The one check a caller must never be trusted to do itself.
-    const { impl, objects } = bucket();
-    const d = await digest(bytesOf("expected"));
-    const key = evidenceKey({ organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d });
-    objects.set(key, bytesOf("tampered"));
-
-    const got = await getEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d });
-    expect(got).toMatchObject({ found: false, reason: "DIGEST_MISMATCH" });
-  });
-
-  it("does not confuse two kinds sharing a digest", async () => {
-    const { impl } = bucket();
-    const bytes = bytesOf("identical bytes");
-    const d = await digest(bytes);
-    await putEvidence(impl, {
-      organizationId: ORG,
-      repositoryId: REPO,
-      kind: "merge-intent",
-      digest: d,
-      bytes,
-    });
-    expect(
-      await getEvidence(impl, {
-        organizationId: ORG,
-        repositoryId: REPO,
-        kind: "transition-record",
-        digest: d,
-      }),
-    ).toEqual({ found: false, reason: "MISSING" });
   });
 });
 

@@ -26,7 +26,6 @@ export const BOUNDS = {
   decimalId: 32,
   baseRef: 1024,
   reason: 512,
-  reasonCode: 64,
   reasonCodeArray: 32,
   suiteEntries: 32,
   suiteName: 64,
@@ -40,8 +39,6 @@ export const BOUNDS = {
 export const DECIMAL_RE = /^[0-9]+$/;
 export const OID_RE = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 export const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
-export const SUITE_NAME_RE = /^[a-z0-9][a-z0-9_.-]*$/;
-export const REASON_CODE_RE = /^[A-Z][A-Z0-9_]*$/;
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 export function fail(detail: string): { ok: false; detail: string } {
@@ -73,6 +70,7 @@ export function opaqueId(v: unknown, name: string): ParseResult<string> {
   return boundedString(v, name, BOUNDS.opaqueId);
 }
 
+/** GitHub ids are never JavaScript numbers on the wire (§21.1). */
 export function decimalId(v: unknown, name: string): ParseResult<DecimalId> {
   if (typeof v !== "string" || !DECIMAL_RE.test(v)) return fail(`${name} must be decimal digits`);
   if (v.length > BOUNDS.decimalId) return fail(`${name} exceeds ${BOUNDS.decimalId} digits`);
@@ -123,24 +121,10 @@ export function positiveCounter(v: unknown, name: string): ParseResult<number> {
   return n;
 }
 
-/** GitHub ids are never JavaScript numbers on the wire (§21.1). */
-export function bigintString(v: unknown, name: string): ParseResult<string> {
-  const id = decimalId(v, name);
-  if (!id.ok) return id;
-  return ok(id.value);
-}
-
 export function reasonText(v: unknown, name: string): ParseResult<string> {
   const s = boundedString(v, name, BOUNDS.reason);
   if (!s.ok) return s;
   if (s.value.trim().length === 0) return fail(`${name} must not be blank`);
-  return s;
-}
-
-export function reasonCode(v: unknown, name: string): ParseResult<string> {
-  const s = boundedString(v, name, BOUNDS.reasonCode);
-  if (!s.ok) return s;
-  if (!REASON_CODE_RE.test(s.value)) return fail(`${name} must be an upper-case reason code`);
   return s;
 }
 
@@ -275,21 +259,3 @@ export function parseGitSubject(v: unknown, name = "git"): ParseResult<GitSubjec
   });
 }
 
-/**
- * Two subjects name the same integration. Used by the final live guard, where
- * "close enough" is the failure we are trying to prevent (§18, §23.2).
- */
-export function sameGitSubject(a: GitSubject, b: GitSubject): boolean {
-  return (
-    a.objectFormat === b.objectFormat &&
-    a.repositoryId === b.repositoryId &&
-    a.baseRef === b.baseRef &&
-    a.baseSha === b.baseSha &&
-    a.headRepositoryId === b.headRepositoryId &&
-    a.headSha === b.headSha &&
-    a.candidateSha === b.candidateSha &&
-    a.candidateTreeOid === b.candidateTreeOid &&
-    a.candidateParentOids.length === b.candidateParentOids.length &&
-    a.candidateParentOids.every((oid, i) => oid === b.candidateParentOids[i])
-  );
-}

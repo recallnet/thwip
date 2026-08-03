@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyEvent, applyEvents, emptyState, QueueRuleViolation, type BranchQueueState } from "./reducer.js";
+import { applyEvent, emptyState, QueueRuleViolation, type BranchQueueState } from "./reducer.js";
+import { applyEvents } from "./test/apply-events.js";
 import type { QueueEvent } from "./events.js";
 
 /**

@@ -331,7 +331,9 @@ const CHECK_SEQUENCE: Array<[label: string, codes: string[]]> = [
   ["Exact Git tree matches", ["SUBJECT_TREE_MISMATCH"]],
   ["Ancestry (parents) matches", ["SUBJECT_ANCESTRY_MISMATCH"]],
   ["Base context matches", ["SUBJECT_BASE_MISMATCH"]],
-  ["Policy digest is the active policy", ["POLICY_NOT_ACTIVE"]],
+  // No row for the policy digest. The verifier stopped asking which policy a
+  // proof cites and asks whether it satisfies the policy in force, so the rows
+  // below are where a policy change shows up.
   ["Pipeline digest is policy-approved", ["PIPELINE_DIGEST_MISMATCH"]],
   ["Signer holds current repository permission", ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"]],
   ["Every required suite passed exactly once", ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"]],

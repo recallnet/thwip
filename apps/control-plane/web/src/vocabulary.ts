@@ -16,7 +16,6 @@
  * grows before this file does still reads as words.
  */
 
-import { BLOCKING_REASONS, type BlockingReason } from "@thwip/queue-domain";
 import type { ReasonCode as ProtocolReasonCode } from "@thwip/protocol";
 import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 
@@ -60,7 +59,6 @@ const OUTCOME_STYLE: Record<ProtocolReasonCode | "BOOTSTRAP_PENDING", Omit<Outco
   SUBJECT_TREE_MISMATCH: { label: "Proof covers different code", tone: "bad" },
   SUBJECT_ANCESTRY_MISMATCH: { label: "Proof covers a different history", tone: "bad" },
   SUBJECT_BASE_MISMATCH: { label: "Proof was run against an older base", tone: "bad" },
-  POLICY_NOT_ACTIVE: { label: "Policy is not the active one", tone: "bad" },
   PIPELINE_DIGEST_MISMATCH: { label: "Pipeline does not match the policy", tone: "bad" },
   SUITE_MISSING: { label: "A required suite did not run", tone: "bad" },
   SUITE_DUPLICATE: { label: "A suite was reported twice", tone: "bad" },
@@ -156,16 +154,6 @@ export function entryStateTone(state: string, blocked: boolean): Tone {
 }
 
 /* ---------- queue blocking reasons ---------- */
-
-/**
- * The guidance the check and the CLI publish, read from the one table all three
- * import. It was copied here by hand and shortened, and the copies disagreed:
- * a turn that ended for a reason outside the branch was reported here in words
- * the terminal never used.
- */
-export const BLOCKED_NEXT_ACTION: Record<BlockingReason, string> = Object.fromEntries(
-  BLOCKING_REASONS.map((reason) => [reason, nextActionFor(reason, "dashboard")]),
-) as Record<BlockingReason, string>;
 
 /**
  * A reason with no written guidance is still not allowed to arrive as a code.

@@ -23,15 +23,9 @@
  * has an exit code.
  */
 
-import {
-  LOCAL_REASONS,
-  SERVICE_REASONS,
-  isReasonCode,
-  nextActionFor as sharedNextAction,
-} from "@thwip/vocabulary";
+import { isReasonCode, nextActionFor as sharedNextAction } from "@thwip/vocabulary";
 import type { ReasonCode } from "@thwip/vocabulary";
 
-export { LOCAL_REASONS, SERVICE_REASONS };
 export type { ReasonCode };
 
 export const EXIT = {
@@ -125,7 +119,6 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   SIGNER_KEY_REVOKED: EXIT.evidenceRejected,
   SIGNER_KEY_UNKNOWN: EXIT.evidenceRejected,
   SIGNER_MISMATCH: EXIT.evidenceRejected,
-  POLICY_NOT_ACTIVE: EXIT.evidenceRejected,
   PIPELINE_DIGEST_MISMATCH: EXIT.evidenceRejected,
   PROOF_EXPIRED: EXIT.evidenceRejected,
   PROOF_MISSING: EXIT.evidenceRejected,
@@ -249,11 +242,6 @@ export function nextActionFor(reasonCode: string): string {
 export function isRetryable(reasonCode: string): boolean {
   const code = exitCodeFor(reasonCode);
   return code === EXIT.turnLost || code === EXIT.unavailable || code === EXIT.rateLimited;
-}
-
-/** Every reason the mapping knows, for the exhaustiveness test. */
-export function knownReasonCodes(): string[] {
-  return Object.keys(CLASS);
 }
 
 /* ------------------------------------------------------------------ */

@@ -51,7 +51,7 @@ function routes(principalId = "alice") {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async () => null,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
   });
@@ -227,7 +227,7 @@ describe("the heartbeat endpoint", () => {
       dispatchCandidateVerification: async () => ({ ok: true }),
       queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
       principalFor: async () => null,
-      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
       driveTurn: async () => {
         driven += 1;
       },
@@ -258,7 +258,7 @@ describe("the heartbeat endpoint", () => {
       dispatchCandidateVerification: async () => ({ ok: true }),
       queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
       principalFor: async () => null,
-      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF }),
+      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
       driveTurn: async () => {
         driven += 1;
       },

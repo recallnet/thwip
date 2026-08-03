@@ -3,6 +3,8 @@ import { installationToken } from "../github-app.js";
 import type { Env } from "../env.js";
 import { confirmMergeAbsence } from "./merge-absence.js";
 import { mergeOperationId } from "./merge-commit.js";
+import type { DecisionRecorder } from "./commands.js";
+import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { buildSnapshot, commandsFor, type QueueSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
@@ -189,6 +191,13 @@ export async function settleReconciliation(
   reads: ReconciliationReads = GITHUB_READS,
 ): Promise<SettledReconciliation> {
   const db = env.DB as unknown as D1Like;
+  // Built once for the whole settlement: every path below can free the lane, and
+  // every freed lane is offered, which writes a decision record.
+  const recordDecision = queueDecisionRecorder({
+    db,
+    bucket: env.EVIDENCE as unknown as R2Like | undefined,
+    repositoryId,
+  });
   const { attemptId, pullRequestNumber, headSha } = overdue;
   const verdict =
     headSha === null
@@ -211,8 +220,8 @@ export async function settleReconciliation(
     const mergeSha = verdict.mergeSha;
     const facts = mergeSha === null ? null : await reads.commitFacts(env, repositoryId, mergeSha);
     if (mergeSha !== null && facts !== null) {
-      const applied = await withQueueState(db, repositoryId, baseRef, (store) => {
-        const commands = commandsFor(store);
+      const applied = await withQueueState(db, repositoryId, baseRef, async (store) => {
+        const commands = commandsFor(store, undefined, recordDecision);
         const confirmed = commands.confirmMerge({
           idempotencyKey: `overdue-merged:${attemptId}`,
           attemptId,
@@ -221,7 +230,7 @@ export async function settleReconciliation(
           mergeTree: facts.treeOid,
           parentShas: facts.parentShas,
         });
-        settle(store, commands);
+        await settle(store, commands);
         return { status: confirmed.status, snapshot: buildSnapshot(store) };
       });
       if (applied.status !== "rejected") {
@@ -231,25 +240,25 @@ export async function settleReconciliation(
     // A merge that cannot be named, or a commit that is not the candidate the
     // queue authorized. Neither is a merge this may write down, and neither is a
     // reason to keep holding the lane.
-    return giveUp(db, repositoryId, baseRef, attemptId, "the merge could not be read back from its commit");
+    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the merge could not be read back from its commit");
   }
 
   if (verdict.kind === "unknown") {
-    return giveUp(db, repositoryId, baseRef, attemptId, verdict.reason);
+    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, verdict.reason);
   }
 
-  const resolved = await withQueueState(db, repositoryId, baseRef, (store) => {
-    const commands = commandsFor(store);
+  const resolved = await withQueueState(db, repositoryId, baseRef, async (store) => {
+    const commands = commandsFor(store, undefined, recordDecision);
     const confirmed = commands.confirmNotMerged({
       idempotencyKey: `overdue-not-merged:${attemptId}`,
       attemptId,
       operationId: mergeOperationId(attemptId),
     });
-    settle(store, commands);
+    await settle(store, commands);
     return { status: confirmed.status, snapshot: buildSnapshot(store) };
   });
   return resolved.status === "rejected"
-    ? giveUp(db, repositoryId, baseRef, attemptId, "the refusal could not be recorded")
+    ? giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the refusal could not be recorded")
     : { outcome: { settled: "not-merged", attemptId, reason: verdict.reason }, snapshot: resolved.snapshot };
 }
 
@@ -263,19 +272,20 @@ export async function settleReconciliation(
  */
 async function giveUp(
   db: D1Like,
+  recordDecision: DecisionRecorder,
   repositoryId: string,
   baseRef: string,
   attemptId: string,
   reason: string,
 ): Promise<SettledReconciliation> {
-  const snapshot = await withQueueState(db, repositoryId, baseRef, (store) => {
-    const commands = commandsFor(store);
+  const snapshot = await withQueueState(db, repositoryId, baseRef, async (store) => {
+    const commands = commandsFor(store, undefined, recordDecision);
     commands.terminateAttempt({
       idempotencyKey: `overdue-unknown:${attemptId}`,
       attemptId,
       outcome: "PROVIDER_FAILURE",
     });
-    settle(store, commands);
+    await settle(store, commands);
     return buildSnapshot(store);
   });
   return { outcome: { settled: "unknown", attemptId, reason }, snapshot };
@@ -287,7 +297,10 @@ async function giveUp(
  * and every place that has forgotten the second one has left the queue idle with
  * work waiting.
  */
-function settle(store: Parameters<typeof buildSnapshot>[0], commands: ReturnType<typeof commandsFor>): void {
+async function settle(
+  store: Parameters<typeof buildSnapshot>[0],
+  commands: ReturnType<typeof commandsFor>,
+): Promise<void> {
   if (store.state().activeAttemptId !== null) return;
-  commands.tick({ idempotencyKey: `settle:${store.generation()}`, decisionDigest: `sha256:${"0".repeat(64)}` });
+  await commands.tick({ idempotencyKey: `settle:${store.generation()}` });
 }

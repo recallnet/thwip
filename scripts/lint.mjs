@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // Minimal repo lint: every tracked JSON/JSONC manifest parses, and no
 // source file imports node builtins inside the Worker bundle.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs";
+import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
 import { validateWorkflow } from "./workflow-lint.mjs";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 let failures = 0;
 
@@ -77,6 +83,73 @@ for (const f of workerSources) {
       console.error(`lint: ${path} is not what the template renders; run node scripts/generate-workflows.mjs`);
       failures++;
     }
+  }
+}
+
+// Exported values the shipping code never imports.
+//
+// This is the largest bug family this repository has produced, and the only one a
+// reviewer cannot see: the function is there, it is documented, it has a passing
+// test, and the single missing thing is an import. No diff shows an import that was
+// never written.
+//
+// `signLocalRunAssignment` and `acceptIntegrationReceipt` sat here while the `fresh`
+// profile enforced nothing. `buildCheck` sat here while the ruleset it fed pinned its
+// check as required, so any repository provisioned from it would have blocked forever
+// on a check nobody publishes. Each was found by accident, months apart.
+//
+// There is no allowlist. An allowlist is where a check like this goes to die: the
+// entry costs one line, the reason is written once and never reread, and within a
+// year the list is longer than the findings it was meant to shrink. That already
+// happened here, with fifty-five entries reading "unwired". Modules nothing may
+// import are read from the files that declare them instead, in `entryPoints()`, so a
+// new bundle entry is known rather than excused.
+{
+  for (const line of renderDead(uncalledExports({ root }))) {
+    console.error(`lint: ${line} is exported and nothing that ships imports it`);
+    failures++;
+  }
+}
+
+// Fields the shipping code reads and never writes, and the branches that
+// therefore cannot run.
+//
+// One level below the check above, and invisible to it: the function is called,
+// the branch is written, and the field it inspects was never populated, so the
+// branch takes its default forever. `nonThwipChecks` is written once, in the
+// `NO_OBJECTION` default, as "passing", so a failing required check reads as
+// passing at the merge gate. `proofPolicyDigest` is null everywhere it is set,
+// so POLICY_CHANGED never fires. This family has cost production time four
+// times, and a suite that builds the object by hand passes every time.
+//
+// No allowlist here either, for the reason given above. What the check tolerates
+// is written into the rules instead: a name declared twice is dropped whole, and
+// a shape this repository describes but does not build is left alone.
+{
+  for (const line of renderUnwritten(unwrittenFields({ root }))) {
+    console.error(`lint: ${line}`);
+    failures++;
+  }
+}
+
+// Dependencies nothing imports, imports nothing declares, and files nothing reaches.
+//
+// knip is deliberately not allowed to judge exports, though it offers to. It counts a
+// test file as a consumer, so it would have called all four of the bugs above used.
+// The two checks are kept apart so that neither can excuse the other: knip owns
+// package manifests and whole files, `uncalledExports` owns what is inside them.
+//
+// An undeclared import is the interesting half. It resolves through pnpm's store on
+// the machine that wrote it and fails on a clean install somewhere else.
+{
+  const knip = spawnSync("npx", ["knip", "--reporter", "symbols"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (knip.status !== 0) {
+    console.error(knip.stdout.trim());
+    if (knip.stderr.trim().length > 0) console.error(knip.stderr.trim());
+    failures++;
   }
 }
 

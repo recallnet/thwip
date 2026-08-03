@@ -20,13 +20,19 @@
  * that cries wolf gets switched off:
  *
  *   - Entry points, read from the configuration that names them: the Worker's
- *     `main` in wrangler.jsonc, the bundler entries, the web app's script tag.
- *     Nothing in this repository imports them, and nothing should.
+ *     `main` in wrangler.jsonc, the bundler entries, the web app's script tag,
+ *     a source file a package script hands to a tool by path. Nothing in this
+ *     repository imports them, and nothing should.
  *   - Types and interfaces. A type used structurally is used without being
  *     imported, so a name-based check cannot tell. Values only.
  *   - Test files. A helper shared between two suites is real use.
- *   - Named allowances, each with a reason, each of which must still match
- *     something or the check fails on the stale entry.
+ *
+ * There are no named allowances. There were fifty-five, most reading "unwired",
+ * and four of them were this check's own defect rather than dead code. An
+ * allowlist is where a check like this goes to die: the entry costs one line,
+ * the reason is written once and never reread, and the list outgrows the
+ * findings it was meant to shrink. What is tolerated is written into the rules
+ * above instead, where it has to stay true.
  *
  * Re-exports are followed rather than counted. `export * from "./x.js"` in a
  * package index makes a name reachable under `@thwip/pkg`; it is not itself a
@@ -81,6 +87,12 @@ export function entryPoints(root) {
     const scripts = json.scripts ?? {};
     for (const command of Object.values(scripts)) {
       for (const m of String(command).matchAll(/esbuild\s+(\S+\.tsx?)/g)) add(join(dirname(pkg), m[1]));
+      // A tool handed a source file by path. `@better-auth/cli generate` reads
+      // `src/auth.cli.ts` this way to emit the auth schema: it never imports
+      // through the app's module graph, so no call site can exist and both the
+      // file and the devDependency read as dead. The package script is what
+      // names the relationship, so it is what this reads.
+      for (const m of String(command).matchAll(/--config\s+(\S+\.tsx?)/g)) add(join(dirname(pkg), m[1]));
     }
   }
 
@@ -160,16 +172,64 @@ function readModule(root, file) {
    * hundred and forty notes about a keyword, and the check would be switched off
    * inside a week. Unexporting them is a tidy-up; this is a bug detector.
    */
+  /**
+   * A name written where a property goes, which is not a use of anything.
+   *
+   * `liveGuardDigest` is a function in `evidence.ts` and also a field name in an
+   * interface twenty lines above it. Counting the field as a mention made the
+   * function look self-used, so the only implementation of the final live guard
+   * sat called by nothing but its own test and this check said nothing. The
+   * shorthand form stays a use, because `{ liveGuardDigest }` really does read
+   * the binding.
+   */
+  const isPropertyName = (node) => {
+    const parent = node.parent;
+    if (ts.isPropertyAccessExpression(parent)) return parent.name === node;
+    if (ts.isQualifiedName(parent)) return parent.right === node;
+    return (
+      (ts.isPropertySignature(parent) ||
+        ts.isPropertyAssignment(parent) ||
+        ts.isPropertyDeclaration(parent) ||
+        ts.isMethodSignature(parent) ||
+        ts.isMethodDeclaration(parent) ||
+        ts.isEnumMember(parent) ||
+        ts.isBindingElement(parent)) &&
+      parent.name === node
+    );
+  };
+
   const mentioned = new Set();
   const walk = (node) => {
     if (
       ts.isIdentifier(node) &&
       !declarationNames.has(node) &&
       !ts.isImportSpecifier(node.parent) &&
-      !ts.isExportSpecifier(node.parent)
+      !ts.isExportSpecifier(node.parent) &&
+      !isPropertyName(node)
     ) {
       mentioned.add(node.text);
     }
+
+    // `await import("./x.js")`, which is an expression rather than a statement.
+    //
+    // Reading only top-level import declarations reported the whole Dagger runner
+    // as dead: `main.ts` lazy-loads it so that repositories using the command
+    // runner never pay for the download-and-spawn module. Three live functions
+    // were sitting in the allowlist under the reason "dagger runner, unwired",
+    // where they would have hidden a genuine regression in that path.
+    //
+    // The module counts as wholly reached rather than picking names out of the
+    // destructuring pattern. A check whose failure mode is crying wolf should
+    // over-count reach, not under-count it.
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      imports.push({ specifier: node.arguments[0].text, all: true });
+    }
+
     ts.forEachChild(node, walk);
   };
 
