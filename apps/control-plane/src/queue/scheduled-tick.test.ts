@@ -209,6 +209,51 @@ async function offeredEntry(
   });
 }
 
+/**
+ * An entry whose device claimed the turn, ran it, and returned a receipt, which
+ * is where `fresh` leaves an attempt while it waits for the merge to be written.
+ */
+async function verifyingEntry(
+  db: D1Like,
+  repositoryId: string,
+  entryId: string,
+  principal: string,
+  pr: number,
+): Promise<void> {
+  await offeredEntry(db, repositoryId, entryId, principal, pr);
+  await withQueueState(db, repositoryId, REF, (store) => {
+    const commands = commandsFor(store);
+    const attemptId = buildSnapshot(store).activeAttemptId;
+    if (attemptId === null) throw new Error("no attempt holds the lane");
+    commands.claim({
+      idempotencyKey: `claim-${entryId}`,
+      attemptId,
+      executionMode: "device",
+      deviceId: "SHA256:device",
+    });
+    commands.candidatePrepared({
+      idempotencyKey: `candidate-${entryId}`,
+      attemptId,
+      baseSha: "b".repeat(40),
+      headSha: "h".repeat(40),
+      candidateSha: "c".repeat(40),
+      candidateTree: "7".repeat(40),
+      policyDigest: `sha256:${"a".repeat(64)}`,
+      runner: "local-run" as never,
+    });
+    commands.assign({
+      idempotencyKey: `assign-${entryId}`,
+      attemptId,
+      assignmentDigest: `sha256:${"1".repeat(64)}`,
+    });
+    commands.submitReceipt({
+      idempotencyKey: `receipt-${entryId}`,
+      attemptId,
+      receiptDigest: `sha256:${"2".repeat(64)}`,
+    });
+  });
+}
+
 function entryFrom(snapshot: ReturnType<typeof buildSnapshot>, entryId: string) {
   return snapshot.entries.find((e) => e.entryId === entryId);
 }
@@ -328,6 +373,36 @@ describe("driving a held lane against the active profile", () => {
       onQueueFailed: () => {},
     });
 
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+  });
+
+  /**
+   * The device has finished, and the merge write is still Actions' job.
+   *
+   * Under `fresh` the receipt route dispatches once, fires and forgets. Nothing
+   * else ever asked: this sweep skipped every device-only repository outright,
+   * so a dispatch GitHub dropped, a run that lost a race, or a refusal that
+   * later stopped being true left the attempt sitting in `RECEIPT_SUBMITTED`
+   * until its execution deadline, with the lane held and everything behind it
+   * waiting. A device-only lane past the run is this sweep's to drive.
+   */
+  it("dispatches Actions for a device-only lane whose run is already answered for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    activePolicy("1", "fresh");
+    await verifyingEntry(db, "1", "entry_a", "alice", 41);
+
+    let drives = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => void drives++,
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+    expect(entryFrom(after, "entry_a")?.state).toBe("Verifying");
     expect(drives).toBe(1);
     expect(result.driven).toBe(1);
   });
