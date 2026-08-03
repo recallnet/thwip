@@ -833,6 +833,14 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
         const attempt = state.attempts.get(entry.currentAttemptId);
         if (attempt !== undefined && attempt.outcome === null) {
           if (attempt.outcomeUnknown) fail("cannot cancel while a merge outcome is unknown");
+          // A merge write already sent to GitHub is nobody's to cancel. The
+          // queue's own merge closes the pull request, so GitHub's close arrives
+          // while the workflow is still reporting what it did — and cancelling
+          // on it terminated the attempt that had just merged, which made
+          // `/merged` refuse the report. GitHub held the commit and the chain
+          // held nothing. Only confirmation may say what a write did, which is
+          // the same rule `admit` and a re-request already keep.
+          if (phaseRank(attempt.phase) >= phaseRank("MERGE_REQUESTED")) return previous;
           terminate(state, attempt, "ADMIN_CANCELLED");
         }
       }

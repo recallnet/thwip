@@ -252,19 +252,17 @@ describe("the pull request holding the lane goes away", () => {
  * missing: the entry holding a live attempt when its pull request goes away.
  */
 describe("a pull request that leaves while holding the lane", () => {
+  /**
+   * The entry holds the lane and nothing has been sent to GitHub for it. That
+   * is the case a close has an answer for. An attempt whose merge write is
+   * already in flight is a different question, and the reducer refuses to
+   * cancel it: only confirmation may say what a write did.
+   */
   it("frees the lane instead of holding it", async () => {
     const e = env();
     const app = routes();
-    const holder = await authorize(app, e, 59, {
-      prepare: true,
-      candidate: {
-        baseSha: "b".repeat(40),
-        candidateSha: "c".repeat(40),
-        candidateTreeOid: TREE,
-        parentShas: ["b".repeat(40), "6".repeat(40)],
-      },
-    });
-    expect(holder.operationId).not.toBeNull();
+    const holder = await authorize(app, e, 59);
+    expect(holder.reason).toBe("HOLDS_TURN");
 
     const response = await app.request(
       `/v1/queue/${REPO}/entries/entry_${REPO}_59?ref=${encodeURIComponent(REF)}&reason=${encodeURIComponent("the pull request was closed")}`,
@@ -332,16 +330,8 @@ describe("the closed webhook itself, once the project or principal it looked up 
     const e = env();
     seed(raw);
     const app = routes();
-    const holder = await authorize(app, e, 59, {
-      prepare: true,
-      candidate: {
-        baseSha: "b".repeat(40),
-        candidateSha: "c".repeat(40),
-        candidateTreeOid: TREE,
-        parentShas: ["b".repeat(40), "6".repeat(40)],
-      },
-    });
-    expect(holder.operationId).not.toBeNull();
+    const holder = await authorize(app, e, 59);
+    expect(holder.reason).toBe("HOLDS_TURN");
 
     // The project row that placed this entry is gone by the time it closes —
     // disabled, reconfigured, whatever the reason. The entry it already
@@ -360,16 +350,8 @@ describe("the closed webhook itself, once the project or principal it looked up 
     const e = env();
     seed(raw);
     const app = routes();
-    const holder = await authorize(app, e, 59, {
-      prepare: true,
-      candidate: {
-        baseSha: "b".repeat(40),
-        candidateSha: "c".repeat(40),
-        candidateTreeOid: TREE,
-        parentShas: ["b".repeat(40), "6".repeat(40)],
-      },
-    });
-    expect(holder.operationId).not.toBeNull();
+    const holder = await authorize(app, e, 59);
+    expect(holder.reason).toBe("HOLDS_TURN");
 
     // The author's principal that placed this entry is gone by the time it
     // closes. The entry it already placed still exists and still needs to
@@ -405,15 +387,7 @@ describe("the closed webhook itself, once the project or principal it looked up 
       )
       .run("proj_1", org, REPO, "acme/repo");
     const app = routes();
-    await authorize(app, e, 59, {
-      prepare: true,
-      candidate: {
-        baseSha: "b".repeat(40),
-        candidateSha: "c".repeat(40),
-        candidateTreeOid: TREE,
-        parentShas: ["b".repeat(40), "6".repeat(40)],
-      },
-    });
+    await authorize(app, e, 59);
     await authorize(app, e, 61);
 
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
@@ -460,15 +434,7 @@ describe("the closed webhook itself, once the project or principal it looked up 
       )
       .run(`sha256:${"d".repeat(64)}`, "proj_1", JSON.stringify({ schemaVersion: "1", securityProfile: "fresh", version: 1 }));
     const app = routes();
-    await authorize(app, e, 59, {
-      prepare: true,
-      candidate: {
-        baseSha: "b".repeat(40),
-        candidateSha: "c".repeat(40),
-        candidateTreeOid: TREE,
-        parentShas: ["b".repeat(40), "6".repeat(40)],
-      },
-    });
+    await authorize(app, e, 59);
     await authorize(app, e, 61);
 
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
