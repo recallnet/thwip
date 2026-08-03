@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalBytes, envelopeDigest } from "./canonical.js";
 import { verifyChain, type ChainLink } from "./verify-chain.js";
+import { D, HEAD, baseAt, link, makeLink, signedOk, treeAt } from "./test/verify-chain-fixtures.js";
 
 /**
  * Walking a branch's chain and saying whether it holds.
@@ -14,82 +15,11 @@ import { verifyChain, type ChainLink } from "./verify-chain.js";
  *
  * Pure on purpose. Signature checking is injected so this runs unchanged in the
  * Worker, in the CLI, and here.
+ *
+ * `link`, `makeLink`, `baseAt` and friends live in `./test/verify-chain-fixtures.js`
+ * so `chain-self-check.test.ts` in the control plane can build the same chains
+ * without a second, drifting copy.
  */
-
-const HEAD = "2".repeat(40);
-const D = (c: string) => `sha256:${c.repeat(64)}`;
-
-/**
- * Where the base stands after `n` recorded transitions, and the tree it
- * carries. A chain built from these joins up the way a real one does: each
- * link begins at the sha the link before it ended on. Building every link
- * from one constant `before` and one constant `after` made every fixture
- * chain discontinuous, which is the exact defect the walk is meant to catch,
- * so a fixture that does it cannot be used to test for it.
- */
-const baseAt = (n: number) => `ba5e${n.toString(16).padStart(36, "0")}`;
-const treeAt = (n: number) => `47ee${n.toString(16).padStart(36, "0")}`;
-
-interface Shape {
-  readonly sequence: number;
-  readonly previous: string | null;
-  /** The base this link starts from. Defaults to where link `sequence - 1` ended. */
-  readonly before?: string;
-  /** The base this link leaves behind. */
-  readonly after?: string;
-  readonly head?: string;
-  readonly over?: Record<string, unknown>;
-}
-
-async function makeLink(shape: Shape): Promise<ChainLink> {
-  const { sequence, previous } = shape;
-  const before = shape.before ?? baseAt(sequence - 1);
-  const after = shape.after ?? baseAt(sequence);
-  const head = shape.head ?? HEAD;
-  const tree = treeAt(sequence);
-  const record = {
-    schemaVersion: "1",
-    kind: "reused-proof-merge",
-    repositoryId: "1315419165",
-    baseRef: "refs/heads/main",
-    queueEpoch: 1,
-    transitionSequence: sequence,
-    previousTransitionDigest: previous,
-    before: { baseSha: before, treeOid: treeAt(sequence - 1) },
-    after: {
-      baseSha: after,
-      treeOid: tree,
-      parentOids: [before, head],
-      parentCount: 2,
-      parentOidsDigest: D("7"),
-      parentsComplete: true,
-    },
-    observedAt: "2026-07-31T12:00:00Z",
-    reusedProof: {
-      attemptId: `att-${sequence}`,
-      mergeIntentDigest: D("1"),
-      pullRequestNumber: sequence,
-      headSha: head,
-      candidateSha: after,
-      candidateTreeOid: tree,
-      mergeMethod: "merge",
-      workReceiptDigest: D("2"),
-      policyDigest: D("6"),
-      pipelineDigest: D("8"),
-      requiredSuitesDigest: D("9"),
-      checkRunId: "778899",
-    },
-    ...shape.over,
-  };
-  const bytes = canonicalBytes(JSON.stringify(record));
-  return { digest: await envelopeDigest(bytes), bytes, jws: "signature" };
-}
-
-async function link(sequence: number, previous: string | null, over: Record<string, unknown> = {}): Promise<ChainLink> {
-  return makeLink({ sequence, previous, over });
-}
-
-const signedOk = { verifySignature: async () => true, epochStartsAt: 1 };
 
 describe("verifying a chain", () => {
   it("accepts a chain whose links join up", async () => {
