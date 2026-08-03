@@ -1,5 +1,6 @@
-/* Shell matches .nt-page (1060px). Text column matches .nt-body (820px).
-   Heroes stay full shell width. */
+/* Shell matches .nt-page (1060px). The whole article — title, hero, body —
+   shares one content column at .nt-body width (820px) so left and right
+   edges line up. */
 
 .eb {
   min-height: 100vh;
@@ -189,10 +190,14 @@
   padding: 2px 8px;
 }
 
-/* Same column as .nt-body: 820px. Hero is full shell (1060). */
+/* One content column: header, hero, and prose share the same edges. */
+.eb-article {
+  max-width: 820px;
+  width: 100%;
+}
+
 .eb-article__header {
   margin-bottom: var(--s5);
-  max-width: 820px;
 }
 
 .eb-meta {
@@ -226,6 +231,7 @@
   border: 1px solid var(--rule);
   background: #0f1419;
   overflow: hidden;
+  width: 100%;
 }
 
 .eb-hero img,
@@ -250,12 +256,9 @@
   border-top: 1px solid var(--hair);
   font-size: 0.875rem;
   color: var(--ghost);
-  max-width: 820px;
 }
 
-/* One text column at 820px — do not re-narrow children with rem caps. */
 .eb-prose {
-  max-width: 820px;
   font-size: 17px;
   line-height: 1.55;
 }
@@ -264,10 +267,8 @@
   margin-top: 0;
 }
 
-/* Product shots can break out of the text column to the shell edge. */
 .eb-prose > figure.eb-shot {
-  max-width: none;
-  width: min(1060px - 64px, 100vw - 64px);
+  width: 100%;
   margin-left: 0;
   margin-right: 0;
 }
