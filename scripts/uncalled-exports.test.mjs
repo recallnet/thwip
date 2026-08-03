@@ -175,4 +175,16 @@ describe("entry points", () => {
   it("counts a source file a package script hands to a tool by path", () => {
     expect(entryPoints(root)).toContain("apps/control-plane/src/auth.cli.ts");
   });
+
+  /**
+   * Astro loads content collections and pages by path. GET / getStaticPaths /
+   * collections exports are the route and content entry surface, not dead code.
+   */
+  it("counts Astro content config and page modules as entries", () => {
+    const entries = entryPoints(root);
+    expect(entries).toContain("apps/blog/src/content.config.ts");
+    expect(entries).toContain("apps/blog/src/pages/rss.xml.ts");
+    expect(entries).toContain("apps/blog/src/pages/blog/[...slug].md.ts");
+  });
 });
+

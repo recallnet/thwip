@@ -23,6 +23,16 @@
       ],
       "project": ["src/**/*.ts", "web/src/**/*.{ts,tsx}"]
     },
+    "apps/blog": {
+      "entry": [
+        "astro.config.mjs",
+        "markdoc.config.mjs",
+        "src/content.config.ts",
+        "src/pages/**/*.{ts,astro}",
+        "scripts/*.mjs"
+      ],
+      "project": ["src/**/*.{ts,astro,css}", "*.mjs", "scripts/**/*.mjs"]
+    },
     "packages/*": {
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.{ts,tsx}"]
