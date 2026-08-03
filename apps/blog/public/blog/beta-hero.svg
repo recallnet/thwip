@@ -1,20 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Local CI to signed proof to GitHub verify">
-  <rect width="1200" height="630" fill="#ffffff"/>
-  <rect x="0" y="0" width="1200" height="8" fill="#005ea2"/>
-  <text x="80" y="100" font-family="ui-sans-serif, system-ui, sans-serif" font-size="36" font-weight="600" fill="#1b1b1b">thwip beta</text>
-  <text x="80" y="150" font-family="ui-sans-serif, system-ui, sans-serif" font-size="22" fill="#565c65">local run → signed proof → GitHub verify</text>
-  <rect x="80" y="220" width="280" height="160" fill="#eceef0" stroke="#dfe1e2"/>
-  <text x="100" y="280" font-family="ui-monospace, monospace" font-size="18" fill="#1b1b1b">1. thwip run</text>
-  <text x="100" y="320" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#565c65">checks on your machine</text>
-  <path d="M380 300 H440" stroke="#005ea2" stroke-width="3"/>
-  <polygon points="440,292 460,300 440,308" fill="#005ea2"/>
-  <rect x="480" y="220" width="280" height="160" fill="#eceef0" stroke="#dfe1e2"/>
-  <text x="500" y="280" font-family="ui-monospace, monospace" font-size="18" fill="#1b1b1b">2. thwip-Proof</text>
-  <text x="500" y="320" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#565c65">signed tree claim</text>
-  <path d="M780 300 H840" stroke="#005ea2" stroke-width="3"/>
-  <polygon points="840,292 860,300 840,308" fill="#005ea2"/>
-  <rect x="880" y="220" width="240" height="160" fill="#eceef0" stroke="#dfe1e2"/>
-  <text x="900" y="280" font-family="ui-monospace, monospace" font-size="18" fill="#1b1b1b">3. App check</text>
-  <text x="900" y="320" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#565c65">merge on evidence</text>
-  <text x="80" y="560" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#71767a">thwip.recall.net · commit-carried CI evidence</text>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1419"/>
+      <stop offset="100%" stop-color="#1b1b1b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="0" y="0" width="8" height="630" fill="#005ea2"/>
+  <text x="72" y="88" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="#7eb6e8" letter-spacing="0.12em">THWIP BETA</text>
+  <text x="72" y="150" font-family="ui-sans-serif, system-ui, sans-serif" font-size="44" font-weight="700" fill="#ffffff">Local run. Signed proof.</text>
+  <text x="72" y="206" font-family="ui-sans-serif, system-ui, sans-serif" font-size="44" font-weight="700" fill="#ffffff">GitHub verifies.</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <rect x="72" y="280" width="300" height="200" fill="#1e252d" stroke="#3d4654" stroke-width="2"/>
+    <text x="96" y="330" font-size="15" fill="#7eb6e8">01</text>
+    <text x="96" y="370" font-size="22" font-weight="600" fill="#ffffff">thwip run</text>
+    <text x="96" y="410" font-size="16" fill="#a8b0ba">checks on your machine</text>
+    <path d="M392 380 H448" stroke="#005ea2" stroke-width="4"/>
+    <polygon points="448,370 468,380 448,390" fill="#005ea2"/>
+    <rect x="488" y="280" width="300" height="200" fill="#1e252d" stroke="#3d4654" stroke-width="2"/>
+    <text x="512" y="330" font-size="15" fill="#7eb6e8">02</text>
+    <text x="512" y="370" font-size="22" font-weight="600" fill="#ffffff">thwip-Proof</text>
+    <text x="512" y="410" font-size="16" fill="#a8b0ba">signed tree claim</text>
+    <path d="M808 380 H864" stroke="#005ea2" stroke-width="4"/>
+    <polygon points="864,370 884,380 864,390" fill="#005ea2"/>
+    <rect x="904" y="280" width="224" height="200" fill="#1e252d" stroke="#00a91c" stroke-width="2"/>
+    <text x="928" y="330" font-size="15" fill="#5dca6a">03</text>
+    <text x="928" y="370" font-size="22" font-weight="600" fill="#ffffff">App check</text>
+    <text x="928" y="410" font-size="16" fill="#a8b0ba">merge on evidence</text>
+  </g>
+  <text x="72" y="560" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#71767a">thwip.recall.net · commit-carried CI evidence</text>
 </svg>

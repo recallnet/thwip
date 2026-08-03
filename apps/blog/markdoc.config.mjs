@@ -39,12 +39,17 @@ export default defineMarkdocConfig({
       },
       selfClosing: true,
     },
+    "cta-row": {
+      render: component("./src/components/CtaRow.astro"),
+    },
     "product-shot": {
       render: component("./src/components/ProductShot.astro"),
       attributes: {
         src: { type: String, required: true },
         alt: { type: String, required: true },
         caption: { type: String, required: false },
+        width: { type: Number, required: false },
+        height: { type: Number, required: false },
       },
       selfClosing: true,
     },

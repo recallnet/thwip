@@ -17,7 +17,7 @@ export function SiteBar({ me, signIn }: { me: Viewer | null | undefined; signIn:
         thwip
       </a>
       <nav aria-label="Site">
-        <a href="/blog">Blog</a>
+        <a href="/blog/">Blog</a>
         <a href="/faq">FAQ</a>
         <a href="/install">Install</a>
         {me ? (
@@ -42,7 +42,7 @@ export function SiteFoot() {
   return (
     <footer className="nt-foot">
       <span>
-        <a href="/blog">Blog</a>
+        <a href="/blog/">Blog</a>
         <a href="/faq">FAQ</a>
         <a href="/install">Install</a>
         <a href="/rss.xml">RSS</a>
