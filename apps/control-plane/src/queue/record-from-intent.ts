@@ -65,10 +65,10 @@ export type RecordFromIntentResult =
 /**
  * The subset of the route's dependencies this path uses.
  *
- * `signRecordBytes` and `storeEvidence` are not GitHub reads like `commitFacts`
- * and `baseContainsSha`, but they still cross a boundary the route's caller
- * gets to choose (the signing key, the evidence bucket), so they come in the
- * same way.
+ * `signRecordBytes` and `storeEvidence` are injected for the same reason
+ * `commitFacts` and `baseContainsSha` are. Each reaches something the caller
+ * chooses, whether that is the signing key, the evidence bucket, or GitHub, and
+ * a test that has to reach any of them for real is a test nobody runs.
  */
 export interface RecordFromIntentDeps<TEnv extends QueueRouteEnv> {
   commitFacts(
