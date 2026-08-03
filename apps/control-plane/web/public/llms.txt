@@ -56,8 +56,9 @@ Node 22 or newer.
 
 ## Blog
 
-- [Beta is open](https://thwip.recall.net/blog/beta.md): public beta
-  announcement — what ships, what a proof establishes, how to start
+- [Verifiable agent coding](https://thwip.recall.net/blog/beta.md): research
+  note on edge-signed commit-carried CI evidence, trust bounds, and open
+  invitations
 - HTML: https://thwip.recall.net/blog/beta/
 
 ## Facts
