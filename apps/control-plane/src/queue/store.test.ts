@@ -488,6 +488,77 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
       expect(store.beginMergeOperation(op)).toEqual({ status: "already-started", outcome: "MERGED" });
       expect(store.mergeOperation("nope")).toBeNull();
     });
+
+    /**
+     * An operation nobody resolved is the failure this whole guard exists around,
+     * and until now nothing could find one.
+     *
+     * Four merges landed on this repository that way. The workflow authorized,
+     * GitHub answered 405 while it was still working out mergeability, the
+     * workflow exited saying it was leaving the outcome to reconciliation, and
+     * the merge landed anyway. The attempt was terminated and compacted, so the
+     * only thing that ever swept these rows was gone, and the operations sit
+     * unresolved with the chain missing four links.
+     *
+     * So the operation carries the obligation, not the attempt. Finding one is
+     * the first thing the sweep needs and the reason these tests exist.
+     */
+    describe("operations nobody resolved", () => {
+      it("finds a write that was started and never resolved", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([
+          {
+            operationId: "op-1",
+            attemptId: "a1",
+            attemptRevision: 3,
+            expectedBaseSha: "b".repeat(40),
+            expectedHeadSha: "h".repeat(40),
+            expectedTreeOid: "t".repeat(40),
+            writeStartedAt: "2026-07-29T12:20:00Z",
+          },
+        ]);
+      });
+
+      it("leaves a resolved write alone", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([]);
+      });
+
+      /**
+       * A write sent a moment ago is in flight, not orphaned. Sweeping it would
+       * race the workflow that is about to report the same operation.
+       */
+      it("leaves a write that is still young enough to report for itself", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        // The argument is the cutoff: anything started at or after it is still in
+        // flight. This write began a second later than the cutoff allows for.
+        expect(store.unresolvedMergeOperations("2026-07-29T12:19:59Z")).toEqual([]);
+      });
+
+      it("finds one whose attempt no longer exists, because that is the case that stranded four merges", () => {
+        const sql = backing();
+        const store = open(sql, IDENTITY);
+        store.beginMergeOperation(op);
+        // Nothing here ever created the attempt, which is the state the queue was
+        // in by the time anybody looked: `state.attempts` held none of the four.
+        const reopened = open(sql, IDENTITY);
+        expect(reopened.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toHaveLength(1);
+      });
+
+      it("returns the oldest first, so a sweep clears the longest-stranded merge first", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation({ ...op, operationId: "op-2", at: "2026-07-29T12:22:00Z" });
+        store.beginMergeOperation(op);
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z").map((o) => o.operationId)).toEqual([
+          "op-1",
+          "op-2",
+        ]);
+      });
+    });
   });
 
   it("keeps the attempt DAG edges it is told about", () => {

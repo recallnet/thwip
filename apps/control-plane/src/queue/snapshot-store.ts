@@ -21,6 +21,7 @@ import type {
   PendingOutbox,
   SubmittedEvent,
   TransitionRow,
+  UnresolvedMergeOperation,
 } from "./store.js";
 
 /**
@@ -465,6 +466,31 @@ export class SnapshotQueueStore {
     row.outcome = outcome;
     row.resolvedAt = at;
     this.flush();
+  }
+
+  /**
+   * Writes that were started and that nobody ever resolved, oldest first. See
+   * the note on `BranchQueueStore.unresolvedMergeOperations`: the obligation to
+   * settle a write belongs to the write, because the attempt that used to carry
+   * it does not survive the failure that needs settling.
+   */
+  unresolvedMergeOperations(startedBefore: string): UnresolvedMergeOperation[] {
+    return this.doc.mergeOperations
+      .filter((row) => row.outcome === null && row.writeStartedAt < startedBefore)
+      .sort((a, b) =>
+        a.writeStartedAt === b.writeStartedAt
+          ? a.operationId.localeCompare(b.operationId)
+          : a.writeStartedAt.localeCompare(b.writeStartedAt),
+      )
+      .map((row) => ({
+        operationId: row.operationId,
+        attemptId: row.attemptId,
+        attemptRevision: row.attemptRevision,
+        expectedBaseSha: row.expectedBaseSha,
+        expectedHeadSha: row.expectedHeadSha,
+        expectedTreeOid: row.expectedTreeOid,
+        writeStartedAt: row.writeStartedAt,
+      }));
   }
 
   mergeOperation(
