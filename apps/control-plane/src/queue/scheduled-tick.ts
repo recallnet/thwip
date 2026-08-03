@@ -1,4 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
+import { CompactSign } from "jose";
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
@@ -7,8 +8,39 @@ import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
 import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
 import type { D1Like } from "./projection.js";
-import type { QueueRouteEnv } from "./routes.js";
+import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
+import { serviceKey } from "../service-signing.js";
+import type { Env } from "../env.js";
+import { ORPHANED_WRITE_GRACE_MS, settleOrphanedWrite } from "./orphaned-writes.js";
+import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
+
+/**
+ * The real dependencies `recordMergeFromIntent` needs, built once from the same
+ * factory `/repair` uses (`recordFromIntentDepsFor` in routes.ts) rather than a
+ * second hand-rolled copy. Reads come from `GITHUB_READS`, the same GitHub
+ * conversation `settleReconciliation` already has above; signing reuses the
+ * queue's own service key; evidence and the queue transaction reuse
+ * `storeEvidence` and `runOnQueue`, the same ones every mutating route goes
+ * through.
+ */
+const RECORD_FROM_INTENT_DEPS: RecordFromIntentDeps<QueueRouteEnv> = recordFromIntentDepsFor(
+  {
+    async commitFacts(env, repositoryId, sha) {
+      const facts = await GITHUB_READS.commitFacts(env, repositoryId, sha);
+      return facts === null ? null : { treeOid: facts.treeOid, parentShas: [...facts.parentShas] };
+    },
+    baseContainsSha: GITHUB_READS.baseContainsSha,
+    async activePolicy(env, repositoryId) {
+      return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
+    },
+    async signRecordBytes(env, bytes, typ) {
+      const { key, kid } = await serviceKey(env as unknown as Env);
+      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
+    },
+  },
+  runOnQueue,
+);
 
 /**
  * Move every queue's clock forward on a timer.
@@ -49,7 +81,13 @@ export async function tickAllQueues(
    * only recovers once somebody remembers to pass a port stays wedged.
    */
   reads: ReconciliationReads = GITHUB_READS,
-): Promise<{ ticked: number; driven: number; failed: number; reconciled: number }> {
+  /**
+   * How the sweep settles a write the workflow walked away from. Defaulted for
+   * the same reason `reads` is: nothing about recovering an orphaned write
+   * should depend on somebody remembering to wire it up.
+   */
+  recordDeps: RecordFromIntentDeps<QueueRouteEnv> = RECORD_FROM_INTENT_DEPS,
+): Promise<{ ticked: number; driven: number; failed: number; reconciled: number; settledWrites: number }> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
     .prepare("SELECT github_repository_id AS repositoryId, base_ref AS baseRef FROM queue_projects WHERE enabled = 1")
@@ -71,6 +109,7 @@ export async function tickAllQueues(
   let driven = 0;
   let failed = 0;
   let reconciled = 0;
+  let settledWrites = 0;
   for (const row of rows.results) {
     try {
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
@@ -161,6 +200,39 @@ export async function tickAllQueues(
         );
       }
 
+      // A write the workflow walked away from is nobody's job until it is this
+      // one's. `settleReconciliation` above needs a surviving attempt; these
+      // rows outlive every attempt, which is why four merges sat unrecorded.
+      const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
+      const orphaned = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+        store.unresolvedMergeOperations(cutoff),
+      );
+      for (const write of orphaned) {
+        const outcome = await settleOrphanedWrite(write, {
+          readMergeState: () => reads.pullRequestMergeState(env, row.repositoryId, write.pullRequestNumber),
+          baseContainsHead: () => reads.baseContainsSha(env, row.repositoryId, row.baseRef, write.expectedHeadSha),
+          recordMerge: (mergeSha) =>
+            recordMergeFromIntent(env, recordDeps, {
+              repositoryId: row.repositoryId,
+              baseRef: row.baseRef,
+              mergeSha,
+              witnessPrincipalId: "queue",
+              attemptId: write.attemptId,
+            }),
+          resolve: (operationId, resolvedAs) =>
+            withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+              store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
+            ),
+        });
+        settledWrites += 1;
+        // Said out loud on the channel this account watches. Something repairing
+        // the chain silently is worse than the gap it closes.
+        console.log(
+          `[queue heartbeat] settled orphaned merge write ${write.operationId} for repository ` +
+            `${row.repositoryId}: ${outcome.settled}`,
+        );
+      }
+
       // Only a held lane needs driving. Dispatching for an idle queue would
       // spend a CI run to be told there is nothing to do — and under `fresh`
       // or `audited` there is no Actions fallback for the run, so a lane still
@@ -193,5 +265,5 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed, reconciled };
+  return { ticked, driven, failed, reconciled, settledWrites };
 }

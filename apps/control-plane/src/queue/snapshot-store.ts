@@ -105,6 +105,7 @@ interface MergeOperationRow {
   expectedBaseSha: string;
   expectedHeadSha: string;
   expectedTreeOid: string;
+  pullRequestNumber: number;
   writeStartedAt: string;
   outcome: string | null;
   resolvedAt: string | null;
@@ -441,6 +442,7 @@ export class SnapshotQueueStore {
     expectedBaseSha: string;
     expectedHeadSha: string;
     expectedTreeOid: string;
+    pullRequestNumber: number;
     at: string;
   }): { status: "started" } | { status: "already-started"; outcome: string | null } {
     const existing = this.doc.mergeOperations.find((row) => row.operationId === op.operationId);
@@ -452,6 +454,7 @@ export class SnapshotQueueStore {
       expectedBaseSha: op.expectedBaseSha,
       expectedHeadSha: op.expectedHeadSha,
       expectedTreeOid: op.expectedTreeOid,
+      pullRequestNumber: op.pullRequestNumber,
       writeStartedAt: op.at,
       outcome: null,
       resolvedAt: null,
@@ -460,7 +463,8 @@ export class SnapshotQueueStore {
     return { status: "started" };
   }
 
-  resolveMergeOperation(operationId: string, outcome: string, at: string): void {
+  /** Async for the same reason as `BranchQueueStore.resolveMergeOperation`. */
+  async resolveMergeOperation(operationId: string, outcome: string, at: string): Promise<void> {
     const row = this.doc.mergeOperations.find((o) => o.operationId === operationId);
     if (row === undefined) return;
     row.outcome = outcome;
@@ -489,6 +493,7 @@ export class SnapshotQueueStore {
         expectedBaseSha: row.expectedBaseSha,
         expectedHeadSha: row.expectedHeadSha,
         expectedTreeOid: row.expectedTreeOid,
+        pullRequestNumber: row.pullRequestNumber,
         writeStartedAt: row.writeStartedAt,
       }));
   }

@@ -210,6 +210,10 @@ export const SCHEMA: readonly string[] = [
  */
 const SCHEMA_PATCHES: readonly string[] = [
   `ALTER TABLE transitions ADD COLUMN recorded_at TEXT`,
+  // A sweep settling an orphaned write needs the pull request to read GitHub
+  // about, and the surviving attempt it used to borrow that number from does
+  // not survive the failure the sweep exists for.
+  `ALTER TABLE merge_operations ADD COLUMN pull_request_number INTEGER`,
 ];
 
 export function initSchema(sql: SqlLike): void {

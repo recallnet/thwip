@@ -108,6 +108,35 @@ import {
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 
 /**
+ * The dependencies `recordMergeFromIntent` needs, assembled from the pieces
+ * every caller already has: the four reads a route's `deps` carries, the
+ * evidence writer above, and however that caller runs a queue command.
+ *
+ * One place builds this shape rather than two so `/repair` and the tick's
+ * orphaned-write sweep stay wired to the same signing key, the same evidence
+ * bucket, and the same reads, and a change to any of them only has one call
+ * site to update.
+ */
+export function recordFromIntentDepsFor<TEnv extends QueueRouteEnv>(
+  reads: {
+    commitFacts: RecordFromIntentDeps<TEnv>["commitFacts"];
+    baseContainsSha: RecordFromIntentDeps<TEnv>["baseContainsSha"];
+    activePolicy: RecordFromIntentDeps<TEnv>["activePolicy"];
+    signRecordBytes: RecordFromIntentDeps<TEnv>["signRecordBytes"];
+  },
+  onQueue: RecordFromIntentDeps<TEnv>["onQueue"],
+): RecordFromIntentDeps<TEnv> {
+  return {
+    commitFacts: reads.commitFacts,
+    baseContainsSha: reads.baseContainsSha,
+    activePolicy: reads.activePolicy,
+    signRecordBytes: reads.signRecordBytes,
+    storeEvidence,
+    onQueue,
+  };
+}
+
+/**
  * The queue's HTTP surface (plan.md §37.1).
  *
  * Every route resolves the Durable Object for one repository and base ref and
@@ -255,7 +284,7 @@ export function projectionMessageFrom(
  * verifier already produced: the queue's decision is authoritative from the
  * object, and the bucket exists so a reader can audit it afterwards.
  */
-async function storeEvidence(
+export async function storeEvidence(
   env: QueueRouteEnv,
   input: Parameters<typeof putEvidence>[1],
 ): Promise<string> {
@@ -3469,14 +3498,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const mergeSha = body.mergeSha;
     const reason = body.reason.trim();
 
-    const recordFromIntentDeps: RecordFromIntentDeps<TEnv> = {
-      commitFacts: deps.commitFacts,
-      baseContainsSha: deps.baseContainsSha,
-      activePolicy: deps.activePolicy,
-      signRecordBytes: deps.signRecordBytes,
-      storeEvidence,
-      onQueue,
-    };
+    const recordFromIntentDeps = recordFromIntentDepsFor<TEnv>(deps, onQueue);
     const outcome = await recordMergeFromIntent(c.env, recordFromIntentDeps, {
       repositoryId,
       baseRef,

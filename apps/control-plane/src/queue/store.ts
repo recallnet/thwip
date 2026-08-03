@@ -176,6 +176,12 @@ export interface UnresolvedMergeOperation {
   readonly expectedHeadSha: string;
   readonly expectedTreeOid: string;
   readonly writeStartedAt: string;
+  /**
+   * The pull request this write was sent for. The attempt used to be where a
+   * sweep looked this up, and the attempt is exactly what does not survive the
+   * failure an orphaned write needs settling from.
+   */
+  readonly pullRequestNumber: number;
 }
 
 export class BranchQueueStore {
@@ -716,6 +722,7 @@ export class BranchQueueStore {
     expectedBaseSha: string;
     expectedHeadSha: string;
     expectedTreeOid: string;
+    pullRequestNumber: number;
     at: string;
   }): { status: "started" } | { status: "already-started"; outcome: string | null } {
     const existing = this.sql
@@ -728,20 +735,26 @@ export class BranchQueueStore {
     this.sql.exec(
       `INSERT INTO merge_operations (
          operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
-         expected_tree_oid, write_started_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         expected_tree_oid, pull_request_number, write_started_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       op.operationId,
       op.attemptId,
       op.attemptRevision,
       op.expectedBaseSha,
       op.expectedHeadSha,
       op.expectedTreeOid,
+      op.pullRequestNumber,
       op.at,
     );
     return { status: "started" };
   }
 
-  resolveMergeOperation(operationId: string, outcome: string, at: string): void {
+  /**
+   * Async because the caller may be settling a write nobody else will settle: a
+   * fire-and-forget write here, cut off by the Worker exiting, is the same
+   * class of loss as the merge write this whole path exists to recover.
+   */
+  async resolveMergeOperation(operationId: string, outcome: string, at: string): Promise<void> {
     this.sql.exec(
       "UPDATE merge_operations SET outcome = ?, resolved_at = ? WHERE operation_id = ?",
       outcome,
@@ -773,10 +786,11 @@ export class BranchQueueStore {
         expected_base_sha: string;
         expected_head_sha: string;
         expected_tree_oid: string;
+        pull_request_number: number;
         write_started_at: string;
       }>(
         `SELECT operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
-                expected_tree_oid, write_started_at
+                expected_tree_oid, pull_request_number, write_started_at
            FROM merge_operations
           WHERE outcome IS NULL AND write_started_at < ?
           ORDER BY write_started_at, operation_id`,
@@ -790,6 +804,7 @@ export class BranchQueueStore {
         expectedBaseSha: row.expected_base_sha,
         expectedHeadSha: row.expected_head_sha,
         expectedTreeOid: row.expected_tree_oid,
+        pullRequestNumber: row.pull_request_number,
         writeStartedAt: row.write_started_at,
       }));
   }

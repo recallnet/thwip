@@ -1,12 +1,16 @@
 // apps/control-plane/src/queue/scheduled-tick.test.ts
 import { afterEach, describe, expect, it } from "vitest";
+import type { Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
 import { tickAllQueues } from "./scheduled-tick.js";
-import type { QueueRouteEnv } from "./routes.js";
+import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { recordHeartbeat } from "./runners.js";
+import { signReusedIntent } from "./attestation.js";
+import type { RecordFromIntentDeps } from "./record-from-intent.js";
+import type { ReconciliationReads } from "./deadlines.js";
 
 /**
  * The queue moves when something calls it, and nothing called it on a timer.
@@ -623,5 +627,131 @@ describe("the tick offers a turn, not just advances the clock", () => {
     // this must still write no row — this runs every five minutes across every
     // enabled queue on an account that deliberately stays inside a free tier.
     expect(row()).toBeUndefined();
+  });
+});
+
+describe("settling a write the workflow walked away from", () => {
+  /**
+   * The shape of the four merges that landed on 2 August 2026 with no chain
+   * link: a signed merge intent survives, the attempt that authorized it does
+   * not, and nothing but the `merge_operations` row says a write was ever sent.
+   */
+  const ORPHAN = {
+    attemptId: "att_orphan",
+    pullRequestNumber: 115,
+    baseSha: "a1".repeat(20),
+    headSha: "b2".repeat(20),
+    mergeSha: "c3".repeat(20),
+    treeOid: "d4".repeat(20),
+    beforeTree: "e5".repeat(20),
+  };
+
+  const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
+    [ORPHAN.baseSha]: { treeOid: ORPHAN.beforeTree, parentShas: ["5c".repeat(20)] },
+    [ORPHAN.mergeSha]: { treeOid: ORPHAN.treeOid, parentShas: [ORPHAN.baseSha, ORPHAN.headSha] },
+  };
+
+  /** Write the merge intent exactly as the authorize route writes it. */
+  async function seedIntent(): Promise<void> {
+    const signed = await signReusedIntent({
+      operationId: `merge_${ORPHAN.attemptId}`,
+      attemptId: ORPHAN.attemptId,
+      git: {
+        objectFormat: "sha1",
+        repositoryId: "1",
+        baseRef: REF,
+        baseSha: ORPHAN.baseSha,
+        headRepositoryId: "1",
+        headSha: ORPHAN.headSha,
+        candidateSha: ORPHAN.mergeSha,
+        candidateTreeOid: ORPHAN.treeOid,
+        candidateParentOids: [ORPHAN.baseSha, ORPHAN.headSha],
+      },
+      position: { queueEpoch: 0, turnSequence: 1, transitionSequence: 1, previousTransitionDigest: null },
+      pullRequestNumber: ORPHAN.pullRequestNumber,
+      evidence: {
+        workReceiptDigest: `sha256:${"1".repeat(64)}` as Sha256,
+        organizationId: "org_acme",
+        policyDigest: `sha256:${"2".repeat(64)}` as Sha256,
+        pipelineDigest: `sha256:${"3".repeat(64)}` as Sha256,
+        requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
+        proofCheckRunId: "91289436271",
+      },
+      mergeMethod: "merge",
+      createdAt: "2026-08-02T07:50:00.000Z",
+      signer: { sign: async () => "jws-intent" },
+    });
+    if ("error" in signed) throw new Error(signed.error);
+    raw
+      .prepare(
+        `INSERT INTO queue_attestations
+           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+         VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        signed.digest,
+        "1",
+        REF,
+        ORPHAN.attemptId,
+        new TextDecoder().decode(signed.bytes),
+        signed.jws,
+        "2026-08-02T07:50:00.000Z",
+      );
+  }
+
+  it("settles a merge write left unresolved by a workflow that exited", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+
+    // The write started twenty minutes ago and nothing ever resolved it. No
+    // attempt was ever created here, the same state the queue was in when it
+    // stranded four merges: `state.attempts` held none of them.
+    await withQueueState(db, "1", REF, async (store) =>
+      store.beginMergeOperation({
+        operationId: `merge_${ORPHAN.attemptId}`,
+        attemptId: ORPHAN.attemptId,
+        attemptRevision: 1,
+        expectedBaseSha: ORPHAN.baseSha,
+        expectedHeadSha: ORPHAN.headSha,
+        expectedTreeOid: ORPHAN.treeOid,
+        pullRequestNumber: ORPHAN.pullRequestNumber,
+        at: "2026-08-02T07:55:00.000Z",
+      }),
+    );
+
+    const recordDeps: RecordFromIntentDeps<QueueRouteEnv> = {
+      commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
+      baseContainsSha: async () => true,
+      activePolicy: async () => ({
+        policyDigest: `sha256:${"2".repeat(64)}`,
+        pipelineDigest: `sha256:${"3".repeat(64)}`,
+        requiredSuites: ["unit"],
+        organizationId: "org_acme",
+      }),
+      signRecordBytes: async () => "jws-record",
+      storeEvidence: async () => "no-bucket",
+      onQueue: runOnQueue,
+    };
+
+    const readsThatSayMerged: ReconciliationReads = {
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: ORPHAN.mergeSha }),
+      baseContainsSha: async () => true,
+      commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
+    };
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged,
+      recordDeps,
+    );
+
+    expect(result.settledWrites).toBe(1);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toEqual([]);
   });
 });
