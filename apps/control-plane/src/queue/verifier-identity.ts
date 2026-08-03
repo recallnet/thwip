@@ -141,37 +141,3 @@ export function verifyVerifierIdentity(claims: OidcVerifierClaims, pinned: Pinne
 
   return { ok: true, runId, runAttempt: Number(runAttempt), jti, workflowSha };
 }
-
-/**
- * One verdict per attempt and nonce (plan.md §23.1). The jti gives a second,
- * independent replay guard: the same token can never be presented twice, even
- * for the same attempt.
- */
-export interface CallbackLedger {
-  seen(jti: string): boolean;
-  remember(jti: string, attemptId: string): void;
-}
-
-export type CallbackAcceptance =
-  | { readonly accepted: true }
-  | { readonly accepted: false; readonly reason: string; readonly code: "REPLAYED_TOKEN" | "NONCE_MISMATCH" | "STALE_ATTEMPT" };
-
-export function acceptCallback(input: {
-  readonly ledger: CallbackLedger;
-  readonly jti: string;
-  readonly attemptId: string;
-  readonly nonce: string;
-  readonly expected: { readonly attemptId: string; readonly nonce: string } | null;
-}): CallbackAcceptance {
-  if (input.ledger.seen(input.jti)) {
-    return { accepted: false, reason: "this OIDC token was already used", code: "REPLAYED_TOKEN" };
-  }
-  if (input.expected === null || input.expected.attemptId !== input.attemptId) {
-    return { accepted: false, reason: "no live attempt is awaiting this result", code: "STALE_ATTEMPT" };
-  }
-  if (input.expected.nonce !== input.nonce) {
-    return { accepted: false, reason: "nonce does not match the issued verification", code: "NONCE_MISMATCH" };
-  }
-  input.ledger.remember(input.jti, input.attemptId);
-  return { accepted: true };
-}

@@ -34,28 +34,25 @@ export async function queueKey(decimalRepositoryId: string, exactBaseRef: string
 /** Comparators run in order; the first non-zero decides. */
 type Key = (entry: EligibleEntry) => bigint;
 
-function minimumBy(entries: readonly EligibleEntry[], keys: readonly Key[]): EligibleEntry | null {
-  let best: EligibleEntry | null = null;
-  let bestKeys: bigint[] = [];
-  for (const entry of entries) {
-    const candidate = keys.map((k) => k(entry));
-    if (best === null) {
-      best = entry;
-      bestKeys = candidate;
-      continue;
+function roundKeys(lastServedTurn: ReadonlyMap<string, bigint>): readonly Key[] {
+  return [
+    (entry) => lastServedTurn.get(entry.sponsorPrincipalId) ?? 0n,
+    (entry) => entry.fairnessOrdinal,
+    (entry) => entry.sponsorGithubUserId,
+    (entry) => BigInt(entry.pullRequestNumber),
+    (entry) => lexicalKey(entry.entryId),
+  ];
+}
+
+function compareBy(keys: readonly Key[]): (a: EligibleEntry, b: EligibleEntry) => number {
+  return (a, b) => {
+    for (const key of keys) {
+      const left = key(a);
+      const right = key(b);
+      if (left !== right) return left < right ? -1 : 1;
     }
-    for (let i = 0; i < candidate.length; i += 1) {
-      const a = candidate[i]!;
-      const b = bestKeys[i]!;
-      if (a === b) continue;
-      if (a < b) {
-        best = entry;
-        bestKeys = candidate;
-      }
-      break;
-    }
-  }
-  return best;
+    return 0;
+  };
 }
 
 /**
@@ -86,20 +83,39 @@ function lexicalKey(value: string): bigint {
   return acc;
 }
 
+/**
+ * One round of the scheduler, with the working it did.
+ *
+ * `heads` is what competed: each principal's oldest entry that was not still
+ * serving a cooldown, in the order the round ranked them, so `selected` is
+ * always `heads[0]`. The queue decision record (plan.md §21.2) is built from
+ * this, which is what keeps the explanation and the choice the same event. A
+ * record assembled by a second pass over the same entries would be a second
+ * scheduler, and two schedulers agreeing today is not a property anybody can
+ * check tomorrow.
+ */
+export interface SchedulerRound {
+  readonly selected: EligibleEntry;
+  readonly heads: readonly EligibleEntry[];
+}
+
+export function runRound(
+  eligibleEntries: readonly EligibleEntry[],
+  lastServedTurn: ReadonlyMap<string, bigint>,
+  now: string,
+): SchedulerRound | null {
+  const eligible = eligibleEntries.filter(
+    (entry) => entry.cooldownUntil === null || entry.cooldownUntil <= now,
+  );
+  const heads = oldestEligibleEntryByPrincipal(eligible).sort(compareBy(roundKeys(lastServedTurn)));
+  const selected = heads[0];
+  return selected === undefined ? null : { selected, heads };
+}
+
 export function selectNext(
   eligibleEntries: readonly EligibleEntry[],
   lastServedTurn: ReadonlyMap<string, bigint>,
   now: string,
 ): EligibleEntry | null {
-  const eligible = eligibleEntries.filter(
-    (entry) => entry.cooldownUntil === null || entry.cooldownUntil <= now,
-  );
-
-  return minimumBy(oldestEligibleEntryByPrincipal(eligible), [
-    (entry) => lastServedTurn.get(entry.sponsorPrincipalId) ?? 0n,
-    (entry) => entry.fairnessOrdinal,
-    (entry) => entry.sponsorGithubUserId,
-    (entry) => BigInt(entry.pullRequestNumber),
-    (entry) => lexicalKey(entry.entryId),
-  ]);
+  return runRound(eligibleEntries, lastServedTurn, now)?.selected ?? null;
 }

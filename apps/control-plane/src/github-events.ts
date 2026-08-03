@@ -29,12 +29,9 @@ export const HANDLED_WEBHOOK_EVENTS = [
 
 export type HandledWebhookEvent = (typeof HANDLED_WEBHOOK_EVENTS)[number];
 
-/**
- * Events the control plane mints for itself and puts on its own queue. GitHub
- * never sends these, so they are not part of any subscription and must not be
- * mistaken for a handler with nothing behind it.
- */
-export const INTERNAL_QUEUE_EVENTS = ["policy_reconcile", "proof_reconcile"] as const;
+// The control plane also mints events for its own queue, which GitHub never
+// sends. They are declared in the test beside this file, which is the only
+// thing that needs both lists; this one is what the App subscribes to.
 
 /**
  * What a fresh registration asks for. The same list, not a copy of it: the two

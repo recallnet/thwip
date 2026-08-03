@@ -15,6 +15,7 @@ import {
   amendMessage,
   currentTree,
   freezeSubject,
+  git,
   headMessage,
   readTips,
   requireCleanTree,
@@ -25,7 +26,7 @@ import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
-import { developerSetupPrompt } from "@thwip/prompts";
+import { developerSetupPrompt, queueInstructions, queueSetupPrompt, withQueuePointer } from "@thwip/prompts";
 import { planQueueCommand } from "./queue-commands.js";
 import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "./ship-io.js";
 import { EXIT } from "./queue-exit.js";
@@ -916,6 +917,120 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
   return report.exitCode;
 }
 
+/** What this repository is called on GitHub, from the origin remote. */
+async function originName(cwd: string): Promise<string | null> {
+  try {
+    const url = await git(["config", "--get", "remote.origin.url"], cwd);
+    return /github\.com[:/]([^/]+\/[^/.]+)/.exec(url)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The two facts about a repository THWIP.md changes on: which backend merges it
+ * and how far activation has got. Enrolment owns both, so they are read from
+ * the bootstrap route. A repository that has not been enrolled yet is
+ * `configured`, which is what the file should say about it.
+ */
+async function queueFacts(
+  endpoint: string,
+  repo: string,
+): Promise<{ backend: "managed" | "native"; activationState: "configured" | "observe" | "canary" | "enforced" }> {
+  const fallback = { backend: "managed", activationState: "configured" } as const;
+  const auth = await apiAuthHeader();
+  if (auth === null) return fallback;
+  const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
+  if (repositoryId === null) return fallback;
+  const res = await fetch(`${endpoint}/v1/queue/${repositoryId}/bootstrap`, {
+    headers: { authorization: auth },
+  });
+  if (!res.ok) return fallback;
+  const body = (await res.json()) as { backend?: string; activationState?: string };
+  return {
+    backend: body.backend === "native" ? "native" : "managed",
+    activationState:
+      body.activationState === "observe" ||
+      body.activationState === "canary" ||
+      body.activationState === "enforced"
+        ? body.activationState
+        : "configured",
+  };
+}
+
+/**
+ * `thwip queue setup`. Printing the prompt is the default, the way `thwip setup`
+ * prints the developer one, because the rest of enrolment is judgement and a
+ * request only an organization administrator may make.
+ *
+ * `--write` performs the one step of that prompt with a single right answer:
+ * THWIP.md, and the bounded pointer in whichever agent instruction files this
+ * repository already has. It writes nothing it has not first shown, and the
+ * pointer replaces only the text between its own delimiters, so instructions
+ * somebody else authored survive.
+ */
+async function cmdQueueSetup(argv: string[]): Promise<number> {
+  const cwd = process.cwd();
+  const repo = flag(argv, "--repo") ?? (await originName(cwd)) ?? "this repository";
+  if (!argv.includes("--write")) {
+    process.stdout.write(queueSetupPrompt(repo) + "\n");
+    return 0;
+  }
+
+  const { existsSync } = await import("node:fs");
+  const { writeFile } = await import("node:fs/promises");
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const branch = flag(argv, "--branch") ?? (await defaultBranch(cwd));
+
+  let hasDaggerModule = false;
+  try {
+    const { parseThwipYaml } = await import("@thwip/policy");
+    hasDaggerModule = parseThwipYaml(await readFile(join(cwd, "thwip.yaml"), "utf8")).pipeline !== undefined;
+  } catch {
+    hasDaggerModule = false;
+  }
+
+  const { backend, activationState } = await queueFacts(endpoint, repo);
+  const instructions = queueInstructions({
+    repositoryName: repo,
+    baseRef: `refs/heads/${branch}`,
+    backend,
+    activationState,
+    hasDaggerModule,
+  });
+
+  const written: string[] = [];
+  const thwipMd = join(cwd, "THWIP.md");
+  const existingMd = existsSync(thwipMd) ? await readFile(thwipMd, "utf8") : null;
+  if (existingMd === instructions) {
+    process.stderr.write("[thwip] THWIP.md is already current\n");
+  } else {
+    // Nine documentation commits went into this repository's own THWIP.md. An
+    // existing file is the author's, so the generated one goes beside it and
+    // they reconcile it, rather than losing that history to a setup command.
+    const target = existingMd === null ? thwipMd : `${thwipMd}.new`;
+    await writeFile(target, instructions);
+    written.push(target);
+  }
+
+  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+    const path = join(cwd, name);
+    if (!existsSync(path)) continue;
+    const existing = await readFile(path, "utf8");
+    const updated = withQueuePointer(existing);
+    if (updated === existing) continue;
+    await writeFile(path, updated);
+    written.push(path);
+  }
+
+  if (written.length === 0) {
+    process.stderr.write("[thwip] nothing to change\n");
+    return 0;
+  }
+  process.stderr.write(`[thwip] wrote ${written.join(", ")}; review the diff before committing\n`);
+  return 0;
+}
+
 /**
  * `thwip queue work --watch`. Validation and the watch loop itself live in
  * queue-commands.ts and queue-work.ts; this only resolves identity, the
@@ -978,6 +1093,7 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
       const [subcommand, ...rest] = invocation.argv;
       if (subcommand === "work") return cmdQueueWork(rest);
       if (subcommand === "doctor") return cmdQueueDoctor(rest);
+      if (subcommand === "setup") return cmdQueueSetup(rest);
       return cmdQueue([...invocation.argv]);
     }
     case "login":

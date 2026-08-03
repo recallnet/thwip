@@ -36,7 +36,14 @@ import {
   REPOSITORY_READ_ONLY,
   type RepositoryLevel,
 } from "./repository-access.js";
-import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./readiness.js";
+import {
+  deriveReadiness,
+  foldCapability,
+  nonThwipCheckState,
+  NO_OBJECTION,
+  type PlatformHealth,
+  type ReadinessFacts,
+} from "./readiness.js";
 import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { workReceiptDigestFrom } from "./work-receipt.js";
 import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
@@ -56,6 +63,7 @@ import {
 import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
 import {
+  parseQueueDecision,
   parseTransitionRecord,
   requiredSuitesDigest,
   type Sha256,
@@ -63,7 +71,7 @@ import {
 } from "@thwip/queue-protocol";
 import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
-import type { QueueCommands } from "./commands.js";
+import { namesNoDecision, type QueueCommands } from "./commands.js";
 import {
   candidateResultBytes,
   candidateResultDigest,
@@ -71,7 +79,7 @@ import {
   requiresIntegratedRun,
   requiresRemoteVerification,
 } from "./candidate-verdict.js";
-import { putEvidence, type R2Like } from "./evidence-store.js";
+import { getEvidence, putEvidence, queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
 import { signLocalRunAssignment } from "./assignment.js";
 import {
@@ -681,17 +689,22 @@ export async function runOnQueue<T>(
   env: QueueRouteEnv,
   repositoryId: string,
   baseRef: string,
-  decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+  decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T | Promise<T>,
   publish?: (update: TurnCheckUpdate) => Promise<void>,
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
+  const recordDecision = queueDecisionRecorder({
+    db,
+    bucket: env.EVIDENCE as unknown as R2Like | undefined,
+    repositoryId,
+  });
   let before: QueueSnapshot | null = null;
-  const out = await withQueueState(db, repositoryId, baseRef, (store) => {
+  const out = await withQueueState(db, repositoryId, baseRef, async (store) => {
     // Read before the commands run, so what changed can be worked out afterwards
     // rather than guessed at. Re-read on every retry, because the state this
     // attempt started from is the only honest baseline for what it changed.
     before = buildSnapshot(store);
-    const commands = commandsFor(store);
+    const commands = commandsFor(store, undefined, recordDecision);
     // Whatever is already due, before anything else.
     //
     // A Durable Object has an alarm; D1 does not. Without this, an offer nobody
@@ -699,8 +712,8 @@ export async function runOnQueue<T>(
     // forever. This is what the alarm did, minus the waking up: the queue is
     // touched on every authorization, every webhook and every nudge, and the
     // document is loaded already, so catching up costs nothing.
-    commands.runAlarm();
-    const result = decide({ store, commands });
+    await commands.runAlarm();
+    const result = await decide({ store, commands });
 
     // If whatever just happened left the lane free, offer it before answering.
     //
@@ -713,10 +726,7 @@ export async function runOnQueue<T>(
     // Cheap to do unconditionally: the scheduler refuses while a lane is busy or
     // the queue is paused, and a tick that offers nothing writes no event.
     if (store.state().activeAttemptId === null) {
-      commands.tick({
-        idempotencyKey: `settle:${store.generation()}`,
-        decisionDigest: `sha256:${"0".repeat(64)}`,
-      });
+      await commands.tick({ idempotencyKey: `settle:${store.generation()}` });
     }
     return { result, snapshot: buildSnapshot(store) };
   });
@@ -1364,10 +1374,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const key = idempotencyKey(c.req.header("idempotency-key"), `tick:${crypto.randomUUID()}`);
     const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
-      commands.tick({
-        idempotencyKey: key,
-        decisionDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      }),
+      commands.tick({ idempotencyKey: key }),
     );
     await driveLane(c.env, deps, repositoryId, snapshot);
     return c.json({ result });
@@ -1602,6 +1609,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "OWNER_UNKNOWN", detail: "this repository's owner has no GitHub id recorded" }, 409);
     }
 
+    // What the scheduler decided when it offered this turn. The device checks
+    // the assignment against the protocol, and this field is its handle on why
+    // the turn is its own; binding a digest naming no record told it nothing and
+    // passed anyway, because the check only reads the field's shape.
+    const queueDecisionDigest = snapshot.activeDecisionDigest;
+    if (queueDecisionDigest === null || namesNoDecision(queueDecisionDigest)) {
+      return c.json(
+        {
+          error: "QUEUE_DECISION_UNAVAILABLE",
+          detail: "this turn was offered without a recorded scheduling decision; it cannot be assigned",
+        },
+        409,
+      );
+    }
+
     const assignmentId = `asg_${attemptId}`;
     const issuedAt = new Date().toISOString();
     const signed = await signLocalRunAssignment({
@@ -1626,7 +1648,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         entryId: entry.entryId,
         pullRequestNumber: entry.pullRequestNumber,
         sponsorPrincipalId: entry.sponsorPrincipalId,
-        queueDecisionDigest: `sha256:${"0".repeat(64)}`,
+        queueDecisionDigest: queueDecisionDigest as Sha256,
       },
       policy: {
         version: policy.version ?? 1,
@@ -2411,10 +2433,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Capability is left out and folded below: `foldCapability` is where runner
     // presence is decided for every writer of `schedulerEligible`, and reading
     // it in two places is how eligibility stopped being derived.
-    const base = deriveReadiness({
+    const stated: ReadinessFacts = {
       ...NO_OBJECTION,
       draft: body.draft === true,
       headProof: body.proofAccepted === true ? "accepted" : "missing",
+    };
+
+    // What the branch requires of this head, before the entry is called ready.
+    //
+    // `nonThwipChecks` had no writer. Both callers spread `NO_OBJECTION`, whose
+    // default is "passing", so `REQUIRED_CHECK_FAILED` and
+    // `REQUIRED_CHECK_PENDING` were unreachable and a pull request with red CI
+    // read as ready. It took a turn, ran it on somebody's machine, and the walk
+    // below refused the merge on rules and runs that were readable before the
+    // offer ever went out.
+    //
+    // Read only when nothing else already blocks the entry, so a blocked pull
+    // request asking once a minute costs no GitHub reads and the read happens
+    // where it can change the answer. The walk below reuses this answer rather
+    // than asking again, so the two gates cannot disagree about one head.
+    // Unknown is not a refusal, here as there.
+    const branchChecks =
+      !deriveReadiness(stated).ready || deps.requiredCheckState === undefined
+        ? null
+        : await deps.requiredCheckState(c.env, repositoryId, baseRef, headSha).catch(() => null);
+
+    const base = deriveReadiness({
+      ...stated,
+      nonThwipChecks: branchChecks === null ? "passing" : nonThwipCheckState(branchChecks),
     });
     const baseReady = base.ready;
     const basePrimaryReason: BlockingReason | null = base.primaryReason;
@@ -2463,7 +2509,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             // parallel jobs for one head still collapses to one turn.
             readinessBucket: Math.floor(Date.now() / 60_000),
             tickBucket: Math.floor(Date.now() / 60_000),
-            decisionDigest: `sha256:${"0".repeat(64)}`,
             // Under `fresh` and `audited` the offer belongs to the developer's
             // machine, which claims it at `/claim`. A server that claimed here
             // would take the turn away from the runner it is waiting on and then
@@ -2695,10 +2740,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         // Only the certain cases, and only when GitHub answered. A check still
         // running may yet pass, and rules that could not be read say nothing
         // about this head.
+        //
+        // The readiness derivation above already read this for an entry that
+        // was otherwise ready. Reusing its answer is one GitHub read rather
+        // than two, and it removes the case where the two gates read the same
+        // head a second apart and disagree.
         const requiredChecks =
-          deps.requiredCheckState === undefined
+          branchChecks ??
+          (deps.requiredCheckState === undefined
             ? null
-            : await deps.requiredCheckState(c.env, repositoryId, baseRef, headSha).catch(() => null);
+            : await deps.requiredCheckState(c.env, repositoryId, baseRef, headSha).catch(() => null));
         const unsatisfied = requiredChecks === null ? [] : unsatisfiedRequiredChecks(requiredChecks);
         if (unsatisfied.length > 0) {
           const named = unsatisfied
@@ -3933,6 +3984,68 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const found = await readAttestation(c.env.DB as unknown as D1Like, digest);
     if (found === null) return c.json({ error: "no record with that digest" }, 404);
     return c.json(found);
+  });
+
+  /**
+   * Why one turn went to the pull request it went to (plan.md §21.2).
+   *
+   * This is the record every assignment and every `TurnOffered` binds by digest,
+   * and until it could be fetched the binding proved nothing. The bytes are
+   * verified against the digest that names them and then read through the same
+   * validator a device would use, so the answer is a decision that survives its
+   * own consistency checks or an explicit refusal. Nothing here is derived from
+   * live queue state: the record says what the scheduler could see when it
+   * chose, which is the only question it can honestly answer later.
+   *
+   * A decision names pull request numbers and the principals in the round, so
+   * read access to the repository is required. There is no public form of it.
+   */
+  app.get("/v1/queue/:repositoryId/decisions/:digest", async (c) => {
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId } = selected;
+
+    const digest = c.req.param("digest");
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return c.json({ error: "not a digest" }, 400);
+
+    const who = await deps.authenticate(c, c.env);
+    if (!who.ok) return c.json({ error: "unauthorized" }, who.status);
+    const level = await repositoryAccess(c.env.DB as unknown as D1Like, repositoryId, who);
+    if (!atLeast(level, "read")) return c.json({ error: REPOSITORY_FORBIDDEN }, 403);
+
+    if (c.env.EVIDENCE === undefined) {
+      return c.json({ error: "NO_EVIDENCE_STORE", detail: "this deployment archives no decisions" }, 503);
+    }
+    const organizationId = await c.env.DB.prepare(
+      "SELECT organization_id AS id FROM projects WHERE github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ id: string }>();
+    if (organizationId === null) return c.json({ error: "no queue for that repository" }, 404);
+
+    const found = await getEvidence(c.env.EVIDENCE as unknown as R2Like, {
+      organizationId: organizationId.id,
+      repositoryId,
+      kind: "queue-decision",
+      digest: digest as Sha256,
+    });
+    if (!found.found) {
+      const status = found.reason === "MISSING" ? 404 : 409;
+      return c.json({ error: found.reason, detail: "no decision with that digest was stored" }, status);
+    }
+
+    const decoded = new TextDecoder().decode(found.bytes);
+    let body: unknown;
+    try {
+      body = JSON.parse(decoded);
+    } catch {
+      return c.json({ error: "DECISION_UNREADABLE", detail: "the stored bytes are not JSON" }, 409);
+    }
+    const decision = parseQueueDecision(body);
+    if (!decision.ok) {
+      return c.json({ error: "DECISION_INVALID", detail: decision.detail }, 409);
+    }
+    return c.json({ digest, decision: decision.value, record: decoded });
   });
 
   /**

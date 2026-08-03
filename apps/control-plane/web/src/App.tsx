@@ -4,7 +4,7 @@ import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { QueuePanel } from "./Queue.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
-import { api, selectedOrg, useFetch } from "./api.js";
+import { api, selectedOrg, useFetch, withOrg } from "./api.js";
 import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
 import { activationText, configSourceText, policyStatusText, proofCheckModeText, whenText } from "./vocabulary.js";
 
@@ -958,7 +958,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
         />
       )}
       {section === "access" && <ProjectAccess projectId={project.id} me={me} />}
-      {section === "setup" && <ProjectSetup projectId={project.id} />}
+      {section === "setup" && <ProjectSetup projectId={project.id} me={me} />}
     </>
   );
 }
@@ -1120,7 +1120,182 @@ function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () 
   );
 }
 
-function ProjectSetup({ projectId }: { projectId: string }) {
+interface BootstrapOutcome {
+  kind: "advanced" | "waiting" | "refused";
+  step: string;
+  detail: string;
+  pullRequestNumber?: number;
+}
+
+interface BootstrapBody {
+  nextStep?: string | null;
+  complete?: boolean;
+  enabled?: boolean;
+  activationState?: string;
+  outcomes?: BootstrapOutcome[];
+  error?: string;
+}
+
+/**
+ * The bootstrap route answers 200, 202, and 409 with a body worth reading, so
+ * this reads the status rather than going through `api`, which throws away
+ * everything but an `error` field.
+ */
+async function bootstrapRequest(
+  repositoryId: string,
+  method: "GET" | "POST",
+): Promise<{ status: number; body: BootstrapBody }> {
+  const res = await fetch(withOrg(`/v1/queue/${repositoryId}/bootstrap`), {
+    method,
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    ...(method === "POST" ? { body: "{}" } : {}),
+  });
+  const body = (await res.json().catch(() => ({}))) as BootstrapBody;
+  return { status: res.status, body };
+}
+
+/** The number GitHub gave the setup pull request. */
+function setupPullNumber(body: BootstrapBody): number | null {
+  for (const outcome of body.outcomes ?? []) {
+    if (outcome.kind === "waiting" && outcome.pullRequestNumber !== undefined) {
+      return outcome.pullRequestNumber;
+    }
+  }
+  return null;
+}
+
+/** What a run stopped on, in the route's own words. */
+function stoppedOn(body: BootstrapBody): string | null {
+  const last = (body.outcomes ?? []).at(-1);
+  return last === undefined ? null : last.detail;
+}
+
+type EnrolmentPhase = "idle" | "running" | "waiting" | "enrolled" | "failed";
+
+/**
+ * Enrolling a repository, as a control.
+ *
+ * This was a hand-written D1 row, two workflows copied in, and a ruleset built
+ * with `gh api` in the one order GitHub accepts. The run stops in the middle
+ * for the setup pull request, which a person merges, so the button comes back
+ * to continue rather than pretending the wait is progress.
+ */
+function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAdminister: boolean }) {
+  const repositoryId = project.github_repository_id;
+  const [phase, setPhase] = useState<EnrolmentPhase>("idle");
+  const [body, setBody] = useState<BootstrapBody>({});
+  const [failure, setFailure] = useState<string | null>(null);
+  const [pull, setPull] = useState<number | null>(null);
+
+  // What setup already got to, so a reader who comes back to this page sees
+  // where it stands rather than a button that implies nothing has happened.
+  useEffect(() => {
+    if (!canAdminister) return;
+    let live = true;
+    void bootstrapRequest(repositoryId, "GET").then(({ status, body: read }) => {
+      if (!live || status !== 200) return;
+      setBody(read);
+      setPhase(read.complete === true ? "enrolled" : "waiting");
+    });
+    return () => {
+      live = false;
+    };
+  }, [repositoryId, canAdminister]);
+
+  // Nothing advances while the setup pull request waits, so polling only keeps
+  // the shown position honest: another administrator may have continued it.
+  useEffect(() => {
+    if (phase !== "waiting") return;
+    const timer = setInterval(() => {
+      void bootstrapRequest(repositoryId, "GET").then(({ status, body: read }) => {
+        if (status !== 200) return;
+        setBody((prev) => ({ ...prev, ...read }));
+        if (read.complete === true) setPhase("enrolled");
+      });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [phase, repositoryId]);
+
+  const start = async () => {
+    setPhase("running");
+    setFailure(null);
+    try {
+      const { status, body: answered } = await bootstrapRequest(repositoryId, "POST");
+      setBody(answered);
+      if (status === 200) {
+        setPhase("enrolled");
+        return;
+      }
+      if (status === 202) {
+        setPull(setupPullNumber(answered) ?? pull);
+        setPhase("waiting");
+        return;
+      }
+      setPhase("failed");
+      setFailure(
+        answered.error ??
+          stoppedOn(answered) ??
+          (status === 409 ? "Setup refused a change that would take a control away." : `${status}`),
+      );
+    } catch (e) {
+      setPhase("failed");
+      setFailure((e as Error).message);
+    }
+  };
+
+  if (!canAdminister) {
+    return (
+      <Panel title="Thwip Queue" meta="one request, made by an organization administrator">
+        <p>
+          Setting up the queue needs the admin or owner role in this organization on GitHub. Ask someone who has it to
+          open this tab.
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="Thwip Queue" meta="merges one pull request at a time, with a signed record of each merge">
+      <p>
+        Setting up opens a pull request on <code>{project.github_name}</code> carrying the two workflows and a{" "}
+        <code>thwip.yaml</code>. Merge it under the controls this repository already has, then continue: setup builds
+        the branch ruleset requiring <code>thwip</code> and <code>thwip / turn</code>, pins each to the source that
+        publishes it, and leaves the queue observing. Running it again changes nothing it has already done.
+      </p>
+      {failure && <p className="thwip-error">{failure}</p>}
+      {phase === "waiting" && (
+        <p>
+          Waiting on the setup pull request.{" "}
+          {pull !== null && (
+            <a href={`https://github.com/${project.github_name}/pull/${pull}`} target="_blank" rel="noreferrer">
+              #{pull}
+            </a>
+          )}{" "}
+          {stoppedOn(body) ?? `Next: ${body.nextStep ?? "unknown"}.`}
+        </p>
+      )}
+      {phase === "enrolled" && (
+        <p>
+          <StatusChip tone="ok">Enrolled</StatusChip> The queue is {body.activationState ?? "observing"} on{" "}
+          <code>{project.default_branch}</code>. It reports what it would do and blocks nothing until you enforce it.
+        </p>
+      )}
+      {phase !== "enrolled" && (
+        <div className="thwip-actions">
+          <button className="gp-btn gp-btn--sm" disabled={phase === "running"} onClick={() => void start()}>
+            {phase === "running" ? "Setting up…" : phase === "waiting" ? "Continue setup" : "Set up the queue"}
+          </button>
+        </div>
+      )}
+      <p className="gp-panel__meta">
+        To drive this from a coding agent instead, run <code>thwip queue setup</code> for the prompt.
+      </p>
+    </Panel>
+  );
+}
+
+function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
   const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   const [copied, setCopied] = useState(false);
   if (error) return <p className="thwip-error">{error}</p>;
@@ -1128,6 +1303,7 @@ function ProjectSetup({ projectId }: { projectId: string }) {
   const p = data.projects.find((x) => x.id === projectId);
   if (!p) return <p className="thwip-error">unknown project</p>;
   const prompt = buildSetupPrompt(p);
+  const role = me.viewer.githubOrgRole;
   return (
     <>
       <Panel
@@ -1147,6 +1323,7 @@ function ProjectSetup({ projectId }: { projectId: string }) {
         </button>
         <pre className="thwip-code-block">{prompt}</pre>
       </Panel>
+      <QueueEnrolment project={p} canAdminister={role === "admin" || role === "owner"} />
     </>
   );
 }

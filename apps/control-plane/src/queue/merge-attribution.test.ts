@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { setupPullRequestFiles } from "./bootstrap-workflows.js";
 import { carriesQueueAttribution } from "./external-push.js";
-import { mergeCommitMessage, mergeCommitText } from "./merge-commit.js";
+import { mergeCommitMessage } from "./merge-commit.js";
+import { mergeCommitText } from "../../test/merge-commit-text.js";
 
 /**
  * A merge the queue wrote must be readable as the queue's own work.

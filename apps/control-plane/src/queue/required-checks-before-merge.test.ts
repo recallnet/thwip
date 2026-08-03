@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { unsatisfiedRequiredChecks } from "./github-port.js";
+import { nonThwipCheckState } from "./readiness.js";
 import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
 
 /**
@@ -159,6 +160,80 @@ describe("what the branch requires, read before the merge is asked for", () => {
     const verdict = await prepareMerge(app, e);
 
     expect(verdict.operationId).not.toBeNull();
+  });
+});
+
+/**
+ * The same GitHub answer, read one step earlier.
+ *
+ * `ReadinessFacts.nonThwipChecks` had no writer at all: both callers of
+ * `deriveReadiness` spread `NO_OBJECTION`, whose default is "passing", so
+ * `REQUIRED_CHECK_FAILED` and `REQUIRED_CHECK_PENDING` were unreachable and a
+ * pull request whose CI had gone red was called ready. It was offered a turn,
+ * the turn ran on somebody's machine, and only the walk to the merge refused
+ * it — on the rules and the runs that were readable before the offer.
+ */
+describe("a required check the queue does not publish", () => {
+  it("does not call an entry ready while its own CI is failing", async () => {
+    const e = env();
+    const app = routes({
+      requiredCheckState: async () => ({
+        required: [TURN_CHECK, "lint"],
+        runs: [
+          { name: TURN_CHECK, status: "completed", conclusion: "success" },
+          { name: "lint", status: "completed", conclusion: "failure" },
+        ],
+      }),
+    });
+
+    const verdict = await prepareMerge(app, e);
+
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toBe("REQUIRED_CHECK_FAILED");
+    expect(verdict.operationId).toBeNull();
+  });
+
+  it("waits on a required check that is still running", async () => {
+    const e = env();
+    const app = routes({
+      requiredCheckState: async () => ({
+        required: ["lint"],
+        runs: [{ name: "lint", status: "in_progress", conclusion: null }],
+      }),
+    });
+
+    const verdict = await prepareMerge(app, e);
+
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toBe("REQUIRED_CHECK_PENDING");
+  });
+
+  it("does not hold an entry back on the check the queue publishes for it", async () => {
+    // `thwip / turn` is required on the branch and published from this
+    // endpoint's own answer. Counting it here would wire the gate to itself.
+    const e = env();
+    const app = routes({
+      requiredCheckState: async () => ({
+        required: [PROOF_CHECK, TURN_CHECK],
+        runs: [
+          { name: PROOF_CHECK, status: "completed", conclusion: "success" },
+          { name: TURN_CHECK, status: "completed", conclusion: "success" },
+        ],
+      }),
+    });
+
+    expect((await prepareMerge(app, e)).reason).toBe("HOLDS_TURN");
+  });
+
+  it("reads the same GitHub answer the merge gate does", () => {
+    // Two readings that disagreed would offer a turn the walk then refuses,
+    // which is the round trip this whole file exists to remove.
+    for (const conclusion of ["success", "neutral", "skipped", "failure", "timed_out", "cancelled"]) {
+      const state = { required: ["lint"], runs: [{ name: "lint", status: "completed", conclusion }] };
+      expect(nonThwipCheckState(state) === "failing", conclusion).toBe(
+        unsatisfiedRequiredChecks(state).length > 0,
+      );
+    }
   });
 });
 

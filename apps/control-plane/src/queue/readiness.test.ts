@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  blockedOnlyByCapability,
   deriveReadiness,
-  isKnownReason,
+  nonThwipCheckState,
   NO_OBJECTION,
   type ReadinessFacts,
 } from "./readiness.js";
@@ -58,7 +57,6 @@ describe("deriveReadiness", () => {
         schedulerEligible: false,
         primaryReason: "AGENT_OFFLINE",
       });
-      expect(blockedOnlyByCapability(readiness)).toBe(true);
     });
 
     it("needs no machine at all when the server can execute the turn", () => {
@@ -74,7 +72,6 @@ describe("deriveReadiness", () => {
       );
       expect(readiness.primaryReason).toBe("REVIEW_REQUIRED");
       expect(readiness.secondaryReasons).toContain("AGENT_OFFLINE");
-      expect(blockedOnlyByCapability(readiness)).toBe(false);
     });
   });
 
@@ -108,7 +105,6 @@ describe("deriveReadiness", () => {
         expect(readiness.ready).toBe(false);
         expect([readiness.primaryReason, ...readiness.secondaryReasons]).toContain(reason);
         // Every reason it can produce must be explainable to a human.
-        expect(isKnownReason(reason)).toBe(true);
         expect(nextAction(reason)).not.toBe(`Blocked: ${reason}.`);
       });
     }
@@ -181,5 +177,74 @@ describe("deriveReadiness", () => {
     const snapshot = JSON.stringify(input);
     deriveReadiness(input);
     expect(JSON.stringify(input)).toBe(snapshot);
+  });
+});
+
+/**
+ * The fact that had no writer.
+ *
+ * `nonThwipChecks` was only ever the `NO_OBJECTION` default, so the two reason
+ * codes below it could not be produced and a pull request with red CI read as
+ * ready all the way to the merge gate.
+ */
+describe("nonThwipCheckState", () => {
+  it("calls a failed required check failing", () => {
+    expect(
+      nonThwipCheckState({
+        required: ["lint"],
+        runs: [{ name: "lint", status: "completed", conclusion: "failure" }],
+      }),
+    ).toBe("failing");
+  });
+
+  it("calls a running required check pending", () => {
+    expect(
+      nonThwipCheckState({
+        required: ["lint"],
+        runs: [{ name: "lint", status: "in_progress", conclusion: null }],
+      }),
+    ).toBe("pending");
+  });
+
+  it("reports the failure ahead of the one still running", () => {
+    expect(
+      nonThwipCheckState({
+        required: ["lint", "unit"],
+        runs: [
+          { name: "lint", status: "in_progress", conclusion: null },
+          { name: "unit", status: "completed", conclusion: "failure" },
+        ],
+      }),
+    ).toBe("failing");
+  });
+
+  it("counts neutral and skipped as satisfied, the way GitHub does", () => {
+    expect(
+      nonThwipCheckState({
+        required: ["a", "b"],
+        runs: [
+          { name: "a", status: "completed", conclusion: "neutral" },
+          { name: "b", status: "completed", conclusion: "skipped" },
+        ],
+      }),
+    ).toBe("passing");
+  });
+
+  it("skips the checks the queue publishes itself", () => {
+    // `thwip / turn` is required on the branch and published from the outcome
+    // of this derivation. Counting it would wire readiness to itself: pending
+    // turn check, unready entry, no offer, no turn check.
+    expect(
+      nonThwipCheckState({
+        required: ["thwip", "thwip / turn", "thwip / candidate"],
+        runs: [{ name: "thwip", status: "completed", conclusion: "failure" }],
+      }),
+    ).toBe("passing");
+  });
+
+  it("leaves a context nothing has published to the merge gate", () => {
+    // Saying a check is still running would be a false statement about one
+    // nothing has started. The gate refuses that case by name instead.
+    expect(nonThwipCheckState({ required: ["lint"], runs: [] })).toBe("passing");
   });
 });

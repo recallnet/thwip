@@ -1127,6 +1127,88 @@ describe("the record behind a merge", () => {
     expect(merged.transition).toBe("applied");
     expect(merged.transitionDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
+
+  /**
+   * Where the merge went, not just what shape it is.
+   *
+   * Four merges in this repository's history landed on a base nobody checked,
+   * and the parent vector is what tells the two apart: a commit with the right
+   * tree and the wrong first parent is a merge onto a branch the queue never
+   * assigned. The count alone would pass it. So both parents are matched by
+   * identity against the base and the head this attempt was assigned, and a
+   * report that fails either signs nothing and takes no chain position.
+   */
+  async function reportParents(app: App, e: QueueRouteEnv, pr: number, parentShas: readonly string[]) {
+    const holder = await authorize(app, e, pr, {
+      prepare: true,
+      candidate: {
+        baseSha: "b".repeat(40),
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
+      },
+    });
+    const response = await app.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: holder.operationId!.replace("merge_", ""),
+          operationId: holder.operationId,
+          mergeSha: "9".repeat(40),
+          mergeTree: TREE,
+          parentShas: [...parentShas],
+        }),
+      },
+      e,
+    );
+    return (await response.json()) as { transition: string; transitionDigest: string | null; detail?: string };
+  }
+
+  function linkCount(): number {
+    return (
+      raw.prepare("SELECT COUNT(*) AS c FROM queue_transitions_index WHERE github_repository_id = ?").get(REPO) as {
+        c: number;
+      }
+    ).c;
+  }
+
+  it("signs no record for a merge whose first parent is not the assigned base", async () => {
+    const e = env();
+    const app = routes();
+
+    // Two parents and the authorized tree, so every shape check passes. It sits
+    // on a commit this attempt was never assigned.
+    const merged = await reportParents(app, e, 59, ["d".repeat(40), String(59).padStart(40, "a")]);
+
+    expect(merged.transition).toBe("skipped");
+    expect(merged.transitionDigest).toBeNull();
+    expect(linkCount()).toBe(0);
+  });
+
+  it("signs no record for a merge whose second parent is not the assigned head", async () => {
+    const e = env();
+    const app = routes();
+
+    const merged = await reportParents(app, e, 59, ["b".repeat(40), "d".repeat(40)]);
+
+    expect(merged.transition).toBe("skipped");
+    expect(merged.transitionDigest).toBeNull();
+    expect(linkCount()).toBe(0);
+  });
+
+  it("signs no record for a squash whose parent is not the assigned base", async () => {
+    const e = env();
+    const app = routes({ queueProject: async () => ({ activationState: "enforced", mergeMethod: "squash" }) });
+
+    const merged = await reportParents(app, e, 59, ["d".repeat(40)]);
+
+    expect(merged.transition).toBe("skipped");
+    expect(merged.transitionDigest).toBeNull();
+    expect(linkCount()).toBe(0);
+  });
 });
 
 /**
