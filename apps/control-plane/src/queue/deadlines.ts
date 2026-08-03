@@ -75,6 +75,20 @@ export interface ReconciliationReads {
     baseRef: string,
     sha: string,
   ): Promise<boolean | null>;
+  /**
+   * The pull requests GitHub associates with a commit, or null when the read
+   * failed. An empty array is an answer: the commit belongs to no pull request.
+   *
+   * A merge write written before `merge_operations` carried a pull request
+   * number has nothing on the row that names one, and the attempt that used to
+   * is long gone. The head commit is what survives, so it is what gets asked
+   * about.
+   */
+  pullRequestNumbersForCommit(
+    env: QueueRouteEnv,
+    repositoryId: string,
+    sha: string,
+  ): Promise<readonly number[] | null>;
   /** The tree and parents of a commit, so a confirmation cites the commit itself. */
   commitFacts(
     env: QueueRouteEnv,
@@ -156,6 +170,17 @@ export const GITHUB_READS: ReconciliationReads = {
     return compared.status === "behind" || compared.status === "identical";
   },
 
+  async pullRequestNumbersForCommit(env, repositoryId, sha) {
+    // `GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls` answers with an
+    // array of pull requests, each carrying its `number`. A refusal comes back
+    // as null from `githubJson`, and null has to stay apart from the empty
+    // array: one means the read did not happen, the other means the commit
+    // really belongs to no pull request.
+    const pulls = await githubJson<Array<{ number?: number }>>(env, repositoryId, `/commits/${sha}/pulls`);
+    if (!Array.isArray(pulls)) return null;
+    return pulls.map((pull) => pull.number).filter((n): n is number => typeof n === "number");
+  },
+
   async commitFacts(env, repositoryId, sha) {
     const commit = await githubJson<{ tree?: { sha?: string }; parents?: Array<{ sha?: string }> }>(
       env,
@@ -222,7 +247,7 @@ export async function settleReconciliation(
     if (mergeSha !== null && facts !== null) {
       const applied = await withQueueState(db, repositoryId, baseRef, async (store) => {
         const commands = commandsFor(store, undefined, recordDecision);
-        const confirmed = commands.confirmMerge({
+        const confirmed = await commands.confirmMerge({
           idempotencyKey: `overdue-merged:${attemptId}`,
           attemptId,
           operationId: mergeOperationId(attemptId),
@@ -249,7 +274,7 @@ export async function settleReconciliation(
 
   const resolved = await withQueueState(db, repositoryId, baseRef, async (store) => {
     const commands = commandsFor(store, undefined, recordDecision);
-    const confirmed = commands.confirmNotMerged({
+    const confirmed = await commands.confirmNotMerged({
       idempotencyKey: `overdue-not-merged:${attemptId}`,
       attemptId,
       operationId: mergeOperationId(attemptId),

@@ -1,12 +1,19 @@
 // apps/control-plane/src/queue/scheduled-tick.test.ts
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
+import type { Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
 import { tickAllQueues } from "./scheduled-tick.js";
-import type { QueueRouteEnv } from "./routes.js";
+import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { recordHeartbeat } from "./runners.js";
+import { readChain, signReusedIntent } from "./attestation.js";
+import type { RecordFromIntentDeps } from "./record-from-intent.js";
+import type { ReconciliationReads } from "./deadlines.js";
+import { serviceKey } from "../service-signing.js";
+import type { Env } from "../env.js";
 
 /**
  * The queue moves when something calls it, and nothing called it on a timer.
@@ -25,6 +32,33 @@ function env(): QueueRouteEnv {
   open.push(t);
   raw = t.raw;
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
+}
+
+let signingKeys = 0;
+
+/**
+ * An env carrying a real ES256 signing key, unique per call. `serviceKey`
+ * (service-signing.ts) only inserts a key into `service_keys` the first time
+ * its kid is seen on this process, so a shared kid across tests would let one
+ * test's insert stand in for another's and hide the exact race this file
+ * exists to catch.
+ */
+async function envWithSigningKey(): Promise<QueueRouteEnv> {
+  const e = env();
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  const jwk = { ...(await exportJWK(pair.privateKey)), kid: `tick-test-${++signingKeys}`, alg: "ES256" };
+  return { ...e, THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(jwk) } as unknown as QueueRouteEnv;
+}
+
+/** `recordDepsThatRecord()` with the stub signer replaced by the real one `RECORD_FROM_INTENT_DEPS` uses in production, so signing goes through `serviceKey` and can mint a row in `service_keys`. */
+function recordDepsThatSignForReal(): RecordFromIntentDeps<QueueRouteEnv> {
+  return {
+    ...recordDepsThatRecord(),
+    async signRecordBytes(e, bytes, typ) {
+      const { key, kid } = await serviceKey(e as unknown as Env);
+      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
+    },
+  };
 }
 
 afterEach(() => {
@@ -55,13 +89,21 @@ function withFailingRepository(db: D1Like, repositoryId: string): D1Like {
   };
 }
 
-function queue(repositoryId: string, enabled: number) {
+/**
+ * `epochStartsAt` names the first attested sequence (`attested_from_sequence`).
+ * Left at the schema default of 0 for every test that does not care about the
+ * chain, since `MISSING_PREFIX` only fires when a served chain's first link
+ * sits strictly past that boundary — a genuinely first-ever link at sequence 1
+ * needs an epoch of 1 to read as having no gap before it (`verify-chain.ts`,
+ * `anchor`).
+ */
+function queue(repositoryId: string, enabled: number, epochStartsAt = 0) {
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES (?, 'org_1', ?, 'refs/heads/main', ?, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence)
+       VALUES (?, 'org_1', ?, 'refs/heads/main', ?, 'enforced', ?)`,
     )
-    .run(`qp_${repositoryId}`, repositoryId, enabled);
+    .run(`qp_${repositoryId}`, repositoryId, enabled, epochStartsAt);
 }
 
 /** An active policy bundle naming `securityProfile`, for `readActivePolicy`. */
@@ -623,5 +665,475 @@ describe("the tick offers a turn, not just advances the clock", () => {
     // this must still write no row — this runs every five minutes across every
     // enabled queue on an account that deliberately stays inside a free tier.
     expect(row()).toBeUndefined();
+  });
+});
+
+/**
+ * The shape of the four merges that landed on 2 August 2026 with no chain
+ * link: a signed merge intent survives, the attempt that authorized it does
+ * not, and nothing but the `merge_operations` row says a write was ever sent.
+ *
+ * Module scope, not local to one describe block: the chain-integration tests
+ * below need the same production write path — `seedIntent` and `beginWrite`
+ * through `tickAllQueues` — to put a real, signed link in `queue_attestations`,
+ * rather than a hand-rolled chain shape that could drift from what production
+ * actually writes.
+ */
+interface OrphanShape {
+  readonly attemptId: string;
+  readonly pullRequestNumber: number;
+  readonly baseSha: string;
+  readonly headSha: string;
+  readonly mergeSha: string;
+  readonly treeOid: string;
+  readonly beforeTree: string;
+}
+
+const ORPHAN: OrphanShape = {
+  attemptId: "att_orphan",
+  pullRequestNumber: 115,
+  baseSha: "a1".repeat(20),
+  headSha: "b2".repeat(20),
+  mergeSha: "c3".repeat(20),
+  treeOid: "d4".repeat(20),
+  beforeTree: "e5".repeat(20),
+};
+
+/**
+ * A second orphan whose base and merge shas share nothing with `ORPHAN`'s.
+ * Recording both through the same production path (`seedIntent` /
+ * `beginWrite` / `sweepOrphanedWrites`) leaves two real, signed links whose
+ * base moves do not join into one path — exactly the shape `BASE_DISCONTINUITY`
+ * exists to name, built without hand-rolling a second chain shape.
+ */
+const ORPHAN_B: OrphanShape = {
+  attemptId: "att_orphan_b",
+  pullRequestNumber: 116,
+  baseSha: "f1".repeat(20),
+  headSha: "f2".repeat(20),
+  mergeSha: "f3".repeat(20),
+  treeOid: "f4".repeat(20),
+  beforeTree: "f5".repeat(20),
+};
+
+/** Every commit fact `commitFacts` may be asked for, across every orphan a test seeds. */
+function commitsFor(...shapes: readonly OrphanShape[]): Record<string, { treeOid: string; parentShas: string[] }> {
+  const commits: Record<string, { treeOid: string; parentShas: string[] }> = {};
+  for (const shape of shapes) {
+    commits[shape.baseSha] = { treeOid: shape.beforeTree, parentShas: ["5c".repeat(20)] };
+    commits[shape.mergeSha] = { treeOid: shape.treeOid, parentShas: [shape.baseSha, shape.headSha] };
+  }
+  return commits;
+}
+
+const COMMITS = commitsFor(ORPHAN);
+
+/** Write the merge intent exactly as the authorize route writes it. */
+async function seedIntent(shape: OrphanShape = ORPHAN): Promise<void> {
+  const signed = await signReusedIntent({
+    operationId: `merge_${shape.attemptId}`,
+    attemptId: shape.attemptId,
+    git: {
+      objectFormat: "sha1",
+      repositoryId: "1",
+      baseRef: REF,
+      baseSha: shape.baseSha,
+      headRepositoryId: "1",
+      headSha: shape.headSha,
+      candidateSha: shape.mergeSha,
+      candidateTreeOid: shape.treeOid,
+      candidateParentOids: [shape.baseSha, shape.headSha],
+    },
+    position: { queueEpoch: 0, turnSequence: 1, transitionSequence: 1, previousTransitionDigest: null },
+    pullRequestNumber: shape.pullRequestNumber,
+    evidence: {
+      workReceiptDigest: `sha256:${"1".repeat(64)}` as Sha256,
+      organizationId: "org_acme",
+      policyDigest: `sha256:${"2".repeat(64)}` as Sha256,
+      pipelineDigest: `sha256:${"3".repeat(64)}` as Sha256,
+      requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
+      proofCheckRunId: "91289436271",
+    },
+    mergeMethod: "merge",
+    createdAt: "2026-08-02T07:50:00.000Z",
+    signer: { sign: async () => "jws-intent" },
+  });
+  if ("error" in signed) throw new Error(signed.error);
+  raw
+    .prepare(
+      `INSERT INTO queue_attestations
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+    )
+    .run(
+      signed.digest,
+      "1",
+      REF,
+      shape.attemptId,
+      new TextDecoder().decode(signed.bytes),
+      signed.jws,
+      "2026-08-02T07:50:00.000Z",
+    );
+}
+
+/**
+ * The write started twenty minutes ago and nothing ever resolved it. No
+ * attempt is ever created, the same state the queue was in when it stranded
+ * four merges: `state.attempts` held none of them.
+ */
+async function beginWrite(
+  db: D1Like,
+  pullRequestNumber: number,
+  shape: OrphanShape = ORPHAN,
+  operationId = `merge_${shape.attemptId}`,
+): Promise<void> {
+  await withQueueState(db, "1", REF, async (store) =>
+    store.beginMergeOperation({
+      operationId,
+      attemptId: shape.attemptId,
+      attemptRevision: 1,
+      expectedBaseSha: shape.baseSha,
+      expectedHeadSha: shape.headSha,
+      expectedTreeOid: shape.treeOid,
+      pullRequestNumber,
+      at: "2026-08-02T07:55:00.000Z",
+    }),
+  );
+}
+
+/** Take the key back off every merge write, as the live rows already are. */
+function forgetPullRequestNumbers(): void {
+  const row = raw
+    .prepare("SELECT document FROM queue_state WHERE github_repository_id = ? AND base_ref = ?")
+    .get("1", REF) as { document: string };
+  const doc = JSON.parse(row.document) as { mergeOperations: Array<Record<string, unknown>> };
+  for (const op of doc.mergeOperations) delete op.pullRequestNumber;
+  raw
+    .prepare("UPDATE queue_state SET document = ? WHERE github_repository_id = ? AND base_ref = ?")
+    .run(JSON.stringify(doc), "1", REF);
+}
+
+function recordDepsThatRecord(): RecordFromIntentDeps<QueueRouteEnv> {
+  return {
+    commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
+    baseContainsSha: async () => true,
+    activePolicy: async () => ({
+      policyDigest: `sha256:${"2".repeat(64)}`,
+      pipelineDigest: `sha256:${"3".repeat(64)}`,
+      requiredSuites: ["unit"],
+      organizationId: "org_acme",
+    }),
+    signRecordBytes: async () => "jws-record",
+    storeEvidence: async () => "no-bucket",
+    onQueue: runOnQueue,
+  };
+}
+
+/** Nothing waits out the confirmation backoff in a test. */
+function readsThatSayMerged(): ReconciliationReads {
+  return {
+    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: ORPHAN.mergeSha }),
+    baseContainsSha: async () => true,
+    pullRequestNumbersForCommit: async () => [ORPHAN.pullRequestNumber],
+    commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
+    sleep: async () => {},
+  };
+}
+
+describe("settling a write the workflow walked away from", () => {
+  it("settles a merge write left unresolved by a workflow that exited", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    const recordDeps = recordDepsThatRecord();
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged(),
+      recordDeps,
+    );
+
+    expect(result.settledWrites).toBe(1);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toEqual([]);
+  });
+
+  /**
+   * What the four stranded rows actually look like in production D1: no
+   * `pullRequestNumber` key at all, because they were written before the row
+   * carried one. A sweep that reads that absence as a number asks GitHub about
+   * pull request `undefined`, is refused, and leaves the row exactly where it
+   * found it on every tick forever.
+   */
+  it("settles a write whose row never carried a pull request number", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    forgetPullRequestNumbers();
+
+    const asked: number[] = [];
+    const reads: ReconciliationReads = {
+      ...readsThatSayMerged(),
+      pullRequestNumbersForCommit: async () => [ORPHAN.pullRequestNumber],
+      pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
+        asked.push(pullRequestNumber);
+        return { merged: true, mergeCommitSha: ORPHAN.mergeSha };
+      },
+    };
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      reads,
+      recordDepsThatRecord(),
+    );
+
+    expect(asked).toEqual([ORPHAN.pullRequestNumber]);
+    expect(result.settledWrites).toBe(1);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toEqual([]);
+  });
+
+  /** A row that came back unknown was examined, not settled. */
+  it("counts only the writes it actually settled", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { ...readsThatSayMerged(), pullRequestMergeState: async () => null, baseContainsSha: async () => null },
+      recordDepsThatRecord(),
+    );
+
+    expect(result.settledWrites).toBe(0);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toHaveLength(1);
+  });
+
+  /**
+   * The sweep is bounded because the tick is. Every write costs GitHub
+   * subrequests, this account stays inside the free tier on purpose, and a
+   * per-invocation cap that the whole tick fails against would take the clock
+   * and the lane driving down with the backlog.
+   */
+  it("settles at most five writes for one queue in one tick", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    for (let i = 0; i < 7; i += 1) await beginWrite(db, 200 + i, ORPHAN, `merge_att_${i}`);
+
+    const asked = new Set<number>();
+    await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      {
+        ...readsThatSayMerged(),
+        pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
+          asked.add(pullRequestNumber);
+          return null;
+        },
+        baseContainsSha: async () => null,
+      },
+      recordDepsThatRecord(),
+    );
+
+    expect(asked.size).toBe(5);
+  });
+
+  /**
+   * The sweep reads GitHub and writes the chain, and both can throw. A queue
+   * with a write it cannot settle must still have its turn driven, or one
+   * stranded row stops that queue moving at all.
+   */
+  it("drives the held turn even when settling a write throws", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await offeredEntry(db, "1", "entry_a", "alice", 41);
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    let drives = 0;
+    const failures: string[] = [];
+    const result = await tickAllQueues(
+      e,
+      {
+        driveTurn: async () => void drives++,
+        onQueueTicked: () => {},
+        onQueueFailed: (repositoryId) => failures.push(repositoryId),
+      },
+      {
+        ...readsThatSayMerged(),
+        pullRequestMergeState: async () => {
+          throw new Error("GitHub is unreachable");
+        },
+      },
+      recordDepsThatRecord(),
+    );
+
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+    expect(failures).toEqual(["1"]);
+  });
+});
+
+describe("the chain check reads the keys the sweep just minted", () => {
+  /**
+   * `sweepOrphanedWrites` (scheduled-tick.ts) can call `recordMergeFromIntent`,
+   * which signs through `serviceKey()` and inserts a row into `service_keys`
+   * the first time this isolate uses that kid. The chain check for the same
+   * queue runs later in the same tick. A key set read once before the
+   * per-queue loop is the key set from before that insert, so the record the
+   * sweep just signed correctly reads as unverifiable — a false `BAD_SIGNATURE`
+   * on the exact signal this whole feature exists to make trustworthy.
+   */
+  it("does not report BAD_SIGNATURE for a record the sweep just signed with a key minted this tick", async () => {
+    const e = await envWithSigningKey();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1, 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args));
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged(),
+      recordDepsThatSignForReal(),
+    );
+
+    vi.restoreAllMocks();
+
+    expect(result.settledWrites).toBe(1);
+    const badSignature = errors.filter((args) => String(args[0]).includes("BAD_SIGNATURE"));
+    expect(badSignature).toEqual([]);
+    expect(result.chainFindings).toBe(0);
+  });
+});
+
+describe("tickAllQueues reads the queue's own chain", () => {
+  /**
+   * The regression this guards is a tick that always reports `chainFindings: 0`
+   * whether the chain is broken or not — wrong argument, wrong table, wrong
+   * ref, or the check never called. Every existing test in this file passes
+   * through the chain check incidentally, against an empty chain, asserting
+   * nothing about it; none would catch that regression.
+   */
+  it("reports a base discontinuity found in the queue's own stored chain, and logs it", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1, 1);
+
+    // Two merges recorded through the production write path
+    // (`seedIntent` / `beginWrite` / `sweepOrphanedWrites`), whose base moves
+    // share nothing: `ORPHAN` leaves `ORPHAN.baseSha` for `ORPHAN.mergeSha`,
+    // `ORPHAN_B` leaves `ORPHAN_B.baseSha` for `ORPHAN_B.mergeSha`. Two real,
+    // signed links whose edges cannot join into one path.
+    await seedIntent(ORPHAN);
+    await beginWrite(db, ORPHAN.pullRequestNumber, ORPHAN);
+    await seedIntent(ORPHAN_B);
+    await beginWrite(db, ORPHAN_B.pullRequestNumber, ORPHAN_B);
+
+    const commits = commitsFor(ORPHAN, ORPHAN_B);
+    const recordDeps: RecordFromIntentDeps<QueueRouteEnv> = {
+      ...recordDepsThatRecord(),
+      commitFacts: async (_env, _repositoryId, sha) => commits[sha] ?? null,
+    };
+    const reads: ReconciliationReads = {
+      ...readsThatSayMerged(),
+      pullRequestNumbersForCommit: async (_env, _repositoryId, sha) =>
+        sha === ORPHAN_B.mergeSha ? [ORPHAN_B.pullRequestNumber] : [ORPHAN.pullRequestNumber],
+      pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) =>
+        pullRequestNumber === ORPHAN_B.pullRequestNumber
+          ? { merged: true, mergeCommitSha: ORPHAN_B.mergeSha }
+          : { merged: true, mergeCommitSha: ORPHAN.mergeSha },
+    };
+
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args));
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      reads,
+      recordDeps,
+    );
+
+    vi.restoreAllMocks();
+
+    expect(result.settledWrites).toBe(2);
+    expect(result.chainFindings).toBeGreaterThan(0);
+    expect(
+      errors.some(
+        (args) => String(args[0]).includes("chain finding") && String(args[0]).includes("BASE_DISCONTINUITY"),
+      ),
+    ).toBe(true);
+  });
+
+  it("finds nothing on a queue whose stored chain is intact", async () => {
+    const e = await envWithSigningKey();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1, 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged(),
+      recordDepsThatSignForReal(),
+    );
+
+    expect(result.settledWrites).toBe(1);
+    expect(result.chainFindings).toBe(0);
+    // `readChain` is what the check actually reads; a passing count with no
+    // link behind it would be as hollow as the regression this suite exists
+    // to catch.
+    const links = await readChain(db, "1", REF);
+    expect(links).toHaveLength(1);
+  });
+
+  it("reports NOTHING_CHECKED for a chain entirely below epochStartsAt, rather than a silent zero", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    // Every link this tick will read sits below this epoch, so the walk
+    // verifies no signature at all — the shape a caller reading only
+    // `chainFindings === 0` would mistake for a clean chain.
+    queue("1", 1, 999);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args));
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+    );
+
+    vi.restoreAllMocks();
+
+    expect(result.settledWrites).toBe(1);
+    expect(result.chainFindings).toBeGreaterThan(0);
+    expect(
+      errors.some((args) => String(args[0]).includes("chain finding") && String(args[0]).includes("NOTHING_CHECKED")),
+    ).toBe(true);
   });
 });

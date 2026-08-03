@@ -1,4 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
+import { CompactSign, compactVerify, createLocalJWKSet, type JSONWebKeySet } from "jose";
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
@@ -7,8 +8,42 @@ import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
 import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
 import type { D1Like } from "./projection.js";
-import type { QueueRouteEnv } from "./routes.js";
+import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
+import { serviceKey } from "../service-signing.js";
+import { verificationKeys } from "../service-keys.js";
+import type { Env } from "../env.js";
+import { ORPHANED_WRITE_GRACE_MS, ORPHANED_WRITE_SWEEP_LIMIT, settleOrphanedWrite } from "./orphaned-writes.js";
+import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
+import { readChain } from "./attestation.js";
+import { checkOwnChain } from "./chain-self-check.js";
+
+/**
+ * The real dependencies `recordMergeFromIntent` needs, built once from the same
+ * factory `/repair` uses (`recordFromIntentDepsFor` in routes.ts) rather than a
+ * second hand-rolled copy. Reads come from `GITHUB_READS`, the same GitHub
+ * conversation `settleReconciliation` already has above; signing reuses the
+ * queue's own service key; evidence and the queue transaction reuse
+ * `storeEvidence` and `runOnQueue`, the same ones every mutating route goes
+ * through.
+ */
+const RECORD_FROM_INTENT_DEPS: RecordFromIntentDeps<QueueRouteEnv> = recordFromIntentDepsFor(
+  {
+    async commitFacts(env, repositoryId, sha) {
+      const facts = await GITHUB_READS.commitFacts(env, repositoryId, sha);
+      return facts === null ? null : { treeOid: facts.treeOid, parentShas: [...facts.parentShas] };
+    },
+    baseContainsSha: GITHUB_READS.baseContainsSha,
+    async activePolicy(env, repositoryId) {
+      return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
+    },
+    async signRecordBytes(env, bytes, typ) {
+      const { key, kid } = await serviceKey(env as unknown as Env);
+      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
+    },
+  },
+  runOnQueue,
+);
 
 /**
  * Move every queue's clock forward on a timer.
@@ -49,12 +84,28 @@ export async function tickAllQueues(
    * only recovers once somebody remembers to pass a port stays wedged.
    */
   reads: ReconciliationReads = GITHUB_READS,
-): Promise<{ ticked: number; driven: number; failed: number; reconciled: number }> {
+  /**
+   * How the sweep settles a write the workflow walked away from. Defaulted for
+   * the same reason `reads` is: nothing about recovering an orphaned write
+   * should depend on somebody remembering to wire it up.
+   */
+  recordDeps: RecordFromIntentDeps<QueueRouteEnv> = RECORD_FROM_INTENT_DEPS,
+): Promise<{
+  ticked: number;
+  driven: number;
+  failed: number;
+  reconciled: number;
+  settledWrites: number;
+  chainFindings: number;
+}> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
-    .prepare("SELECT github_repository_id AS repositoryId, base_ref AS baseRef FROM queue_projects WHERE enabled = 1")
+    .prepare(
+      "SELECT github_repository_id AS repositoryId, base_ref AS baseRef, attested_from_sequence AS epochStartsAt " +
+        "FROM queue_projects WHERE enabled = 1",
+    )
     .bind()
-    .all<{ repositoryId: string; baseRef: string }>();
+    .all<{ repositoryId: string; baseRef: string; epochStartsAt: number }>();
 
   const now = new Date().toISOString();
   // Retire stale runners once per repository, not once per queue: the table is
@@ -71,6 +122,8 @@ export async function tickAllQueues(
   let driven = 0;
   let failed = 0;
   let reconciled = 0;
+  let settledWrites = 0;
+  let chainFindings = 0;
   for (const row of rows.results) {
     try {
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
@@ -183,6 +236,72 @@ export async function tickAllQueues(
         await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
         driven += 1;
       }
+
+      // A write the workflow walked away from is nobody's job until it is this
+      // one's. `settleReconciliation` above needs a surviving attempt; these
+      // rows outlive every attempt, which is why four merges sat unrecorded.
+      //
+      // Last, after the lane has been driven. Settling a write reads GitHub
+      // several times and writes the chain, and both can throw: `withQueueState`
+      // gives up after five lost compare-and-swaps and `recordMergeFromIntent`
+      // raises whatever the signer or the evidence store raises. Standing ahead
+      // of the drive, one queue with a write it could not settle would stop that
+      // queue's turns from ever being driven, which is a worse failure than the
+      // one the sweep repairs.
+      settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
+
+      // The queue reads its own chain here, once per queue per tick, the same
+      // way `/v1/queue/:repositoryId/chain` reads it for an outside verifier
+      // and the way `thwip verify-chain` checks it from off the network. This
+      // is the check that would have caught the four merges that sat unrecorded
+      // for a day: `verifyChain` has reported `BASE_DISCONTINUITY` for exactly
+      // that shape since the day the gap was understood, and nothing ran it.
+      //
+      // Last, after everything that can add or repair a link this tick. A
+      // finding is read and reported, never acted on: the sweep above is what
+      // repairs a chain, and this is only the queue looking at what it wrote.
+      //
+      // The key set is read here, after `sweepOrphanedWrites`, not once for the
+      // whole tick. `sweepOrphanedWrites` can call `recordMergeFromIntent`,
+      // which signs through `serviceKey()` and inserts a row into
+      // `service_keys` the first time this isolate uses that kid — inside the
+      // same per-queue pass this check runs in. A key set taken before that
+      // insert would check the record the sweep just signed against a key
+      // published after the record was made, and report it as `BAD_SIGNATURE`:
+      // a false alarm on the exact signal this feature exists to make
+      // trustworthy, and one that clears itself on the next tick, which makes
+      // it rarer and harder to diagnose rather than less bad. `verificationKeys`
+      // is a plain D1 select, so reading it once per queue rather than once per
+      // tick costs one extra read on a queue with a chain to check, not one per
+      // link.
+      const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
+      const verificationKeySet = createLocalJWKSet(publishedKeys);
+      const verifyChainSignature = async (jws: string, bytes: Uint8Array): Promise<boolean> => {
+        try {
+          const { payload } = await compactVerify(jws, verificationKeySet);
+          return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
+        } catch {
+          return false;
+        }
+      };
+
+      const chainLinks = await readChain(db, row.repositoryId, row.baseRef);
+      const chainCheck = await checkOwnChain(chainLinks, {
+        epochStartsAt: row.epochStartsAt,
+        subject: { repositoryId: row.repositoryId, baseRef: row.baseRef },
+        verifySignature: verifyChainSignature,
+      });
+      chainFindings += chainCheck.length;
+      for (const finding of chainCheck) {
+        // Said out loud, on the same channel every other repair on this sweep
+        // uses. A gap in the chain that only a log line ever mentions is a gap
+        // nobody reads until somebody goes looking for it by hand, which is
+        // how the last one went a full day.
+        console.error(
+          `[queue heartbeat] chain finding for repository ${row.repositoryId}: ` +
+            `${finding.code} at ${finding.sequence ?? finding.digest.slice(0, 16)}: ${finding.detail}`,
+        );
+      }
     } catch (error) {
       // A heartbeat that reports the same number whether it worked or failed
       // is not a signal. Keep this out of `ticked` so a fleet-wide outage
@@ -193,5 +312,78 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed, reconciled };
+  return { ticked, driven, failed, reconciled, settledWrites, chainFindings };
+}
+
+/**
+ * Settle the merge writes on one queue that nobody ever closed, and say how many
+ * actually settled.
+ *
+ * Counting the ones examined instead would report a repair on every tick for a
+ * row that keeps coming back unknown, which is the opposite of what the number
+ * is read for.
+ */
+async function sweepOrphanedWrites(
+  env: QueueRouteEnv,
+  db: D1Like,
+  row: { repositoryId: string; baseRef: string },
+  reads: ReconciliationReads,
+  recordDeps: RecordFromIntentDeps<QueueRouteEnv>,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
+  const orphaned = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+    store.unresolvedMergeOperations(cutoff),
+  );
+
+  let settled = 0;
+  // Oldest first, so a backlog clears the longest-stranded merge first and the
+  // cap never starves one row.
+  for (const write of orphaned.slice(0, ORPHANED_WRITE_SWEEP_LIMIT)) {
+    const outcome = await settleOrphanedWrite(write, {
+      pullRequestNumbersForHead: () =>
+        reads.pullRequestNumbersForCommit(env, row.repositoryId, write.expectedHeadSha),
+      readMergeState: (pullRequestNumber) =>
+        reads.pullRequestMergeState(env, row.repositoryId, pullRequestNumber),
+      baseContainsHead: () => reads.baseContainsSha(env, row.repositoryId, row.baseRef, write.expectedHeadSha),
+      recordMerge: (mergeSha) =>
+        recordMergeFromIntent(env, recordDeps, {
+          repositoryId: row.repositoryId,
+          baseRef: row.baseRef,
+          mergeSha,
+          // Display only. It names who is speaking for this record in the
+          // evidence a reader sees, and nothing authenticates against it: the
+          // record's authority comes from the merge intent the queue already
+          // signed and from the commit read back out of git, neither of which
+          // this string touches. No principal row is claimed for it, because the
+          // sweep is the Worker's own clock rather than any person or device.
+          witnessPrincipalId: "queue",
+          attemptId: write.attemptId,
+        }),
+      resolve: (operationId, resolvedAs) =>
+        withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+          store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
+        ),
+      ...(reads.sleep === undefined ? {} : { sleep: reads.sleep }),
+    });
+    // Said out loud on the channel this account watches. Something repairing
+    // the chain silently is worse than the gap it closes.
+    //
+    // A write the sweep could not settle says so once and then stays quiet. It
+    // comes back every five minutes until somebody resolves it, and a line per
+    // row per tick would bury the settlements that matter under a standing
+    // report of the same unreadable row.
+    if (outcome.settled === "unknown") {
+      console.log(
+        `[queue heartbeat] orphaned merge write ${write.operationId} for repository ` +
+          `${row.repositoryId} is still unsettled: ${outcome.reason}`,
+      );
+      continue;
+    }
+    settled += 1;
+    console.log(
+      `[queue heartbeat] settled orphaned merge write ${write.operationId} for repository ` +
+        `${row.repositoryId}: ${outcome.settled}`,
+    );
+  }
+  return settled;
 }

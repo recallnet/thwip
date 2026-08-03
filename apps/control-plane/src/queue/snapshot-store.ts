@@ -21,6 +21,7 @@ import type {
   PendingOutbox,
   SubmittedEvent,
   TransitionRow,
+  UnresolvedMergeOperation,
 } from "./store.js";
 
 /**
@@ -104,6 +105,13 @@ interface MergeOperationRow {
   expectedBaseSha: string;
   expectedHeadSha: string;
   expectedTreeOid: string;
+  /**
+   * Absent on every row this document held before the key existed. Production
+   * runs on this store, and the four writes the sweep was built for are four
+   * such rows, so the key is optional here and the absence is carried as null
+   * rather than read back as a number nobody wrote.
+   */
+  pullRequestNumber?: number | null;
   writeStartedAt: string;
   outcome: string | null;
   resolvedAt: string | null;
@@ -440,6 +448,7 @@ export class SnapshotQueueStore {
     expectedBaseSha: string;
     expectedHeadSha: string;
     expectedTreeOid: string;
+    pullRequestNumber: number;
     at: string;
   }): { status: "started" } | { status: "already-started"; outcome: string | null } {
     const existing = this.doc.mergeOperations.find((row) => row.operationId === op.operationId);
@@ -451,6 +460,7 @@ export class SnapshotQueueStore {
       expectedBaseSha: op.expectedBaseSha,
       expectedHeadSha: op.expectedHeadSha,
       expectedTreeOid: op.expectedTreeOid,
+      pullRequestNumber: op.pullRequestNumber,
       writeStartedAt: op.at,
       outcome: null,
       resolvedAt: null,
@@ -459,12 +469,39 @@ export class SnapshotQueueStore {
     return { status: "started" };
   }
 
-  resolveMergeOperation(operationId: string, outcome: string, at: string): void {
+  /** Async for the same reason as `BranchQueueStore.resolveMergeOperation`. */
+  async resolveMergeOperation(operationId: string, outcome: string, at: string): Promise<void> {
     const row = this.doc.mergeOperations.find((o) => o.operationId === operationId);
     if (row === undefined) return;
     row.outcome = outcome;
     row.resolvedAt = at;
     this.flush();
+  }
+
+  /**
+   * Writes that were started and that nobody ever resolved, oldest first. See
+   * the note on `BranchQueueStore.unresolvedMergeOperations`: the obligation to
+   * settle a write belongs to the write, because the attempt that used to carry
+   * it does not survive the failure that needs settling.
+   */
+  unresolvedMergeOperations(startedBefore: string): UnresolvedMergeOperation[] {
+    return this.doc.mergeOperations
+      .filter((row) => row.outcome === null && row.writeStartedAt < startedBefore)
+      .sort((a, b) =>
+        a.writeStartedAt === b.writeStartedAt
+          ? a.operationId.localeCompare(b.operationId)
+          : a.writeStartedAt.localeCompare(b.writeStartedAt),
+      )
+      .map((row) => ({
+        operationId: row.operationId,
+        attemptId: row.attemptId,
+        attemptRevision: row.attemptRevision,
+        expectedBaseSha: row.expectedBaseSha,
+        expectedHeadSha: row.expectedHeadSha,
+        expectedTreeOid: row.expectedTreeOid,
+        pullRequestNumber: row.pullRequestNumber ?? null,
+        writeStartedAt: row.writeStartedAt,
+      }));
   }
 
   mergeOperation(

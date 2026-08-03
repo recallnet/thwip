@@ -493,6 +493,8 @@ export class QueueCommands {
     if (attempt.baseSha === null || attempt.headSha === null || attempt.candidateTree === null) {
       return { status: "rejected", detail: "candidate is not pinned" };
     }
+    const entry = state.entries.get(attempt.entryId);
+    if (entry === undefined) return { status: "rejected", detail: `unknown entry ${attempt.entryId}` };
     const now = this.clock.now();
     const begun = this.store.beginMergeOperation({
       operationId: input.operationId,
@@ -501,6 +503,7 @@ export class QueueCommands {
       expectedBaseSha: attempt.baseSha,
       expectedHeadSha: attempt.headSha,
       expectedTreeOid: attempt.candidateTree,
+      pullRequestNumber: entry.pullRequestNumber,
       at: now,
     });
     if (begun.status === "already-started") return begun;
@@ -541,14 +544,14 @@ export class QueueCommands {
     );
   }
 
-  confirmMerge(input: {
+  async confirmMerge(input: {
     idempotencyKey: string;
     attemptId: string;
     operationId: string;
     mergeSha: string;
     mergeTree: string;
     parentShas: readonly string[];
-  }): CommandResult {
+  }): Promise<CommandResult> {
     const now = this.clock.now();
     const result = this.store.append(
       {
@@ -569,11 +572,18 @@ export class QueueCommands {
         bumpAttemptRevision: true,
       },
     );
-    if (result.status === "applied") this.store.resolveMergeOperation(input.operationId, "MERGED", now);
+    // Awaited: the store closes the row that says a merge write is outstanding,
+    // and a promise dropped here is the same fire-and-forget loss the orphaned
+    // write sweep exists to repair.
+    if (result.status === "applied") await this.store.resolveMergeOperation(input.operationId, "MERGED", now);
     return result;
   }
 
-  confirmNotMerged(input: { idempotencyKey: string; attemptId: string; operationId: string }): CommandResult {
+  async confirmNotMerged(input: {
+    idempotencyKey: string;
+    attemptId: string;
+    operationId: string;
+  }): Promise<CommandResult> {
     const now = this.clock.now();
     const result = this.store.append(
       {
@@ -592,7 +602,7 @@ export class QueueCommands {
       },
     );
     if (result.status === "applied") {
-      this.store.resolveMergeOperation(input.operationId, "CONFIRMED_NOT_MERGED", now);
+      await this.store.resolveMergeOperation(input.operationId, "CONFIRMED_NOT_MERGED", now);
     }
     return result;
   }

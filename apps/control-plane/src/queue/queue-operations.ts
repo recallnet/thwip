@@ -526,12 +526,12 @@ export interface ConfirmInput {
  * than the alternative it replaces, which was a link that named a commit and
  * attested to nothing.
  */
-export function confirmOnly(
+export async function confirmOnly(
   commands: QueueCommands,
   store: QueueStateStore,
   input: Omit<ConfirmInput, "transitionDigest" | "witnessPrincipalIds" | "kind">,
-): {
-  confirmed: ReturnType<QueueCommands["confirmMerge"]>;
+): Promise<{
+  confirmed: Awaited<ReturnType<QueueCommands["confirmMerge"]>>;
   /** What the queue authorized, for the record that is about to be built. */
   attempt: {
     baseSha: string | null;
@@ -544,8 +544,8 @@ export function confirmOnly(
   } | null;
   chainHead: { sequence: number; digest: string } | null;
   snapshot: QueueSnapshot;
-} {
-  const confirmed = commands.confirmMerge({
+}> {
+  const confirmed = await commands.confirmMerge({
     idempotencyKey: `merged:${input.attemptId}`,
     attemptId: input.attemptId,
     operationId: input.operationId,
