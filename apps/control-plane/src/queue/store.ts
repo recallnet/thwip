@@ -163,8 +163,20 @@ export type QueueStateStore = Pick<
   | "beginMergeOperation"
   | "resolveMergeOperation"
   | "mergeOperation"
+  | "unresolvedMergeOperations"
   | "classifyCallback"
 >;
+
+/** A merge write that was sent and that nothing has settled. */
+export interface UnresolvedMergeOperation {
+  readonly operationId: string;
+  readonly attemptId: string;
+  readonly attemptRevision: number;
+  readonly expectedBaseSha: string;
+  readonly expectedHeadSha: string;
+  readonly expectedTreeOid: string;
+  readonly writeStartedAt: string;
+}
 
 export class BranchQueueStore {
   private cached: BranchQueueState | null = null;
@@ -736,6 +748,50 @@ export class BranchQueueStore {
       at,
       operationId,
     );
+  }
+
+  /**
+   * Writes that were started and that nobody ever resolved, oldest first.
+   *
+   * The obligation to settle a write belongs to the write. It used to belong to
+   * the attempt, and an attempt is the wrong place for it: the workflow reports
+   * the outcome, and when it exits without reporting, the attempt is terminated
+   * and compacted while the row it was supposed to settle stays behind. Four
+   * merges on this repository landed exactly that way and the chain has no link
+   * for any of them.
+   *
+   * `startedBefore` is the cutoff. A write sent moments ago is in flight rather
+   * than stranded, and sweeping it would race the workflow that is about to
+   * report the same operation.
+   */
+  unresolvedMergeOperations(startedBefore: string): UnresolvedMergeOperation[] {
+    return this.sql
+      .exec<{
+        operation_id: string;
+        attempt_id: string;
+        attempt_revision: number;
+        expected_base_sha: string;
+        expected_head_sha: string;
+        expected_tree_oid: string;
+        write_started_at: string;
+      }>(
+        `SELECT operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
+                expected_tree_oid, write_started_at
+           FROM merge_operations
+          WHERE outcome IS NULL AND write_started_at < ?
+          ORDER BY write_started_at, operation_id`,
+        startedBefore,
+      )
+      .toArray()
+      .map((row) => ({
+        operationId: row.operation_id,
+        attemptId: row.attempt_id,
+        attemptRevision: row.attempt_revision,
+        expectedBaseSha: row.expected_base_sha,
+        expectedHeadSha: row.expected_head_sha,
+        expectedTreeOid: row.expected_tree_oid,
+        writeStartedAt: row.write_started_at,
+      }));
   }
 
   mergeOperation(operationId: string): { attemptId: string; attemptRevision: number; outcome: string | null } | null {
