@@ -832,6 +832,92 @@ describe("the receipt the machine signs", () => {
     ).toMatchObject({ n: 1 });
   });
 
+  /**
+   * The queue's own merge closes the pull request, and GitHub says so.
+   *
+   * `pull_request closed` arrives while the merge workflow is still reporting
+   * what it did, and the close handler cancelled the entry and terminated its
+   * attempt `ADMIN_CANCELLED`. So `/merged` was refused `RESULT_NOT_AUTHORIZED`
+   * for an attempt that had just merged: GitHub held the commit and the chain
+   * held nothing. `recallnet/thwip-test` pull request 2 merged as `b4a9c56` with
+   * no record, one second after the close beat the report.
+   *
+   * A merge write already sent to GitHub is not the operator's to cancel and
+   * not a webhook's either. Only confirmation may say what it did.
+   */
+  it("records the merge when the close webhook beats the report of it", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app({ driveTurn: async () => {} });
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+
+    const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
+    expect(verdict.operationId).not.toBeNull();
+    const held = await attemptId(e);
+
+    // GitHub's close, in the window between the merge landing and the report.
+    await withQueueState(db, REPO, REF, (store) => {
+      commandsFor(store).cancel({
+        idempotencyKey: `webhook:closed:${held}`,
+        entryId: `entry_${REPO}_${PR}`,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    const reported = await routes.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: held,
+          operationId: verdict.operationId,
+          mergeSha: MERGE_SHA,
+          mergeTree: TREE,
+          parentShas: [BASE, HEAD],
+        }),
+      },
+      e,
+    );
+    expect(reported.status).toBe(200);
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
+  });
+
+  /**
+   * And a close that is a close still ends the turn. Nothing was sent to
+   * GitHub for this attempt, so there is no write to protect and the lane has
+   * to be freed for whatever is behind it.
+   */
+  it("still cancels a turn whose pull request was closed before any merge was asked for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app({ driveTurn: async () => {} });
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    const held = await attemptId(e);
+
+    await withQueueState(db, REPO, REF, (store) => {
+      commandsFor(store).cancel({
+        idempotencyKey: `webhook:closed:${held}`,
+        entryId: `entry_${REPO}_${PR}`,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Cancelled" });
+    expect(after.activeAttemptId).toBeNull();
+  });
+
   it("still reports an idle lane as idle", async () => {
     const e = env();
     const routes = app();
