@@ -99,7 +99,13 @@ const jsonLd = [
     {
       post.data.heroImage && (
         <figure class="eb-hero">
-          <img src={post.data.heroImage} alt={post.data.heroAlt ?? ""} />
+          <img
+            src={post.data.heroImage}
+            alt={post.data.heroAlt ?? ""}
+            width="1200"
+            height="630"
+            decoding="async"
+          />
         </figure>
       )
     }

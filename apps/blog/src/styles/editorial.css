@@ -1,26 +1,34 @@
+/* Shell matches the notary homepage (1060px). Prose is a reading measure
+   inside that shell so heroes and cards can use the full page width. */
+
 .eb {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
+.eb-shell {
+  width: 100%;
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
 .eb-bar {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: var(--s4);
-  padding: var(--s4) var(--s5);
-  border-bottom: 1px solid var(--rule);
-  max-width: 72rem;
-  margin: 0 auto;
-  width: 100%;
+  gap: 24px;
+  padding: 20px 0 14px;
+  border-bottom: 1px solid var(--ink);
 }
 
 .eb-mark {
   font-family: var(--num);
-  font-weight: 600;
-  font-size: 1.125rem;
-  letter-spacing: -0.02em;
+  font-variation-settings: "wdth" 118, "wght" 700;
+  font-weight: 700;
+  font-size: 21px;
+  letter-spacing: -0.01em;
   color: var(--ink);
   text-decoration: none;
 }
@@ -28,7 +36,7 @@
 .eb-bar nav {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s4);
+  gap: 20px;
   font-size: 0.9375rem;
 }
 
@@ -44,13 +52,7 @@
 .eb-main {
   flex: 1;
   width: 100%;
-  max-width: 42rem;
-  margin: 0 auto;
-  padding: var(--s7) var(--s5);
-}
-
-.eb-main--wide {
-  max-width: 48rem;
+  padding: 48px 0 64px;
 }
 
 .eb-foot {
@@ -58,11 +60,8 @@
   flex-wrap: wrap;
   justify-content: space-between;
   gap: var(--s3);
-  padding: var(--s5);
+  padding: 20px 0 32px;
   border-top: 1px solid var(--rule);
-  max-width: 72rem;
-  margin: 0 auto;
-  width: 100%;
   font-size: 0.875rem;
   color: var(--muted);
 }
@@ -81,7 +80,7 @@
 .eb-index-title {
   font-family: var(--num);
   font-weight: 600;
-  font-size: clamp(1.75rem, 4vw, 2.25rem);
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
   letter-spacing: -0.02em;
   margin: 0 0 var(--s3);
   max-width: none;
@@ -89,32 +88,64 @@
 
 .eb-index-lede {
   color: var(--muted);
-  font-size: 1.0625rem;
+  font-size: 1.125rem;
   margin: 0 0 var(--s6);
-  max-width: 40rem;
+  max-width: 52rem;
+  line-height: 1.5;
 }
 
 .eb-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s5);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--s4);
+}
+
+@media (min-width: 720px) {
+  .eb-list {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--s5);
+  }
 }
 
 .eb-card {
-  display: block;
-  padding: var(--s5);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
   border: 1px solid var(--rule);
   text-decoration: none;
   color: inherit;
   transition: border-color 0.12s ease;
+  overflow: hidden;
+  background: var(--paper);
 }
 
 .eb-card:hover {
   border-color: var(--ink);
   color: inherit;
+}
+
+.eb-card__thumb {
+  background: var(--hair);
+  border-bottom: 1px solid var(--rule);
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+.eb-card__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.eb-card__body {
+  padding: var(--s5);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 }
 
 .eb-card__meta {
@@ -131,12 +162,14 @@
   font-size: 1.25rem;
   margin: 0 0 var(--s2);
   letter-spacing: -0.015em;
+  line-height: 1.25;
 }
 
 .eb-card__desc {
   margin: 0;
   color: var(--muted);
   font-size: 0.975rem;
+  flex: 1;
 }
 
 .eb-tags {
@@ -156,9 +189,10 @@
   padding: 2px 8px;
 }
 
-/* Article */
+/* Article header + media use the full shell width */
 .eb-article__header {
-  margin-bottom: var(--s6);
+  margin-bottom: var(--s5);
+  max-width: 40rem;
 }
 
 .eb-meta {
@@ -171,15 +205,15 @@
 .eb-article__header h1 {
   font-family: var(--num);
   font-weight: 600;
-  font-size: clamp(1.75rem, 4vw, 2.375rem);
+  font-size: clamp(1.875rem, 4vw, 2.75rem);
   letter-spacing: -0.02em;
-  line-height: 1.2;
+  line-height: 1.15;
   margin: 0 0 var(--s3);
   max-width: none;
 }
 
 .eb-lede {
-  font-size: 1.125rem;
+  font-size: 1.2rem;
   color: var(--muted);
   margin: 0;
   line-height: 1.5;
@@ -188,19 +222,25 @@
 .eb-hero {
   margin: 0 0 var(--s6);
   border: 1px solid var(--rule);
-  background: var(--hair);
+  background: #0f1419;
+  overflow: hidden;
 }
 
-.eb-hero img {
+.eb-hero img,
+.eb-shot img {
   width: 100%;
+  height: auto;
+  display: block;
+  vertical-align: middle;
 }
 
 .eb-hero figcaption,
 .eb-shot figcaption {
   font-size: 0.875rem;
   color: var(--muted);
-  padding: var(--s2) var(--s3);
+  padding: var(--s3) var(--s4);
   border-top: 1px solid var(--rule);
+  background: var(--paper);
 }
 
 .eb-md-alt {
@@ -209,9 +249,10 @@
   border-top: 1px solid var(--hair);
   font-size: 0.875rem;
   color: var(--ghost);
+  max-width: 40rem;
 }
 
-/* Prose */
+/* Reading measure for prose only — media full-bleed within shell */
 .eb-prose {
   font-size: 1.0625rem;
   line-height: 1.65;
@@ -221,22 +262,39 @@
   margin-top: 0;
 }
 
+.eb-prose > p,
+.eb-prose > ul,
+.eb-prose > ol,
+.eb-prose > h2,
+.eb-prose > h3,
+.eb-prose > aside,
+.eb-prose > .eb-cta-row,
+.eb-prose > .eb-steps {
+  max-width: 40rem;
+}
+
+.eb-prose > figure.eb-shot {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
 .eb-prose h2,
 .eb-prose h3 {
   font-family: var(--num);
   font-weight: 600;
   letter-spacing: -0.015em;
   margin: var(--s6) 0 var(--s3);
-  max-width: none;
+  max-width: 40rem;
   line-height: 1.25;
 }
 
 .eb-prose h2 {
-  font-size: 1.375rem;
+  font-size: 1.5rem;
 }
 
 .eb-prose h3 {
-  font-size: 1.125rem;
+  font-size: 1.2rem;
 }
 
 .eb-prose p,
@@ -254,41 +312,33 @@
   font-size: 0.9em;
   background: var(--hair);
   padding: 0.1em 0.35em;
-  border-radius: 2px;
 }
 
-.eb-prose pre {
+.eb-prose pre,
+.eb-prose .astro-code {
   position: relative;
   margin: 0 0 var(--s5);
   padding: var(--s4);
+  padding-top: calc(var(--s4) + 4px);
   background: var(--hair);
   border: 1px solid var(--rule);
   overflow-x: auto;
   font-size: 0.875rem;
   line-height: 1.5;
+  max-width: 40rem;
 }
 
 .eb-prose pre code {
   background: none;
   padding: 0;
   font-size: inherit;
-  border-radius: 0;
-}
-
-.eb-prose pre .astro-code,
-.eb-prose .astro-code {
-  margin: 0 0 var(--s5);
-  padding: var(--s4);
-  border: 1px solid var(--rule);
-  overflow-x: auto;
-  font-size: 0.875rem;
-  line-height: 1.5;
 }
 
 .eb-copy {
   position: absolute;
   top: var(--s2);
   right: var(--s2);
+  z-index: 1;
   font-family: var(--mono);
   font-size: 0.6875rem;
   text-transform: uppercase;
@@ -340,12 +390,13 @@
   margin-bottom: 0;
 }
 
-/* CTA */
+/* CTA — several links share one row when consecutive */
 .eb-cta-row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s3);
   margin: var(--s5) 0;
+  align-items: center;
 }
 
 .eb-cta {
@@ -355,7 +406,7 @@
   font-family: var(--sans);
   font-weight: 600;
   font-size: 0.9375rem;
-  padding: 0.65rem 1.1rem;
+  padding: 0.7rem 1.15rem;
   text-decoration: none;
   border: 1px solid var(--ink);
   background: var(--ink);
@@ -383,11 +434,8 @@
 .eb-shot {
   margin: 0 0 var(--s5);
   border: 1px solid var(--rule);
-  background: var(--hair);
-}
-
-.eb-shot img {
-  width: 100%;
+  background: #0f1419;
+  overflow: hidden;
 }
 
 /* Steps */
@@ -401,8 +449,9 @@
 .eb-step {
   counter-increment: eb-step;
   border: 1px solid var(--rule);
-  padding: var(--s4);
+  padding: var(--s4) var(--s5);
   margin-bottom: var(--s3);
+  background: var(--paper);
 }
 
 .eb-step__title {
@@ -426,4 +475,9 @@
 
 .eb-step > :last-child {
   margin-bottom: 0;
+}
+
+.eb-step pre,
+.eb-step .astro-code {
+  max-width: none;
 }
