@@ -1,11 +1,15 @@
 ---
 title: "Research note: verifiable agent coding at the edge"
-description: "thwip is an open research and product experiment in commit-carried CI evidence. Edge-signed proofs on the exact Git tree, verified by a GitHub App, with an explicit map of what we claim and what we leave open."
+description: "A working experiment in commit-carried CI evidence for agent-run pipelines: edge-signed proofs on an exact Git tree, App-native verification on GitHub, explicit trust bounds, related work, and an open invitation to extend the model."
 pubDate: 2026-08-03T12:00:00.000Z
+updatedDate: 2026-08-03T20:00:00.000Z
 author: thwip
 tags:
   - research
   - beta
+  - supply-chain
+  - agents
+  - continuous-integration
 heroImage: /blog/beta-hero.svg
 heroAlt: Local run, signed proof, GitHub verifies
 ---
@@ -13,41 +17,85 @@ heroAlt: Local run, signed proof, GitHub verifies
 Coding agents write and push faster than most CI systems were designed to
 serve. The open problem is verification: how do you keep a fail-closed merge
 gate when the suite already ran on a laptop or agent machine, and when the
-cloud re-run is either too expensive, too slow, or both?
+cloud re-run is either too expensive or too slow?
 
-**thwip** is our answer so far, now in public beta. It is a control plane and a
-small protocol for *commit-carried CI evidence*: you run approved checks where
-the code lives, sign a compact proof of the exact Git tree, and a
-ruleset-protected GitHub App verifies that proof before merge. We treat this
-as research in verifiable agent coding, with a working product attached so the
-claims stay falsifiable.
+Builders who live in that loop report Agents multiplying micro-PRs while
+[GitHub Actions](https://docs.github.com/en/actions) re-runs the same suite on
+branch and main, sometimes until free-tier minutes run out and merges freeze
+with local tests still green. Industry reporting around AI-generated code keeps
+landing on the same gap: high distrust of AI output and uneven verification
+before merge (Sonar’s 2026 State of Code framing, widely discussed as
+“verification debt”).
+
+**thwip** is our answer so far, in public beta. It is a control plane and a small
+protocol for *commit-carried CI evidence*: run approved checks where the code
+lives, sign a compact proof of the exact Git tree, and let a ruleset-protected
+GitHub App verify that proof before merge. We treat this as research in
+verifiable agent coding, with a working product attached so the claims stay
+falsifiable.
 
 {% cta-row %}
 {% cta href="https://github.com/recallnet/thwip" label="Repository" /%}
 {% cta href="/install" label="Try the beta" variant="ghost" /%}
 {% /cta-row %}
 
+## Related work and inspiration
+
+We stand on existing supply-chain and attestation work rather than inventing a
+parallel universe of crypto primitives.
+
+- **[in-toto](https://in-toto.io/)** and its
+  [Statement](https://github.com/in-toto/attestation/tree/main/spec/v1) shape:
+  how we carry a typed predicate over a subject.
+- **[DSSE](https://github.com/secure-systems-lab/dsse)** (Dead Simple Signing
+  Envelope): how the proof is signed and transported inside a git trailer.
+- **[SLSA](https://slsa.dev/)**, especially
+  [Build L3](https://slsa.dev/spec/v1.0/levels#build-l3): the bar we claim for
+  the **remote** profile when GitHub runs and signs the suites. Fast is
+  deliberately not L3; see below.
+- **[Sigstore](https://www.sigstore.dev/)** and related keyless signing
+  ecosystems: we did *not* adopt keyless identity for the first slice. Device
+  keys enrolled on GitHub keep the trust story inspectable and offline-capable
+  for local runs.
+- **[Dagger](https://dagger.io/)**: content-addressed pipelines so “same tree,
+  same digests” is a property of the graph, not a wish.
+- **[GitHub Apps](https://docs.github.com/en/apps)** and
+  [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets):
+  App-native checks without putting a repository workflow in the trust boundary
+  that judges the candidate (see our
+  [ADR on App-native proof checks](https://github.com/recallnet/thwip/blob/main/docs/adr/0001-app-native-proof-checks.md)).
+- **Provenance and attestations in CI** more broadly: GitHub’s own
+  [artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds)
+  and the OCI/supply-chain literature. thwip targets a different artifact: the
+  *commit itself* as the carrier for CI evidence about agent-local work.
+- **Local signoff culture** (self-hosted runners, `bin/signoff`-style workflows):
+  the social move to stop paying the cloud to re-prove work you already ran.
+  thwip’s job is to keep that evidence something a merge queue can still
+  require.
+
+If you know adjacent systems we should cite or compare, open an issue. Related
+work is part of the research surface.
+
 ## The edge verification thesis
 
-Agents and developers already execute lint, typecheck, and tests on the
-machine that holds the checkout, the secrets shape, and the agent session.
-That run is the natural place to produce evidence. The merge authority
-(GitHub) still needs something it can require without replaying the world.
+Agents and developers already execute lint, typecheck, and tests on the machine
+that holds the checkout, the toolchain, and the agent session. That run is the
+natural place to produce evidence. The merge authority still needs something it
+can require without replaying the world.
 
 thwip’s thesis is that those two roles can stay separate:
 
 1. **Execution at the edge** produces digests and a signed statement over a
    fixed tree and policy.
 2. **Verification at the platform** checks the signature, the subject, current
-   GitHub permission, key enrollment, and policy version, and publishes a
-   check the ruleset can pin.
+   GitHub permission, key enrollment, and policy version, and publishes a check
+   the ruleset can pin.
 
-We deliberately do *not* put the agent inside the trust boundary that decides
-pass or fail. The agent may drive the CLI. An enrolled device key signs. The
-App evaluates. That split is the product of the research as much as any
-feature list.
+The agent may drive the CLI. An enrolled device key signs. The App evaluates.
+We keep the agent outside the trust boundary that decides pass or fail. That
+split is the research claim as much as any feature.
 
-## What we already shipped (minimal trust setup)
+## Minimal trust setup (what works in beta)
 
 The beta implements a complete, narrow loop.
 
@@ -56,16 +104,17 @@ envelope>` over an in-toto Statement v1 with predicate
 `urn:thwip:attestation:ci-run:v1`. The payload is compact enough to ride the
 commit.
 
-**Signing.** An OpenSSH ed25519 key, enrolled as a GitHub **Signing** key for
-the same account the CLI authenticates as, signs the envelope. Device
-registration is a human step on purpose.
+**Signing.** An OpenSSH ed25519 key, enrolled as a GitHub
+[Signing key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/checking-for-existing-ssh-keys)
+for the same account the CLI authenticates as, signs the envelope. Device
+registration is a human step on purpose. Authentication keys do not count.
 
 **Verification.** The thwip GitHub App owns the required `thwip` check. It
 evaluates the exact PR or merge-group subject, uses the shared verifier
 package, and executes no repository code. It reads GitHub for permission and
-keys, fetches a signed fact bundle from the control plane, and fails closed
-with stable reason codes (`PASS`, `SUBJECT_TREE_MISMATCH`,
-`SIGNER_KEY_REVOKED`, …).
+keys, fetches a signed fact bundle from the control plane, and fails closed with
+stable reason codes (`PASS`, `SUBJECT_TREE_MISMATCH`, `SIGNER_KEY_REVOKED`, and
+siblings).
 
 **Policy.** Organization defaults live in the dashboard. An optional
 `thwip.yaml` on the active default branch may override them after protected
@@ -75,7 +124,7 @@ request.
 **Profiles.**
 
 | Profile | Who ran the suites | What the merge can cite |
-|---------|--------------------|-------------------------|
+| --- | --- | --- |
 | **fast** | Signer on their machine | Head proof; no pre-run control-plane contact |
 | **remote** | GitHub Actions on the integration candidate | GitHub-signed suite results (SLSA Build L3 for those checks) |
 
@@ -84,10 +133,12 @@ integration receipt. Nothing issues or signs those yet, so the CLI and control
 plane refuse them by name rather than quietly delivering remote under a
 stronger label.
 
-**Queue.** On this repository we dogfood a merge queue that records digests
-you can fetch and re-check (`GET /v1/queue/records/:digest`). A merge record
-cites what was verified; if a required citation is missing, the queue refuses
-to sign a hollow record.
+**Queue.** On this repository we dogfood a merge queue that records digests you
+can fetch and re-check (`GET /v1/queue/records/:digest`). A merge record cites
+what was verified; if a required citation is missing, the queue refuses to sign
+a hollow record. Design notes live under
+[`docs/`](https://github.com/recallnet/thwip/tree/main/docs) and
+[`THWIP.md`](https://github.com/recallnet/thwip/blob/main/THWIP.md).
 
 That is the minimal setup we claim works today: edge execution, commit-carried
 proof, App-native check, GitHub-mirrored membership, two honest profiles.
@@ -99,25 +150,23 @@ Precision is the whole point of this note.
 - thwip **does not observe execution**. Under fast, the signature is an
   attributed claim that the approved suites passed on that tree. Detection of
   lies is reproducibility and disagreement across machines, later commits, and
-  remote runs, not surveillance.
+  remote runs.
 - thwip **never sees source**. The App and control plane verify metadata and
   digests; they do not fetch a worktree to re-run your code for the proof
   check.
 - A green `thwip` check is **not** a guarantee of product correctness, security
-  review, or end-to-end user behavior. It is a structured claim about the
-  approved suite digests and who signed them.
-- Local and remote environments still diverge. Paths that need the cloud as
-  the execution environment should use **remote**. Auth, billing, deploy
-  config, and lockfiles are the usual candidates.
+  review, or end-to-end user behavior. It is a structured claim about approved
+  suite digests and who signed them.
+- Local and remote environments still diverge. Paths that need the cloud as the
+  execution environment should use **remote**. Auth, billing, deploy config, and
+  lockfiles are the usual candidates.
 - Identity is **GitHub’s**. Membership and repository permission come from the
   org and collaborators. We add no second invite graph.
 
-The [FAQ](/faq) and [llms.txt](/llms.txt) state these bounds in short form for
-humans and agents.
+Short forms for humans and agents: [FAQ](/faq), [faq.md](/faq.md),
+[llms.txt](/llms.txt).
 
 ## Framework sketch
-
-Think of three layers:
 
 ```
 edge (agent / developer machine)
@@ -132,33 +181,34 @@ platform (GitHub + thwip App + control plane)
 ```
 
 Content-addressed pipelines (Dagger modules, named required functions) make
-“same tree, same digests” a real property rather than a slogan. The control
-plane is policy, keys, and verification, not a CI farm.
+“same tree, same digests” a real property. The control plane is policy, keys,
+and verification. It is not a CI farm.
 
-## Invitation
+## Open questions
 
 We opened the beta so others can stress the model on real agent workflows and
 help expand it.
 
-Useful directions (non-exhaustive):
-
 - Integration receipts and assignment so `fresh` / `audited` mean something
   distinct from remote.
 - Stronger multi-party agreement on digests before merge.
-- Broader matrix and hybrid path ergonomics when part of the suite must stay
-  remote.
+- Hybrid matrix ergonomics when part of the suite must stay remote (for example
+  macOS or Windows legs).
 - Tooling that helps agents fail closed *before* push without inventing a
   second policy language.
 - Independent verification of published queue records and chain links.
-- Critique of the fast/remote split and of what should sit outside any proof.
+- Comparison write-ups against keyless signing, build provenance only, and
+  pure self-hosted Actions.
 
-The monorepo is public: [github.com/recallnet/thwip](https://github.com/recallnet/thwip).
-Issues and PRs are welcome. This repository ships with thwip on its own merge
-path, so contributions meet the same evidence bar we describe.
+The monorepo is public:
+[github.com/recallnet/thwip](https://github.com/recallnet/thwip). Issues and PRs
+are welcome. This repository ships with thwip on its own merge path, so
+contributions meet the same evidence bar we describe.
 
 ## Try the working slice
 
-1. `npm install -g @recallnet/thwip` (Node 22+).
+1. `npm install -g @recallnet/thwip` (Node 22+), package
+   [`@recallnet/thwip`](https://www.npmjs.com/package/@recallnet/thwip).
 2. `thwip login`, then register an ed25519 key as a GitHub **Signing** key.
 3. Install the App, enable a project, `thwip init`, `thwip run`, push.
 
@@ -168,5 +218,5 @@ path, so contributions meet the same evidence bar we describe.
 {% /cta-row %}
 
 Agent prompt: [/install.md](/install.md). Claim bounds: [/faq.md](/faq.md).
-Protocol and queue details live in the repository under `docs/` and the
-package sources.
+Protocol sources: [`packages/protocol`](https://github.com/recallnet/thwip/tree/main/packages/protocol),
+[`packages/verifier`](https://github.com/recallnet/thwip/tree/main/packages/verifier).
