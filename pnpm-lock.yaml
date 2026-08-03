@@ -4,9 +4,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@thwip/cli': link:packages/cli
+
 importers:
 
   .:
+    dependencies:
+      '@thwip/cli':
+        specifier: link:packages/cli
+        version: link:packages/cli
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.12.0
