@@ -105,6 +105,18 @@ export function entryPoints(root) {
     for (const m of text.matchAll(/src="\.?\/?([^"]+\.tsx?)"/g)) add(join(dirname(html), m[1]));
   }
 
+  // Astro content collections and file-based routes. Nothing imports these
+  // modules; Astro loads them by path from the package root, the same way
+  // wrangler names the Worker main. A pages/*.ts export of GET or
+  // getStaticPaths is the route entry, not dead code.
+  for (const f of execFileSync("git", ["ls-files", "*.ts", "*.tsx"], { cwd: root, encoding: "utf8" })
+    .trim()
+    .split("\n")
+    .filter((f) => f.length > 0 && !f.includes("node_modules/"))) {
+    if (/^apps\/[^/]+\/src\/content\.config\.ts$/.test(f)) add(f);
+    if (/^apps\/[^/]+\/src\/pages\/.+\.tsx?$/.test(f)) add(f);
+  }
+
   return found;
 }
 

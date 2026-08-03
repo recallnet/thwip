@@ -1,0 +1,74 @@
+---
+title: thwip beta is open
+description: Commit-carried CI evidence for agent-run pipelines is available in public beta. Run checks where the code lives, sign the tree, and merge on a verified proof.
+pubDate: 2026-08-03T12:00:00.000Z
+author: thwip
+tags:
+  - product
+  - beta
+heroImage: /blog/beta-hero.svg
+heroAlt: Diagram of a local CI run producing a signed proof that GitHub verifies before merge
+---
+
+thwip is in public beta.
+
+If your team runs CI on developer machines or coding agents, and you still want a
+GitHub-enforced record of what ran on which tree, this is the surface we built
+for that job.
+
+{% cta href="/blog/beta-install/" label="Install and sign up" /%}
+{% cta href="/dashboard" label="Open the dashboard" variant="ghost" /%}
+
+## What ships in beta
+
+- A CLI, `@recallnet/thwip`, that runs your required checks, signs a compact
+  proof over the exact Git tree, and attaches it as a commit trailer.
+- A GitHub App that verifies those proofs against current repository
+  permission, enrolled signing keys, and project policy.
+- Organization and project controls on [thwip.recall.net](https://thwip.recall.net),
+  mirrored from GitHub membership. No separate invite system.
+- Two security profiles you can set per path: **fast** (signed local proof) and
+  **remote** (GitHub runs the checks and signs provenance).
+
+{% product-shot src="/blog/beta-hero.svg" alt="Local run, signed proof, GitHub verification before merge" caption="Evidence moves with the commit. The cloud verifies; it does not re-run the suite by default." /%}
+
+## What a proof is (and is not)
+
+A thwip proof is a signed claim: who ran the approved checks, on which Git tree,
+under which policy version, with a key enrolled to a GitHub account that still
+holds repository permission.
+
+thwip never sees your source and never watches your test process. False claims
+are caught when digests disagree with other machines, later commits, or a remote
+profile run—not by surveillance.
+
+{% callout type="tip" title="Precision" %}
+The remote profile is SLSA Build L3 for the checks GitHub actually ran. Fast is
+an attributed assertion plus hermeticity and reproducibility controls. Pick
+remote where a cloud re-run is worth the minutes.
+{% /callout %}
+
+## Who beta is for
+
+- Teams where agents or developers already run lint, typecheck, and tests
+  locally, and replaying everything in Actions is pure latency.
+- Orgs that want the merge queue gated on *evidence*, not on “CI green on a
+  different SHA.”
+- People who will read the [FAQ](/faq) before treating a proof as stronger than
+  it is.
+
+## Pricing while we learn
+
+Free and Pro both verify the same way. Free is capped for projects and signers;
+Pro raises those caps. Details stay on the dashboard and in
+[llms.txt](/llms.txt).
+
+## Get started
+
+The install path is a short tutorial: CLI, device sign-in, signing key on
+GitHub, first project.
+
+{% cta href="/blog/beta-install/" label="Beta sign-up and install" /%}
+
+Questions that are not “how do I install” belong in the [FAQ](/faq). Agent-ready
+setup text lives at [/install](/install) and `/install.md`.

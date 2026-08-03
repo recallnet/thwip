@@ -1,0 +1,22 @@
+{
+  "name": "@thwip/blog",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && node scripts/merge-into-client.mjs && node scripts/assert-build.mjs",
+    "typecheck": "astro check",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/markdoc": "^0.15.8",
+    "@astrojs/rss": "^4.0.14",
+    "@astrojs/sitemap": "^3.6.0",
+    "astro": "^5.16.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.0",
+    "typescript": "^5.7.0"
+  }
+}

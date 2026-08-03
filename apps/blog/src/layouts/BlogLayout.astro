@@ -1,0 +1,60 @@
+---
+import "../styles/tokens.css";
+import "../styles/editorial.css";
+import SiteBar from "../components/SiteBar.astro";
+import SiteFoot from "../components/SiteFoot.astro";
+import CodeCopy from "../components/CodeCopy.astro";
+
+interface Props {
+  title: string;
+  description: string;
+  canonicalPath: string;
+  ogImage?: string;
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+  wide?: boolean;
+}
+const { title, description, canonicalPath, ogImage, jsonLd, wide } = Astro.props;
+const site = Astro.site ?? new URL("https://thwip.recall.net");
+const canonical = new URL(canonicalPath, site).href;
+const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:type" content="article" />
+    {ogImageUrl && <meta property="og:image" content={ogImageUrl} />}
+    <meta name="twitter:card" content={ogImageUrl ? "summary_large_image" : "summary"} />
+    <link rel="alternate" type="application/rss+xml" title="thwip blog" href="/rss.xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600&family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>"
+    />
+    {
+      jsonLd && (
+        <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+      )
+    }
+  </head>
+  <body class="eb">
+    <SiteBar />
+    <main class:list={["eb-main", { "eb-main--wide": wide }]}>
+      <slot />
+    </main>
+    <SiteFoot />
+    <CodeCopy />
+  </body>
+</html>
