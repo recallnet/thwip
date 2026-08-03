@@ -75,6 +75,7 @@ const CANDIDATE = "c".repeat(40);
 const TREE = "7".repeat(40);
 const OTHER_TREE = "8".repeat(40);
 const MERGE_SHA = "d".repeat(40);
+const MOVED_HEAD = "f".repeat(40);
 
 /** A real carrier, so the head's proof digest is a digest of something. */
 const CARRIER =
@@ -609,6 +610,53 @@ describe("the receipt the machine signs", () => {
     const response = await post(routes, e, "nudge", {});
     expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: PR, state: "Verifying" });
     expect(driven).toEqual([PR]);
+  });
+
+  /**
+   * A push under a running turn ends that turn, rather than poisoning it.
+   *
+   * The queue pins the candidate when it issues the assignment and holds both
+   * immutable, and nothing ever told it the pull request had moved on. So a
+   * contributor pushing while a device was running kept a turn alive against a
+   * tree GitHub no longer integrates: the device asking again was handed back
+   * the stale assignment, ran the stale tree, signed a receipt for it, and the
+   * queue accepted it — and then refused every merge for that attempt with
+   * `INTEGRATION_RECEIPT_TREE_MISMATCH`, forever, because the receipt really was
+   * about a different tree. Pull request 2 on `recallnet/thwip-test` sat in
+   * `RECEIPT_SUBMITTED` for exactly this reason.
+   *
+   * `HEAD_MOVED` is the reducer's own answer and nothing was reaching it. It
+   * defers, so the place in line is kept and the next turn is taken against
+   * what is there now.
+   */
+  it("ends a turn whose pull request moved under the device running it", async () => {
+    const e = env();
+    const routes = app();
+    const claimed = await claim(routes, e);
+    const stale = await attemptId(e);
+
+    await authorize(routes, e, { headSha: MOVED_HEAD });
+
+    const snapshot = await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => buildSnapshot(store));
+    expect(snapshot.activeAttemptId).toBeNull();
+    expect(snapshot.entries[0]).toMatchObject({ state: "Deferred" });
+
+    // And the account of the stale tree is worth nothing: the attempt it
+    // answers is over, so there is no lane for it to move.
+    const late = await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    expect(late.status).toBe(409);
+    expect(stale).not.toBe(snapshot.activeAttemptId);
+  });
+
+  it("leaves a turn alone while the pull request stays where it was", async () => {
+    const e = env();
+    const routes = app();
+    await claim(routes, e);
+    const held = await attemptId(e);
+
+    await authorize(routes, e);
+
+    expect(await attemptId(e)).toBe(held);
   });
 
   it("still reports an idle lane as idle", async () => {
