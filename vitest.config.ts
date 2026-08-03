@@ -38,6 +38,10 @@ const testSupport = {
     "./packages/vocabulary/src/test/reason-codes.ts",
     import.meta.url,
   ).pathname,
+  "@thwip/queue-protocol/test/verify-chain-fixtures": new URL(
+    "./packages/queue-protocol/src/test/verify-chain-fixtures.ts",
+    import.meta.url,
+  ).pathname,
 };
 
 export default defineConfig({

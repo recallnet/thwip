@@ -1,5 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
-import { CompactSign } from "jose";
+import { CompactSign, compactVerify, createLocalJWKSet, type JSONWebKeySet } from "jose";
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
@@ -11,9 +11,12 @@ import type { D1Like } from "./projection.js";
 import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
 import { serviceKey } from "../service-signing.js";
+import { verificationKeys } from "../service-keys.js";
 import type { Env } from "../env.js";
 import { ORPHANED_WRITE_GRACE_MS, ORPHANED_WRITE_SWEEP_LIMIT, settleOrphanedWrite } from "./orphaned-writes.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
+import { readChain } from "./attestation.js";
+import { checkOwnChain } from "./chain-self-check.js";
 
 /**
  * The real dependencies `recordMergeFromIntent` needs, built once from the same
@@ -87,12 +90,40 @@ export async function tickAllQueues(
    * should depend on somebody remembering to wire it up.
    */
   recordDeps: RecordFromIntentDeps<QueueRouteEnv> = RECORD_FROM_INTENT_DEPS,
-): Promise<{ ticked: number; driven: number; failed: number; reconciled: number; settledWrites: number }> {
+): Promise<{
+  ticked: number;
+  driven: number;
+  failed: number;
+  reconciled: number;
+  settledWrites: number;
+  chainFindings: number;
+}> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
-    .prepare("SELECT github_repository_id AS repositoryId, base_ref AS baseRef FROM queue_projects WHERE enabled = 1")
+    .prepare(
+      "SELECT github_repository_id AS repositoryId, base_ref AS baseRef, attested_from_sequence AS epochStartsAt " +
+        "FROM queue_projects WHERE enabled = 1",
+    )
     .bind()
-    .all<{ repositoryId: string; baseRef: string }>();
+    .all<{ repositoryId: string; baseRef: string; epochStartsAt: number }>();
+
+  // The queue's own chain, checked the way an outside verifier checks it: read
+  // the links this tick already has a D1 connection for, and verify each
+  // signature against the keys this service has itself published. No network
+  // call — `verificationKeys` reads the same table `/.well-known/thwip-keys`
+  // serves from. A queue with no attestations yet reads an empty chain and
+  // never calls `verifyChainSignature` at all, so an isolate that has not
+  // signed anything does not need the key published before its first tick.
+  const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
+  const verificationKeySet = createLocalJWKSet(publishedKeys);
+  const verifyChainSignature = async (jws: string, bytes: Uint8Array): Promise<boolean> => {
+    try {
+      const { payload } = await compactVerify(jws, verificationKeySet);
+      return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
+    } catch {
+      return false;
+    }
+  };
 
   const now = new Date().toISOString();
   // Retire stale runners once per repository, not once per queue: the table is
@@ -110,6 +141,7 @@ export async function tickAllQueues(
   let failed = 0;
   let reconciled = 0;
   let settledWrites = 0;
+  let chainFindings = 0;
   for (const row of rows.results) {
     try {
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
@@ -235,6 +267,34 @@ export async function tickAllQueues(
       // queue's turns from ever being driven, which is a worse failure than the
       // one the sweep repairs.
       settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
+
+      // The queue reads its own chain here, once per queue per tick, the same
+      // way `/v1/queue/:repositoryId/chain` reads it for an outside verifier
+      // and the way `thwip verify-chain` checks it from off the network. This
+      // is the check that would have caught the four merges that sat unrecorded
+      // for a day: `verifyChain` has reported `BASE_DISCONTINUITY` for exactly
+      // that shape since the day the gap was understood, and nothing ran it.
+      //
+      // Last, after everything that can add or repair a link this tick. A
+      // finding is read and reported, never acted on: the sweep above is what
+      // repairs a chain, and this is only the queue looking at what it wrote.
+      const chainLinks = await readChain(db, row.repositoryId, row.baseRef);
+      const chainCheck = await checkOwnChain(chainLinks, {
+        epochStartsAt: row.epochStartsAt,
+        subject: { repositoryId: row.repositoryId, baseRef: row.baseRef },
+        verifySignature: verifyChainSignature,
+      });
+      chainFindings += chainCheck.length;
+      for (const finding of chainCheck) {
+        // Said out loud, on the same channel every other repair on this sweep
+        // uses. A gap in the chain that only a log line ever mentions is a gap
+        // nobody reads until somebody goes looking for it by hand, which is
+        // how the last one went a full day.
+        console.error(
+          `[queue heartbeat] chain finding for repository ${row.repositoryId}: ` +
+            `${finding.code} at ${finding.sequence ?? finding.digest.slice(0, 16)}: ${finding.detail}`,
+        );
+      }
     } catch (error) {
       // A heartbeat that reports the same number whether it worked or failed
       // is not a signal. Keep this out of `ticked` so a fleet-wide outage
@@ -245,7 +305,7 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed, reconciled, settledWrites };
+  return { ticked, driven, failed, reconciled, settledWrites, chainFindings };
 }
 
 /**

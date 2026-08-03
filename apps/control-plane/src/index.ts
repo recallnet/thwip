@@ -2629,7 +2629,7 @@ export default {
       });
       console.log(
         `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed} ` +
-          `reconciled=${result.reconciled} settledWrites=${result.settledWrites}`,
+          `reconciled=${result.reconciled} settledWrites=${result.settledWrites} chainFindings=${result.chainFindings}`,
       );
       return;
     }
