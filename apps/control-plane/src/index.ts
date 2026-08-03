@@ -11,7 +11,6 @@ import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
 import { syncInstallations } from "./admin-sync.js";
 import {
   activatePolicyFromDefaultBranchPush,
-  policyPushFromGithubWebhook,
   reconcileInstallationPolicies,
   type GithubPolicyWebhookPayload,
   type PolicyPush,
@@ -53,13 +52,13 @@ import { backfillAttestations } from "./queue/attestation-backfill.js";
 import { hasEvidence, putEvidence, type R2Like } from "./queue/evidence-store.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
 import {
-  appProofTaskFromWebhook,
   processAppProof,
   reconcileInstallationProofChecks,
   reconcileProjectProofChecks,
   requestForRerequest,
   type AppProofTask,
 } from "./app-proof-verification.js";
+import { webhookWork } from "./webhook-work.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -1635,23 +1634,14 @@ app.post("/api/github/webhooks", async (c) => {
     }
   }
 
-  const policyPush = policyPushFromGithubWebhook(event, payload);
-  const appProofTask = appProofTaskFromWebhook(event, payload as never);
-  const reconcileProofRepositoryId =
-    event === "push" &&
-    payload.repository?.id != null &&
-    payload.ref === `refs/heads/${payload.repository.default_branch ?? ""}`
-      ? String(payload.repository.id)
-      : null;
-  await c.env.SYNC_QUEUE.send({
-    provider: "github",
-    delivery,
-    event,
-    installationId,
-    policyPush,
-    appProofTask,
-    reconcileProofRepositoryId,
-  });
+  const work = webhookWork(event, payload as never, { delivery, installationId });
+  if (work === null) {
+    // Deliberately silent about the common case. Most deliveries are check_run
+    // events the App caused by publishing its own checks, and a log line each
+    // would cost more than the send did.
+    return c.json({ ok: true, duplicate, queued: { handled: false, detail: "no work in this delivery" } });
+  }
+  await c.env.SYNC_QUEUE.send(work);
   return c.json({ ok: true, duplicate, queued });
 });
 
