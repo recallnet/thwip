@@ -350,16 +350,29 @@ describe("nonThwipCheckState", () => {
     ).toBe("passing");
   });
 
-  it("skips the checks the queue publishes itself", () => {
-    // `thwip / turn` is required on the branch and published from the outcome
-    // of this derivation. Counting it would wire readiness to itself: pending
-    // turn check, unready entry, no offer, no turn check.
+  it("skips the turn check, which is this derivation's own output", () => {
+    // Counting it would wire readiness to itself: pending turn check, unready
+    // entry, no offer, no turn check.
     expect(
       nonThwipCheckState({
-        required: ["thwip", "thwip / turn", "thwip / candidate"],
-        runs: [{ name: "thwip", status: "completed", conclusion: "failure" }],
+        required: ["thwip / turn"],
+        runs: [{ name: "thwip / turn", status: "completed", conclusion: "failure" }],
       }),
     ).toBe("passing");
+  });
+
+  it("counts a failed proof check, which the App publishes and this does not", () => {
+    // `thwip` used to be skipped alongside the turn check, on the reasoning that
+    // both start with the same word. It is the App's verdict on the head's
+    // proof, so reading it is not circular, and skipping it meant the queue
+    // offered the lane to a pull request whose proof the App had already
+    // rejected. The merge gate refused it at the end, after the turn was spent.
+    expect(
+      nonThwipCheckState({
+        required: ["thwip"],
+        runs: [{ name: "thwip", status: "completed", conclusion: "failure" }],
+      }),
+    ).toBe("failing");
   });
 
   it("leaves a context nothing has published to the merge gate", () => {
