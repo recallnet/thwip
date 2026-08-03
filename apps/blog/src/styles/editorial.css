@@ -1,5 +1,5 @@
-/* Shell matches the notary homepage (1060px). Prose is a reading measure
-   inside that shell so heroes and cards can use the full page width. */
+/* Shell matches .nt-page (1060px). Text column matches .nt-body (820px).
+   Heroes stay full shell width. */
 
 .eb {
   min-height: 100vh;
@@ -90,7 +90,7 @@
   color: var(--muted);
   font-size: 1.125rem;
   margin: 0 0 var(--s6);
-  max-width: 52rem;
+  max-width: 820px;
   line-height: 1.5;
 }
 
@@ -189,10 +189,10 @@
   padding: 2px 8px;
 }
 
-/* Article header + media use the full shell width */
+/* Same column as .nt-body: 820px. Hero is full shell (1060). */
 .eb-article__header {
   margin-bottom: var(--s5);
-  max-width: 40rem;
+  max-width: 820px;
 }
 
 .eb-meta {
@@ -213,10 +213,12 @@
 }
 
 .eb-lede {
-  font-size: 1.2rem;
+  font-size: 21px;
   color: var(--muted);
   margin: 0;
-  line-height: 1.5;
+  line-height: 1.45;
+  letter-spacing: -0.011em;
+  max-width: 46ch;
 }
 
 .eb-hero {
@@ -231,7 +233,6 @@
   width: 100%;
   height: auto;
   display: block;
-  vertical-align: middle;
 }
 
 .eb-hero figcaption,
@@ -249,32 +250,24 @@
   border-top: 1px solid var(--hair);
   font-size: 0.875rem;
   color: var(--ghost);
-  max-width: 40rem;
+  max-width: 820px;
 }
 
-/* Reading measure for prose only — media full-bleed within shell */
+/* One text column at 820px — do not re-narrow children with rem caps. */
 .eb-prose {
-  font-size: 1.0625rem;
-  line-height: 1.65;
+  max-width: 820px;
+  font-size: 17px;
+  line-height: 1.55;
 }
 
 .eb-prose > :first-child {
   margin-top: 0;
 }
 
-.eb-prose > p,
-.eb-prose > ul,
-.eb-prose > ol,
-.eb-prose > h2,
-.eb-prose > h3,
-.eb-prose > aside,
-.eb-prose > .eb-cta-row,
-.eb-prose > .eb-steps {
-  max-width: 40rem;
-}
-
+/* Product shots can break out of the text column to the shell edge. */
 .eb-prose > figure.eb-shot {
   max-width: none;
+  width: min(1060px - 64px, 100vw - 64px);
   margin-left: 0;
   margin-right: 0;
 }
@@ -285,7 +278,7 @@
   font-weight: 600;
   letter-spacing: -0.015em;
   margin: var(--s6) 0 var(--s3);
-  max-width: 40rem;
+  max-width: none;
   line-height: 1.25;
 }
 
@@ -301,6 +294,7 @@
 .eb-prose ul,
 .eb-prose ol {
   margin: 0 0 var(--s4);
+  max-width: none;
 }
 
 .eb-prose li + li {
@@ -325,7 +319,7 @@
   overflow-x: auto;
   font-size: 0.875rem;
   line-height: 1.5;
-  max-width: 40rem;
+  max-width: none;
 }
 
 .eb-prose pre code {
