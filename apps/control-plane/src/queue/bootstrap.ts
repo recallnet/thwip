@@ -10,7 +10,6 @@ import {
   nativeMergeQueueRuleset,
   nextBootstrapStep,
   policyRuleset,
-  OWNERSHIP_RULESET_NAME,
   POLICY_RULESET_NAME,
   type Backend,
   type BootstrapProgress,
@@ -697,5 +696,3 @@ export function bootstrapGitHub(
     },
   };
 }
-
-export { OWNERSHIP_RULESET_NAME, POLICY_RULESET_NAME };

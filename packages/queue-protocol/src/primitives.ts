@@ -40,7 +40,6 @@ export const BOUNDS = {
 export const DECIMAL_RE = /^[0-9]+$/;
 export const OID_RE = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 export const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
-export const SUITE_NAME_RE = /^[a-z0-9][a-z0-9_.-]*$/;
 export const REASON_CODE_RE = /^[A-Z][A-Z0-9_]*$/;
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
@@ -73,6 +72,7 @@ export function opaqueId(v: unknown, name: string): ParseResult<string> {
   return boundedString(v, name, BOUNDS.opaqueId);
 }
 
+/** GitHub ids are never JavaScript numbers on the wire (§21.1). */
 export function decimalId(v: unknown, name: string): ParseResult<DecimalId> {
   if (typeof v !== "string" || !DECIMAL_RE.test(v)) return fail(`${name} must be decimal digits`);
   if (v.length > BOUNDS.decimalId) return fail(`${name} exceeds ${BOUNDS.decimalId} digits`);
@@ -121,13 +121,6 @@ export function positiveCounter(v: unknown, name: string): ParseResult<number> {
   if (!n.ok) return n;
   if (n.value === 0) return fail(`${name} must be positive`);
   return n;
-}
-
-/** GitHub ids are never JavaScript numbers on the wire (§21.1). */
-export function bigintString(v: unknown, name: string): ParseResult<string> {
-  const id = decimalId(v, name);
-  if (!id.ok) return id;
-  return ok(id.value);
 }
 
 export function reasonText(v: unknown, name: string): ParseResult<string> {

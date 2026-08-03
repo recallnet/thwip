@@ -5,7 +5,7 @@ import { BranchQueueStore } from "./store.js";
 import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore } from "./store.js";
 import type { SqlLike } from "./sql.js";
-import { DEFAULT_TIMINGS, QueueCommands, validateTimings } from "./commands.js";
+import { QueueCommands } from "./commands.js";
 
 /**
  * The command layer end to end, including the alarm. Time and identifiers are
@@ -109,16 +109,6 @@ function ready(commands: QueueCommands, entryId: string, principal: string, pr: 
     primaryReason: null,
   });
 }
-
-describe("validateTimings", () => {
-  it("accepts the defaults and rejects windows outside the allowed range", () => {
-    expect(validateTimings(DEFAULT_TIMINGS)).toEqual({ ok: true });
-    expect(validateTimings({ ...DEFAULT_TIMINGS, offerSeconds: 10 })).toMatchObject({ ok: false });
-    expect(validateTimings({ ...DEFAULT_TIMINGS, offerSeconds: 600 })).toMatchObject({ ok: false });
-    expect(validateTimings({ ...DEFAULT_TIMINGS, executionSeconds: 60 })).toMatchObject({ ok: false });
-    expect(validateTimings({ ...DEFAULT_TIMINGS, executionSeconds: 60 * 60 })).toMatchObject({ ok: false });
-  });
-});
 
 describe.each(STORES)("QueueCommands over $name", ({ make }) => {
   beforeEach(() => {

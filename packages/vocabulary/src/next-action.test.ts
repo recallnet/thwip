@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { BLOCKING_REASONS } from "@thwip/queue-domain";
 import { REASON_CODES } from "@thwip/protocol";
 import { NEXT_ACTION, SURFACES, SURFACE_NEXT_ACTION, nextActionFor } from "./next-action.js";
-import { isReasonCode, reasonCodes } from "./reason-codes.js";
+import { isReasonCode } from "./reason-codes.js";
+import { reasonCodes } from "./test/reason-codes.js";
 
 /**
  * The table is a `Record` over a closed union, so a code without a sentence

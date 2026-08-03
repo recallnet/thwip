@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -120,21 +120,4 @@ export async function runDaggerSuites(args: {
     results.push({ id, status: code === 0 ? "passed" : "failed", durationMs: Date.now() - started });
   }
   return results;
-}
-
-/** Read the module digest so the policy can pin exactly what ran. */
-export async function moduleDigest(cwd: string, modulePath: string): Promise<string> {
-  const { readdir, stat } = await import("node:fs/promises");
-  const hash = createHash("sha256");
-  const walk = async (dir: string): Promise<void> => {
-    for (const entry of (await readdir(dir)).sort()) {
-      if (entry === "node_modules" || entry === ".git" || entry === "sdk") continue;
-      const full = join(dir, entry);
-      const s = await stat(full);
-      if (s.isDirectory()) await walk(full);
-      else hash.update(entry).update(await readFile(full));
-    }
-  };
-  await walk(join(cwd, modulePath));
-  return `sha256:${hash.digest("hex")}`;
 }

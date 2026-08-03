@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EXIT, exitCodeFor, humanSummary, isRetryable, knownReasonCodes } from "./queue-exit.js";
+import { LOCAL_REASONS, SERVICE_REASONS } from "@thwip/vocabulary";
+import { EXIT, exitCodeFor, humanSummary, isRetryable, nextActionFor } from "./queue-exit.js";
 import { reactToReason } from "./ship.js";
 
 /**
@@ -7,39 +8,21 @@ import { reactToReason } from "./ship.js";
  * behaviour. See .superpowers/sdd/stress-test-report.md.
  *
  * The queue's authorize endpoint answers with a `reason` string. The CLI turns
- * that string into an exit code and a sentence. Every reason below is one the
- * service really returns, taken from apps/control-plane/src/queue/routes.ts and
- * candidate-verdict.ts.
+ * that string into an exit code and a sentence. The reasons come from
+ * @thwip/vocabulary's SERVICE_REASONS, which declares what
+ * apps/control-plane/src/queue/routes.ts and candidate-verdict.ts put on the wire.
  */
 
-/** Reasons apps/control-plane/src/queue/routes.ts can put on the wire. */
-const SERVICE_REASONS = [
-  "DEVICE_ONLY",
-  "QUEUE_NOT_CONFIGURED",
-  "NO_PINNED_VERIFIER",
-  "DISPATCH_FAILED",
-  "CANDIDATE_DISPATCH_FAILED",
-  "MERGE_EVIDENCE_INCOMPLETE",
-  "MERGE_INTENT_INVALID",
-  "WORK_RECEIPT_UNREADABLE",
-  // decideCandidate refusals, forwarded verbatim as `reason: decision.code`.
-  "CANDIDATE_NOT_VERIFIED",
-  "CANDIDATE_TREE_MISMATCH",
-  "CANDIDATE_BASE_MOVED",
-  "CANDIDATE_REJECTED",
-  "CANDIDATE_DIGEST_MISMATCH",
-  "CANDIDATE_POLICY_MISMATCH",
-  "CANDIDATE_SUITE_NOT_PASSED",
-  "CANDIDATE_SUITES_INCOMPLETE",
-  "CANDIDATE_VERIFIER_NOT_PINNED",
-];
+/** What nextActionFor answers for a code the CLI has no class for. */
+const UNRECOGNIZED = /does not know the reason code/;
 
 describe("ADVERSARIAL: what the CLI makes of the answers the service gives", () => {
   it("classifies every reason the queue can return", () => {
     // An unmapped reason falls to exit 50, "an invariant disagreed; this needs a
-    // human, not a retry". Most of these are ordinary, actionable answers.
-    const known = new Set(knownReasonCodes());
-    const unmapped = SERVICE_REASONS.filter((reason) => !known.has(reason));
+    // human, not a retry". Most of these are ordinary, actionable answers. The
+    // wire vocabulary is read from @thwip/vocabulary, so a code the control plane
+    // adds shows up here without anyone copying it.
+    const unmapped = SERVICE_REASONS.filter((reason) => UNRECOGNIZED.test(nextActionFor(reason)));
     expect(unmapped, `the CLI has no class for: ${unmapped.join(", ")}`).toEqual([]);
   });
 
@@ -94,7 +77,7 @@ describe("ADVERSARIAL: what the CLI makes of the answers the service gives", () 
 
 describe("ADVERSARIAL: CLI classification that already holds", () => {
   it("never maps a refusal to success", () => {
-    for (const reason of knownReasonCodes()) {
+    for (const reason of [...SERVICE_REASONS, ...LOCAL_REASONS]) {
       if (reason === "PASS") continue;
       expect(exitCodeFor(reason)).not.toBe(EXIT.ok);
     }

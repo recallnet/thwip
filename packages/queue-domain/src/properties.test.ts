@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { applyEvent, applyEvents, emptyState, QueueRuleViolation, type BranchQueueState } from "./reducer.js";
+import { applyEvent, emptyState, QueueRuleViolation, type BranchQueueState } from "./reducer.js";
+import { applyEvents } from "./test/apply-events.js";
 import { checkInvariants } from "./invariants.js";
 import { selectNext, type EligibleEntry } from "./scheduler.js";
 import type { QueueEvent } from "./events.js";

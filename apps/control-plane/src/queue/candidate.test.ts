@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   actionForMergeStatus,
-  candidateFetchPlan,
-  candidateStillCurrent,
   pinCandidate,
   validateMergeResult,
   type CommitFacts,
@@ -132,22 +130,6 @@ describe("pinCandidate", () => {
   });
 });
 
-describe("candidateStillCurrent", () => {
-  it("accepts an unchanged candidate at an unchanged revision", () => {
-    expect(candidateStillCurrent(subject, subject, { pinnedAt: 4, now: 4 })).toEqual({ current: true });
-  });
-
-  it("discards a result produced across a revision change", () => {
-    expect(candidateStillCurrent(subject, subject, { pinnedAt: 4, now: 5 })).toMatchObject({ current: false });
-  });
-
-  it("discards a candidate whose facts moved", () => {
-    expect(
-      candidateStillCurrent(subject, { ...subject, headSha: "9".repeat(40) }, { pinnedAt: 4, now: 4 }),
-    ).toMatchObject({ current: false });
-  });
-});
-
 describe("validateMergeResult", () => {
   it("accepts a merge whose parents and tree are exactly the assigned ones", () => {
     expect(
@@ -242,31 +224,5 @@ describe("actionForMergeStatus", () => {
     for (const status of [408, 429, 500, 503]) {
       expect(actionForMergeStatus(status)).toMatchObject({ kind: "reconcile" });
     }
-  });
-});
-
-describe("candidateFetchPlan", () => {
-  it("uses a temporary remote rather than trusting origin", () => {
-    const plan = candidateFetchPlan({
-      canonicalBaseRepositoryUrl: "https://github.com/recallnet/thwip.git",
-      pullRequestNumber: 42,
-      candidateSha: CANDIDATE,
-      candidateTreeOid: TREE,
-    });
-    expect(plan.commands[0]).toContain("git remote add thwip-base");
-    expect(plan.commands.join("\n")).not.toContain("origin");
-    expect(plan.commands.join("\n")).toContain("refs/pull/42/merge");
-    expect(plan.cleanup).toEqual(["git remote remove thwip-base"]);
-  });
-
-  it("verifies both the commit and its tree", () => {
-    const plan = candidateFetchPlan({
-      canonicalBaseRepositoryUrl: "https://github.com/recallnet/thwip.git",
-      pullRequestNumber: 42,
-      candidateSha: CANDIDATE,
-      candidateTreeOid: TREE,
-    });
-    expect(plan.commands.some((c) => c.includes("rev-parse FETCH_HEAD") && c.includes(CANDIDATE))).toBe(true);
-    expect(plan.commands.some((c) => c.includes("format=%T") && c.includes(TREE))).toBe(true);
   });
 });

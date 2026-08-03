@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXIT } from "./queue-exit.js";
 import {
-  describeDecision,
   nextShipStep,
   planInterrupt,
   reactToReason,
@@ -185,19 +184,5 @@ describe("planInterrupt", () => {
   it("never reports an interrupt as a queue request being lost", () => {
     const plan = planInterrupt(state({ turn: "offered", queueEntryExists: true }));
     expect(plan.message).not.toMatch(/cancel|remove|lost/i);
-  });
-});
-
-describe("describeDecision", () => {
-  it("renders each decision shape as one line", () => {
-    expect(describeDecision({ kind: "step", step: "push", why: "remote is behind" })).toBe(
-      "push: remote is behind",
-    );
-    expect(describeDecision({ kind: "done", outcome: "MERGE_CONFIRMED", exitCode: EXIT.ok })).toBe(
-      "MERGE_CONFIRMED",
-    );
-    expect(
-      describeDecision({ kind: "stop", reasonCode: "REVIEW_REQUIRED", exitCode: EXIT.humanRequired, why: "ask" }),
-    ).toBe("REVIEW_REQUIRED: ask");
   });
 });

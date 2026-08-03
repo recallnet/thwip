@@ -23,13 +23,14 @@ the deviation and the reason are recorded here.
 
 ## Execution
 
-- **Command runner instead of Dagger.** Dagger is not installed on this
-  machine and global tooling is nix-managed. The CLI freezes the exact Git
-  subject, verifies the committed `thwip.pipeline.json` against the
-  policy-approved digest, runs the suites, and refuses to sign if the bound
-  tree changed during the run (FR-009). Swapping the command runner for
-  Dagger changes only `packages/cli/src/pipeline.ts` and the policy digest
-  material.
+- **Two runners, both wired.** `deriveProjectConfig` reads `thwip.yaml` and
+  picks `dagger` when the project names a `pipeline.module`, otherwise
+  `command`. The pipeline is derived in process and its digest is part of the
+  policy; nothing reads a committed `thwip.pipeline.json`. `main.ts` lazy-loads
+  `packages/cli/src/dagger.ts` for the `dagger` runner, which provisions the
+  pinned engine into its own cache and checks the download against the
+  published checksum. Either way the CLI freezes the exact Git subject and
+  refuses to sign if the bound tree changed during the run (FR-009).
 - **Exact-source freezing uses the clean-tree invariant** (refuse dirty tree,
   re-check tree OID before and after the run) instead of materializing a
   separate read-only worktree. Untracked files are permitted but cannot be
