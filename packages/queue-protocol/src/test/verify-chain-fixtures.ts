@@ -111,7 +111,7 @@ export function intactLinks(): ChainLink[] {
  * 105 merged as `a1fe3e7` and wrote no record. Record 52 left the base at
  * `7059839`; record 53 says it began at `a1fe3e7`. Sequence numbers are
  * handed out per recorded transition, so the unrecorded merge leaves no hole
- * there — only the base moves, and that is what `BASE_DISCONTINUITY` catches.
+ * there. Only the base moves, and that is what `BASE_DISCONTINUITY` catches.
  */
 const GAP: readonly ChainLink[] = await (async () => {
   const fiftyTwoBefore = "797c695e4f7965b5592802a4e513fbd9e5982fa2";

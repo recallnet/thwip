@@ -109,9 +109,10 @@ export async function tickAllQueues(
 
   // The queue's own chain, checked the way an outside verifier checks it: read
   // the links this tick already has a D1 connection for, and verify each
-  // signature against the keys this service has itself published. No network
-  // call — `verificationKeys` reads the same table `/.well-known/thwip-keys`
-  // serves from. A queue with no attestations yet reads an empty chain and
+  // signature against the keys this service has itself published. Nothing here
+  // touches the network, because `verificationKeys` reads the same table
+  // `/.well-known/thwip-keys` serves from. A queue with no attestations reads an
+  // empty chain and
   // never calls `verifyChainSignature` at all, so an isolate that has not
   // signed anything does not need the key published before its first tick.
   const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
