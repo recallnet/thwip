@@ -1,0 +1,30 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+
+  "include": ["files", "dependencies", "unlisted", "binaries", "unresolved"],
+  "exclude": ["exports", "types", "nsExports", "nsTypes", "enumMembers", "duplicates"],
+
+  "ignoreDependencies": ["cloudflare"],
+  "ignoreBinaries": ["wrangler"],
+
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"],
+      "project": ["scripts/**/*.mjs"]
+    },
+    "apps/control-plane": {
+      "entry": [
+        "src/index.ts",
+        "src/**/*.test.ts",
+        "src/**/*.workers.test.ts",
+        "test/**/*.ts",
+        "web/src/**/*.test.ts"
+      ],
+      "project": ["src/**/*.ts", "web/src/**/*.{ts,tsx}"]
+    },
+    "packages/*": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.{ts,tsx}"]
+    }
+  }
+}
