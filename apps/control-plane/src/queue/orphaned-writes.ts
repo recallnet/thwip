@@ -28,11 +28,17 @@ export const ORPHANED_WRITE_GRACE_MS = 10 * 60 * 1000;
  *
  * Settling one write costs a pull request read and a base comparison per
  * confirmation round, plus the commit reads that build the record, and every one
- * of those is a Worker subrequest. This account stays inside the free tier on
- * purpose, where the per-invocation subrequest budget is small enough that an
- * unbounded sweep over a backlog would blow it and fail the whole tick, taking
- * the clock and the lane driving down with it. Five leaves headroom for the rest
- * of the tick, and the cron comes back in five minutes for the next five.
+ * of those is a Worker subrequest, and `githubJson` mints an installation token
+ * per call, so each read costs two. A row GitHub cannot answer runs the full
+ * three-round backoff and costs about fourteen. This account stays inside the
+ * free tier on purpose, and an unbounded sweep over a backlog would exhaust the
+ * per-invocation budget and fail the whole tick.
+ *
+ * Five does not guarantee the tick fits. Five unreadable rows across several
+ * queues can still run the budget out, and the honest reason that is survivable
+ * is ordering rather than arithmetic: the sweep runs after the lane is driven,
+ * so a tick that dies here has already done the work a queue stops without, and
+ * the rows wait for the next cron.
  */
 export const ORPHANED_WRITE_SWEEP_LIMIT = 5;
 

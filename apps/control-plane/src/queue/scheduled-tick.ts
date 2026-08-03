@@ -298,9 +298,21 @@ async function sweepOrphanedWrites(
         ),
       ...(reads.sleep === undefined ? {} : { sleep: reads.sleep }),
     });
-    if (outcome.settled !== "unknown") settled += 1;
     // Said out loud on the channel this account watches. Something repairing
     // the chain silently is worse than the gap it closes.
+    //
+    // A write the sweep could not settle says so once and then stays quiet. It
+    // comes back every five minutes until somebody resolves it, and a line per
+    // row per tick would bury the settlements that matter under a standing
+    // report of the same unreadable row.
+    if (outcome.settled === "unknown") {
+      console.log(
+        `[queue heartbeat] orphaned merge write ${write.operationId} for repository ` +
+          `${row.repositoryId} is still unsettled: ${outcome.reason}`,
+      );
+      continue;
+    }
+    settled += 1;
     console.log(
       `[queue heartbeat] settled orphaned merge write ${write.operationId} for repository ` +
         `${row.repositoryId}: ${outcome.settled}`,
