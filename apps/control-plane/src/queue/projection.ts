@@ -221,26 +221,6 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
 }
 
 /**
- * Is the projection behind, and by how much? Surfaced so a reader can be told
- * "this may be up to N generations stale" rather than being quietly misled.
- */
-export async function projectionLag(
-  db: D1Like,
-  repositoryId: string,
-  baseRef: string,
-  liveGeneration: number,
-): Promise<{ projected: number; live: number; behind: number }> {
-  const row = await db
-    .prepare(
-      "SELECT generation FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ?",
-    )
-    .bind(repositoryId, baseRef)
-    .first<{ generation: number }>();
-  const projected = row?.generation ?? 0;
-  return { projected, live: liveGeneration, behind: Math.max(0, liveGeneration - projected) };
-}
-
-/**
  * Answer a queue read from the projection.
  *
  * Shaped exactly like the object's snapshot, so a caller cannot tell the two

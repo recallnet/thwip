@@ -108,17 +108,22 @@ export interface WithQueueStateOptions {
  *
  * `decide` may run more than once and must be safe to repeat, which for the queue
  * means every command it issues carries an idempotency key.
+ *
+ * It may be asynchronous, and it has to be: offering a turn writes the queue
+ * decision record the offer binds, and digesting and storing that record are
+ * both awaits. The result is awaited before the save, so a decision that has not
+ * finished cannot be committed as though it had.
  */
 export async function withQueueState<T>(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
-  decide: (store: SnapshotQueueStore) => T,
+  decide: (store: SnapshotQueueStore) => T | Promise<T>,
   options: WithQueueStateOptions = {},
 ): Promise<T> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const loaded = await loadQueueState(db, repositoryId, baseRef);
-    const result = decide(loaded.store);
+    const result = await decide(loaded.store);
     if (options.beforeSave !== undefined) await options.beforeSave();
     const outcome = await loaded.save();
     if (outcome !== "conflict") return result;

@@ -2,12 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import {
-  APP_MANIFEST_EVENTS,
-  HANDLED_WEBHOOK_EVENTS,
-  INTERNAL_QUEUE_EVENTS,
-  webhookEventDrift,
-} from "./github-events.js";
+import { APP_MANIFEST_EVENTS, HANDLED_WEBHOOK_EVENTS, webhookEventDrift } from "./github-events.js";
 
 /**
  * What the App is subscribed to, against what the code handles.
@@ -25,6 +20,17 @@ import {
 
 const source = (name: string): string =>
   readFileSync(fileURLToPath(new URL(name, import.meta.url)), "utf8");
+
+/**
+ * Events the control plane mints for itself and puts on its own queue. GitHub
+ * never sends these, so they are not part of any subscription and must not be
+ * mistaken for a handler with nothing behind it.
+ *
+ * Declared here rather than beside `HANDLED_WEBHOOK_EVENTS` because this file
+ * is the only thing that needs both lists, and the source file then describes
+ * exactly one thing: what the App subscribes to.
+ */
+const INTERNAL_QUEUE_EVENTS = ["policy_reconcile", "proof_reconcile"] as const;
 
 /**
  * Every webhook event the code branches on, read out of the code itself.

@@ -1,4 +1,4 @@
-import { BLOCKING_REASONS, isCapabilityReason, type BlockingReason } from "@thwip/queue-domain";
+import type { BlockingReason } from "@thwip/queue-domain";
 
 /**
  * Deriving readiness (plan.md §7.1).
@@ -232,21 +232,67 @@ export function deriveReadiness(facts: ReadinessFacts): Readiness {
   };
 }
 
-/**
- * A readiness result is only useful if its reason is one the check and the
- * dashboard know how to explain. This guards against a typo becoming a bare code
- * in front of a developer.
- */
-export function isKnownReason(reason: string): reason is BlockingReason {
-  return (BLOCKING_REASONS as readonly string[]).includes(reason);
+/** What a branch requires of a head, and what the head says about it. */
+export interface RequiredCheckFacts {
+  /** Contexts a `required_status_checks` rule names for this branch. */
+  readonly required: readonly string[];
+  /** The latest run per name on the head. */
+  readonly runs: readonly {
+    readonly name: string;
+    readonly status: string;
+    readonly conclusion: string | null;
+  }[];
 }
 
-/** True when the only thing standing in the way is an absent machine. */
-export function blockedOnlyByCapability(readiness: Readiness): boolean {
-  return (
-    readiness.ready &&
-    !readiness.schedulerEligible &&
-    readiness.primaryReason !== null &&
-    isCapabilityReason(readiness.primaryReason)
-  );
+/**
+ * Conclusions GitHub counts as satisfying a required status check.
+ *
+ * Restated here rather than imported from `github-port.ts`, which is the HTTP
+ * port and would drag fetch-shaped code into a pure derivation.
+ * `required-checks-before-merge.test.ts` asserts the two readings agree on
+ * every conclusion, so they cannot drift.
+ */
+const SATISFYING = new Set(["success", "neutral", "skipped"]);
+
+/** A context this queue publishes itself: `thwip` and everything under it. */
+function ownCheck(context: string): boolean {
+  return context === "thwip" || context.startsWith("thwip / ");
+}
+
+/**
+ * `nonThwipChecks`, from the branch rules and the runs on the head.
+ *
+ * This fact had no writer. Every caller of `deriveReadiness` spread
+ * `NO_OBJECTION`, whose default is `"passing"`, so `REQUIRED_CHECK_FAILED` and
+ * `REQUIRED_CHECK_PENDING` could not be produced by the derivation at all: a
+ * pull request whose CI had gone red read as ready, took a turn, ran it on a
+ * developer's machine, and the walk to the merge refused it on the same fact
+ * that was readable before the offer.
+ *
+ * The queue's own checks are skipped, which is what the name says. `thwip /
+ * turn` is required on the branch and published by the queue from the outcome
+ * of this derivation, so counting it would wire readiness to itself: pending
+ * turn check, unready entry, no offer, no turn check.
+ *
+ * A required context with no run at all is left as passing. `A required check
+ * is still running` would be a false statement about a context nothing has
+ * started, and the merge gate already refuses that case by name, on the same
+ * GitHub answer, a moment before the write.
+ */
+export function nonThwipCheckState(facts: RequiredCheckFacts): "passing" | "pending" | "failing" {
+  let pending = false;
+  for (const context of facts.required) {
+    if (ownCheck(context)) continue;
+    const runs = facts.runs.filter((run) => run.name === context);
+    if (runs.length === 0) continue;
+    if (runs.some((run) => run.status === "completed" && SATISFYING.has(run.conclusion ?? ""))) continue;
+    // Still running may yet pass, so it waits rather than refuses. A failure is
+    // reported ahead of it because it is the one a developer can act on.
+    if (runs.some((run) => run.status !== "completed")) {
+      pending = true;
+      continue;
+    }
+    return "failing";
+  }
+  return pending ? "pending" : "passing";
 }

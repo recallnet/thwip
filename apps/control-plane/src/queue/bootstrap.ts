@@ -112,9 +112,25 @@ export interface BootstrapDeps {
   };
 }
 
+/**
+ * `pullRequestNumber` is carried rather than left in `detail` because a caller
+ * needs to link to the pull request a person has to merge. The dashboard read it
+ * back out of the prose with a regular expression, which breaks silently the day
+ * the sentence is reworded.
+ */
 export type StepOutcome =
-  | { readonly kind: "advanced"; readonly step: BootstrapStep; readonly detail: string }
-  | { readonly kind: "waiting"; readonly step: BootstrapStep; readonly detail: string }
+  | {
+      readonly kind: "advanced";
+      readonly step: BootstrapStep;
+      readonly detail: string;
+      readonly pullRequestNumber?: number;
+    }
+  | {
+      readonly kind: "waiting";
+      readonly step: BootstrapStep;
+      readonly detail: string;
+      readonly pullRequestNumber?: number;
+    }
   | { readonly kind: "refused"; readonly step: BootstrapStep; readonly detail: string }
   | { readonly kind: "complete" };
 
@@ -377,12 +393,23 @@ async function performStep(
           kind: "waiting",
           step,
           detail: `opened the setup pull request #${opened.number}; merge it to continue`,
+          pullRequestNumber: opened.number,
         };
       }
       if (!open.merged) {
-        return { kind: "waiting", step, detail: `setup pull request #${open.number} is not merged` };
+        return {
+          kind: "waiting",
+          step,
+          detail: `setup pull request #${open.number} is not merged`,
+          pullRequestNumber: open.number,
+        };
       }
-      return { kind: "advanced", step, detail: `setup pull request #${open.number} merged` };
+      return {
+        kind: "advanced",
+        step,
+        detail: `setup pull request #${open.number} merged`,
+        pullRequestNumber: open.number,
+      };
     }
 
     case "create-disabled-policy-without-source":

@@ -16,7 +16,6 @@
  * grows before this file does still reads as words.
  */
 
-import { BLOCKING_REASONS, type BlockingReason } from "@thwip/queue-domain";
 import type { ReasonCode as ProtocolReasonCode } from "@thwip/protocol";
 import { isReasonCode, nextActionFor } from "@thwip/vocabulary";
 
@@ -156,16 +155,6 @@ export function entryStateTone(state: string, blocked: boolean): Tone {
 }
 
 /* ---------- queue blocking reasons ---------- */
-
-/**
- * The guidance the check and the CLI publish, read from the one table all three
- * import. It was copied here by hand and shortened, and the copies disagreed:
- * a turn that ended for a reason outside the branch was reported here in words
- * the terminal never used.
- */
-export const BLOCKED_NEXT_ACTION: Record<BlockingReason, string> = Object.fromEntries(
-  BLOCKING_REASONS.map((reason) => [reason, nextActionFor(reason, "dashboard")]),
-) as Record<BlockingReason, string>;
 
 /**
  * A reason with no written guidance is still not allowed to arrive as a code.

@@ -177,6 +177,244 @@ export function collect(f: Facts): boolean {
   });
 });
 
+const GATES = `export interface Gates {
+  readonly reviewed: boolean;
+  readonly draft: boolean;
+  readonly baseRef: string;
+  readonly mergeable: boolean;
+}
+`;
+
+describe("rule 3, a branch on a value that never varies", () => {
+  it("reports a negated guard on a field only ever written true", () => {
+    // The live case. `reviewsSatisfied`, `codeOwnerReviewSatisfied` and
+    // `approvalAfterPushSatisfied` were true in `NO_OBJECTION` and nowhere
+    // else, so the queue reported reviews as satisfied without reading a
+    // single review and REVIEW_REQUIRED never once reached a developer.
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function collect(g: Gates): string[] {
+  const out: string[] = [];
+  if (!g.reviewed) out.push("REVIEW_REQUIRED");
+  return out;
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:5 reviewed"]);
+  });
+
+  it("reports a negated operand of an && chain", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function blocked(g: Gates, urgent: boolean): boolean {
+  return !g.reviewed && urgent;
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 reviewed"]);
+  });
+
+  it("reports an operand of an || chain", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function allowed(g: Gates, admin: boolean): boolean {
+  return g.reviewed || admin;
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 reviewed"]);
+  });
+
+  it("reports a plain guard on a field only ever written false", () => {
+    const dir = fixture({
+      "gates.ts": `export interface Gates {
+  readonly paused: boolean;
+  readonly draft: boolean;
+  readonly baseRef: string;
+  readonly mergeable: boolean;
+}
+`,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { paused: false, draft: false, baseRef: "", mergeable: true };
+export function collect(g: Gates): string[] {
+  const out: string[] = [];
+  if (g.paused) out.push("QUEUE_PAUSED");
+  return out;
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:5 paused"]);
+  });
+
+  it("reports a ternary with an unreachable arm", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function label(g: Gates): string {
+  return g.reviewed ? "ok" : "needs review";
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 reviewed"]);
+  });
+
+  it("reports the negated condition of a ternary", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function label(g: Gates): string {
+  return !g.reviewed ? "needs review" : "ok";
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 reviewed"]);
+  });
+
+  it("says nothing when a caller overrides the permissive default", () => {
+    // A default object exists to be spread over. The override is a write, and
+    // a field two call sites disagree about decides a branch.
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function fromApi(approvals: number): Gates {
+  return { ...DEFAULTS, reviewed: false };
+}
+export function collect(g: Gates): boolean {
+  return !g.reviewed;
+}
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("leaves an optional boolean alone", () => {
+    // Absence is falsy whatever the writes say, so the guard stays live.
+    const dir = fixture({
+      "gates.ts": `export interface Gates {
+  readonly reviewed?: boolean;
+  readonly draft: boolean;
+  readonly baseRef: string;
+  readonly mergeable: boolean;
+}
+`,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function collect(g: Gates): boolean {
+  return !g.reviewed;
+}
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("does not count a test as a writer, and does not report a test's guard", () => {
+    // A suite that hand-builds the false case is what let all three review
+    // gates ship. The finding must survive it, and must point at production.
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function collect(g: Gates): boolean {
+  return !g.reviewed;
+}
+`,
+      "derive.test.ts": `import { DEFAULTS, collect } from "./derive.js";
+collect({ ...DEFAULTS, reviewed: false });
+if (!DEFAULTS.reviewed) throw new Error("x");
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 reviewed"]);
+  });
+
+  it("says nothing about a field written only by a test", () => {
+    // Nothing in production writes it, so rule 1 owns the case. Rule 3 must
+    // not add a second finding off a write set of one test-written value.
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export function collect(g: Gates): boolean {
+  return !g.reviewed;
+}
+`,
+      "derive.test.ts": `import { collect } from "./derive.js";
+collect({ reviewed: true, draft: false, baseRef: "", mergeable: true });
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("says nothing when a write is a value it cannot read", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+declare const computed: boolean;
+export const DEFAULTS: Gates = { reviewed: computed, draft: false, baseRef: "", mergeable: true };
+export function collect(g: Gates): boolean {
+  return !g.reviewed;
+}
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("reports a guard on a digest that is null everywhere it is set", () => {
+    const dir = fixture({
+      "gates.ts": `export interface Gates {
+  readonly digest: string | null;
+  readonly draft: boolean;
+  readonly baseRef: string;
+  readonly mergeable: boolean;
+}
+`,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { digest: null, draft: false, baseRef: "", mergeable: true };
+export function changed(g: Gates): string {
+  return g.digest ? "changed" : "same";
+}
+`,
+    });
+    expect(found(dir)).toEqual(["derive.ts:4 digest"]);
+  });
+
+  it("declines a string write set", () => {
+    // The empty string is a value code writes on purpose. Reading it as false
+    // would be this check guessing, and a wrong rule 3 is worse than a narrow
+    // one.
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function managed(g: Gates): boolean {
+  return !g.baseRef;
+}
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("says nothing when a read is not a branch", () => {
+    const dir = fixture({
+      "gates.ts": GATES,
+      "derive.ts": `import type { Gates } from "./gates.js";
+export const DEFAULTS: Gates = { reviewed: true, draft: false, baseRef: "", mergeable: true };
+export function report(g: Gates): boolean {
+  return g.reviewed;
+}
+`,
+    });
+    expect(found(dir)).toEqual([]);
+  });
+});
+
 describe("rule 1, a field nothing writes", () => {
   it("reports a required field left out of the shape that builds it", () => {
     const dir = fixture({

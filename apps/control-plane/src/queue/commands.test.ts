@@ -115,45 +115,45 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     makeStore = make;
   });
 
-  it("reports noop when nothing is eligible", () => {
+  it("reports noop when nothing is eligible", async () => {
     const { commands } = harness();
-    expect(commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" })).toMatchObject({
+    expect(await commands.tick({ idempotencyKey: "t1"})).toMatchObject({
       status: "noop",
     });
   });
 
-  it("offers a turn, sets the offer deadline, and queues an outbox item", () => {
+  it("offers a turn, sets the offer deadline, and queues an outbox item", async () => {
     const { store, commands } = harness();
     ready(commands, "e1", "alice", 7);
-    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+    const offered = await commands.tick({ idempotencyKey: "t1"});
     expect(offered.status).toBe("applied");
     expect(store.earliestDeadline()).toBe("2026-07-29T12:01:30.000Z");
     expect(store.pendingOutbox().map((o) => o.kind)).toEqual(["offer-created"]);
   });
 
-  it("refuses a device claim with no device id", () => {
+  it("refuses a device claim with no device id", async () => {
     const { commands } = harness();
     ready(commands, "e1", "alice", 7);
-    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    const offered = await commands.tick({ idempotencyKey: "t1"}) as { attemptId: string };
     expect(
       commands.claim({ idempotencyKey: "c1", attemptId: offered.attemptId, executionMode: "device" }),
     ).toMatchObject({ status: "rejected" });
   });
 
-  it("lets the server claim its own turn for fast reuse", () => {
+  it("lets the server claim its own turn for fast reuse", async () => {
     const { store, commands } = harness();
     ready(commands, "e1", "alice", 7);
-    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    const offered = await commands.tick({ idempotencyKey: "t1"}) as { attemptId: string };
     expect(
       commands.claim({ idempotencyKey: "c1", attemptId: offered.attemptId, executionMode: "fast-reuse" }),
     ).toMatchObject({ status: "applied" });
     expect(store.pendingOutbox().map((o) => o.kind)).toEqual(["offer-created", "start-workflow"]);
   });
 
-  it("drives a full turn to a recorded transition", () => {
+  it("drives a full turn to a recorded transition", async () => {
     const { store, commands, clock } = harness();
     ready(commands, "e1", "alice", 7);
-    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+    const offered = await commands.tick({ idempotencyKey: "t1"}) as { attemptId: string };
     const attemptId = offered.attemptId;
 
     commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
@@ -211,14 +211,14 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
   });
 
   describe("the alarm", () => {
-    it("expires an unclaimed offer and keeps the entry's place", () => {
+    it("expires an unclaimed offer and keeps the entry's place", async () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
-      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      await commands.tick({ idempotencyKey: "t1"});
       const ordinal = store.state().entries.get("e1")!.fairnessOrdinal;
 
       clock.advance(120);
-      const first = commands.runAlarm();
+      const first = await commands.runAlarm();
       expect(first.handled.map((d) => d.kind)).toEqual(["offer"]);
       expect(first.results[0]).toMatchObject({ status: "applied" });
 
@@ -228,7 +228,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(store.state().activeAttemptId).toBeNull();
     });
 
-    it("offers the freed lane to the next entry, rather than waiting to be asked", () => {
+    it("offers the freed lane to the next entry, rather than waiting to be asked", async () => {
       // A repository sat stuck for hours exactly here: an offer expired, the lane
       // went free, four entries were Ready and eligible, and no turn was ever
       // offered because nothing ticked the scheduler again. In steady state an
@@ -236,12 +236,12 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
       ready(commands, "e2", "bob", 8);
-      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      await commands.tick({ idempotencyKey: "t1"});
       const firstHolder = store.state().activeAttemptId;
       expect(firstHolder).not.toBeNull();
 
       clock.advance(120);
-      commands.runAlarm();
+      await commands.runAlarm();
 
       const after = store.state();
       expect(after.activeAttemptId).not.toBeNull();
@@ -249,27 +249,27 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(checkInvariants(after)).toEqual([]);
     });
 
-    it("does not offer a lane that is still held", () => {
+    it("does not offer a lane that is still held", async () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
-      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      await commands.tick({ idempotencyKey: "t1"});
       const attemptId = store.state().activeAttemptId!;
       commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
 
       clock.advance(30);
-      commands.runAlarm();
+      await commands.runAlarm();
       expect(store.state().activeAttemptId).toBe(attemptId);
     });
 
-    it("is idempotent when delivered twice", () => {
+    it("is idempotent when delivered twice", async () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
-      commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+      await commands.tick({ idempotencyKey: "t1"});
       clock.advance(120);
 
-      const first = commands.runAlarm();
+      const first = await commands.runAlarm();
       const generationAfterFirst = store.generation();
-      const second = commands.runAlarm();
+      const second = await commands.runAlarm();
 
       expect(first.results[0]).toMatchObject({ status: "applied" });
       expect(second.handled).toEqual([]);
@@ -277,21 +277,21 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(checkInvariants(store.state())).toEqual([]);
     });
 
-    it("is idempotent when the same deadline is redelivered after a lost clear", () => {
+    it("is idempotent when the same deadline is redelivered after a lost clear", async () => {
       // The clear and the action commit together, but alarm delivery is
       // at-least-once and a crash can lose the clear. The second delivery must
       // recognise the action by its deadline-derived key, not by the absence of
       // the row.
       const { sql, store, commands, clock } = sqlHarness();
       ready(commands, "e1", "alice", 7);
-      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+      const offered = await commands.tick({ idempotencyKey: "t1"}) as {
         attemptId: string;
       };
       clock.advance(120);
 
       const due = store.dueDeadlines(clock.now());
       expect(due).toHaveLength(1);
-      const first = commands.runAlarm();
+      const first = await commands.runAlarm();
       expect(first.results[0]).toMatchObject({ status: "applied" });
       const generation = store.generation();
 
@@ -304,7 +304,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       );
       store.evict();
 
-      const second = commands.runAlarm();
+      const second = await commands.runAlarm();
       expect(second.handled).toHaveLength(1);
       expect(second.results[0]).toMatchObject({ status: "duplicate" });
       expect(store.generation()).toBe(generation);
@@ -312,10 +312,10 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(checkInvariants(store.state())).toEqual([]);
     });
 
-    it("supersedes an attempt whose reconnect grace ran out", () => {
+    it("supersedes an attempt whose reconnect grace ran out", async () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
-      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+      const offered = await commands.tick({ idempotencyKey: "t1"}) as {
         attemptId: string;
       };
       const attemptId = offered.attemptId;
@@ -338,19 +338,19 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(store.state().activeAttemptId).toBe(attemptId);
 
       clock.advance(61);
-      const alarm = commands.runAlarm();
+      const alarm = await commands.runAlarm();
       expect(alarm.handled.map((d) => d.kind)).toEqual(["grace"]);
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("SUPERSEDED");
       expect(store.state().entries.get("e1")!.state).toBe("Deferred");
       expect(store.state().activeAttemptId).toBeNull();
     });
 
-    it("converts a missing merge confirmation into an unknown outcome, never a retry", () => {
+    it("converts a missing merge confirmation into an unknown outcome, never a retry", async () => {
       const { store, commands, clock } = harness();
-      const attemptId = driveToMergeRequested(commands);
+      const attemptId = await driveToMergeRequested(commands);
 
       clock.advance(120);
-      const alarm = commands.runAlarm();
+      const alarm = await commands.runAlarm();
       expect(alarm.handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
       expect(store.state().entries.get("e1")!.state).toBe("Reconciling");
       expect(store.pendingOutbox().some((o) => o.kind === "reconcile-merge")).toBe(true);
@@ -358,10 +358,10 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(store.pendingOutbox().filter((o) => o.kind === "merge-write")).toHaveLength(1);
     });
 
-    it("reschedules to the next earliest deadline", () => {
+    it("reschedules to the next earliest deadline", async () => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
-      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+      const offered = await commands.tick({ idempotencyKey: "t1"}) as {
         attemptId: string;
       };
       commands.claim({
@@ -373,22 +373,22 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       // The offer deadline is gone; execution is now the earliest.
       expect(store.earliestDeadline()).toBe("2026-07-29T12:20:00.000Z");
       clock.advance(30);
-      expect(commands.runAlarm().nextAlarm).toBe("2026-07-29T12:20:00.000Z");
+      expect((await commands.runAlarm()).nextAlarm).toBe("2026-07-29T12:20:00.000Z");
     });
   });
 
   describe("the merge write guard", () => {
-    it("refuses a second write for the same operation", () => {
+    it("refuses a second write for the same operation", async () => {
       const { commands } = harness();
-      const attemptId = driveToMergeRequested(commands);
+      const attemptId = await driveToMergeRequested(commands);
       const again = commands.beginMergeWrite({ idempotencyKey: "m1b", attemptId, operationId: "op-x" });
       expect(again).toMatchObject({ status: "already-started" });
     });
 
-    it("refuses to start a write for an unpinned candidate", () => {
+    it("refuses to start a write for an unpinned candidate", async () => {
       const { commands } = harness();
       ready(commands, "e1", "alice", 7);
-      const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+      const offered = await commands.tick({ idempotencyKey: "t1"}) as {
         attemptId: string;
       };
       expect(
@@ -396,9 +396,9 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       ).toMatchObject({ status: "rejected" });
     });
 
-    it("resolves a proven non-merge without creating another operation", () => {
+    it("resolves a proven non-merge without creating another operation", async () => {
       const { store, commands } = harness();
-      const attemptId = driveToMergeRequested(commands);
+      const attemptId = await driveToMergeRequested(commands);
       commands.mergeOutcomeUnknown({ idempotencyKey: "u1", attemptId });
       commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("CONFIRMED_NOT_MERGED");
@@ -411,12 +411,12 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     });
   });
 
-  it("pauses on an external transition and demands a rebaseline before resuming", () => {
+  it("pauses on an external transition and demands a rebaseline before resuming", async () => {
     const { store, commands } = harness();
     ready(commands, "e1", "alice", 7);
     commands.observedExternalTransition({ idempotencyKey: "x1", observedBaseSha: "x".repeat(40) });
     expect(store.state().paused).toBe(true);
-    expect(commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" })).toMatchObject({
+    expect(await commands.tick({ idempotencyKey: "t1"})).toMatchObject({
       status: "noop",
     });
     expect(commands.resume({ idempotencyKey: "r1", actorPrincipalId: "admin" })).toMatchObject({
@@ -429,10 +429,10 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     expect(store.state().paused).toBe(false);
   });
 
-  it("bumps the attempt revision when a live attempt's readiness changes", () => {
+  it("bumps the attempt revision when a live attempt's readiness changes", async () => {
     const { store, commands } = harness();
     ready(commands, "e1", "alice", 7);
-    const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as {
+    const offered = await commands.tick({ idempotencyKey: "t1"}) as {
       attemptId: string;
     };
     commands.claim({
@@ -455,9 +455,9 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
 });
 
 /** Everything up to and including the merge write starting. */
-function driveToMergeRequested(commands: QueueCommands): string {
+async function driveToMergeRequested(commands: QueueCommands): Promise<string> {
   ready(commands, "e1", "alice", 7);
-  const offered = commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" }) as { attemptId: string };
+  const offered = await commands.tick({ idempotencyKey: "t1"}) as { attemptId: string };
   const attemptId = offered.attemptId;
   commands.claim({ idempotencyKey: "c1", attemptId, executionMode: "device", deviceId: "d1" });
   commands.candidatePrepared({
@@ -500,15 +500,15 @@ describe.each(STORES)("the alarm terminates, over $name", ({ make }) => {
     makeStore = make;
   });
 
-  it("never asks to be woken at a time that has already passed", () => {
+  it("never asks to be woken at a time that has already passed", async () => {
     const { store, commands, clock } = harness();
     ready(commands, "e1", "alice", 7);
     ready(commands, "e2", "bob", 8);
-    commands.tick({ idempotencyKey: "t1", decisionDigest: "sha256:d" });
+    await commands.tick({ idempotencyKey: "t1"});
 
     for (let i = 0; i < 5; i += 1) {
       clock.advance(600);
-      commands.runAlarm();
+      await commands.runAlarm();
       const next = store.earliestDeadline();
       if (next !== null) expect(next > clock.now()).toBe(true);
     }

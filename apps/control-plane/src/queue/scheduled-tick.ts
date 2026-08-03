@@ -1,6 +1,7 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
+import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
 import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
@@ -83,9 +84,17 @@ export async function tickAllQueues(
         deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
         deviceOnlyByRepo.set(row.repositoryId, deviceOnly);
       }
-      const swept = await withQueueState(db, row.repositoryId, row.baseRef, (store) => {
-        const commands = commandsFor(store);
-        commands.runAlarm();
+      const swept = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => {
+        const commands = commandsFor(
+          store,
+          undefined,
+          queueDecisionRecorder({
+            db,
+            bucket: env.EVIDENCE as unknown as R2Like | undefined,
+            repositoryId: row.repositoryId,
+          }),
+        );
+        await commands.runAlarm();
 
         // A runner that stopped heartbeating loses eligibility, never its
         // fairness ordinal: it must not block a Ready entry behind it, and it
@@ -120,10 +129,7 @@ export async function tickAllQueues(
         // scheduler refuses while the lane is busy or the queue is paused, and
         // a tick that offers nothing writes no event.
         if (store.state().activeAttemptId === null) {
-          commands.tick({
-            idempotencyKey: `settle:${store.generation()}`,
-            decisionDigest: `sha256:${"0".repeat(64)}`,
-          });
+          await commands.tick({ idempotencyKey: `settle:${store.generation()}` });
         }
         // Named inside the transaction the tick already runs, so discovering the
         // usual nothing costs no extra read. GitHub is only consulted for a

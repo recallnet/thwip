@@ -1,4 +1,6 @@
-import type { Sha256 } from "@thwip/queue-protocol";
+import { canonicalRecordBytes, envelopeDigest, type Sha256 } from "@thwip/queue-protocol";
+import type { DecisionRecorder } from "./commands.js";
+import type { D1Like } from "./projection.js";
 
 /**
  * Digest-addressed evidence storage (plan.md §39.4, §41).
@@ -146,4 +148,45 @@ export async function hasEvidence(
   },
 ): Promise<boolean> {
   return (await bucket.head(evidenceKey(input))) !== null;
+}
+
+/**
+ * Write the scheduling decision an offer is about to bind, and hand back its
+ * digest (plan.md §21.2).
+ *
+ * The digest is taken over the same canonical bytes that are stored, so the
+ * assignment a device checks names bytes a reader can fetch and hash for
+ * themselves. Where the deployment has no bucket the digest is still the digest
+ * of the real record; what is missing is the archive, not the explanation.
+ *
+ * A refused write throws. An offer whose decision was rejected by the store
+ * would name a record nobody can read, which is the defect this producer exists
+ * to end, one layer down.
+ */
+export function queueDecisionRecorder(input: {
+  readonly db: D1Like;
+  readonly bucket: R2Like | undefined;
+  readonly repositoryId: string;
+}): DecisionRecorder {
+  return async (decision) => {
+    const bytes = canonicalRecordBytes(decision);
+    const digest = await envelopeDigest(bytes);
+    if (input.bucket === undefined) return digest;
+    // Evidence is tenant-scoped, so a repository this deployment has no project
+    // row for has nowhere to put it.
+    const row = await input.db
+      .prepare("SELECT organization_id AS id FROM projects WHERE github_repository_id = ?")
+      .bind(input.repositoryId)
+      .first<{ id: string }>();
+    if (row === null) return digest;
+    const result = await putEvidence(input.bucket, {
+      organizationId: row.id,
+      repositoryId: input.repositoryId,
+      kind: "queue-decision",
+      digest,
+      bytes,
+    });
+    if (!result.stored) throw new Error(`queue decision ${digest} was refused by the store: ${result.reason}`);
+    return digest;
+  };
 }

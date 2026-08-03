@@ -18,10 +18,25 @@
  * written, and the tests pass, because a test builds the object by hand and
  * writes the value production never writes.
  *
- * Two rules:
+ * Three rules:
  *
  *   1. A declared property no shipping code writes, where shipping code reads it.
  *   2. A comparison against a literal no shipping code ever writes.
+ *   3. A branch on a property whose every write is the same boolean.
+ *
+ * Rule 3 is the one that arrived late, and it cost three gates. `reviewsSatisfied`,
+ * `codeOwnerReviewSatisfied` and `approvalAfterPushSatisfied` are true in
+ * `NO_OBJECTION` and written nowhere else, and they are read as `if
+ * (!facts.reviewsSatisfied)`. Rule 2 wants a literal on the other side of an
+ * operator and there is none, so it walked past a queue that reported reviews as
+ * satisfied without having read one.
+ *
+ * It is a rule of its own rather than a widening of rule 2 because the two find
+ * different things. Rule 2 answers "can this comparison ever hold" and names the
+ * comparison. Rule 3 answers "does this value decide anything" and names the
+ * branch, and the two need separate write-set conditions: rule 2 works off a set
+ * of any size, rule 3 needs the set to agree on one truth value. Both read the
+ * same write set, so tightening a write in one place tightens both.
  *
  * What it tolerates matters more than what it catches, because a check that
  * cries wolf gets switched off. There is no type checker here, so the only thing
@@ -37,7 +52,10 @@
  *
  *   - Test files, as writer, reader and comparer. A suite that sets the field is
  *     what hid all four earlier cases.
- *   - Optional properties under rule 1. One that is sometimes absent is normal.
+ *   - Optional properties under rules 1 and 3. One that is sometimes absent is
+ *     normal, and absence is falsy however the writes read.
+ *   - Anything but a boolean or null under rule 3. The empty string and zero are
+ *     values code writes on purpose and reads for more than their truthiness.
  *   - Shapes this repository describes but does not build: a GitHub response, a
  *     D1 row. Rule 1 fires only when some object literal in shipping code builds
  *     most of the declaring type and leaves the field out. A type only ever
@@ -140,6 +158,64 @@ export function literalOf(node) {
 }
 
 /**
+ * Whether a literal value counts as true when a branch asks, or null when this
+ * check declines to say.
+ *
+ * Only three values answer. A string or a number would answer too, but the
+ * empty string and zero are values code writes on purpose and reads for
+ * something other than their truthiness, and rule 3 has to be right every time
+ * to stay switched on. `null` is here because the sentinel this repository
+ * writes into a digest field is the one it then branches on.
+ */
+export function truthinessOf(literal) {
+  if (literal === "true") return true;
+  if (literal === "false" || literal === "null") return false;
+  return null;
+}
+
+/**
+ * Where a read is used for its truthiness, and how many `!` sit above it.
+ *
+ * Rule 3 needs the same thing rule 2 needs from `x.prop === L`: a place where
+ * the value decides which way the program goes. `if (!facts.reviewsSatisfied)`
+ * decides it as surely as `=== "failing"` does, and that is the form the three
+ * review facts took, so rule 2 walked straight past a gate that had never once
+ * refused a pull request.
+ *
+ * Parentheses and `as` are climbed through, `!` is climbed and counted, and the
+ * climb stops at the first slot that branches. A bare `!x.prop` counts on its
+ * own: negating a value that never changes is the same dead computation with
+ * the `if` written somewhere else.
+ */
+function truthPosition(node) {
+  let current = node;
+  let negations = 0;
+  for (;;) {
+    const parent = current.parent;
+    if (parent === undefined) return null;
+    if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent)) {
+      current = parent;
+      continue;
+    }
+    if (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken) {
+      negations += 1;
+      current = parent;
+      continue;
+    }
+    const branches =
+      ((ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) &&
+        parent.expression === current) ||
+      (ts.isConditionalExpression(parent) && parent.condition === current) ||
+      (ts.isForStatement(parent) && parent.condition === current) ||
+      (ts.isBinaryExpression(parent) &&
+        (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.BarBarToken));
+    if (branches) return { negations, node: current };
+    return negations > 0 ? { negations, node: current } : null;
+  }
+}
+
+/**
  * Everything one file says about property names: where they are declared, where
  * they are written, where they are read, and where they are compared.
  */
@@ -149,6 +225,7 @@ function readFile(root, file) {
   const writes = [];
   const reads = [];
   const comparisons = [];
+  const truthTests = [];
   const literals = [];
   const assertedTypes = new Set();
 
@@ -256,7 +333,19 @@ function readFile(root, file) {
         node.parent.left === node &&
         node.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
         node.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
-      if (!assigned) reads.push({ file, name: node.name.text, line: lineOf(source, node) });
+      if (!assigned) {
+        reads.push({ file, name: node.name.text, line: lineOf(source, node) });
+        const position = truthPosition(node);
+        if (position !== null) {
+          truthTests.push({
+            file,
+            name: node.name.text,
+            line: lineOf(source, node),
+            negations: position.negations,
+            text: position.node.getText(source),
+          });
+        }
+      }
     }
 
     // `x.prop === L` and `x.prop !== L`.
@@ -315,7 +404,7 @@ function readFile(root, file) {
   };
 
   walk(source);
-  return { declarations, writes, reads, comparisons, literals, assertedTypes };
+  return { declarations, writes, reads, comparisons, truthTests, literals, assertedTypes };
 }
 
 /** How much of a shape an object literal has to build to count as building it. */
@@ -358,6 +447,7 @@ export function unwrittenFields({ root, files = sourceFiles(root) }) {
   const writesByName = new Map();
   const readsByName = new Map();
   const comparisonsByName = new Map();
+  const truthTestsByName = new Map();
   const push = (map, key, value) => {
     const list = map.get(key);
     if (list === undefined) map.set(key, [value]);
@@ -367,6 +457,7 @@ export function unwrittenFields({ root, files = sourceFiles(root) }) {
     for (const write of module.writes) push(writesByName, write.name, write);
     for (const read of module.reads) push(readsByName, read.name, read);
     for (const comparison of module.comparisons) push(comparisonsByName, comparison.name, comparison);
+    for (const test of module.truthTests) push(truthTestsByName, test.name, test);
   }
 
   const findings = [];
@@ -437,6 +528,23 @@ export function unwrittenFields({ root, files = sourceFiles(root) }) {
           detail: `${comparison.text} is always true; shipping code only ever writes ${[...values].join(", ")}`,
         });
       }
+    }
+
+    // Rule 3. A property is optional when absence carries meaning, and absence
+    // is falsy, so a branch on it stays live whatever the writes say.
+    if (declaration.optional) continue;
+    const truths = new Set([...values].map(truthinessOf));
+    if (truths.size !== 1 || truths.has(null)) continue;
+    const written = [...truths][0];
+    for (const test of truthTestsByName.get(name) ?? []) {
+      const value = test.negations % 2 === 0 ? written : !written;
+      findings.push({
+        rule: 3,
+        file: test.file,
+        line: test.line,
+        name,
+        detail: `${test.text} is always ${value}; shipping code only ever writes ${[...values].join(", ")}`,
+      });
     }
   }
 

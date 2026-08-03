@@ -357,7 +357,3 @@ export function bootstrapCheckRun(input: { headSha: string; policyEnforcement: "
     },
   };
 }
-
-export function isBootstrapCheck(externalId: string | null | undefined): boolean {
-  return typeof externalId === "string" && externalId.startsWith("bootstrap:");
-}

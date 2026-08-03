@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  hasQueuePointer,
   queueInstructions,
   queuePointer,
   queueSetupPrompt,
@@ -104,7 +103,7 @@ describe("withQueuePointer", () => {
     const existing = "# Agents\n\nRun the tests before you finish.\n";
     const updated = withQueuePointer(existing);
     expect(updated.startsWith(existing)).toBe(true);
-    expect(hasQueuePointer(updated)).toBe(true);
+    expect(updated).toContain(queuePointer());
   });
 
   it("is idempotent, so re-running setup produces no diff", () => {
@@ -150,7 +149,7 @@ describe("withQueuePointer", () => {
   it("handles a file with no trailing newline", () => {
     const updated = withQueuePointer("# Agents");
     expect(updated.startsWith("# Agents\n\n")).toBe(true);
-    expect(hasQueuePointer(updated)).toBe(true);
+    expect(updated).toContain(queuePointer());
   });
 });
 
@@ -165,11 +164,29 @@ describe("queueSetupPrompt", () => {
 
   it("is explicit about what only the owner can do", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toMatch(/merge the setup pull request/);
+    expect(prompt).toMatch(/THWIP_ENQUEUE_TOKEN repository secret/);
     expect(prompt).toMatch(/grant the thwip App "checks: write"/);
-    expect(prompt).toMatch(/add "thwip" and "thwip \/ turn" to the branch ruleset/);
+  });
+
+  /**
+   * The bootstrap route builds the ruleset now. A prompt that still told an
+   * agent to hand-build it would produce a ruleset enrolment then refuses to
+   * replace, which is the branch nobody can merge on.
+   */
+  it("sends ruleset work to enrolment rather than to the agent", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toMatch(/It builds the branch ruleset itself/);
+    expect(prompt).toMatch(/Do\n *not edit that ruleset by hand/);
     // GitHub can only pin a context to its source after that source has
-    // published it once, so the order is part of the instruction.
-    expect(prompt).toMatch(/after\n *that source has published the check once/);
+    // published the check, and the prompt says who handles that ordering.
+    expect(prompt).toMatch(/pins each to the source that publishes it/);
+  });
+
+  it("names the request that enrols the repository", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toContain("/v1/queue/<repository id>/bootstrap");
+    expect(prompt).toMatch(/"Set up" tab/);
   });
 
   /**
@@ -185,21 +202,22 @@ describe("queueSetupPrompt", () => {
 
   it("only tells the agent to run commands the CLI has", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    for (const missing of ["thwip queue setup", "thwip queue repair", "--watch"]) {
+    for (const missing of ["thwip queue repair", "--watch"]) {
       expect(prompt, missing).not.toContain(missing);
     }
     expect(prompt).toContain("thwip queue doctor");
+    expect(prompt).toContain("thwip queue setup --write");
   });
 
   it("asks for proof before the checks are made required", () => {
     expect(queueSetupPrompt("recallnet/thwip")).toMatch(
-      /required check that nothing publishes blocks\n *every merge/,
+      /required check that\n *nothing publishes blocks every merge/,
     );
   });
 
   it("tells the agent to preserve what someone else authored", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/Preserve all unrelated rules/);
-    expect(prompt).toMatch(/Do not\n *rewrite instructions someone else authored/);
+    expect(prompt).toMatch(/drop a rule or a required check somebody else added/);
+    expect(prompt).toMatch(/Do not rewrite instructions\n *someone else authored/);
   });
 });
