@@ -2247,15 +2247,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // device-only profile is not pushed through Actions: the connected device
     // already claimed it over its heartbeat, and dispatching anyway spends a
     // whole run to be told there is nothing for it to do.
+    // `driveLane` says who holds the lane, and this route reports what it said.
+    //
+    // The route used to decide that for itself, and looked only for `Offered`
+    // or `Active`. An attempt that has returned its receipt is `Verifying`, so
+    // the one lane in flight read as no lane at all: `LANE_IDLE` was answered
+    // and `driveLane` — which does understand `Verifying` — was never reached.
+    // Under `fresh` that is the whole window in which a merge still has to be
+    // written, so the one operator tool for an unmerged attempt refused to look
+    // at the only state it is ever stuck in. Two predicates for one question is
+    // how that happened, so there is one now.
     const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-    const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-    if (holder === undefined) return c.json({ nudged: false, reason: "LANE_IDLE" });
-
     const outcome = await driveLane(c.env, deps, repositoryId, snapshot);
     if (!outcome.dispatched) {
-      return c.json({ nudged: false, reason: outcome.reason, pullRequestNumber: holder.pullRequestNumber });
+      return outcome.reason === "LANE_IDLE"
+        ? c.json({ nudged: false, reason: outcome.reason })
+        : c.json({ nudged: false, reason: outcome.reason, pullRequestNumber: outcome.pullRequestNumber });
     }
-    return c.json({ nudged: true, pullRequestNumber: holder.pullRequestNumber, state: holder.state });
+    const holder = snapshot.entries.find((e) => e.pullRequestNumber === outcome.pullRequestNumber);
+    return c.json({ nudged: true, pullRequestNumber: outcome.pullRequestNumber, state: holder?.state ?? null });
   });
 
   /**

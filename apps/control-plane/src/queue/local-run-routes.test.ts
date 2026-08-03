@@ -23,6 +23,7 @@ import {
 } from "@thwip/queue-protocol";
 import { buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
+import { tickAllQueues } from "./scheduled-tick.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -75,6 +76,7 @@ const CANDIDATE = "c".repeat(40);
 const TREE = "7".repeat(40);
 const OTHER_TREE = "8".repeat(40);
 const MERGE_SHA = "d".repeat(40);
+const MOVED_HEAD = "f".repeat(40);
 
 /** A real carrier, so the head's proof digest is a digest of something. */
 const CARRIER =
@@ -117,6 +119,16 @@ function seed(): void {
        VALUES (?, '1', 'ssh-ed25519', ?, ?, 'laptop')`,
     )
     .run(deviceKeyId, publicKey, deviceKeyId);
+  // So `readActivePolicy` — which the heartbeat sweep reads directly rather than
+  // through the deps object — sees the same `fresh` this suite is about.
+  raw
+    .prepare("INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status) VALUES (?, ?, 1, ?, 'active')")
+    .run(
+      `sha256:${"a".repeat(64)}`,
+      "proj_1",
+      JSON.stringify({ schemaVersion: "1", securityProfile: "fresh", version: 1, pipeline: { requiredSuites: ["lint"] } }),
+    );
+  raw.prepare("UPDATE projects SET active_policy_digest = ? WHERE id = 'proj_1'").run(`sha256:${"a".repeat(64)}`);
 }
 
 const policy = {
@@ -198,6 +210,34 @@ function authorize(routes: Routes, e: QueueRouteEnv, over: Record<string, unknow
         proofAccepted: true,
         draft: false,
         ...over,
+      }),
+    },
+    e,
+  );
+}
+
+/**
+ * What `thwip-merge.yml` does when the queue drives the lane: ask `authorize`
+ * with the candidate GitHub integrated, and report back what landed. Written out
+ * here rather than stubbed, because a stub would let the merge succeed without
+ * the gate the whole profile is.
+ */
+async function mergeAsActionsWould(routes: Routes, e: QueueRouteEnv): Promise<void> {
+  const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
+  if (verdict.operationId === null) return;
+  const id = await attemptId(e);
+  await routes.request(
+    `/v1/queue/${REPO}/merged`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseRef: REF,
+        attemptId: id,
+        operationId: verdict.operationId,
+        mergeSha: MERGE_SHA,
+        mergeTree: TREE,
+        parentShas: [BASE, HEAD],
       }),
     },
     e,
@@ -587,6 +627,149 @@ describe("the receipt the machine signs", () => {
 
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
     expect(driven).toEqual([PR]);
+  });
+
+  /**
+   * The whole point, with the one dispatch thrown away.
+   *
+   * Everything up to the receipt worked in production and nothing after it ever
+   * did: the receipt route dispatched once, fired and forgot, and no other
+   * caller in the system would drive a device-only lane. So a single lost
+   * dispatch was the difference between a merge and an attempt sitting in
+   * `RECEIPT_SUBMITTED` until its deadline. The merge Actions performs is stood
+   * up here for real — the same `authorize` with `prepare` and the same
+   * `/merged` report the workflow makes — and the only thing asking for it is
+   * the five-minute sweep.
+   */
+  it("reaches a merge and a verified-merge record when the first dispatch is lost", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    // The dispatch the receipt route makes goes nowhere, as it did in production.
+    const routes = app({ driveTurn: async () => {} });
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+
+    const held = await attemptId(e);
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 0 });
+
+    await tickAllQueues(e, {
+      driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    const rows = raw
+      .prepare("SELECT bytes FROM queue_attestations WHERE kind = 'verified-merge'")
+      .all() as Array<{ bytes: string }>;
+    expect(rows).toHaveLength(1);
+    const parsed = parseTransitionRecord(JSON.parse(rows[0]!.bytes) as unknown);
+    if (!parsed.ok || parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
+    expect(parsed.value.verifiedMerge.assignmentDigest).toBe(claimed.assignmentDigest);
+    expect(parsed.value.verifiedMerge.attemptId).toBe(held);
+  });
+
+  /**
+   * And the gate the profile exists for, over the same recovered path. A sweep
+   * that drives a lane the device never answered for merges nothing: `fresh`
+   * without a receipt is a refusal, and no amount of asking again changes it.
+   */
+  it("merges nothing on that path when no receipt was ever accepted", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app({ driveTurn: async () => {} });
+    await claim(routes, e);
+
+    await tickAllQueues(e, {
+      driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+    });
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]?.state).not.toBe("Merged");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE transition_sequence IS NOT NULL").get())
+      .toMatchObject({ n: 0 });
+  });
+
+  /**
+   * The operator's way back in, for the one state it could not see.
+   *
+   * `/nudge` picked the holder itself, and only ever looked for `Offered` or
+   * `Active`. An attempt that had returned its receipt is `Verifying`, so the
+   * one lane in flight read as no lane at all: the route answered `LANE_IDLE`
+   * and returned before `driveLane` — which does understand `Verifying` — was
+   * ever called. Every operator tool reported an idle queue while an attempt
+   * held the lane, which is how the merge that never happened stayed invisible.
+   */
+  it("nudges a lane held by an attempt whose receipt is already in", async () => {
+    const e = env();
+    const routes = app();
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    driven.length = 0;
+
+    const response = await post(routes, e, "nudge", {});
+    expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: PR, state: "Verifying" });
+    expect(driven).toEqual([PR]);
+  });
+
+  /**
+   * A push under a running turn ends that turn, rather than poisoning it.
+   *
+   * The queue pins the candidate when it issues the assignment and holds both
+   * immutable, and nothing ever told it the pull request had moved on. So a
+   * contributor pushing while a device was running kept a turn alive against a
+   * tree GitHub no longer integrates: the device asking again was handed back
+   * the stale assignment, ran the stale tree, signed a receipt for it, and the
+   * queue accepted it — and then refused every merge for that attempt with
+   * `INTEGRATION_RECEIPT_TREE_MISMATCH`, forever, because the receipt really was
+   * about a different tree. Pull request 2 on `recallnet/thwip-test` sat in
+   * `RECEIPT_SUBMITTED` for exactly this reason.
+   *
+   * `HEAD_MOVED` is the reducer's own answer and nothing was reaching it. It
+   * defers, so the place in line is kept and the next turn is taken against
+   * what is there now.
+   */
+  it("ends a turn whose pull request moved under the device running it", async () => {
+    const e = env();
+    const routes = app();
+    const claimed = await claim(routes, e);
+    const stale = await attemptId(e);
+
+    await authorize(routes, e, { headSha: MOVED_HEAD });
+
+    const snapshot = await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => buildSnapshot(store));
+    expect(snapshot.activeAttemptId).toBeNull();
+    expect(snapshot.entries[0]).toMatchObject({ state: "Deferred" });
+
+    // And the account of the stale tree is worth nothing: the attempt it
+    // answers is over, so there is no lane for it to move.
+    const late = await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    expect(late.status).toBe(409);
+    expect(stale).not.toBe(snapshot.activeAttemptId);
+  });
+
+  it("leaves a turn alone while the pull request stays where it was", async () => {
+    const e = env();
+    const routes = app();
+    await claim(routes, e);
+    const held = await attemptId(e);
+
+    await authorize(routes, e);
+
+    expect(await attemptId(e)).toBe(held);
+  });
+
+  it("still reports an idle lane as idle", async () => {
+    const e = env();
+    const routes = app();
+    const response = await post(routes, e, "nudge", {});
+    expect(await response.json()).toMatchObject({ nudged: false, reason: "LANE_IDLE" });
+    expect(driven).toEqual([]);
   });
 });
 
