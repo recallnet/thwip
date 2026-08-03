@@ -63,6 +63,12 @@ export function decodeState(raw: SerializedState): BranchQueueState {
     lastServedTurn: new Map(lastServedTurn.map(([id, turn]) => [id, BigInt(turn)])),
     fairnessDebt: new Map(raw["fairnessDebt"] as Array<[string, readonly string[]]>),
     appliedKeys: new Set(raw["appliedKeys"] as string[]),
-    transitions: raw["transitions"] as Transition[],
+    // Only links a reader can fetch. Documents written before the reducer
+    // stopped inventing one carry an `external:<sha>` entry for a base that
+    // moved outside the queue, and the queue signs its chain head into every
+    // assignment and merge intent it makes. A branch holding one of those could
+    // issue nothing further, and dropping it here is what lets that branch
+    // recover rather than needing the document rebuilt by hand.
+    transitions: (raw["transitions"] as Transition[]).filter((t) => t.digest.startsWith("sha256:")),
   };
 }

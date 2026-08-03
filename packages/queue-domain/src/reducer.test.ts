@@ -552,10 +552,14 @@ describe("reducer", () => {
   describe("external movement (§6.2 invariant 21)", () => {
     it("pauses the queue and records the external base", () => {
       let state = applyEvents(base(), happyPath());
+      const chain = state.transitions.length;
       state = applyEvent(state, ev({ type: "ExternalTransitionObserved", observedBaseSha: "x".repeat(40) }));
       expect(state.paused).toBe(true);
       expect(state.pauseReason).toBe("EXTERNAL_TRANSITION");
-      expect(state.transitions.at(-1)!.kind).toBe("external");
+      expect(state.baseSha).toBe("x".repeat(40));
+      // The chain is not extended: nothing signed this, and the queue names its
+      // chain head in every assignment and merge intent it goes on to sign.
+      expect(state.transitions).toHaveLength(chain);
       expect(checkInvariants(state)).toEqual([]);
     });
 

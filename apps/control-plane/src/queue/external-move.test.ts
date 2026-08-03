@@ -62,16 +62,24 @@ describe("being told the branch moved", () => {
     expect(after.baseSha).toBe(MOVED);
   });
 
-  it("records the movement in the chain, as external rather than verified", async () => {
+  /**
+   * The move is recorded, and the signed chain is not touched.
+   *
+   * A link carrying `external:<sha>` used to go on the chain here. Nothing signs
+   * it, so no reader can fetch it, and the queue names its chain head as
+   * `previousTransitionDigest` in every assignment and merge intent it signs
+   * afterwards — both validated against a protocol that only knows `sha256:`
+   * digests. One hand-pushed commit therefore stopped the branch issuing any
+   * further turn at all.
+   */
+  it("records the movement without extending the signed chain", async () => {
     const e = env();
     queueConfigured();
     await queueExternalMove(e, { repositoryId: REPO, baseRef: REF, observedBaseSha: MOVED });
 
-    const head = (await state(e)).transitions.at(-1)!;
-    expect(head.kind).toBe("external");
-    expect(head.baseSha).toBe(MOVED);
-    // Never claimed as something the queue verified.
-    expect(head.witnessPrincipalIds).toEqual([]);
+    const after = await state(e);
+    expect(after.baseSha).toBe(MOVED);
+    expect(after.transitions).toEqual([]);
   });
 
   /**
@@ -86,7 +94,8 @@ describe("being told the branch moved", () => {
 
     expect(first.handled).toBe(true);
     expect(second.handled).toBe(false);
-    expect((await state(e)).transitions).toHaveLength(1);
+    // One event applied, not two: the second delivery is a duplicate.
+    expect((await state(e)).lastSequence).toBe(1);
   });
 
   it("stays quiet about a branch no queue guards", async () => {
