@@ -105,6 +105,7 @@ import {
   claimCandidateDispatch,
   recordCandidateVerdict,
 } from "./candidate-store.js";
+import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 
 /**
  * The queue's HTTP surface (plan.md §37.1).
@@ -780,19 +781,9 @@ export async function runOnQueue<T>(
   return out;
 }
 
-/** Read the queue without writing anything. */
 /** What a refused command said, for a caller that has to be told why. */
 function commandDetail(result: { readonly status: string; readonly detail?: string }): string {
   return result.detail ?? result.status;
-}
-
-async function readQueue(
-  env: QueueRouteEnv,
-  repositoryId: string,
-  baseRef: string,
-): Promise<{ store: SnapshotQueueStore; snapshot: QueueSnapshot }> {
-  const loaded = await loadQueueState(env.DB as unknown as D1Like, repositoryId, baseRef);
-  return { store: loaded.store, snapshot: buildSnapshot(loaded.store) };
 }
 
 /**
@@ -3478,207 +3469,42 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const mergeSha = body.mergeSha;
     const reason = body.reason.trim();
 
-    const facts = await deps.commitFacts(c.env, repositoryId, mergeSha);
-    if (facts === null) return c.json({ error: "could not read that commit" }, 404);
-
-    // A commit that exists is not a commit that landed. The record would say the
-    // base branch became this, so the branch is asked, exactly as the merge
-    // report path asks. Without it an operator repairing by hand could name the
-    // test merge of an open pull request and get it signed, which is how record
-    // 54 reached the chain by another route.
-    const reachable = await deps.baseContainsSha(c.env, repositoryId, baseRef, mergeSha);
-    if (reachable !== true) {
-      return c.json(
-        {
-          error:
-            reachable === false
-              ? `${baseRef} does not contain ${mergeSha}`
-              : `${baseRef} could not be asked whether it contains ${mergeSha}`,
-          code: "MERGE_NOT_ON_BASE",
-        },
-        409,
-      );
-    }
-
-    const db = c.env.DB as unknown as D1Like;
-    const authorization = await authorizationFor(db, {
+    const recordFromIntentDeps: RecordFromIntentDeps<TEnv> = {
+      commitFacts: deps.commitFacts,
+      baseContainsSha: deps.baseContainsSha,
+      activePolicy: deps.activePolicy,
+      signRecordBytes: deps.signRecordBytes,
+      storeEvidence,
+      onQueue,
+    };
+    const outcome = await recordMergeFromIntent(c.env, recordFromIntentDeps, {
       repositoryId,
       baseRef,
-      treeOid: facts.treeOid,
-      parentShas: facts.parentShas,
+      mergeSha,
+      witnessPrincipalId: who.principalId,
       ...(typeof body.attemptId === "string" ? { attemptId: body.attemptId } : {}),
     });
-    if ("refused" in authorization) {
-      return c.json({ error: authorization.refused, code: "MERGE_NOT_AUTHORIZED" }, 409);
-    }
-    const intent = authorization.intent;
-    // A verified merge's record binds an Actions run id, which the intent does
-    // not carry, and an override binds an authorization this must not reissue.
-    // Neither can be rebuilt from what survives, so neither is guessed at.
-    if (intent.kind !== "reused" && intent.kind !== "candidate-verified") {
-      return c.json(
-        { error: `a ${intent.kind} merge cannot be rebuilt from its intent alone`, code: "MERGE_NOT_AUTHORIZED" },
-        409,
-      );
-    }
-    const attemptId = intent.attemptId;
 
-    const already = await transitionRecordFor(db, attemptId);
-    if (already !== null) {
+    if (outcome.status === "refused") {
+      const status = outcome.code === "COMMIT_UNREADABLE" || outcome.code === "BASE_UNREADABLE" ? 404 : 409;
+      return c.json({ error: outcome.detail, code: outcome.code }, status);
+    }
+    if (outcome.status === "already") {
       return c.json({
         recorded: "already",
-        attemptId,
-        pullRequestNumber: intent.pullRequestNumber,
-        transitionDigest: already,
+        attemptId: outcome.attemptId,
+        pullRequestNumber: outcome.pullRequestNumber,
+        transitionDigest: outcome.transitionDigest,
       });
     }
-
-    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-    if (snapshot.activeAttemptId === attemptId) {
-      return c.json(
-        { error: "that attempt still holds the lane; reconcile it instead", code: "ATTEMPT_STILL_LIVE" },
-        409,
-      );
-    }
-
-    // The tree the branch had before this merge, from the commit itself. A
-    // record that is not first in its epoch has to say where it started.
-    const before = await deps.commitFacts(c.env, repositoryId, intent.git.baseSha);
-    if (before === null) return c.json({ error: "could not read the base this merge started from" }, 404);
-
-    const head = snapshot.transitions.at(-1);
-    const transitionSequence = (head?.transitionSequence ?? 0) + 1;
-    const priorDigest = head?.digest ?? null;
-
-    // The policy the intent bound, not whatever is active now: the record says
-    // what this merge rested on, and the policy may have changed since.
-    const policy = await deps.activePolicy(c.env, repositoryId);
-    const verified = intent.kind === "candidate-verified";
-    const signed = await signReusedRecord({
-      attemptId,
-      mergeMethod: intent.mergeMethod,
-      git: {
-        ...intent.git,
-        candidateSha: mergeSha,
-        candidateTreeOid: facts.treeOid,
-        candidateParentOids: [...facts.parentShas],
-      },
-      position: {
-        queueEpoch: snapshot.queueEpoch,
-        turnSequence: intent.turnSequence,
-        transitionSequence,
-        previousTransitionDigest: priorDigest as Sha256 | null,
-      },
-      pullRequestNumber: intent.pullRequestNumber,
-      evidence: {
-        workReceiptDigest: intent.evidence.workReceiptDigest,
-        organizationId: policy?.organizationId ?? "",
-        policyDigest: intent.policyDigest,
-        pipelineDigest: intent.evidence.pipelineDigest,
-        requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
-        proofCheckRunId: intent.evidence.proofCheckRunId,
-        ...(verified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
-      },
-      mergeIntentDigest: authorization.intentDigest,
-      before: { baseSha: intent.git.baseSha, treeOid: before.treeOid },
-      final: { sha: mergeSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
-      observedAt: new Date().toISOString(),
-      signer: { sign: (bytes, typ) => deps.signRecordBytes(c.env, bytes, typ) },
-    });
-    if ("error" in signed) {
-      return c.json({ error: `the queue refused to sign its own record: ${signed.error}` }, 409);
-    }
-
-    const stored = await storeAttestation(db, {
-      digest: signed.digest,
-      kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
-      repositoryId,
-      baseRef,
-      transitionSequence,
-      attemptId,
-      bytes: signed.bytes,
-      jws: signed.jws,
-      ...(policy === null
-        ? {}
-        : {
-            organizationId: policy.organizationId,
-            mirror: (mirrored: {
-              organizationId: string;
-              repositoryId: string;
-              kind: "merge-intent" | "transition-record";
-              digest: string;
-              bytes: Uint8Array;
-            }) =>
-              storeEvidence(c.env, {
-                organizationId: mirrored.organizationId,
-                repositoryId: mirrored.repositoryId,
-                kind: mirrored.kind,
-                digest: mirrored.digest as `sha256:${string}`,
-                bytes: mirrored.bytes,
-              }).then(() => undefined),
-          }),
-    });
-    if (!stored.stored) {
-      return c.json({
-        recorded: "already",
-        attemptId,
-        pullRequestNumber: intent.pullRequestNumber,
-        transitionDigest: stored.digest,
-      });
-    }
-
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) => {
-      const tail = store.state().transitions.at(-1);
-      // The position this record claims is inside the bytes that were signed,
-      // and signing is not inside the transaction. A link recorded at a
-      // position its own record does not claim is exactly the break the
-      // verifier reports, so the record is dropped rather than misplaced.
-      if ((tail?.transitionSequence ?? 0) + 1 !== transitionSequence || (tail?.digest ?? null) !== priorDigest) {
-        return { moved: true as const };
-      }
-      return {
-        moved: false as const,
-        transition: commands.recordTransition({
-          idempotencyKey: `repair:${attemptId}`,
-          kind: verified ? "verified" : "reused",
-          transitionSequence,
-          priorDigest,
-          digest: signed.digest,
-          baseSha: mergeSha,
-          // The reducer chains an attempt only where it can see one whose phase
-          // is MERGED, and this attempt was terminated and has since been
-          // compacted away. The attempt is inside the signed record and on the
-          // row that holds it, which is where a reader looks for it.
-          attemptId: null,
-          witnessPrincipalIds: [who.principalId],
-        }),
-      };
-    });
-
-    if (result.moved) {
-      // The chain grew between reading the head and recording. The bytes stay:
-      // the queue really did sign them, and destroying signed evidence to tidy
-      // up is a worse habit than keeping a row nothing points at. What goes is
-      // the claim to a position, so the chain never serves a record whose own
-      // sequence disagrees with the one it was served at.
-      await db
-        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-        .bind(signed.digest)
-        .run();
-      return c.json(
-        { error: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" },
-        409,
-      );
-    }
-
     return c.json({
-      recorded: result.transition.status,
-      attemptId,
-      pullRequestNumber: intent.pullRequestNumber,
-      mergeSha,
-      sequence: transitionSequence,
-      transitionDigest: signed.digest,
-      mergeIntentDigest: authorization.intentDigest,
+      recorded: "applied",
+      attemptId: outcome.attemptId,
+      pullRequestNumber: outcome.pullRequestNumber,
+      mergeSha: outcome.mergeSha,
+      sequence: outcome.sequence,
+      transitionDigest: outcome.transitionDigest,
+      mergeIntentDigest: outcome.mergeIntentDigest,
       actor: who.principalId,
       reason,
     });
