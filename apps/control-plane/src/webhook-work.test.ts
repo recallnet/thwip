@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { INSTALLATION_STATE_EVENTS, webhookWork } from "./webhook-work.js";
+import { INSTALLATION_STATE_EVENTS, MEMBERSHIP_EVENTS, webhookWork } from "./webhook-work.js";
 
 const base = { delivery: "d1", installationId: "42" };
 
@@ -53,9 +53,33 @@ describe("webhookWork", () => {
   });
 
   it("keeps an installation change, because it is what actually changes installation state", () => {
+    // Pinned, because a loop over an emptied array asserts nothing and passes.
+    expect(INSTALLATION_STATE_EVENTS).toHaveLength(2);
     for (const event of INSTALLATION_STATE_EVENTS) {
       expect(webhookWork(event, { action: "created" }, base)).not.toBeNull();
     }
+  });
+
+  it("keeps every membership event the consumer reconciles for", () => {
+    expect(MEMBERSHIP_EVENTS).toHaveLength(5);
+    for (const event of MEMBERSHIP_EVENTS) {
+      expect(webhookWork(event, { action: "added" }, base)).not.toBeNull();
+    }
+  });
+
+  it("keeps a merge group asking for checks, because the proof check is one of them", () => {
+    const work = webhookWork(
+      "merge_group",
+      {
+        action: "checks_requested",
+        repository: { id: 1315419165, full_name: "recallnet/thwip", owner: { id: 1 } },
+        installation: { id: 42 },
+        merge_group: { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" },
+      },
+      base,
+    );
+    expect(work).not.toBeNull();
+    expect(work!.appProofTask).not.toBeNull();
   });
 
   it("skips an event the consumer has no branch for", () => {

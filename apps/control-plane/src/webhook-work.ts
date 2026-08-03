@@ -11,9 +11,10 @@ import { policyPushFromGithubWebhook, type PolicyPush } from "./policy-activatio
  * cron runs on, so the machinery that settles orphaned merge writes and verifies
  * the chain went down first.
  *
- * The rule here is the consumer's own list of branches. Anything the consumer
- * would act on is enqueued. Anything else costs nothing, because a queue
- * operation that does no work is still an operation.
+ * The rule here is the consumer's own list of branches, and this file calls the
+ * same functions the consumer gates on rather than restating their conditions,
+ * so the two cannot drift into disagreeing. A queue operation that does no work
+ * is still an operation.
  */
 
 /** Events after which the consumer's reconcile pass has something to reconcile. */
@@ -58,10 +59,11 @@ export function webhookWork(
   const membership = (MEMBERSHIP_EVENTS as readonly string[]).includes(event);
   const installationState = (INSTALLATION_STATE_EVENTS as readonly string[]).includes(event);
 
-  // A pull request rides through unconditionally. It is the event the required
-  // check hangs on, its volume is a rounding error next to check_run, and a
-  // payload shape that stops short of a proof task at this edge would strand
-  // the pull request with no signal anywhere that it happened.
+  // A pull request rides through unconditionally, because it is the event the
+  // required check hangs on. `appProofTaskFromWebhook` returns null when
+  // `repositoryFacts` cannot read the payload, so deciding here on that alone
+  // would strand a pull request with nothing anywhere saying it happened. Its
+  // volume is a rounding error next to check_run.
   const pullRequest = event === "pull_request";
 
   const work =
