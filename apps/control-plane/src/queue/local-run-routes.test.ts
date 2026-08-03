@@ -21,7 +21,7 @@ import {
   QUEUE_SIGN_NAMESPACE,
   queueSigningBytes,
 } from "@thwip/queue-protocol";
-import { buildSnapshot } from "./queue-operations.js";
+import { buildSnapshot, commandsFor } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import type { D1Like } from "./projection.js";
@@ -762,6 +762,160 @@ describe("the receipt the machine signs", () => {
     await authorize(routes, e);
 
     expect(await attemptId(e)).toBe(held);
+  });
+
+  /**
+   * A branch that moved without the queue, and the next device turn after it.
+   *
+   * Somebody pushing straight to the base pauses the queue and asks an operator
+   * to rebaseline, which is right. What it also used to do is push an entry onto
+   * the queue's chain carrying `external:<sha>` where a record digest belongs.
+   * Nothing signs that entry, so no reader can fetch it, and every signature the
+   * queue makes afterwards names it as `previousTransitionDigest`: the
+   * assignment the device is handed, and the merge intent behind the merge. Both
+   * are validated against the protocol before they are signed, and the protocol
+   * only knows `sha256:` digests, so the claim came back
+   * `ASSIGNMENT_INVALID` 500 and the branch could never take another turn.
+   *
+   * `recallnet/thwip-test` sat exactly there: one hand-pushed commit on `main`
+   * and no device could claim the lane again, rebaselined or not.
+   */
+  it("hands a device its turn after the branch moved outside the queue", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app();
+    const moved = "a".repeat(40);
+    await withQueueState(db, REPO, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.observedExternalTransition({ idempotencyKey: `external:${moved}`, observedBaseSha: moved });
+      commands.rebaseline({ idempotencyKey: "rebaseline:1", actorPrincipalId: "alice", baseSha: BASE });
+      commands.resume({ idempotencyKey: "resume:1", actorPrincipalId: "alice" });
+    });
+
+    const claimed = await claim(routes, e);
+    expect(claimed.assignmentDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    // And the whole walk after it, because the same value reaches the merge
+    // intent: a chain that starts with something nothing signed cannot be
+    // extended by anything either.
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    await mergeAsActionsWould(routes, e);
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
+  });
+
+  /**
+   * The receipt route's own dispatch, all the way to the record.
+   *
+   * The five-minute sweep is the recovery, not the path. What a developer
+   * watching `thwip ship` waits on is the merge the acceptance of their receipt
+   * asks for, so this drives nothing else: no sweep, no nudge, only the lane
+   * driven at the moment the receipt is accepted.
+   */
+  it("reaches a verified-merge record from the drive the receipt itself asks for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    let routes: Routes;
+    routes = app({ driveTurn: async () => void (await mergeAsActionsWould(routes, e)) });
+    const claimed = await claim(routes, e);
+
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
+  });
+
+  /**
+   * The queue's own merge closes the pull request, and GitHub says so.
+   *
+   * `pull_request closed` arrives while the merge workflow is still reporting
+   * what it did, and the close handler cancelled the entry and terminated its
+   * attempt `ADMIN_CANCELLED`. So `/merged` was refused `RESULT_NOT_AUTHORIZED`
+   * for an attempt that had just merged: GitHub held the commit and the chain
+   * held nothing. `recallnet/thwip-test` pull request 2 merged as `b4a9c56` with
+   * no record, one second after the close beat the report.
+   *
+   * A merge write already sent to GitHub is not the operator's to cancel and
+   * not a webhook's either. Only confirmation may say what it did.
+   */
+  it("records the merge when the close webhook beats the report of it", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app({ driveTurn: async () => {} });
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+
+    const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
+    expect(verdict.operationId).not.toBeNull();
+    const held = await attemptId(e);
+
+    // GitHub's close, in the window between the merge landing and the report.
+    await withQueueState(db, REPO, REF, (store) => {
+      commandsFor(store).cancel({
+        idempotencyKey: `webhook:closed:${held}`,
+        entryId: `entry_${REPO}_${PR}`,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    const reported = await routes.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: held,
+          operationId: verdict.operationId,
+          mergeSha: MERGE_SHA,
+          mergeTree: TREE,
+          parentShas: [BASE, HEAD],
+        }),
+      },
+      e,
+    );
+    expect(reported.status).toBe(200);
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
+  });
+
+  /**
+   * And a close that is a close still ends the turn. Nothing was sent to
+   * GitHub for this attempt, so there is no write to protect and the lane has
+   * to be freed for whatever is behind it.
+   */
+  it("still cancels a turn whose pull request was closed before any merge was asked for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app({ driveTurn: async () => {} });
+    const claimed = await claim(routes, e);
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    const held = await attemptId(e);
+
+    await withQueueState(db, REPO, REF, (store) => {
+      commandsFor(store).cancel({
+        idempotencyKey: `webhook:closed:${held}`,
+        entryId: `entry_${REPO}_${PR}`,
+        actorPrincipalId: "github",
+        reason: "the pull request was closed",
+      });
+    });
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Cancelled" });
+    expect(after.activeAttemptId).toBeNull();
   });
 
   it("still reports an idle lane as idle", async () => {
