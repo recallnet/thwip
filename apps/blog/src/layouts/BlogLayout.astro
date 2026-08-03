@@ -11,9 +11,8 @@ interface Props {
   canonicalPath: string;
   ogImage?: string;
   jsonLd?: Record<string, unknown> | Record<string, unknown>[];
-  wide?: boolean;
 }
-const { title, description, canonicalPath, ogImage, jsonLd, wide } = Astro.props;
+const { title, description, canonicalPath, ogImage, jsonLd } = Astro.props;
 const site = Astro.site ?? new URL("https://thwip.recall.net");
 const canonical = new URL(canonicalPath, site).href;
 const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
@@ -45,16 +44,22 @@ const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
     />
     {
       jsonLd && (
-        <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+        <script is:inline type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
       )
     }
   </head>
   <body class="eb">
-    <SiteBar />
-    <main class:list={["eb-main", { "eb-main--wide": wide }]}>
-      <slot />
+    <div class="eb-shell">
+      <SiteBar />
+    </div>
+    <main class="eb-main">
+      <div class="eb-shell">
+        <slot />
+      </div>
     </main>
-    <SiteFoot />
+    <div class="eb-shell">
+      <SiteFoot />
+    </div>
     <CodeCopy />
   </body>
 </html>

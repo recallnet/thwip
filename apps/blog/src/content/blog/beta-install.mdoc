@@ -8,7 +8,7 @@ tags:
   - beta
   - install
 heroImage: /blog/install-hero.svg
-heroAlt: Checklist from CLI install through first signed proof
+heroAlt: Terminal-style checklist from npm install through thwip run
 ---
 
 This is the human-readable path from zero to a signed proof. For a paste-ready
@@ -110,8 +110,6 @@ the exact head subject.
 {% /step %}
 {% /steps %}
 
-{% product-shot src="/blog/install-hero.svg" alt="Install, sign in, register key, run proof" caption="Machine setup is CLI + GitHub signing key. Project setup is on the dashboard." /%}
-
 ## What success looks like
 
 - `thwip keys status` shows a registered signing key for your GitHub login.
@@ -122,8 +120,10 @@ the exact head subject.
 
 ## Next
 
+{% cta-row %}
 {% cta href="/dashboard" label="Open the dashboard" /%}
 {% cta href="/blog/beta/" label="Read the beta announcement" variant="ghost" /%}
+{% /cta-row %}
 
 Deeper product questions: [FAQ](/faq) and [FAQ markdown](/faq.md). Full agent
 setup text: [install](/install) and [install.md](/install.md).

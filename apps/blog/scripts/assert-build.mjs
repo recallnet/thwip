@@ -49,6 +49,19 @@ if (rssPath && existsSync(rssPath)) {
   }
 }
 
+// Hero assets referenced from posts must ship next to the HTML.
+for (const asset of ["blog/beta-hero.svg", "blog/install-hero.svg"]) {
+  requireFile(asset);
+}
+
+// SPA-style shell must not replace the blog index (regression guard).
+if (indexPath && existsSync(indexPath)) {
+  const html = readFileSync(indexPath, "utf8");
+  if (!html.includes("eb-index-title") || html.includes("id=\"root\"")) {
+    failures.push("blog/index.html looks like the SPA shell, not the editorial index");
+  }
+}
+
 if (failures.length > 0) {
   console.error("blog assert-build failed:");
   for (const f of failures) console.error(`  - ${f}`);

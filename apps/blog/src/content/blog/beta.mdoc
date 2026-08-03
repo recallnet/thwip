@@ -7,7 +7,7 @@ tags:
   - product
   - beta
 heroImage: /blog/beta-hero.svg
-heroAlt: Diagram of a local CI run producing a signed proof that GitHub verifies before merge
+heroAlt: Local run, signed proof, GitHub verifies — three stages of the thwip path
 ---
 
 thwip is in public beta.
@@ -16,8 +16,10 @@ If your team runs CI on developer machines or coding agents, and you still want 
 GitHub-enforced record of what ran on which tree, this is the surface we built
 for that job.
 
+{% cta-row %}
 {% cta href="/blog/beta-install/" label="Install and sign up" /%}
 {% cta href="/dashboard" label="Open the dashboard" variant="ghost" /%}
+{% /cta-row %}
 
 ## What ships in beta
 
@@ -29,8 +31,6 @@ for that job.
   mirrored from GitHub membership. No separate invite system.
 - Two security profiles you can set per path: **fast** (signed local proof) and
   **remote** (GitHub runs the checks and signs provenance).
-
-{% product-shot src="/blog/beta-hero.svg" alt="Local run, signed proof, GitHub verification before merge" caption="Evidence moves with the commit. The cloud verifies; it does not re-run the suite by default." /%}
 
 ## What a proof is (and is not)
 
@@ -68,7 +68,9 @@ Pro raises those caps. Details stay on the dashboard and in
 The install path is a short tutorial: CLI, device sign-in, signing key on
 GitHub, first project.
 
+{% cta-row %}
 {% cta href="/blog/beta-install/" label="Beta sign-up and install" /%}
+{% cta href="/faq" label="Read the FAQ" variant="ghost" /%}
+{% /cta-row %}
 
-Questions that are not “how do I install” belong in the [FAQ](/faq). Agent-ready
-setup text lives at [/install](/install) and `/install.md`.
+Agent-ready setup text lives at [/install](/install) and `/install.md`.
