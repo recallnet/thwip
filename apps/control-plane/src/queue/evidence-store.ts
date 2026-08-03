@@ -28,7 +28,6 @@ export type EvidenceKind =
   | "queue-decision"
   | "integration-assignment"
   | "integration-receipt"
-  | "exact-receipt-reuse"
   | "verifier-result"
   | "merge-intent"
   | "transition-record";

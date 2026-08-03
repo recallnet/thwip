@@ -26,8 +26,22 @@ const workspaceSource = Object.fromEntries(
   ),
 );
 
+/**
+ * Test-support subpaths, ahead of the package aliases above.
+ *
+ * Vite matches a string alias by prefix, so a bare `@thwip/vocabulary` entry
+ * swallows `@thwip/vocabulary/test` and resolves it to the package index, where
+ * the helper is not exported. Order decides which wins.
+ */
+const testSupport = {
+  "@thwip/vocabulary/test": new URL(
+    "./packages/vocabulary/src/test/reason-codes.ts",
+    import.meta.url,
+  ).pathname,
+};
+
 export default defineConfig({
-  resolve: { alias: workspaceSource },
+  resolve: { alias: { ...testSupport, ...workspaceSource } },
   test: {
     include: ["packages/**/src/**/*.test.ts", "apps/**/src/**/*.test.ts", "scripts/**/*.test.mjs"],
     // The workerd chaos suite imports cloudflare:test and needs the Workers pool.

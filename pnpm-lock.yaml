@@ -154,18 +154,12 @@ importers:
       '@thwip/sshsig':
         specifier: workspace:*
         version: link:../sshsig
-      '@thwip/verifier':
-        specifier: workspace:*
-        version: link:../verifier
       '@thwip/vocabulary':
         specifier: workspace:*
         version: link:../vocabulary
       jose:
         specifier: ^6.0.0
         version: 6.2.4
-      yaml:
-        specifier: ^2.9.0
-        version: 2.9.0
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -188,20 +182,13 @@ importers:
         specifier: ^2.0.0
         version: 2.1.0
 
-  packages/queue-domain:
-    dependencies:
-      '@thwip/protocol':
-        specifier: workspace:*
-        version: link:../protocol
+  packages/queue-domain: {}
 
   packages/queue-protocol:
     dependencies:
       '@thwip/protocol':
         specifier: workspace:*
         version: link:../protocol
-      canonicalize:
-        specifier: ^2.0.0
-        version: 2.1.0
 
   packages/sshsig:
     devDependencies:

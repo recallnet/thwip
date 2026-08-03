@@ -1,46 +1,51 @@
 import { describe, expect, it } from "vitest";
 import { ATTEMPT_OUTCOMES, BLOCKING_REASONS } from "@thwip/queue-domain";
 import { REASON_CODES } from "@thwip/protocol";
-import {
-  EXIT,
-  exitCodeFor,
-  humanSummary,
-  isRetryable,
-  knownReasonCodes,
-  line,
-  LOCAL_REASONS,
-  nextActionFor,
-  OUTCOMES,
-  SERVICE_REASONS,
-} from "./queue-exit.js";
+import { LOCAL_REASONS, SERVICE_REASONS } from "@thwip/vocabulary";
+import { EXIT, exitCodeFor, humanSummary, isRetryable, line, nextActionFor, OUTCOMES } from "./queue-exit.js";
 
 /**
  * The exit-code contract is what an agent branches on, so the dangerous failure
  * is a reason landing in the wrong class rather than in no class at all. These
  * tests check the mapping is exhaustive over every reason the system can actually
  * produce, and that the classes with real consequences are right.
+ *
+ * Exhaustiveness is asserted through `nextActionFor`, the function the CLI itself
+ * calls on every reason it prints. When a code has no class, that function says so
+ * in one sentence and quotes the code back. Matching on that sentence tests the
+ * path a user hits rather than a list built for the test.
  */
+
+/** What nextActionFor answers for a code the CLI has no class for. */
+const UNRECOGNIZED = /does not know the reason code/;
+
+/**
+ * Every code any surface can hand the CLI, from the four vocabularies that
+ * declare them. This is the same composition @thwip/vocabulary's ReasonCode
+ * union is built from, read out of the exports rather than a list kept for tests.
+ */
+const ALL_REASONS: readonly string[] = [
+  ...BLOCKING_REASONS,
+  ...ATTEMPT_OUTCOMES,
+  ...REASON_CODES,
+  ...SERVICE_REASONS,
+  ...LOCAL_REASONS,
+];
+
+function expectClassified(reason: string, what: string): void {
+  expect(nextActionFor(reason), `unmapped ${what} ${reason}`).not.toMatch(UNRECOGNIZED);
+}
 
 describe("exhaustiveness", () => {
   it("classifies every blocking reason the queue can report", () => {
-    for (const reason of BLOCKING_REASONS) {
-      expect(knownReasonCodes(), `unmapped blocking reason ${reason}`).toContain(reason);
-    }
+    for (const reason of BLOCKING_REASONS) expectClassified(reason, "blocking reason");
   });
 
   it("classifies every terminal attempt outcome", () => {
-    const known = knownReasonCodes();
-    for (const outcome of ATTEMPT_OUTCOMES) {
-      // A few outcomes are queue-internal and never surfaced to the CLI; the rest
-      // must be classified, because an agent will see them.
-      const internal = ["MERGE_REJECTED", "SUITE_MISSING", "SUITE_DUPLICATE", "SIGNER_MISMATCH", "MERGE_CONFLICT"];
-      if (internal.includes(outcome)) continue;
-      expect(known, `unmapped attempt outcome ${outcome}`).toContain(outcome);
-    }
+    for (const outcome of ATTEMPT_OUTCOMES) expectClassified(outcome, "attempt outcome");
   });
 
   it("classifies the proof verifier's reason codes it can surface", () => {
-    const known = knownReasonCodes();
     const surfaced = REASON_CODES.filter((code) =>
       [
         "PASS",
@@ -55,21 +60,19 @@ describe("exhaustiveness", () => {
         "SUBJECT_TREE_MISMATCH",
       ].includes(code),
     );
-    for (const code of surfaced) expect(known, `unmapped verifier code ${code}`).toContain(code);
+    for (const code of surfaced) expectClassified(code, "verifier code");
   });
 
   it("classifies every code the control plane writes on the wire", () => {
-    const known = knownReasonCodes();
-    for (const reason of [...SERVICE_REASONS, ...LOCAL_REASONS]) {
-      expect(known, `unmapped wire reason ${reason}`).toContain(reason);
-    }
+    for (const reason of [...SERVICE_REASONS, ...LOCAL_REASONS]) expectClassified(reason, "wire reason");
   });
 
-  it("has a sentence for every code it classifies", () => {
+  it("has a sentence for every code the vocabulary declares", () => {
     // The classification and the sentence are Records over the same union, so
     // this cannot drift without the build failing. The test is here for a reader.
-    for (const reason of knownReasonCodes()) {
+    for (const reason of ALL_REASONS) {
       const action = nextActionFor(reason);
+      expect(action, `${reason} has no next action`).not.toMatch(UNRECOGNIZED);
       expect(action.length, `${reason} has no next action`).toBeGreaterThan(0);
       expect(action, `${reason} ends without a full stop`).toMatch(/[.]$/);
       expect(action, `${reason} was written with an em dash`).not.toContain("—");
@@ -79,7 +82,7 @@ describe("exhaustiveness", () => {
 
 describe("classification consequences", () => {
   it("never maps a failure to success", () => {
-    for (const reason of knownReasonCodes()) {
+    for (const reason of ALL_REASONS) {
       if (reason === "PASS") continue;
       expect(exitCodeFor(reason), `${reason} maps to success`).not.toBe(EXIT.ok);
     }

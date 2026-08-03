@@ -1,4 +1,5 @@
-import { NEXT_ACTION, nextActionFor, reasonCodes } from "@thwip/vocabulary";
+import { NEXT_ACTION, nextActionFor } from "@thwip/vocabulary";
+import { reasonCodes } from "@thwip/vocabulary/test";
 import { describe, expect, it } from "vitest";
 
 import { checkSummary, type AppProofEvaluation } from "./app-proof-verification.js";

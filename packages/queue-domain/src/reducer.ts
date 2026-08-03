@@ -856,7 +856,3 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
 
   return state;
 }
-
-export function applyEvents(state: BranchQueueState, events: readonly QueueEvent[]): BranchQueueState {
-  return events.reduce(applyEvent, state);
-}

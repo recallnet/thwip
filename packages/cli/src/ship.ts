@@ -191,15 +191,3 @@ export function planInterrupt(state: ShipState): InterruptPlan {
       : "detached",
   };
 }
-
-/** Human-readable one-liner for a decision, for the non-JSON output mode. */
-export function describeDecision(decision: ShipDecision): string {
-  switch (decision.kind) {
-    case "step":
-      return `${decision.step}: ${decision.why}`;
-    case "done":
-      return decision.outcome;
-    case "stop":
-      return `${decision.reasonCode}: ${decision.why}`;
-  }
-}

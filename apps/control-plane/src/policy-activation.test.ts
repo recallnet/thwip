@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { deriveProjectConfigFromText, type RepositorySnapshot } from "@thwip/policy";
+import { deriveProjectConfig, parseThwipYaml, type RepositorySnapshot } from "@thwip/policy";
 import {
   activatePolicyFromDefaultBranchPush,
   policyPushFromGithubWebhook,
@@ -196,8 +196,8 @@ suites:
       { repositoryId: "20", ref: "refs/heads/main", after: sha1 },
       dependencies,
     );
-    const expectedFirst = await deriveProjectConfigFromText(
-      yaml1,
+    const expectedFirst = await deriveProjectConfig(
+      parseThwipYaml(yaml1),
       { ownerId: "10", repositoryId: "20" },
       snapshots.get(sha1)!,
     );
@@ -253,8 +253,8 @@ suites:
       { repositoryId: "20", ref: "refs/heads/main", after: sha2 },
       dependencies,
     );
-    const expectedSecond = await deriveProjectConfigFromText(
-      yaml2,
+    const expectedSecond = await deriveProjectConfig(
+      parseThwipYaml(yaml2),
       { ownerId: "10", repositoryId: "20" },
       snapshots.get(sha2)!,
     );

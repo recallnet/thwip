@@ -22,6 +22,8 @@ import { serviceKey, signPayload } from "./service-signing.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
+import { isOrgAdmin } from "./queue/repository-access.js";
+import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
 import { deriveReadiness, foldCapability, NO_OBJECTION, type PlatformHealth } from "./queue/readiness.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
@@ -979,18 +981,6 @@ app.post("/admin/sync", async (c) => {
  * App can actually publish the check it would require; making that operator-only
  * would mean the people doing the setup cannot check their own work.
  */
-/**
- * Who counts as an administrator for queue operations.
- *
- * GitHub's projections use `owner` for the people who created or own the
- * organization and `admin` for org administrators, and both can change rulesets.
- * Checking only for `admin` locked out owners — the people most likely to be
- * running setup in the first place.
- */
-function isOrgAdmin(role: string | null): boolean {
-  return role === "admin" || role === "owner";
-}
-
 async function queueDoctor(env: Env, repo: string): Promise<Response> {
   const installations = await listInstallations(env);
   const owner = repo.split("/")[0];
@@ -1066,6 +1056,28 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
     .first<{ github_name: string }>();
   if (row === null) return c.json({ error: "unknown repository" }, 404);
   return queueDoctor(c.env, row.github_name);
+});
+
+/**
+ * Setup, as a request.
+ *
+ * Enrolling `recallnet/thwip-test` took a hand-written D1 row, two workflows
+ * copied in, a secret set by hand, and a ruleset built with `gh api`. The code
+ * that does all of it has been here and tested since; what was missing was this.
+ * Same administrator as the doctor, because this writes what the doctor reads.
+ */
+app.post("/v1/queue/:repositoryId/bootstrap", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  const body = await c.req.json().catch(() => ({}));
+  const result = await bootstrapRouteResponse(c.env, viewer, c.req.param("repositoryId"), body);
+  return c.json(result.body as never, result.status as never);
+});
+
+/** Where setup got to. Polled while the setup pull request waits for review. */
+app.get("/v1/queue/:repositoryId/bootstrap", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  const result = await bootstrapStatusResponse(c.env, viewer, c.req.param("repositoryId"));
+  return c.json(result.body as never, result.status as never);
 });
 
 // Resolve a repository's GitHub numeric ids from its full name. The

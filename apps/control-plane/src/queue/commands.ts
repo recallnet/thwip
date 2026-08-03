@@ -44,27 +44,6 @@ export const DEFAULT_TIMINGS: QueueTimings = {
   mergeConfirmSeconds: 60,
 };
 
-export const TIMING_LIMITS = {
-  offerSeconds: { min: 15, max: 5 * 60 },
-  executionSeconds: { min: 5 * 60, max: 45 * 60 },
-} as const;
-
-export function validateTimings(timings: QueueTimings): { ok: true } | { ok: false; detail: string } {
-  if (
-    timings.offerSeconds < TIMING_LIMITS.offerSeconds.min ||
-    timings.offerSeconds > TIMING_LIMITS.offerSeconds.max
-  ) {
-    return { ok: false, detail: "offer window must be between 15 seconds and 5 minutes" };
-  }
-  if (
-    timings.executionSeconds < TIMING_LIMITS.executionSeconds.min ||
-    timings.executionSeconds > TIMING_LIMITS.executionSeconds.max
-  ) {
-    return { ok: false, detail: "execution window must be between 5 and 45 minutes" };
-  }
-  return { ok: true };
-}
-
 function plusSeconds(iso: string, seconds: number): string {
   return new Date(Date.parse(iso) + seconds * 1000).toISOString();
 }

@@ -1,4 +1,4 @@
-import { sameGitSubject, type GitSubject } from "@thwip/queue-protocol";
+import type { GitSubject } from "@thwip/queue-protocol";
 
 /**
  * Candidate preparation and result validation (plan.md §16).
@@ -94,23 +94,6 @@ export function pinCandidate(input: {
 }
 
 /**
- * The candidate must still describe the same integration when the attempt is
- * about to act on it (§16.1 step 6). A result produced before a relevant state
- * change is discarded rather than used.
- */
-export function candidateStillCurrent(
-  pinned: GitSubject,
-  observed: GitSubject,
-  revisions: { readonly pinnedAt: number; readonly now: number },
-): { current: true } | { current: false; reason: string } {
-  if (revisions.now !== revisions.pinnedAt) {
-    return { current: false, reason: "attempt revision changed while the candidate was being resolved" };
-  }
-  if (!sameGitSubject(pinned, observed)) return { current: false, reason: "candidate no longer matches" };
-  return { current: true };
-}
-
-/**
  * Result validation after the merge (§16.3). If the tree differs, the mutation
  * already happened and must not be papered over: the caller raises an integrity
  * incident and pauses the queue.
@@ -196,29 +179,4 @@ export function actionForMergeStatus(status: number, message?: string): MergeRes
       }
       return { kind: "reconcile", reason: `unhandled status ${status}` };
   }
-}
-
-/**
- * The independent fetch the CLI performs (§16.1). `origin` is not trusted to be
- * the base repository, because in a fork checkout it usually names the fork, so
- * the commands use a temporary remote from the server-resolved URL and verify
- * the objects rather than the ref.
- */
-export function candidateFetchPlan(input: {
-  readonly canonicalBaseRepositoryUrl: string;
-  readonly pullRequestNumber: number;
-  readonly candidateSha: string;
-  readonly candidateTreeOid: string;
-  readonly remoteName?: string;
-}): { readonly commands: readonly string[]; readonly cleanup: readonly string[] } {
-  const remote = input.remoteName ?? "thwip-base";
-  return {
-    commands: [
-      `git remote add ${remote} ${input.canonicalBaseRepositoryUrl}`,
-      `git fetch --no-tags ${remote} refs/pull/${input.pullRequestNumber}/merge`,
-      `test "$(git rev-parse FETCH_HEAD)" = "${input.candidateSha}"`,
-      `test "$(git show -s --format=%T FETCH_HEAD)" = "${input.candidateTreeOid}"`,
-    ],
-    cleanup: [`git remote remove ${remote}`],
-  };
 }
