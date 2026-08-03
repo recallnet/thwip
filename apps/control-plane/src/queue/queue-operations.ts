@@ -272,6 +272,39 @@ export function admit(commands: QueueCommands, store: QueueStateStore, input: Ad
       entryId: input.entryId,
       headSha: input.headSha,
     });
+
+    // And end the turn that was running against the commit it just left.
+    //
+    // The entry followed the push and the attempt did not, because the reducer
+    // holds a pinned candidate immutable and nothing ever told the queue the
+    // pull request had moved. Under `fresh` that turn is already poisoned: the
+    // assignment names a tree GitHub no longer integrates, the device asking
+    // again is handed that same assignment back, and the receipt it returns is
+    // an honest account of the wrong tree. The queue accepts it and then refuses
+    // every merge for that attempt with `INTEGRATION_RECEIPT_TREE_MISMATCH`,
+    // which no push and no operator can clear, until the execution deadline
+    // reaps it. Pull request 2 on `recallnet/thwip-test` sat there.
+    //
+    // `HEAD_MOVED` defers, so the place in line is kept and the next turn is
+    // taken against what is there now. An offer nobody has claimed pins nothing
+    // and is left alone: whoever claims it reads the head that is there then. A
+    // merge already sent to GitHub is left alone too, because nothing here knows
+    // whether it landed and only confirmation may say.
+    const running =
+      existing.currentAttemptId === null ? undefined : store.state().attempts.get(existing.currentAttemptId);
+    if (
+      running !== undefined &&
+      running.outcome === null &&
+      !running.outcomeUnknown &&
+      running.headSha !== null &&
+      running.headSha !== input.headSha
+    ) {
+      commands.terminateAttempt({
+        idempotencyKey: `authorize:head-moved:${running.attemptId}:${input.headSha}`,
+        attemptId: running.attemptId,
+        outcome: "HEAD_MOVED",
+      });
+    }
   }
   commands.evaluateReadiness({
     idempotencyKey: `authorize:ready:${input.entryId}:${input.headSha}:${input.readinessBucket}`,
