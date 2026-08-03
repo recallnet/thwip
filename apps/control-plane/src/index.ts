@@ -11,7 +11,6 @@ import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
 import { syncInstallations } from "./admin-sync.js";
 import {
   activatePolicyFromDefaultBranchPush,
-  policyPushFromGithubWebhook,
   reconcileInstallationPolicies,
   type GithubPolicyWebhookPayload,
   type PolicyPush,
@@ -53,13 +52,14 @@ import { backfillAttestations } from "./queue/attestation-backfill.js";
 import { hasEvidence, putEvidence, type R2Like } from "./queue/evidence-store.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
 import {
-  appProofTaskFromWebhook,
   processAppProof,
   reconcileInstallationProofChecks,
   reconcileProjectProofChecks,
   requestForRerequest,
   type AppProofTask,
 } from "./app-proof-verification.js";
+import { webhookWork } from "./webhook-work.js";
+import { processQueueMessage, type QueueConsumerDeps, type QueueConsumerMessage } from "./queue-consumer.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -1635,23 +1635,14 @@ app.post("/api/github/webhooks", async (c) => {
     }
   }
 
-  const policyPush = policyPushFromGithubWebhook(event, payload);
-  const appProofTask = appProofTaskFromWebhook(event, payload as never);
-  const reconcileProofRepositoryId =
-    event === "push" &&
-    payload.repository?.id != null &&
-    payload.ref === `refs/heads/${payload.repository.default_branch ?? ""}`
-      ? String(payload.repository.id)
-      : null;
-  await c.env.SYNC_QUEUE.send({
-    provider: "github",
-    delivery,
-    event,
-    installationId,
-    policyPush,
-    appProofTask,
-    reconcileProofRepositoryId,
-  });
+  const work = webhookWork(event, payload as never, { delivery, installationId });
+  if (work === null) {
+    // Deliberately silent about the common case. Most deliveries are check_run
+    // events the App caused by publishing its own checks, and a log line each
+    // would cost more than the send did.
+    return c.json({ ok: true, duplicate, queued: { handled: false, detail: "no work in this delivery" } });
+  }
+  await c.env.SYNC_QUEUE.send(work);
   return c.json({ ok: true, duplicate, queued });
 });
 
@@ -2574,39 +2565,18 @@ export default {
   fetch: app.fetch,
   async queue(batch: MessageBatch, env: Env): Promise<void> {
     const synced = new Set<string>();
+    const deps: QueueConsumerDeps = {
+      syncInstallation: (id) => syncInstallation(env, id),
+      reconcileInstallationProofChecks: (id) => reconcileInstallationProofChecks(env, id),
+      activatePolicyFromDefaultBranchPush: (policyPush) => activatePolicyFromDefaultBranchPush(env, policyPush),
+      reconcileInstallationPolicies: (id) => reconcileInstallationPolicies(env, id),
+      reconcileProjectProofChecks: (id) => reconcileProjectProofChecks(env, id),
+      processAppProof: (request) => processAppProof(env, request),
+      requestForRerequest: (verificationId) => requestForRerequest(env, verificationId),
+    };
     for (const msg of batch.messages) {
-      const body = msg.body as {
-        event?: string;
-        installationId?: string | null;
-        policyPush?: PolicyPush | null;
-        appProofTask?: AppProofTask | null;
-        reconcileProofRepositoryId?: string | null;
-      };
-      const inst = body?.installationId;
       try {
-        if (inst && !synced.has(inst)) {
-          await syncInstallation(env, inst);
-          synced.add(inst);
-          if (["member", "membership", "organization", "repository", "team"].includes(body.event ?? "")) {
-            await reconcileInstallationProofChecks(env, inst);
-          }
-        }
-        if (body.policyPush != null) {
-          await activatePolicyFromDefaultBranchPush(env, body.policyPush);
-        }
-        if (body.event === "policy_reconcile" && inst) {
-          await reconcileInstallationPolicies(env, inst);
-          await reconcileInstallationProofChecks(env, inst);
-        }
-        if (body.reconcileProofRepositoryId) {
-          await reconcileProjectProofChecks(env, body.reconcileProofRepositoryId);
-        }
-        if (body.appProofTask?.kind === "verify") {
-          await processAppProof(env, body.appProofTask.request);
-        } else if (body.appProofTask?.kind === "rerequest") {
-          const request = await requestForRerequest(env, body.appProofTask.verificationId);
-          if (request !== null) await processAppProof(env, request);
-        }
+        await processQueueMessage(msg.body as QueueConsumerMessage, synced, deps);
         msg.ack();
       } catch {
         msg.retry();
