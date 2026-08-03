@@ -51,16 +51,36 @@ const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/he
  */
 type AnyStore = BranchQueueStore | SnapshotQueueStore;
 
+/**
+ * Take the pull request number back off every merge write in the backing, the
+ * way the rows written before the column existed already are. `ALTER TABLE`
+ * leaves the old rows NULL, and the document store's old rows simply have no
+ * such key.
+ */
+function stripPullRequestNumbers(sql: SqlLike): void {
+  sql.exec("UPDATE merge_operations SET pull_request_number = NULL");
+}
+
+function stripPullRequestNumbersFromDocument(cell: SnapshotCell): void {
+  const held = cell.read();
+  if (held === null) return;
+  const doc = JSON.parse(held) as { mergeOperations: Array<Record<string, unknown>> };
+  for (const row of doc.mergeOperations) delete row.pullRequestNumber;
+  cell.write(JSON.stringify(doc));
+}
+
 const IMPLEMENTATIONS = [
   {
     name: "BranchQueueStore",
     backing: () => sqlite() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore => BranchQueueStore.open(b as SqlLike, id),
+    legacy: (b: never) => stripPullRequestNumbers(b as SqlLike),
   },
   {
     name: "SnapshotQueueStore",
     backing: () => cellOf() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore => SnapshotQueueStore.open(b as SnapshotCell, id),
+    legacy: (b: never) => stripPullRequestNumbersFromDocument(b as SnapshotCell),
   },
   {
     // The same store with compaction turned up as far as it goes, so anything the
@@ -70,6 +90,7 @@ const IMPLEMENTATIONS = [
     backing: () => cellOf() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore =>
       SnapshotQueueStore.open(b as SnapshotCell, id, { terminalEntries: 1, transitions: 1 }),
+    legacy: (b: never) => stripPullRequestNumbersFromDocument(b as SnapshotCell),
   },
 ];
 
@@ -106,7 +127,7 @@ function request(store: AnyStore, entryId: string, principal: string, pr: number
   );
 }
 
-describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
+describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
   it("creates its schema and meta row once", () => {
     const sql = backing();
     const first = open(sql, IDENTITY);
@@ -572,6 +593,22 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
           "op-1",
           "op-2",
         ]);
+      });
+
+      /**
+       * The four stranded writes predate the column, so what the sweep meets in
+       * production is a row with no pull request number at all. Reporting that
+       * as a number sends the sweep to `GET /pulls/undefined`, which 404s on
+       * every tick, which is a row that can never settle.
+       */
+      it("reports a write written before the column existed as having no pull request number", () => {
+        const b = backing();
+        const store = open(b, IDENTITY);
+        store.beginMergeOperation(op);
+        legacy(b);
+        const found = open(b, IDENTITY).unresolvedMergeOperations("2026-07-29T12:25:00Z");
+        expect(found).toHaveLength(1);
+        expect(found[0]?.pullRequestNumber).toBeNull();
       });
     });
   });

@@ -180,8 +180,14 @@ export interface UnresolvedMergeOperation {
    * The pull request this write was sent for. The attempt used to be where a
    * sweep looked this up, and the attempt is exactly what does not survive the
    * failure an orphaned write needs settling from.
+   *
+   * Null on every row written before the column existed, which includes the four
+   * stranded writes this sweep was built for. A sweep that reads a missing
+   * number as a number asks GitHub about pull request `undefined`, gets a 404,
+   * and leaves the row exactly where it found it forever, so the absence is
+   * typed and the sweep resolves the number from the head commit instead.
    */
-  readonly pullRequestNumber: number;
+  readonly pullRequestNumber: number | null;
 }
 
 export class BranchQueueStore {
@@ -786,7 +792,7 @@ export class BranchQueueStore {
         expected_base_sha: string;
         expected_head_sha: string;
         expected_tree_oid: string;
-        pull_request_number: number;
+        pull_request_number: number | null;
         write_started_at: string;
       }>(
         `SELECT operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
@@ -804,7 +810,7 @@ export class BranchQueueStore {
         expectedBaseSha: row.expected_base_sha,
         expectedHeadSha: row.expected_head_sha,
         expectedTreeOid: row.expected_tree_oid,
-        pullRequestNumber: row.pull_request_number,
+        pullRequestNumber: row.pull_request_number ?? null,
         writeStartedAt: row.write_started_at,
       }));
   }

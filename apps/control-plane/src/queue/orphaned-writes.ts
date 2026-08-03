@@ -1,5 +1,6 @@
 import type { UnresolvedMergeOperation } from "./store.js";
 import type { RecordFromIntentResult } from "./record-from-intent.js";
+import { confirmMergeAbsence, type PullMergeState } from "./merge-absence.js";
 
 /**
  * Settling a merge write the workflow walked away from.
@@ -22,9 +23,29 @@ import type { RecordFromIntentResult } from "./record-from-intent.js";
 /** Ten minutes. Longer than any merge workflow run observed on this repository. */
 export const ORPHANED_WRITE_GRACE_MS = 10 * 60 * 1000;
 
+/**
+ * How many stranded writes one queue settles per tick.
+ *
+ * Settling one write costs a pull request read and a base comparison per
+ * confirmation round, plus the commit reads that build the record, and every one
+ * of those is a Worker subrequest. This account stays inside the free tier on
+ * purpose, where the per-invocation subrequest budget is small enough that an
+ * unbounded sweep over a backlog would blow it and fail the whole tick, taking
+ * the clock and the lane driving down with it. Five leaves headroom for the rest
+ * of the tick, and the cron comes back in five minutes for the next five.
+ */
+export const ORPHANED_WRITE_SWEEP_LIMIT = 5;
+
 export interface OrphanedWriteReads {
+  /**
+   * The pull requests GitHub associates with the head commit this write pinned,
+   * or null when the read failed. Asked only for a row written before
+   * `merge_operations` carried a pull request number, which is what the four
+   * stranded writes are.
+   */
+  pullRequestNumbersForHead(): Promise<readonly number[] | null>;
   /** What the pull request says about itself, or null when it could not be read. */
-  readMergeState(): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
+  readMergeState(pullRequestNumber: number): Promise<PullMergeState | null>;
   /** Whether the base branch contains the head commit, from git ancestry. */
   baseContainsHead(): Promise<boolean | null>;
   /** Build, sign and record the transition from the signed merge intent. */
@@ -35,6 +56,8 @@ export interface OrphanedWriteReads {
    * exiting, is the same class of loss the whole sweep exists to close.
    */
   resolve(operationId: string, outcome: "MERGED" | "CONFIRMED_NOT_MERGED"): Promise<void>;
+  /** The backoff between confirmation rounds. Overridden so tests do not wait. */
+  sleep?(ms: number): Promise<void>;
 }
 
 export type OrphanedWriteOutcome =
@@ -46,40 +69,66 @@ export async function settleOrphanedWrite(
   write: UnresolvedMergeOperation,
   reads: OrphanedWriteReads,
 ): Promise<OrphanedWriteOutcome> {
-  const pull = await reads.readMergeState();
-  const contains = await reads.baseContainsHead();
+  const unknown = (reason: string): OrphanedWriteOutcome => ({
+    settled: "unknown",
+    operationId: write.operationId,
+    reason,
+  });
 
-  // Git settles it either way round. A pull request that reports itself merged
-  // is enough, and so is ancestry when the pull request has not caught up with
-  // its own merge.
-  const landed = pull?.merged === true || contains === true;
+  const pullRequestNumber = await pullRequestFor(write, reads);
+  if (pullRequestNumber === null) {
+    return unknown("the pull request this write was sent for could not be named");
+  }
 
-  if (landed) {
-    // `merge_commit_sha` on an open pull request holds the test merge GitHub
-    // computes for it, which has the real merge's tree and parents and is on no
-    // branch, so it is only trusted once the pull request reports itself
-    // merged. Ancestry alone names no commit at all, only that the expected
-    // head is reachable from base, so the expected head is offered instead.
-    // Nothing here is taken on faith: `recordMerge` reads the commit back from
-    // git and refuses anything whose tree and parents do not match what the
-    // queue authorized, so a wrong guess here comes back "refused" rather than
-    // recording something nobody signed for.
-    const mergeSha = pull?.merged === true ? pull.mergeCommitSha : contains === true ? write.expectedHeadSha : null;
-    if (mergeSha === null) {
-      return { settled: "unknown", operationId: write.operationId, reason: "the merge landed and GitHub named no commit" };
+  // `confirmMergeAbsence` is the rule this codebase already settled on, and it
+  // is reused rather than restated. One pull request read that has not caught up
+  // with its own merge is how four merges lost their links; a negative needs
+  // every read, from both sources, across the backoff.
+  const verdict = await confirmMergeAbsence(
+    {
+      readPull: () => reads.readMergeState(pullRequestNumber),
+      baseContainsHead: () => reads.baseContainsHead(),
+    },
+    reads.sleep === undefined ? {} : { sleep: reads.sleep },
+  );
+
+  if (verdict.kind === "merged") {
+    // A merge with no sha is the ancestry-only arm: the base contains the head,
+    // which says a merge landed and says nothing about what landed. Offering the
+    // head commit here is what `merge-absence.ts` refuses to do and for the same
+    // reason. On a squash queue the squash tree equals the head tree while the
+    // branch sits on base, so a head commit parented on base passes every gate
+    // and the chain would claim main became the pull request's own commit. The
+    // row stays open and the next tick asks again.
+    if (verdict.mergeSha === null) {
+      return unknown("the merge landed and GitHub named no commit");
     }
-    const recorded = await reads.recordMerge(mergeSha);
-    if (recorded.status === "refused") {
-      return { settled: "unknown", operationId: write.operationId, reason: recorded.detail };
-    }
+    const recorded = await reads.recordMerge(verdict.mergeSha);
+    if (recorded.status === "refused") return unknown(recorded.detail);
     await reads.resolve(write.operationId, "MERGED");
-    return { settled: "merged", operationId: write.operationId, mergeSha };
+    return { settled: "merged", operationId: write.operationId, mergeSha: verdict.mergeSha };
   }
 
-  if (pull !== null && contains === false) {
-    await reads.resolve(write.operationId, "CONFIRMED_NOT_MERGED");
-    return { settled: "not-merged", operationId: write.operationId };
-  }
+  if (verdict.kind === "unknown") return unknown(verdict.reason);
 
-  return { settled: "unknown", operationId: write.operationId, reason: "GitHub could not be read well enough to say" };
+  await reads.resolve(write.operationId, "CONFIRMED_NOT_MERGED");
+  return { settled: "not-merged", operationId: write.operationId };
+}
+
+/**
+ * Which pull request this write was sent for.
+ *
+ * The row carries the number for every write started since the column existed.
+ * The four writes the sweep was built for predate it and carry nothing, so the
+ * number is read back from the head commit they pinned. Two candidates is not an
+ * answer: picking one would be the guess this whole file exists to avoid.
+ */
+async function pullRequestFor(
+  write: UnresolvedMergeOperation,
+  reads: OrphanedWriteReads,
+): Promise<number | null> {
+  if (write.pullRequestNumber !== null) return write.pullRequestNumber;
+  const candidates = await reads.pullRequestNumbersForHead();
+  if (candidates === null || candidates.length !== 1) return null;
+  return candidates[0] ?? null;
 }

@@ -182,7 +182,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     const write = commands.beginMergeWrite({ idempotencyKey: "m1", attemptId, operationId: "op-x" });
     expect(write.status).toBe("applied");
     clock.advance(2);
-    commands.confirmMerge({
+    await commands.confirmMerge({
       idempotencyKey: "m2",
       attemptId,
       operationId: "op-x",
@@ -400,7 +400,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const { store, commands } = harness();
       const attemptId = await driveToMergeRequested(commands);
       commands.mergeOutcomeUnknown({ idempotencyKey: "u1", attemptId });
-      commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
+      await commands.confirmNotMerged({ idempotencyKey: "n1", attemptId, operationId: "op-x" });
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("CONFIRMED_NOT_MERGED");
       expect(store.mergeOperation("op-x")).toMatchObject({ outcome: "CONFIRMED_NOT_MERGED" });
       // Deferred with a cooldown, so the lane goes to somebody else before this
