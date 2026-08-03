@@ -141,6 +141,12 @@ for (const f of workerSources) {
 //
 // An undeclared import is the interesting half. It resolves through pnpm's store on
 // the machine that wrote it and fails on a clean install somewhere else.
+//
+// Two entries in `ignoreDependencies` are there because knip reads imports and
+// these are not imported. `cloudflare` is the Workers built-in module scheme,
+// `cloudflare:workers`, and not a package at all. `@thwip/cli` is a `link:` in the
+// root manifest that puts the `thwip` binary on the path in this repository; no
+// file imports it and none should.
 {
   const knip = spawnSync("npx", ["knip", "--reporter", "symbols"], {
     cwd: root,
