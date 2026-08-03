@@ -1,4 +1,5 @@
 import type { BlockingReason } from "@thwip/queue-domain";
+import { TURN_CHECK } from "./turn-check.js";
 
 /**
  * Deriving readiness (plan.md §7.1).
@@ -214,9 +215,21 @@ export interface RequiredCheckFacts {
  */
 const SATISFYING = new Set(["success", "neutral", "skipped"]);
 
-/** A context this queue publishes itself: `thwip` and everything under it. */
+/**
+ * The one context readiness must not read: its own output.
+ *
+ * `thwip / turn` is what this derivation publishes, so counting it would make
+ * readiness depend on the last thing readiness said.
+ *
+ * `thwip` is excluded from that reasoning on purpose. It is the App's verdict on
+ * the head's proof, published by proof verification and not by this file, so
+ * reading it is not circular. It used to be skipped alongside the turn check,
+ * which meant a red proof check left an entry ready: the queue offered the lane
+ * to a pull request whose proof the App had already rejected, and the merge gate
+ * refused it at the end instead.
+ */
 function ownCheck(context: string): boolean {
-  return context === "thwip" || context.startsWith("thwip / ");
+  return context === TURN_CHECK;
 }
 
 /**
