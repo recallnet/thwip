@@ -1259,7 +1259,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-    decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+    decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T | Promise<T>,
   ) =>
     runOnQueue(env, repositoryId, baseRef, decide, (update) =>
       deps.publishTurnCheck === undefined
@@ -3308,7 +3308,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         c.env,
         repositoryId,
         baseRef,
-        ({ commands, store }) =>
+        async ({ commands, store }) =>
           confirmOnly(commands, store, {
             attemptId,
             operationId: mergeOperationId(attemptId),
@@ -3421,7 +3421,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       c.env,
       repositoryId,
       baseRef,
-      ({ commands }) =>
+      async ({ commands }) =>
         commands.confirmNotMerged({
           idempotencyKey: `reconcile:${attemptId}:${reason.slice(0, 32)}`,
           attemptId,
@@ -3854,14 +3854,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       });
     }
 
-    const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+    const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, async ({ commands }) => {
       // An outcome already in doubt has to be declared unknown before it can be
       // resolved, which is the reducer refusing to skip reconciliation.
       commands.mergeOutcomeUnknown({
         idempotencyKey: `not-merged:unknown:${attemptId}`,
         attemptId,
       });
-      return commands.confirmNotMerged({
+      return await commands.confirmNotMerged({
         idempotencyKey: `not-merged:${attemptId}`,
         attemptId,
         operationId,
@@ -3923,7 +3923,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       c.env,
       repositoryId,
       baseRef,
-      ({ commands, store }) =>
+      async ({ commands, store }) =>
         confirmOnly(commands, store, {
           attemptId,
           operationId: body.operationId!,

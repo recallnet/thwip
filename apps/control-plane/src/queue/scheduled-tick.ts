@@ -12,7 +12,7 @@ import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./route
 import { readActivePolicy } from "../active-policy.js";
 import { serviceKey } from "../service-signing.js";
 import type { Env } from "../env.js";
-import { ORPHANED_WRITE_GRACE_MS, settleOrphanedWrite } from "./orphaned-writes.js";
+import { ORPHANED_WRITE_GRACE_MS, ORPHANED_WRITE_SWEEP_LIMIT, settleOrphanedWrite } from "./orphaned-writes.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 
 /**
@@ -200,39 +200,6 @@ export async function tickAllQueues(
         );
       }
 
-      // A write the workflow walked away from is nobody's job until it is this
-      // one's. `settleReconciliation` above needs a surviving attempt; these
-      // rows outlive every attempt, which is why four merges sat unrecorded.
-      const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
-      const orphaned = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
-        store.unresolvedMergeOperations(cutoff),
-      );
-      for (const write of orphaned) {
-        const outcome = await settleOrphanedWrite(write, {
-          readMergeState: () => reads.pullRequestMergeState(env, row.repositoryId, write.pullRequestNumber),
-          baseContainsHead: () => reads.baseContainsSha(env, row.repositoryId, row.baseRef, write.expectedHeadSha),
-          recordMerge: (mergeSha) =>
-            recordMergeFromIntent(env, recordDeps, {
-              repositoryId: row.repositoryId,
-              baseRef: row.baseRef,
-              mergeSha,
-              witnessPrincipalId: "queue",
-              attemptId: write.attemptId,
-            }),
-          resolve: (operationId, resolvedAs) =>
-            withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
-              store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
-            ),
-        });
-        settledWrites += 1;
-        // Said out loud on the channel this account watches. Something repairing
-        // the chain silently is worse than the gap it closes.
-        console.log(
-          `[queue heartbeat] settled orphaned merge write ${write.operationId} for repository ` +
-            `${row.repositoryId}: ${outcome.settled}`,
-        );
-      }
-
       // Only a held lane needs driving. Dispatching for an idle queue would
       // spend a CI run to be told there is nothing to do — and under `fresh`
       // or `audited` there is no Actions fallback for the run, so a lane still
@@ -255,6 +222,19 @@ export async function tickAllQueues(
         await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
         driven += 1;
       }
+
+      // A write the workflow walked away from is nobody's job until it is this
+      // one's. `settleReconciliation` above needs a surviving attempt; these
+      // rows outlive every attempt, which is why four merges sat unrecorded.
+      //
+      // Last, after the lane has been driven. Settling a write reads GitHub
+      // several times and writes the chain, and both can throw: `withQueueState`
+      // gives up after five lost compare-and-swaps and `recordMergeFromIntent`
+      // raises whatever the signer or the evidence store raises. Standing ahead
+      // of the drive, one queue with a write it could not settle would stop that
+      // queue's turns from ever being driven, which is a worse failure than the
+      // one the sweep repairs.
+      settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
     } catch (error) {
       // A heartbeat that reports the same number whether it worked or failed
       // is not a signal. Keep this out of `ticked` so a fleet-wide outage
@@ -266,4 +246,65 @@ export async function tickAllQueues(
     }
   }
   return { ticked, driven, failed, reconciled, settledWrites };
+}
+
+/**
+ * Settle the merge writes on one queue that nobody ever closed, and say how many
+ * actually settled.
+ *
+ * Counting the ones examined instead would report a repair on every tick for a
+ * row that keeps coming back unknown, which is the opposite of what the number
+ * is read for.
+ */
+async function sweepOrphanedWrites(
+  env: QueueRouteEnv,
+  db: D1Like,
+  row: { repositoryId: string; baseRef: string },
+  reads: ReconciliationReads,
+  recordDeps: RecordFromIntentDeps<QueueRouteEnv>,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
+  const orphaned = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+    store.unresolvedMergeOperations(cutoff),
+  );
+
+  let settled = 0;
+  // Oldest first, so a backlog clears the longest-stranded merge first and the
+  // cap never starves one row.
+  for (const write of orphaned.slice(0, ORPHANED_WRITE_SWEEP_LIMIT)) {
+    const outcome = await settleOrphanedWrite(write, {
+      pullRequestNumbersForHead: () =>
+        reads.pullRequestNumbersForCommit(env, row.repositoryId, write.expectedHeadSha),
+      readMergeState: (pullRequestNumber) =>
+        reads.pullRequestMergeState(env, row.repositoryId, pullRequestNumber),
+      baseContainsHead: () => reads.baseContainsSha(env, row.repositoryId, row.baseRef, write.expectedHeadSha),
+      recordMerge: (mergeSha) =>
+        recordMergeFromIntent(env, recordDeps, {
+          repositoryId: row.repositoryId,
+          baseRef: row.baseRef,
+          mergeSha,
+          // Display only. It names who is speaking for this record in the
+          // evidence a reader sees, and nothing authenticates against it: the
+          // record's authority comes from the merge intent the queue already
+          // signed and from the commit read back out of git, neither of which
+          // this string touches. No principal row is claimed for it, because the
+          // sweep is the Worker's own clock rather than any person or device.
+          witnessPrincipalId: "queue",
+          attemptId: write.attemptId,
+        }),
+      resolve: (operationId, resolvedAs) =>
+        withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+          store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
+        ),
+      ...(reads.sleep === undefined ? {} : { sleep: reads.sleep }),
+    });
+    if (outcome.settled !== "unknown") settled += 1;
+    // Said out loud on the channel this account watches. Something repairing
+    // the chain silently is worse than the gap it closes.
+    console.log(
+      `[queue heartbeat] settled orphaned merge write ${write.operationId} for repository ` +
+        `${row.repositoryId}: ${outcome.settled}`,
+    );
+  }
+  return settled;
 }

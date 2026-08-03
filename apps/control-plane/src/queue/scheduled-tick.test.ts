@@ -699,29 +699,44 @@ describe("settling a write the workflow walked away from", () => {
       );
   }
 
-  it("settles a merge write left unresolved by a workflow that exited", async () => {
-    const e = env();
-    const db = e.DB as unknown as D1Like;
-    queue("1", 1);
-    await seedIntent();
-
-    // The write started twenty minutes ago and nothing ever resolved it. No
-    // attempt was ever created here, the same state the queue was in when it
-    // stranded four merges: `state.attempts` held none of them.
+  /**
+   * The write started twenty minutes ago and nothing ever resolved it. No
+   * attempt is ever created, the same state the queue was in when it stranded
+   * four merges: `state.attempts` held none of them.
+   */
+  async function beginWrite(
+    db: D1Like,
+    pullRequestNumber: number,
+    operationId = `merge_${ORPHAN.attemptId}`,
+  ): Promise<void> {
     await withQueueState(db, "1", REF, async (store) =>
       store.beginMergeOperation({
-        operationId: `merge_${ORPHAN.attemptId}`,
+        operationId,
         attemptId: ORPHAN.attemptId,
         attemptRevision: 1,
         expectedBaseSha: ORPHAN.baseSha,
         expectedHeadSha: ORPHAN.headSha,
         expectedTreeOid: ORPHAN.treeOid,
-        pullRequestNumber: ORPHAN.pullRequestNumber,
+        pullRequestNumber,
         at: "2026-08-02T07:55:00.000Z",
       }),
     );
+  }
 
-    const recordDeps: RecordFromIntentDeps<QueueRouteEnv> = {
+  /** Take the key back off every merge write, as the live rows already are. */
+  function forgetPullRequestNumbers(): void {
+    const row = raw
+      .prepare("SELECT document FROM queue_state WHERE github_repository_id = ? AND base_ref = ?")
+      .get("1", REF) as { document: string };
+    const doc = JSON.parse(row.document) as { mergeOperations: Array<Record<string, unknown>> };
+    for (const op of doc.mergeOperations) delete op.pullRequestNumber;
+    raw
+      .prepare("UPDATE queue_state SET document = ? WHERE github_repository_id = ? AND base_ref = ?")
+      .run(JSON.stringify(doc), "1", REF);
+  }
+
+  function recordDepsThatRecord(): RecordFromIntentDeps<QueueRouteEnv> {
+    return {
       commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
       baseContainsSha: async () => true,
       activePolicy: async () => ({
@@ -734,17 +749,31 @@ describe("settling a write the workflow walked away from", () => {
       storeEvidence: async () => "no-bucket",
       onQueue: runOnQueue,
     };
+  }
 
-    const readsThatSayMerged: ReconciliationReads = {
+  /** Nothing waits out the confirmation backoff in a test. */
+  function readsThatSayMerged(): ReconciliationReads {
+    return {
       pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: ORPHAN.mergeSha }),
       baseContainsSha: async () => true,
+      pullRequestNumbersForCommit: async () => [ORPHAN.pullRequestNumber],
       commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
+      sleep: async () => {},
     };
+  }
+
+  it("settles a merge write left unresolved by a workflow that exited", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    const recordDeps = recordDepsThatRecord();
 
     const result = await tickAllQueues(
       e,
       { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
-      readsThatSayMerged,
+      readsThatSayMerged(),
       recordDeps,
     );
 
@@ -753,5 +782,131 @@ describe("settling a write the workflow walked away from", () => {
       store.unresolvedMergeOperations(new Date().toISOString()),
     );
     expect(remaining).toEqual([]);
+  });
+
+  /**
+   * What the four stranded rows actually look like in production D1: no
+   * `pullRequestNumber` key at all, because they were written before the row
+   * carried one. A sweep that reads that absence as a number asks GitHub about
+   * pull request `undefined`, is refused, and leaves the row exactly where it
+   * found it on every tick forever.
+   */
+  it("settles a write whose row never carried a pull request number", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    forgetPullRequestNumbers();
+
+    const asked: number[] = [];
+    const reads: ReconciliationReads = {
+      ...readsThatSayMerged(),
+      pullRequestNumbersForCommit: async () => [ORPHAN.pullRequestNumber],
+      pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
+        asked.push(pullRequestNumber);
+        return { merged: true, mergeCommitSha: ORPHAN.mergeSha };
+      },
+    };
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      reads,
+      recordDepsThatRecord(),
+    );
+
+    expect(asked).toEqual([ORPHAN.pullRequestNumber]);
+    expect(result.settledWrites).toBe(1);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toEqual([]);
+  });
+
+  /** A row that came back unknown was examined, not settled. */
+  it("counts only the writes it actually settled", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { ...readsThatSayMerged(), pullRequestMergeState: async () => null, baseContainsSha: async () => null },
+      recordDepsThatRecord(),
+    );
+
+    expect(result.settledWrites).toBe(0);
+    const remaining = await withQueueState(db, "1", REF, async (store) =>
+      store.unresolvedMergeOperations(new Date().toISOString()),
+    );
+    expect(remaining).toHaveLength(1);
+  });
+
+  /**
+   * The sweep is bounded because the tick is. Every write costs GitHub
+   * subrequests, this account stays inside the free tier on purpose, and a
+   * per-invocation cap that the whole tick fails against would take the clock
+   * and the lane driving down with the backlog.
+   */
+  it("settles at most five writes for one queue in one tick", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    for (let i = 0; i < 7; i += 1) await beginWrite(db, 200 + i, `merge_att_${i}`);
+
+    const asked = new Set<number>();
+    await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      {
+        ...readsThatSayMerged(),
+        pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
+          asked.add(pullRequestNumber);
+          return null;
+        },
+        baseContainsSha: async () => null,
+      },
+      recordDepsThatRecord(),
+    );
+
+    expect(asked.size).toBe(5);
+  });
+
+  /**
+   * The sweep reads GitHub and writes the chain, and both can throw. A queue
+   * with a write it cannot settle must still have its turn driven, or one
+   * stranded row stops that queue moving at all.
+   */
+  it("drives the held turn even when settling a write throws", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await offeredEntry(db, "1", "entry_a", "alice", 41);
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    let drives = 0;
+    const failures: string[] = [];
+    const result = await tickAllQueues(
+      e,
+      {
+        driveTurn: async () => void drives++,
+        onQueueTicked: () => {},
+        onQueueFailed: (repositoryId) => failures.push(repositoryId),
+      },
+      {
+        ...readsThatSayMerged(),
+        pullRequestMergeState: async () => {
+          throw new Error("GitHub is unreachable");
+        },
+      },
+      recordDepsThatRecord(),
+    );
+
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
+    expect(failures).toEqual(["1"]);
   });
 });

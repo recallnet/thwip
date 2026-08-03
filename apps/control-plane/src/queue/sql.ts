@@ -142,6 +142,7 @@ export const SCHEMA: readonly string[] = [
      expected_base_sha TEXT NOT NULL,
      expected_head_sha TEXT NOT NULL,
      expected_tree_oid TEXT NOT NULL,
+     pull_request_number INTEGER,
      write_started_at TEXT NOT NULL,
      outcome TEXT,
      resolved_at TEXT

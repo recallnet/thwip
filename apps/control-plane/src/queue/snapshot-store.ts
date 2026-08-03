@@ -105,7 +105,13 @@ interface MergeOperationRow {
   expectedBaseSha: string;
   expectedHeadSha: string;
   expectedTreeOid: string;
-  pullRequestNumber: number;
+  /**
+   * Absent on every row this document held before the key existed. Production
+   * runs on this store, and the four writes the sweep was built for are four
+   * such rows, so the key is optional here and the absence is carried as null
+   * rather than read back as a number nobody wrote.
+   */
+  pullRequestNumber?: number | null;
   writeStartedAt: string;
   outcome: string | null;
   resolvedAt: string | null;
@@ -493,7 +499,7 @@ export class SnapshotQueueStore {
         expectedBaseSha: row.expectedBaseSha,
         expectedHeadSha: row.expectedHeadSha,
         expectedTreeOid: row.expectedTreeOid,
-        pullRequestNumber: row.pullRequestNumber,
+        pullRequestNumber: row.pullRequestNumber ?? null,
         writeStartedAt: row.writeStartedAt,
       }));
   }
