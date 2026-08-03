@@ -1,0 +1,60 @@
+:root {
+  --paper: #ffffff;
+  --ink: #1b1b1b;
+  --muted: #565c65;
+  --ghost: #71767a;
+  --rule: #dfe1e2;
+  --hair: #eceef0;
+  --civic: #005ea2;
+  --civic-dark: #00436d;
+  --pass: #00a91c;
+  --fail: #b50909;
+
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "Public Sans", system-ui, sans-serif;
+  --num: "Archivo", var(--sans);
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--civic);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  color: var(--civic-dark);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}

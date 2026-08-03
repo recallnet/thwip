@@ -51,6 +51,17 @@ Node 22 or newer.
   Repository setup is a separate prompt, on each project's dashboard page.
 - [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored org
   management (requires sign-in)
+- [Blog](https://thwip.recall.net/blog/): product announcements and guides
+- [RSS](https://thwip.recall.net/rss.xml): blog feed
+
+## Blog
+
+- [Beta is open](https://thwip.recall.net/blog/beta.md): public beta
+  announcement — what ships, what a proof establishes, how to start
+- [Beta sign-up and install](https://thwip.recall.net/blog/beta-install.md):
+  CLI, login, GitHub signing key, first `thwip run`
+- HTML twins: https://thwip.recall.net/blog/beta/ and
+  https://thwip.recall.net/blog/beta-install/
 
 ## Facts
 
