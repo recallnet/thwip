@@ -290,6 +290,7 @@ const PORTS = { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFaile
 const NOT_MERGED: ReconciliationReads = {
   pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
   baseContainsSha: async () => false,
+  pullRequestNumbersForCommit: async () => [114],
   commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "114".padStart(40, "a")] }),
   sleep: async () => {},
 };

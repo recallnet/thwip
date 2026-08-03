@@ -51,16 +51,36 @@ const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/he
  */
 type AnyStore = BranchQueueStore | SnapshotQueueStore;
 
+/**
+ * Take the pull request number back off every merge write in the backing, the
+ * way the rows written before the column existed already are. `ALTER TABLE`
+ * leaves the old rows NULL, and the document store's old rows simply have no
+ * such key.
+ */
+function stripPullRequestNumbers(sql: SqlLike): void {
+  sql.exec("UPDATE merge_operations SET pull_request_number = NULL");
+}
+
+function stripPullRequestNumbersFromDocument(cell: SnapshotCell): void {
+  const held = cell.read();
+  if (held === null) return;
+  const doc = JSON.parse(held) as { mergeOperations: Array<Record<string, unknown>> };
+  for (const row of doc.mergeOperations) delete row.pullRequestNumber;
+  cell.write(JSON.stringify(doc));
+}
+
 const IMPLEMENTATIONS = [
   {
     name: "BranchQueueStore",
     backing: () => sqlite() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore => BranchQueueStore.open(b as SqlLike, id),
+    legacy: (b: never) => stripPullRequestNumbers(b as SqlLike),
   },
   {
     name: "SnapshotQueueStore",
     backing: () => cellOf() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore => SnapshotQueueStore.open(b as SnapshotCell, id),
+    legacy: (b: never) => stripPullRequestNumbersFromDocument(b as SnapshotCell),
   },
   {
     // The same store with compaction turned up as far as it goes, so anything the
@@ -70,6 +90,7 @@ const IMPLEMENTATIONS = [
     backing: () => cellOf() as never,
     open: (b: never, id: typeof IDENTITY): AnyStore =>
       SnapshotQueueStore.open(b as SnapshotCell, id, { terminalEntries: 1, transitions: 1 }),
+    legacy: (b: never) => stripPullRequestNumbersFromDocument(b as SnapshotCell),
   },
 ];
 
@@ -106,7 +127,7 @@ function request(store: AnyStore, entryId: string, principal: string, pr: number
   );
 }
 
-describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
+describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
   it("creates its schema and meta row once", () => {
     const sql = backing();
     const first = open(sql, IDENTITY);
@@ -462,6 +483,7 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
       expectedBaseSha: "b".repeat(40),
       expectedHeadSha: "h".repeat(40),
       expectedTreeOid: "t".repeat(40),
+      pullRequestNumber: 42,
       at: "2026-07-29T12:20:00Z",
     };
 
@@ -480,13 +502,114 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open }) => {
       expect(restarted.beginMergeOperation(op)).toMatchObject({ status: "already-started" });
     });
 
-    it("remembers how an operation resolved", () => {
+    it("remembers how an operation resolved", async () => {
       const store = open(backing(), IDENTITY);
       store.beginMergeOperation(op);
-      store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
+      await store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
       expect(store.mergeOperation("op-1")).toMatchObject({ attemptId: "a1", outcome: "MERGED" });
       expect(store.beginMergeOperation(op)).toEqual({ status: "already-started", outcome: "MERGED" });
       expect(store.mergeOperation("nope")).toBeNull();
+    });
+
+    /**
+     * The pull request a write was sent for, carried on the row rather than
+     * looked up through the attempt: the attempt is exactly what the sweep
+     * cannot rely on once it is stranded.
+     */
+    it("carries the pull request the write was sent for", () => {
+      const store = open(backing(), IDENTITY);
+      store.beginMergeOperation(op);
+      expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([
+        expect.objectContaining({ operationId: "op-1", pullRequestNumber: 42 }),
+      ]);
+    });
+
+    /**
+     * An operation nobody resolved is the failure this whole guard exists around,
+     * and until now nothing could find one.
+     *
+     * Four merges landed on this repository that way. The workflow authorized,
+     * GitHub answered 405 while it was still working out mergeability, the
+     * workflow exited saying it was leaving the outcome to reconciliation, and
+     * the merge landed anyway. The attempt was terminated and compacted, so the
+     * only thing that ever swept these rows was gone, and the operations sit
+     * unresolved with the chain missing four links.
+     *
+     * So the operation carries the obligation, not the attempt. Finding one is
+     * the first thing the sweep needs and the reason these tests exist.
+     */
+    describe("operations nobody resolved", () => {
+      it("finds a write that was started and never resolved", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([
+          {
+            operationId: "op-1",
+            attemptId: "a1",
+            attemptRevision: 3,
+            expectedBaseSha: "b".repeat(40),
+            expectedHeadSha: "h".repeat(40),
+            expectedTreeOid: "t".repeat(40),
+            pullRequestNumber: 42,
+            writeStartedAt: "2026-07-29T12:20:00Z",
+          },
+        ]);
+      });
+
+      it("leaves a resolved write alone", async () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        await store.resolveMergeOperation("op-1", "MERGED", "2026-07-29T12:21:00Z");
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toEqual([]);
+      });
+
+      /**
+       * A write sent a moment ago is in flight, not orphaned. Sweeping it would
+       * race the workflow that is about to report the same operation.
+       */
+      it("leaves a write that is still young enough to report for itself", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation(op);
+        // The argument is the cutoff: anything started at or after it is still in
+        // flight. This write began a second later than the cutoff allows for.
+        expect(store.unresolvedMergeOperations("2026-07-29T12:19:59Z")).toEqual([]);
+      });
+
+      it("finds one whose attempt no longer exists, because that is the case that stranded four merges", () => {
+        const sql = backing();
+        const store = open(sql, IDENTITY);
+        store.beginMergeOperation(op);
+        // Nothing here ever created the attempt, which is the state the queue was
+        // in by the time anybody looked: `state.attempts` held none of the four.
+        const reopened = open(sql, IDENTITY);
+        expect(reopened.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toHaveLength(1);
+      });
+
+      it("returns the oldest first, so a sweep clears the longest-stranded merge first", () => {
+        const store = open(backing(), IDENTITY);
+        store.beginMergeOperation({ ...op, operationId: "op-2", at: "2026-07-29T12:22:00Z" });
+        store.beginMergeOperation(op);
+        expect(store.unresolvedMergeOperations("2026-07-29T12:25:00Z").map((o) => o.operationId)).toEqual([
+          "op-1",
+          "op-2",
+        ]);
+      });
+
+      /**
+       * The four stranded writes predate the column, so what the sweep meets in
+       * production is a row with no pull request number at all. Reporting that
+       * as a number sends the sweep to `GET /pulls/undefined`, which 404s on
+       * every tick, which is a row that can never settle.
+       */
+      it("reports a write written before the column existed as having no pull request number", () => {
+        const b = backing();
+        const store = open(b, IDENTITY);
+        store.beginMergeOperation(op);
+        legacy(b);
+        const found = open(b, IDENTITY).unresolvedMergeOperations("2026-07-29T12:25:00Z");
+        expect(found).toHaveLength(1);
+        expect(found[0]?.pullRequestNumber).toBeNull();
+      });
     });
   });
 
