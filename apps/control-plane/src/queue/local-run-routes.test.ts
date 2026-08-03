@@ -21,7 +21,7 @@ import {
   QUEUE_SIGN_NAMESPACE,
   queueSigningBytes,
 } from "@thwip/queue-protocol";
-import { buildSnapshot } from "./queue-operations.js";
+import { buildSnapshot, commandsFor } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import type { D1Like } from "./projection.js";
@@ -762,6 +762,74 @@ describe("the receipt the machine signs", () => {
     await authorize(routes, e);
 
     expect(await attemptId(e)).toBe(held);
+  });
+
+  /**
+   * A branch that moved without the queue, and the next device turn after it.
+   *
+   * Somebody pushing straight to the base pauses the queue and asks an operator
+   * to rebaseline, which is right. What it also used to do is push an entry onto
+   * the queue's chain carrying `external:<sha>` where a record digest belongs.
+   * Nothing signs that entry, so no reader can fetch it, and every signature the
+   * queue makes afterwards names it as `previousTransitionDigest`: the
+   * assignment the device is handed, and the merge intent behind the merge. Both
+   * are validated against the protocol before they are signed, and the protocol
+   * only knows `sha256:` digests, so the claim came back
+   * `ASSIGNMENT_INVALID` 500 and the branch could never take another turn.
+   *
+   * `recallnet/thwip-test` sat exactly there: one hand-pushed commit on `main`
+   * and no device could claim the lane again, rebaselined or not.
+   */
+  it("hands a device its turn after the branch moved outside the queue", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    const routes = app();
+    const moved = "a".repeat(40);
+    await withQueueState(db, REPO, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.observedExternalTransition({ idempotencyKey: `external:${moved}`, observedBaseSha: moved });
+      commands.rebaseline({ idempotencyKey: "rebaseline:1", actorPrincipalId: "alice", baseSha: BASE });
+      commands.resume({ idempotencyKey: "resume:1", actorPrincipalId: "alice" });
+    });
+
+    const claimed = await claim(routes, e);
+    expect(claimed.assignmentDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    // And the whole walk after it, because the same value reaches the merge
+    // intent: a chain that starts with something nothing signed cannot be
+    // extended by anything either.
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+    await mergeAsActionsWould(routes, e);
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
+  });
+
+  /**
+   * The receipt route's own dispatch, all the way to the record.
+   *
+   * The five-minute sweep is the recovery, not the path. What a developer
+   * watching `thwip ship` waits on is the merge the acceptance of their receipt
+   * asks for, so this drives nothing else: no sweep, no nudge, only the lane
+   * driven at the moment the receipt is accepted.
+   */
+  it("reaches a verified-merge record from the drive the receipt itself asks for", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    let routes: Routes;
+    routes = app({ driveTurn: async () => void (await mergeAsActionsWould(routes, e)) });
+    const claimed = await claim(routes, e);
+
+    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
+
+    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
+    expect(after.entries[0]).toMatchObject({ state: "Merged" });
+    expect(
+      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
+    ).toMatchObject({ n: 1 });
   });
 
   it("still reports an idle lane as idle", async () => {

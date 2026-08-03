@@ -787,16 +787,19 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       state.pauseReason = "EXTERNAL_TRANSITION";
       state.rebaselineRequired = true;
       state.baseSha = event.observedBaseSha;
-      const last = state.transitions.at(-1) ?? null;
-      state.transitions.push({
-        kind: "external",
-        transitionSequence: (last?.transitionSequence ?? 0) + 1,
-        priorDigest: last?.digest ?? null,
-        digest: `external:${event.observedBaseSha}`,
-        baseSha: event.observedBaseSha,
-        attemptId: null,
-        witnessPrincipalIds: [],
-      });
+      // The chain is not extended, because nothing signed anything.
+      //
+      // This used to push a link carrying `external:<sha>` where a record digest
+      // belongs. Every signature the queue makes afterwards names the chain head
+      // as `previousTransitionDigest` — the assignment a device is handed, and
+      // the merge intent behind a merge — and both are checked against the
+      // protocol, which only knows `sha256:` digests. So one commit pushed
+      // straight to the base left the branch unable to issue another assignment
+      // at all: the claim came back `ASSIGNMENT_INVALID`, rebaselined or not.
+      //
+      // Nothing is lost by leaving it out. The move is on the event log, in the
+      // pause, in `rebaselineRequired` and in `baseSha`, and a link no reader can
+      // fetch was never evidence of it.
       break;
     }
 
