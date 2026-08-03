@@ -26,7 +26,6 @@ export const BOUNDS = {
   decimalId: 32,
   baseRef: 1024,
   reason: 512,
-  reasonCode: 64,
   reasonCodeArray: 32,
   suiteEntries: 32,
   suiteName: 64,
@@ -40,7 +39,6 @@ export const BOUNDS = {
 export const DECIMAL_RE = /^[0-9]+$/;
 export const OID_RE = /^([0-9a-f]{40}|[0-9a-f]{64})$/;
 export const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
-export const REASON_CODE_RE = /^[A-Z][A-Z0-9_]*$/;
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 export function fail(detail: string): { ok: false; detail: string } {
@@ -127,13 +125,6 @@ export function reasonText(v: unknown, name: string): ParseResult<string> {
   const s = boundedString(v, name, BOUNDS.reason);
   if (!s.ok) return s;
   if (s.value.trim().length === 0) return fail(`${name} must not be blank`);
-  return s;
-}
-
-export function reasonCode(v: unknown, name: string): ParseResult<string> {
-  const s = boundedString(v, name, BOUNDS.reasonCode);
-  if (!s.ok) return s;
-  if (!REASON_CODE_RE.test(s.value)) return fail(`${name} must be an upper-case reason code`);
   return s;
 }
 

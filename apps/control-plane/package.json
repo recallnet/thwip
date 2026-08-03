@@ -8,7 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "deploy:staging": "pnpm -w -r build && node ../../scripts/predeploy.mjs --env staging && wrangler deploy --env staging --var BUILD_SHA:\"$(node ../../scripts/build-sha.mjs)\"",
     "dev": "wrangler dev --env staging",
-    "test:workers": "vitest run --config vitest.workers.config.ts"
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "auth:schema": "better-auth generate --config src/auth.cli.ts --output dist/auth-schema.sql --yes"
   },
   "dependencies": {
     "@andrewxhill/graphics-press-css": "^4.7.2",

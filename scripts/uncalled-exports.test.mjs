@@ -59,6 +59,34 @@ describe("uncalled exports", () => {
     expect(found(dir)).toEqual([]);
   });
 
+  it("does not let a field of the same name hide a function", () => {
+    // `liveGuardDigest` is a function in evidence.ts and a field name in an
+    // interface above it. Counting the field as a mention made the function look
+    // self-used, so the only implementation of the final live guard sat called by
+    // nothing but its own test while this check reported nothing.
+    const dir = fixture({
+      "a.ts": "export interface Facts { orphan: string }\nexport function orphan() {}\n",
+    });
+    expect(found(dir)).toEqual(["a.ts#orphan"]);
+  });
+
+  it("still counts a shorthand property as a use", () => {
+    // `{ orphan }` reads the binding, unlike `{ orphan: x }` which only names a key.
+    const dir = fixture({
+      "a.ts": "function orphan() {}\nexport const bag = { orphan };\n",
+      "b.ts": 'import { bag } from "./a.js";\nconsole.log(bag);\n',
+    });
+    expect(found(dir)).toEqual([]);
+  });
+
+  it("does not count reading a property as using a function of that name", () => {
+    const dir = fixture({
+      "a.ts": "export function orphan() {}\nexport const read = (x: { orphan: string }) => x.orphan;\n",
+      "b.ts": 'import { read } from "./a.js";\nconsole.log(read);\n',
+    });
+    expect(found(dir)).toEqual(["a.ts#orphan"]);
+  });
+
   it("does not count a test as a caller", () => {
     // Every one of the four cases this exists for had a thorough suite. A test
     // proves a function works, never that anything runs it.
@@ -135,5 +163,16 @@ describe("entry points", () => {
     expect(entries).toContain("packages/cli/src/main.ts");
     expect(entries).toContain("packages/action/src/main.ts");
     expect(entries).toContain("apps/control-plane/web/src/main.tsx");
+  });
+
+  /**
+   * `@better-auth/cli generate` reads `src/auth.cli.ts` by path to emit the
+   * auth schema. It never imports through the app's module graph, so the file
+   * had no call site and the devDependency had no user, and two different
+   * tools called each of them dead. The `auth:schema` package script names the
+   * relationship, and this reads it from there rather than excusing the file.
+   */
+  it("counts a source file a package script hands to a tool by path", () => {
+    expect(entryPoints(root)).toContain("apps/control-plane/src/auth.cli.ts");
   });
 });

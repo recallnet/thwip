@@ -6,6 +6,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs";
+import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
 import { validateWorkflow } from "./workflow-lint.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -106,6 +107,27 @@ for (const f of workerSources) {
 {
   for (const line of renderDead(uncalledExports({ root }))) {
     console.error(`lint: ${line} is exported and nothing that ships imports it`);
+    failures++;
+  }
+}
+
+// Fields the shipping code reads and never writes, and the branches that
+// therefore cannot run.
+//
+// One level below the check above, and invisible to it: the function is called,
+// the branch is written, and the field it inspects was never populated, so the
+// branch takes its default forever. `nonThwipChecks` is written once, in the
+// `NO_OBJECTION` default, as "passing", so a failing required check reads as
+// passing at the merge gate. `proofPolicyDigest` is null everywhere it is set,
+// so POLICY_CHANGED never fires. This family has cost production time four
+// times, and a suite that builds the object by hand passes every time.
+//
+// No allowlist here either, for the reason given above. What the check tolerates
+// is written into the rules instead: a name declared twice is dropped whole, and
+// a shape this repository describes but does not build is left alone.
+{
+  for (const line of renderUnwritten(unwrittenFields({ root }))) {
+    console.error(`lint: ${line}`);
     failures++;
   }
 }
