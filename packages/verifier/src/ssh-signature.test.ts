@@ -80,7 +80,6 @@ function makeBundle(publicKey: string): VerificationBundleV1 {
     repositoryId: "1315419165",
     ownerId: "162603603",
     activePolicyDigest: POLICY_DIGEST,
-    gracePolicyDigests: [],
     policy: {
       schemaVersion: "1",
       projectId: "prj_thwip",

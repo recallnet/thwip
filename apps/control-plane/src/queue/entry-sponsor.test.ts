@@ -72,7 +72,7 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     dispatchCandidateVerification: async () => ({ ok: true }),
     queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
     principalFor: async (_e: unknown, githubUserId: string) => (githubUserId === "2" ? "bob" : "alice"),
-    pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF }),
+    pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
     ...over,
@@ -120,7 +120,7 @@ describe("joining the queue", () => {
   it("refuses to place a pull request on a branch it does not target", async () => {
     const e = env();
     const routes = app({
-      pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: "refs/heads/release" }),
+      pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: "refs/heads/release", authorIsBot: false }),
     });
     const response = await join(routes, e);
     expect(response.status).toBe(409);

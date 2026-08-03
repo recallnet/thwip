@@ -307,6 +307,25 @@ export async function activatePolicyFromDefaultBranchPush(
         WHERE id = ? AND enabled = 1`,
     ).bind(derived.policyDigest, derived.policy.securityProfile, project.id),
   ]);
+
+  // Re-judge every open head under the policy that just took effect.
+  //
+  // Key revocation, project disable and a proof-mode change all enqueue this;
+  // activation did not, so a repository that added a required suite left every
+  // open pull request holding a green check earned under the policy before it.
+  // The merge gate refuses those now, and this is what clears them: the App
+  // re-verifies each head and republishes the check, so a developer sees the
+  // refusal on the pull request rather than at the merge.
+  await env.SYNC_QUEUE.send({
+    provider: "dashboard",
+    delivery: `policy-activated_${derived.policyDigest.slice(-32)}`,
+    event: "proof_reconcile",
+    installationId: project.installation_id,
+    policyPush: null,
+    appProofTask: null,
+    reconcileProofRepositoryId: project.github_repository_id,
+  });
+
   return {
     status: "activated",
     digest: derived.policyDigest,

@@ -1622,11 +1622,8 @@ async function verifyProof(input, deps) {
   }
   if (pred.git.baseSha !== facts.baseSha)
     return res("SUBJECT_BASE_MISMATCH", void 0, { statement });
-  const policyEligible = pred.policy.digest === bundle.activePolicyDigest || bundle.gracePolicyDigests.includes(pred.policy.digest);
-  if (!policyEligible)
-    return res("POLICY_NOT_ACTIVE", pred.policy.digest, { statement });
   if (pred.pipeline.digest !== bundle.policy.pipeline.digest || pred.pipeline.runner !== bundle.policy.pipeline.runner) {
-    return res("PIPELINE_DIGEST_MISMATCH", void 0, { statement });
+    return res("PIPELINE_DIGEST_MISMATCH", `this project now runs pipeline ${bundle.policy.pipeline.digest} on ${bundle.policy.pipeline.runner} and the proof ran ${pred.pipeline.digest} on ${pred.pipeline.runner}; run \`thwip run\` again`, { statement });
   }
   if (pred.signer.keyId !== keyid)
     return res("SIGNER_MISMATCH", "predicate keyId != envelope keyid", { statement });
@@ -1656,10 +1653,12 @@ async function verifyProof(input, deps) {
   }
   for (const required of bundle.policy.pipeline.requiredSuites) {
     const suite = pred.run.suites.find((s) => s.id === required);
-    if (!suite)
-      return res("SUITE_MISSING", required, { statement });
-    if (suite.status !== "passed")
-      return res("SUITE_NOT_PASSED", required, { statement });
+    if (!suite) {
+      return res("SUITE_MISSING", `this project requires ${required} and the proof does not report it; run \`thwip run\` again`, { statement });
+    }
+    if (suite.status !== "passed") {
+      return res("SUITE_NOT_PASSED", `${required} is ${suite.status} in this proof`, { statement });
+    }
   }
   const remoteSuites = bundle.policy.pipeline.remoteSuites ?? [];
   if (remoteSuites.length > 0) {
@@ -2099,7 +2098,9 @@ var CHECK_SEQUENCE = [
   ["Exact Git tree matches", ["SUBJECT_TREE_MISMATCH"]],
   ["Ancestry (parents) matches", ["SUBJECT_ANCESTRY_MISMATCH"]],
   ["Base context matches", ["SUBJECT_BASE_MISMATCH"]],
-  ["Policy digest is the active policy", ["POLICY_NOT_ACTIVE"]],
+  // No row for the policy digest. The verifier stopped asking which policy a
+  // proof cites and asks whether it satisfies the policy in force, so the rows
+  // below are where a policy change shows up.
   ["Pipeline digest is policy-approved", ["PIPELINE_DIGEST_MISMATCH"]],
   ["Signer holds current repository permission", ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"]],
   ["Every required suite passed exactly once", ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"]],

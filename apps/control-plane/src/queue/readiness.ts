@@ -5,59 +5,67 @@ import type { BlockingReason } from "@thwip/queue-domain";
  *
  * A queue request is durable; readiness is not. It is a conjunction of many
  * current facts, so it is re-derived from scratch on every relevant GitHub event
- * rather than patched from the event's contents — an event says what changed,
- * not whether everything else still holds.
+ * rather than patched from the event's contents: an event says what changed, not
+ * whether everything else still holds.
  *
  * The order of checks is deliberate. The reason a developer sees should be the
- * most actionable one, so repository-level problems come before review problems,
- * and review problems before "no machine is connected". A capability problem is
- * reported last because it does not make the entry unready: an offline laptop
- * keeps its place and must not freeze the branch.
+ * most actionable one, so repository-level problems come before review problems.
+ * Capability is not here at all; `foldCapability` decides it, after everything
+ * else, because an offline laptop keeps its place and must not freeze the branch.
  */
 
-export interface ReadinessFacts {
-  /* Project and queue configuration */
-  readonly projectEnabled: boolean;
-  readonly queuePaused: boolean;
-  readonly managedBaseRef: string;
+/**
+ * A fact this caller could not read.
+ *
+ * Every field below is required, and a caller that cannot answer one says so
+ * instead of writing a value that reads as fine. `collect` turns `"unread"` into
+ * no objection in one place, so an unread fact never refuses, but a reviewer can
+ * still tell a caller that read the fact from a caller that skipped it.
+ *
+ * This replaced a permissive constant every call site spread. The constant meant
+ * a field nobody thought about was silently "no problem": seventeen of
+ * twenty-four fields held their default forever, and thirteen reason codes with
+ * sentences on every surface described states nothing ever checked for. The
+ * spread was the defect, so the spread is gone and every field is required. A
+ * twenty-fifth field breaks all three call sites until someone decides what it
+ * means there.
+ */
+export type Unread = "unread";
 
+export interface ReadinessFacts {
   /* Pull request */
-  readonly pullRequestState: "open" | "closed";
+  readonly pullRequestState: "open" | "closed" | Unread;
   readonly draft: boolean;
-  readonly baseRef: string;
-  readonly mergeable: boolean | null;
 
   /* Authorization */
-  readonly ownerAuthorized: boolean;
-  readonly authorIsBot: boolean;
+  readonly ownerAuthorized: boolean | Unread;
+  readonly authorIsBot: boolean | Unread;
   readonly sponsorPrincipalId: string | null;
 
   /* Evidence */
-  readonly headProof: "accepted" | "missing" | "rejected";
-  readonly activePolicyDigest: string | null;
-  readonly proofPolicyDigest: string | null;
+  readonly headProof: "accepted" | "missing" | "rejected" | Unread;
+  /**
+   * What the head's proof does not cover of the policy in force, from
+   * `proofShortfall`, or null when it covers all of it.
+   *
+   * Not a pair of policy digests. Identity was the wrong comparison and was
+   * removed from the verifier and the merge gate: a policy's digest moves when
+   * a setting no proof can fail moves, so refusing on it invalidated every
+   * proof in flight over a cosmetic edit.
+   */
+  readonly proofShortfall: string | null | Unread;
 
   /* GitHub's own gates */
-  readonly reviewsSatisfied: boolean;
-  readonly codeOwnerReviewSatisfied: boolean;
-  readonly approvalAfterPushSatisfied: boolean;
-  readonly conversationsResolved: boolean;
-  readonly nonThwipChecks: "passing" | "pending" | "failing";
+  readonly reviewsSatisfied: boolean | Unread;
+  readonly codeOwnerReviewSatisfied: boolean | Unread;
+  readonly approvalAfterPushSatisfied: boolean | Unread;
+  readonly conversationsResolved: boolean | Unread;
+  readonly nonThwipChecks: "passing" | "pending" | "failing" | Unread;
+  readonly mergeable: boolean | null | Unread;
 
   /* Platform health */
-  readonly appPermissionsHealthy: boolean;
-  readonly rulesetEnforced: boolean;
-
-  /* Entry lifecycle */
-  readonly cancelled: boolean;
-  readonly needsRepair: boolean;
-  readonly cooldownUntil: string | null;
-  readonly now: string;
-
-  /* Ephemeral capability, not repository readiness */
-  readonly compatibleRunnerConnected: boolean;
-  /** Fast reuse or remote execution means no device is needed at all. */
-  readonly serverExecutable: boolean;
+  readonly appPermissionsHealthy: boolean | Unread;
+  readonly rulesetEnforced: boolean | Unread;
 }
 
 /**
@@ -74,98 +82,60 @@ export interface PlatformHealth {
   readonly sponsorAuthorized: boolean;
 }
 
-/**
- * Facts nobody has read yet.
- *
- * A caller spreads this and overrides what it knows, so `deriveReadiness` stays
- * one derivation rather than growing a second, narrower copy for every place
- * that holds only part of the picture. That is how the queue ended up with two
- * hand-rolled readiness checks that between them consulted neither the ruleset,
- * nor the App's permissions, nor the sponsor's access.
- *
- * Every value here means "no objection", because an unread fact is not a
- * refusal. A blank that blocked would stop the queue on everything a caller had
- * not got round to reading, which is the opposite failure and a worse one.
- */
-export const NO_OBJECTION: ReadinessFacts = {
-  projectEnabled: true,
-  queuePaused: false,
-  managedBaseRef: "",
-  pullRequestState: "open",
-  draft: false,
-  baseRef: "",
-  mergeable: null,
-  ownerAuthorized: true,
-  authorIsBot: false,
-  sponsorPrincipalId: null,
-  headProof: "accepted",
-  activePolicyDigest: null,
-  proofPolicyDigest: null,
-  reviewsSatisfied: true,
-  codeOwnerReviewSatisfied: true,
-  approvalAfterPushSatisfied: true,
-  conversationsResolved: true,
-  nonThwipChecks: "passing",
-  appPermissionsHealthy: true,
-  rulesetEnforced: true,
-  cancelled: false,
-  needsRepair: false,
-  cooldownUntil: null,
-  now: "",
-  compatibleRunnerConnected: false,
-  serverExecutable: true,
-};
-
 export interface Readiness {
   readonly ready: boolean;
-  readonly schedulerEligible: boolean;
   readonly primaryReason: BlockingReason | null;
   readonly secondaryReasons: readonly BlockingReason[];
 }
 
 /** Every check, in the order a developer would want to hear about them. */
 function collect(facts: ReadinessFacts): BlockingReason[] {
+  // Unread facts, resolved once, here and nowhere else.
+  //
+  // A fact nobody has read is not a refusal. A blank that blocked would stop the
+  // queue on everything a caller had not got round to reading, which is the
+  // opposite failure and the worse one. Only an explicit negative objects.
+  const ownerAuthorized = facts.ownerAuthorized !== false;
+  const appPermissionsHealthy = facts.appPermissionsHealthy !== false;
+  const rulesetEnforced = facts.rulesetEnforced !== false;
+  const reviewsSatisfied = facts.reviewsSatisfied !== false;
+  const codeOwnerReviewSatisfied = facts.codeOwnerReviewSatisfied !== false;
+  const approvalAfterPushSatisfied = facts.approvalAfterPushSatisfied !== false;
+  const conversationsResolved = facts.conversationsResolved !== false;
+  const proofShortfall = facts.proofShortfall === "unread" ? null : facts.proofShortfall;
+
   const reasons: BlockingReason[] = [];
 
-  if (!facts.projectEnabled) reasons.push("PROJECT_DISABLED");
-  if (facts.queuePaused) reasons.push("QUEUE_PAUSED");
-  if (facts.cancelled) reasons.push("PR_CLOSED");
   if (facts.pullRequestState === "closed") reasons.push("PR_CLOSED");
   if (facts.draft) reasons.push("PR_DRAFT");
-  if (facts.baseRef !== facts.managedBaseRef) reasons.push("BASE_NOT_MANAGED");
-  if (!facts.ownerAuthorized) reasons.push("OWNER_UNAUTHORIZED");
-  // A bot pull request cannot consume a fairness share without a human behind it.
-  if (facts.authorIsBot && facts.sponsorPrincipalId === null) reasons.push("SPONSOR_REQUIRED");
+  if (!ownerAuthorized) reasons.push("OWNER_UNAUTHORIZED");
+  // A bot pull request cannot consume a fairness share without a human behind
+  // it. The human who joins becomes the sponsor, so this clears by somebody
+  // queueing the pull request rather than by anything the bot can do.
+  if (facts.authorIsBot === true && facts.sponsorPrincipalId === null) reasons.push("SPONSOR_REQUIRED");
 
-  if (!facts.appPermissionsHealthy) reasons.push("APP_PERMISSION_DRIFT");
-  if (!facts.rulesetEnforced) reasons.push("RULESET_DRIFT");
+  if (!appPermissionsHealthy) reasons.push("APP_PERMISSION_DRIFT");
+  if (!rulesetEnforced) reasons.push("RULESET_DRIFT");
 
   if (facts.headProof === "missing") reasons.push("LOCAL_RECEIPT_MISSING");
   if (facts.headProof === "rejected") reasons.push("LOCAL_RECEIPT_REJECTED");
-  // The active policy judges the work, never the policy the pull request proposes
-  // (plan.md §6.2 invariant 14).
-  if (
-    facts.headProof === "accepted" &&
-    facts.activePolicyDigest !== null &&
-    facts.proofPolicyDigest !== null &&
-    facts.proofPolicyDigest !== facts.activePolicyDigest
-  ) {
-    reasons.push("POLICY_CHANGED");
-  }
+  // The active policy judges the work, never the policy the pull request
+  // proposes (plan.md §6.2 invariant 14). What it judges is the pipeline and
+  // the required suites, which `proofShortfall` compares with the same two
+  // tests the merge gate uses. The merge gate refuses this after the pull
+  // request has spent its turn; here it is refused before the offer goes out.
+  if (facts.headProof === "accepted" && proofShortfall !== null) reasons.push("POLICY_CHANGED");
 
-  if (!facts.reviewsSatisfied) reasons.push("REVIEW_REQUIRED");
-  if (!facts.codeOwnerReviewSatisfied) reasons.push("CODEOWNER_REVIEW_REQUIRED");
-  if (!facts.approvalAfterPushSatisfied) reasons.push("APPROVAL_AFTER_PUSH_REQUIRED");
-  if (!facts.conversationsResolved) reasons.push("CONVERSATION_UNRESOLVED");
+  if (!reviewsSatisfied) reasons.push("REVIEW_REQUIRED");
+  if (!codeOwnerReviewSatisfied) reasons.push("CODEOWNER_REVIEW_REQUIRED");
+  if (!approvalAfterPushSatisfied) reasons.push("APPROVAL_AFTER_PUSH_REQUIRED");
+  if (!conversationsResolved) reasons.push("CONVERSATION_UNRESOLVED");
   if (facts.nonThwipChecks === "failing") reasons.push("REQUIRED_CHECK_FAILED");
   if (facts.nonThwipChecks === "pending") reasons.push("REQUIRED_CHECK_PENDING");
 
   // `mergeable: null` means GitHub has not finished computing it. That is not a
   // conflict, and reporting one would be wrong.
   if (facts.mergeable === false) reasons.push("MERGE_CONFLICT");
-
-  if (facts.needsRepair) reasons.push("NEEDS_REPAIR");
-  if (facts.cooldownUntil !== null && facts.cooldownUntil > facts.now) reasons.push("COOLDOWN_ACTIVE");
 
   return reasons;
 }
@@ -186,15 +156,17 @@ function hasCapability(facts: CapabilityFacts): boolean {
 }
 
 /**
- * Fold capability into an otherwise-decided readiness, without recomputing
- * the other checks.
+ * Fold capability into an otherwise-decided readiness.
  *
  * This is the one place `schedulerEligible` is decided from runner presence.
- * Every writer of `schedulerEligible` — `/authorize`, the pull-request
- * webhook, the heartbeat route, and the scheduled tick — calls this rather
- * than each carrying its own copy of "and is a runner connected", which is
- * how eligibility ended up written by whichever of them ran last instead of
- * derived (plan.md §452).
+ * Every writer of it — `/authorize`, the pull-request webhook, the heartbeat
+ * route, and the scheduled tick — calls this rather than each carrying its own
+ * copy of "and is a runner connected", which is how eligibility ended up
+ * written by whichever of them ran last instead of derived (plan.md §452).
+ *
+ * `deriveReadiness` used to answer the same question a second time, off two
+ * fields sitting inside `ReadinessFacts`. Those fields are gone and the answer
+ * is here alone, so the two cannot disagree.
  */
 export function foldCapability(
   base: { readonly ready: boolean; readonly primaryReason: BlockingReason | null },
@@ -204,29 +176,17 @@ export function foldCapability(
   if (hasCapability(capability)) return { schedulerEligible: true, primaryReason: base.primaryReason };
   // Capability is reported last: an offline machine does not make the entry
   // unready, it only withholds the offer, so this must not override an
-  // earlier, more actionable reason — but `base.ready` is true here, so there
-  // is no earlier reason to preserve.
+  // earlier, more actionable reason. `base.ready` is true here, so there is no
+  // earlier reason to preserve.
   return { schedulerEligible: false, primaryReason: "AGENT_OFFLINE" };
 }
 
 export function deriveReadiness(facts: ReadinessFacts): Readiness {
   const blocking = collect(facts);
-
-  // Capability is evaluated independently of every other check — even a
-  // blocked entry reports whether a machine is there, so the dashboard can
-  // say both things at once — and only ever suppresses scheduling, never
-  // readiness itself, so the entry keeps its fairness identity (§7.1, §7.2).
-  const capability: BlockingReason[] = hasCapability(facts) ? [] : ["AGENT_OFFLINE"];
-
-  const ready = blocking.length === 0;
-  const schedulerEligible = ready && capability.length === 0;
-
-  const ordered = [...blocking, ...capability];
-  const deduped = ordered.filter((reason, i) => ordered.indexOf(reason) === i);
+  const deduped = blocking.filter((reason, i) => blocking.indexOf(reason) === i);
 
   return {
-    ready,
-    schedulerEligible,
+    ready: deduped.length === 0,
     primaryReason: deduped[0] ?? null,
     secondaryReasons: deduped.slice(1),
   };
@@ -262,8 +222,8 @@ function ownCheck(context: string): boolean {
 /**
  * `nonThwipChecks`, from the branch rules and the runs on the head.
  *
- * This fact had no writer. Every caller of `deriveReadiness` spread
- * `NO_OBJECTION`, whose default is `"passing"`, so `REQUIRED_CHECK_FAILED` and
+ * This fact had no writer. Every caller spread a permissive constant whose
+ * default was `"passing"`, so `REQUIRED_CHECK_FAILED` and
  * `REQUIRED_CHECK_PENDING` could not be produced by the derivation at all: a
  * pull request whose CI had gone red read as ready, took a turn, ran it on a
  * developer's machine, and the walk to the merge refused it on the same fact
@@ -295,4 +255,107 @@ export function nonThwipCheckState(facts: RequiredCheckFacts): "passing" | "pend
     return "failing";
   }
   return pending ? "pending" : "passing";
+}
+
+/**
+ * What the branch's `pull_request` rule asks of a pull request, and what GitHub
+ * says about this one.
+ *
+ * Both halves are needed. The rule says which of the four gates apply, because a
+ * branch that does not require a code owner must not be told one is missing; the
+ * pull request says whether the ones that apply are met.
+ */
+export interface ReviewFacts {
+  /** From the branch's `pull_request` rule. Zero when the branch has no such rule. */
+  readonly requiredApprovingReviewCount: number;
+  readonly requireCodeOwnerReview: boolean;
+  readonly requireLastPushApproval: boolean;
+  readonly requireThreadResolution: boolean;
+  /**
+   * GitHub's own decision about this pull request under those rules.
+   *
+   * Null when nothing is required of it. This is the only thing that refuses:
+   * the rules can be satisfied by reviewers the queue cannot enumerate, so
+   * counting approvals here would refuse merges GitHub would allow.
+   */
+  readonly reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  /** A review CODEOWNERS asked for and nobody has given. */
+  readonly pendingCodeOwnerReview: boolean;
+  /** Approving reviews, and how many of them name the current head commit. */
+  readonly approvals: number;
+  readonly approvalsOnHead: number;
+  /** Open review threads that still apply to the head. */
+  readonly unresolvedThreads: number;
+}
+
+/**
+ * What one read of a pull request answers.
+ *
+ * Five facts, one round trip, taken at the point the required checks are
+ * already read. Mergeability rides along because it comes from the same
+ * response: `MERGE_CONFLICT` was unreachable for the same reason the four
+ * review gates were, and a conflicted pull request otherwise spends a turn
+ * before anything says so.
+ */
+export interface PullRequestGates {
+  readonly review: ReviewFacts;
+  readonly mergeable: boolean | null;
+}
+
+/** The four review gates, as `ReadinessFacts` states them. */
+export interface ReviewGates {
+  readonly reviewsSatisfied: boolean;
+  readonly codeOwnerReviewSatisfied: boolean;
+  readonly approvalAfterPushSatisfied: boolean;
+  readonly conversationsResolved: boolean;
+}
+
+/**
+ * The four review gates, from one read of the branch rules and the pull request.
+ *
+ * GitHub enforces all four and only GitHub, at the ref update the merge workflow
+ * performs. Nothing in the control plane read a review, so a pull request with
+ * no approval was called ready, given the lane ahead of everyone waiting, run
+ * through the full pipeline on a developer's machine, and handed a signed
+ * merge-intent attestation for a merge GitHub was never going to permit. The
+ * 422 arrived after all of that, and the sentence that explained it sat in an
+ * Actions log.
+ *
+ * Nothing here refuses on its own arithmetic. A refusal needs GitHub to have
+ * already said `REVIEW_REQUIRED` or `CHANGES_REQUESTED`, or a required thread
+ * left open. The three approval codes then name which rule is unmet, because
+ * "a code owner has to look at this" and "approve it again after that push"
+ * send a developer to different places.
+ */
+export function reviewGates(facts: ReviewFacts): ReviewGates {
+  const satisfied: ReviewGates = {
+    reviewsSatisfied: true,
+    codeOwnerReviewSatisfied: true,
+    approvalAfterPushSatisfied: true,
+    conversationsResolved: !facts.requireThreadResolution || facts.unresolvedThreads === 0,
+  };
+
+  // No approval rule on this branch, so none of the three approval codes can be
+  // true of it. A `reviewDecision` arriving from something the rules endpoint
+  // does not report must not refuse a merge on a rule the queue cannot see.
+  const approvalRule = facts.requiredApprovingReviewCount > 0 || facts.requireCodeOwnerReview;
+  const settled = facts.reviewDecision === "APPROVED" || facts.reviewDecision === null;
+  if (!approvalRule || settled) return satisfied;
+
+  // Changes requested is the reviewer speaking, not a rule going unmet, so the
+  // three rule-specific codes would name the wrong thing.
+  if (facts.reviewDecision === "CHANGES_REQUESTED") {
+    return { ...satisfied, reviewsSatisfied: false };
+  }
+
+  if (facts.requireCodeOwnerReview && facts.pendingCodeOwnerReview) {
+    return { ...satisfied, codeOwnerReviewSatisfied: false };
+  }
+  // Somebody approved and then the branch moved. Saying "this needs a review"
+  // to a developer who is looking at an approval is how they stop believing the
+  // check.
+  if (facts.requireLastPushApproval && facts.approvals > 0 && facts.approvalsOnHead === 0) {
+    return { ...satisfied, approvalAfterPushSatisfied: false };
+  }
+  return { ...satisfied, reviewsSatisfied: false };
 }

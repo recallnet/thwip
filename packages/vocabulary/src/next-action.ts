@@ -36,7 +36,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   OWNER_UNAUTHORIZED: "You no longer have the repository permission this queue requires.",
   SIGNER_PERMISSION_INSUFFICIENT:
     "The signer lacks the repository permission the policy requires, or the policy does not let an author sign their own pull request.",
-  SPONSOR_REQUIRED: "A bot pull request needs a human sponsor before it can queue.",
+  SPONSOR_REQUIRED:
+    "A bot opened this pull request, so no fairness share belongs to it. Join the queue for it and you become its sponsor.",
   PERMISSION_REVOKED: "Your repository permission changed while this was integrating.",
 
   /* Configuration. */
@@ -108,7 +109,6 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "This repository does not accept the key that signed the proof. Run thwip enroll on the machine that signed it, and where the policy asks for it, publish that key on the signer's GitHub account.",
   SIGNER_MISMATCH:
     "The proof names one signer and carries another's signature. Run thwip run again on the machine that owns the key.",
-  POLICY_NOT_ACTIVE: "This proof was signed under a policy that is no longer active. Run thwip run again.",
   PIPELINE_DIGEST_MISMATCH:
     "The pipeline changed after this proof was signed. Pull the current thwip.yaml, then run thwip run again.",
   PROOF_EXPIRED: "This proof is older than the policy allows. Run thwip run again.",
@@ -169,7 +169,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   /* What was being integrated is no longer what is there. */
   HEAD_MOVED: "You pushed during your turn, so the queue needs a proof for the new head. Run thwip ship again.",
   BASE_MOVED: "The base moved, so this proof no longer covers what would be merged. Run thwip ship again.",
-  POLICY_CHANGED: "The project policy changed. The queue will re-evaluate on the new policy.",
+  POLICY_CHANGED:
+    "The policy now requires something this proof does not cover: a different pipeline, or a suite it never ran. Run thwip run again on this commit and push.",
   REVIEWS_CHANGED:
     "The reviews on this pull request changed while it was integrating. It goes back through the gate.",
   SUBJECT_TREE_MISMATCH: "This proof covers a different tree than the commit it sits on. Run thwip run again.",

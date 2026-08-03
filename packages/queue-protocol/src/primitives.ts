@@ -259,21 +259,3 @@ export function parseGitSubject(v: unknown, name = "git"): ParseResult<GitSubjec
   });
 }
 
-/**
- * Two subjects name the same integration. Used by the final live guard, where
- * "close enough" is the failure we are trying to prevent (§18, §23.2).
- */
-export function sameGitSubject(a: GitSubject, b: GitSubject): boolean {
-  return (
-    a.objectFormat === b.objectFormat &&
-    a.repositoryId === b.repositoryId &&
-    a.baseRef === b.baseRef &&
-    a.baseSha === b.baseSha &&
-    a.headRepositoryId === b.headRepositoryId &&
-    a.headSha === b.headSha &&
-    a.candidateSha === b.candidateSha &&
-    a.candidateTreeOid === b.candidateTreeOid &&
-    a.candidateParentOids.length === b.candidateParentOids.length &&
-    a.candidateParentOids.every((oid, i) => oid === b.candidateParentOids[i])
-  );
-}

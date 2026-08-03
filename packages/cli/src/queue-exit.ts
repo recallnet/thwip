@@ -119,7 +119,6 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   SIGNER_KEY_REVOKED: EXIT.evidenceRejected,
   SIGNER_KEY_UNKNOWN: EXIT.evidenceRejected,
   SIGNER_MISMATCH: EXIT.evidenceRejected,
-  POLICY_NOT_ACTIVE: EXIT.evidenceRejected,
   PIPELINE_DIGEST_MISMATCH: EXIT.evidenceRejected,
   PROOF_EXPIRED: EXIT.evidenceRejected,
   PROOF_MISSING: EXIT.evidenceRejected,

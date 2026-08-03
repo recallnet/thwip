@@ -484,8 +484,7 @@ async function cmdShip(argv: string[]): Promise<number> {
       const last = mine?.["lastAttemptId"];
       attemptId = typeof active === "string" ? active : typeof last === "string" ? last : null;
       return {
-        authenticated: true,
-        workingTreeClean: git.workingTreeClean,
+            workingTreeClean: git.workingTreeClean,
         headProof,
         pushedHeadMatchesLocal: git.pushedHeadMatchesLocal,
         pullRequestNumber: prNumber,

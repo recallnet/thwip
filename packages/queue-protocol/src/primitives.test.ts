@@ -10,7 +10,6 @@ import {
   isoDateTime,
   parseGitSubject,
   reasonText,
-  sameGitSubject,
   sha256,
 } from "./primitives.js";
 
@@ -143,38 +142,5 @@ describe("parseGitSubject", () => {
         subject({ candidateParentOids: ["1".repeat(40), "2".repeat(40), "3".repeat(40)] }),
       ),
     ).toMatchObject({ ok: false });
-  });
-});
-
-describe("sameGitSubject", () => {
-  it("is true only for an exact match", () => {
-    const a = parseGitSubject(subject());
-    const b = parseGitSubject(subject());
-    expect(a.ok && b.ok && sameGitSubject(a.value, b.value)).toBe(true);
-  });
-
-  it("is false when any single field differs", () => {
-    const a = parseGitSubject(subject());
-    for (const field of [
-      "baseSha",
-      "headSha",
-      "candidateSha",
-      "candidateTreeOid",
-      "repositoryId",
-      "headRepositoryId",
-      "baseRef",
-    ]) {
-      const changed = subject({
-        [field]: field === "baseRef" ? "refs/heads/other" : field.endsWith("Id") ? "999" : "9".repeat(40),
-      });
-      const b = parseGitSubject(changed);
-      expect(a.ok && b.ok && sameGitSubject(a.value, b.value)).toBe(false);
-    }
-  });
-
-  it("is false when parent order differs", () => {
-    const a = parseGitSubject(subject());
-    const b = parseGitSubject(subject({ candidateParentOids: ["2".repeat(40), "1".repeat(40)] }));
-    expect(a.ok && b.ok && sameGitSubject(a.value, b.value)).toBe(false);
   });
 });

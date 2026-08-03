@@ -117,7 +117,17 @@ function fixture(): { database: Database.Database; env: Env } {
     VALUES ('project_1', 'org_1', '20', 'recallnet/playhouse', 'main');
   `);
   const d1 = new TestD1(database);
-  return { database, env: { DB: d1 } as unknown as Env };
+  // Activation re-verifies every open head under the policy it just activated,
+  // so a test env has to carry the queue that carries that message.
+  const reconciled: Array<Record<string, unknown>> = [];
+  return {
+    database,
+    reconciled,
+    env: {
+      DB: d1,
+      SYNC_QUEUE: { send: async (m: Record<string, unknown>) => void reconciled.push(m) },
+    } as unknown as Env,
+  };
 }
 
 describe("first-policy activation lifecycle", () => {
@@ -149,7 +159,7 @@ describe("first-policy activation lifecycle", () => {
   });
 
   it("moves import → enable → bootstrap → canonical activation, idempotently", async () => {
-    const { database, env } = fixture();
+    const { database, env, reconciled } = fixture();
     const sha1 = "a".repeat(40);
     const sha2 = "b".repeat(40);
     const yaml1 = `
@@ -270,6 +280,14 @@ suites:
       { digest: expectedFirst.policyDigest, status: "retired" },
       { digest: expectedSecond.policyDigest, status: "active" },
     ]);
+
+    // Each activation asks for the open heads to be judged again. Without this
+    // a head keeps the green check it earned under the policy that was retired,
+    // and the merge gate refuses it with nothing on the way to clear it.
+    expect(reconciled.map((message) => message["event"])).toEqual(["proof_reconcile", "proof_reconcile"]);
+    expect(reconciled.every((message) => message["reconcileProofRepositoryId"] === "20")).toBe(true);
+    // The push that changed nothing enqueued nothing.
+    expect(reconciled).toHaveLength(2);
   });
 
   it("activates organization defaults and lets canonical repository yaml override them", async () => {

@@ -9,7 +9,6 @@ import {
 
 function state(over: Partial<ShipState> = {}): ShipState {
   return {
-    authenticated: true,
     workingTreeClean: true,
     headProof: "accepted",
     pushedHeadMatchesLocal: true,
@@ -26,12 +25,6 @@ describe("nextShipStep", () => {
     // A proof over an uncommitted tree attests to something no reviewer can see.
     const decision = nextShipStep(state({ workingTreeClean: false }));
     expect(decision).toMatchObject({ kind: "stop", reasonCode: "UNCOMMITTED_CHANGES" });
-  });
-
-  it("sends the developer to login rather than trying to authenticate for them", () => {
-    const decision = nextShipStep(state({ authenticated: false }));
-    expect(decision).toMatchObject({ kind: "stop", exitCode: EXIT.authRequired });
-    if (decision.kind === "stop") expect(decision.why).toMatch(/your own terminal/);
   });
 
   it("runs the suites when the head has no proof", () => {
