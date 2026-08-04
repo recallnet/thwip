@@ -1505,3 +1505,34 @@ describe("what a failing comment publisher costs the heartbeat", () => {
     expect(errors.some((args) => String(args[0]).includes("could not refresh the status comments"))).toBe(true);
   });
 });
+
+/**
+ * What the whole sweep may spend, rather than what each queue may.
+ *
+ * A Worker invocation gets fifty subrequests and the sweep shares them across
+ * every queue in the fleet, the merge writes it settles and the lanes it
+ * drives. A budget handed out per queue multiplies by the fleet: on 4 August
+ * eight writes each across two queues, on top of four settled writes, ran the
+ * invocation out and failed both queues.
+ */
+describe("the comment budget the whole sweep works to", () => {
+  it("hands every queue the same budget object, so the fleet shares one", async () => {
+    const e = env();
+    queue("1", 1);
+    queue("2", 1);
+    const budgets: unknown[] = [];
+
+    await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async (_r: string, _b: string, _s: unknown, budget: unknown) => void budgets.push(budget),
+      retireStatusComments: async () => {},
+    });
+
+    expect(budgets).toHaveLength(2);
+    expect(budgets[0]).toBe(budgets[1]);
+    expect(budgets[0]).toEqual({ remaining: expect.any(Number) });
+  });
+});
