@@ -89,7 +89,7 @@ function happyPath(entryId = "e1", principal = "alice", attemptId = "a1"): Queue
       kind: "verified",
       transitionSequence: 1,
       priorDigest: null,
-      digest: "sha256:tr1",
+      digest: `sha256:${"a".repeat(64)}`,
       baseSha: "m".repeat(40),
       attemptId,
       witnessPrincipalIds: [principal],
@@ -526,7 +526,7 @@ describe("reducer", () => {
         kind: "verified",
         transitionSequence: 2,
         priorDigest: null,
-        digest: "sha256:tr",
+        digest: `sha256:${"b".repeat(64)}`,
         baseSha: "m".repeat(40),
         attemptId: "a1",
         witnessPrincipalIds: ["alice"],
@@ -541,13 +541,50 @@ describe("reducer", () => {
         type: "TransitionRecorded",
         kind: "verified",
         transitionSequence: 2,
-        priorDigest: "sha256:wrong",
-        digest: "sha256:tr2",
+        priorDigest: `sha256:${"e".repeat(64)}`,
+        digest: `sha256:${"c".repeat(64)}`,
         baseSha: "n".repeat(40),
         attemptId: "a9",
         witnessPrincipalIds: ["bob"],
       });
       expect(() => applyEvent(state, unlinked)).toThrow(/prior digest/i);
+    });
+
+    it("rejects a digest that is not sha256 and sixty four hex digits", () => {
+      // What an older queue wrote for a base it saw move. The protocol reads a
+      // chain head as `sha256:`, so every assignment the branch signed after one
+      // of these came back ASSIGNMENT_INVALID.
+      const state = applyEvents(base(), happyPath().slice(0, 13));
+      const notADigest = ev({
+        type: "TransitionRecorded",
+        kind: "external",
+        transitionSequence: 2,
+        priorDigest: `sha256:${"1".repeat(64)}`,
+        digest: `external:${"d".repeat(40)}`,
+        baseSha: "d".repeat(40),
+        attemptId: null,
+        witnessPrincipalIds: [],
+      });
+      expect(() => applyEvent(state, notADigest)).toThrow(/sixty four hex digits/i);
+    });
+
+    it("rejects a commit sha padded out to digest width", () => {
+      // Record 121 on this repository's own chain. The reconcile route took the
+      // commit an operator named, padded it with zeroes and called it a record
+      // digest. Nothing hashes to it, so the chain route served no link there,
+      // and the record after it named a predecessor no reader could fetch.
+      const state = applyEvents(base(), happyPath().slice(0, 13));
+      const padded = ev({
+        type: "TransitionRecorded",
+        kind: "external",
+        transitionSequence: 2,
+        priorDigest: `sha256:${"1".repeat(64)}`,
+        digest: `sha256:7cf3967bd5751cea12d2f91368b57454b0d6e5ba${"0".repeat(24)}`,
+        baseSha: "7cf3967bd5751cea12d2f91368b57454b0d6e5ba",
+        attemptId: null,
+        witnessPrincipalIds: [],
+      });
+      expect(() => applyEvent(state, padded)).toThrow(/commit sha padded/i);
     });
 
     it("refuses to chain a failed attempt", () => {
@@ -558,7 +595,7 @@ describe("reducer", () => {
         kind: "verified",
         transitionSequence: 1,
         priorDigest: null,
-        digest: "sha256:tr",
+        digest: `sha256:${"b".repeat(64)}`,
         baseSha: "m".repeat(40),
         attemptId: "a1",
         witnessPrincipalIds: ["alice"],

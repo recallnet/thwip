@@ -142,6 +142,35 @@ export function emptyState(queueKey: string, repositoryId: string, baseRef: stri
   };
 }
 
+/**
+ * A chain link names a record by its digest, so the value has to be one.
+ *
+ * Two shapes get in without this. `external:<commit sha>` was written by an
+ * older queue, which broke every assignment the branch tried to sign afterwards
+ * because the protocol reads a chain head as `sha256:`. And a commit sha right
+ * padded with zeroes to digest width, which the reconcile route minted for a
+ * merge that landed outside a turn: `sha256:7cf3967b…0000` is forty hex digits
+ * of commit and twenty four of filler, it is syntactically a digest, and no
+ * record hashes to it, so the chain route serves nothing at that position and
+ * the link after it names a predecessor a reader cannot fetch.
+ *
+ * The second shape is why the check is not the `sha256:` prefix alone. A real
+ * SHA-256 ends in twenty four zero nibbles about once in 2^96 records, so
+ * refusing that ending costs nothing anybody will ever notice and closes the
+ * one way a commit id has ever reached this field.
+ */
+const RECORD_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const COMMIT_SHA_PADDED = /^sha256:[0-9a-f]{40}0{24}$/;
+
+function requireRecordDigest(digest: string): void {
+  if (!RECORD_DIGEST.test(digest)) {
+    fail(`a transition digest must be sha256: and sixty four hex digits, not ${digest}`);
+  }
+  if (COMMIT_SHA_PADDED.test(digest)) {
+    fail(`${digest} is a commit sha padded to digest width; a transition digest names a record`);
+  }
+}
+
 function requireEntry(state: BranchQueueState, entryId: string): Entry {
   return state.entries.get(entryId) ?? fail(`unknown entry ${entryId}`);
 }
@@ -773,6 +802,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       if (!(TRANSITION_KINDS as readonly string[]).includes(event.kind)) {
         fail(`unknown transition kind ${event.kind}`);
       }
+      requireRecordDigest(event.digest);
       const last = state.transitions.at(-1) ?? null;
       const expected = (last?.transitionSequence ?? 0) + 1;
       if (event.transitionSequence !== expected) {

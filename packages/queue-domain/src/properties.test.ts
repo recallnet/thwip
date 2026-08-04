@@ -168,7 +168,9 @@ function step(run: Run, s: Step): void {
         parentShas: ["b".repeat(40), "h".repeat(40)],
       });
       run.transitions += 1;
-      const digest = `sha256:tr${run.transitions}`;
+      // Digest width, because the reducer refuses anything narrower: a chain
+      // link names a record, and a value no record hashes to is not one.
+      const digest = `sha256:${String(run.transitions).padStart(64, "f")}`;
       push(run, {
         type: "TransitionRecorded",
         kind: "verified",

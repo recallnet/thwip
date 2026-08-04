@@ -2273,8 +2273,21 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (body.observed === "merged-outside-the-turn") {
       // A merge that landed while an attempt was held but had not requested a write.
       // The queue cannot certify it: it never pinned a candidate for it. So the
-      // attempt ends and the movement is recorded as external, which is what it was
-      // from the chain's point of view — honest rather than flattering.
+      // attempt ends and the entry leaves, and the branch movement is left to the
+      // heal path.
+      //
+      // This used to append a chain link here, with the commit sha padded out to
+      // digest width standing in for a record digest. No record hashed to that
+      // value because no record was ever built, so the chain route served nothing
+      // at the position, and the next real merge named a predecessor no reader
+      // could fetch. Record 121 on this repository is one of those, and it cost
+      // three findings that no tick could clear.
+      //
+      // Healing writes the movement properly: it reads the commit's tree and
+      // parents from GitHub, checks no signed intent pins it, builds an
+      // `external-transition` document, signs it and stores the bytes, and only
+      // then takes a position in the chain. Reconciling reports the merge; heal
+      // records it.
       if (typeof body.mergeSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.mergeSha)) {
         return c.json({ error: "mergeSha required" }, 400);
       }
@@ -2300,19 +2313,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             outcome: "ADMIN_CANCELLED",
           });
         }
-        const head = store.state().transitions.at(-1);
-        const sequence = (head?.transitionSequence ?? 0) + 1;
-        const transition = commands.recordTransition({
-          idempotencyKey: `outside:transition:${attemptId}`,
-          kind: "external",
-          transitionSequence: sequence,
-          priorDigest: head?.digest ?? null,
-          digest: `sha256:${mergeSha.padEnd(64, "0").slice(0, 64)}`,
-          baseSha: mergeSha,
-          attemptId: null,
-          witnessPrincipalIds: [],
-        });
-        return { entryId, sequence, transition };
+        return { entryId };
       });
 
       // Ending the attempt frees the lane; the next offer expires unclaimed in
@@ -2321,11 +2322,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       return c.json({
         resolved: "external",
-        transition: result.transition.status,
-        sequence: result.sequence,
+        mergeSha,
         attemptId,
         entryResolved: result.entryId === null ? "no entry held the lane" : "cancelled",
-        note: "recorded as external: the queue held a turn but never pinned a candidate for this merge",
+        note:
+          "the queue held a turn and never pinned a candidate for this merge, so it certifies nothing about it. " +
+          `The branch movement is a chain finding; POST /v1/queue/${repositoryId}/heal writes the signed record for it.`,
       });
     }
 
