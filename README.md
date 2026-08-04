@@ -25,9 +25,13 @@ policy can activate immediately when a project is enabled. Without either
 source the App reports the missing policy explicitly and fails closed.
 
 Projects begin with the distinct `thwip / proof (observe)` App check. After a
-recent PASS under the active policy, an administrator can enforce the
-App-owned `thwip` check and pin that expected App in the repository ruleset
-before removing the previous verifier workflow.
+recent PASS under the active policy, an administrator can enforce it, and the
+App publishes `thwip` from then on.
+
+On a queue-enrolled branch the required `thwip` context is still sourced from
+GitHub Actions and satisfied by the `thwip-required.yml` the setup pull request
+adds, so both checks sit on the commit. `docs/adr/0001-app-native-proof-checks.md`
+says what moving the requirement to the App would take.
 
 ## Contributing (this repo eats its own dogfood)
 
