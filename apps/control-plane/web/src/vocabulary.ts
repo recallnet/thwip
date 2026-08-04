@@ -306,3 +306,16 @@ export function healActionLabel(plan: { healable: boolean; steps: readonly unkno
   if (!plan.healable || plan.steps.length === 0) return null;
   return plan.steps.length === 1 ? "Record it" : "Record them";
 }
+
+/**
+ * What a refused read of the plans means for the panel.
+ *
+ * A reader who is not an administrator gets 403, and the panel is simply not
+ * theirs: nothing goes on their screen. Anything else is thwip failing, and
+ * hiding that shows an administrator a page identical to a clean chain at the
+ * moment the check they rely on has stopped working.
+ */
+export function healPanelFailure(status: number | undefined): string | null {
+  if (status === 403) return null;
+  return "thwip could not check this branch's record. That is thwip failing rather than the chain passing, so read it again before trusting the rest of this page.";
+}

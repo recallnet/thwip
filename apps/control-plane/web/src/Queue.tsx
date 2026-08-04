@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { api, useFetch } from "./api.js";
+import { api, ApiError, useFetch } from "./api.js";
 import { ConfirmAction, Panel } from "./ui.js";
 import {
   blockedNextAction,
@@ -7,6 +7,7 @@ import {
   entryStateTone,
   findingTitle,
   healActionLabel,
+  healPanelFailure,
   ownerGithubUrl,
   ownerName,
   transitionKindText,
@@ -128,11 +129,13 @@ interface HealPlanView {
  */
 function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; baseRef: string }) {
   const [plans, setPlans] = useState<readonly HealPlanView[] | null>(null);
-  // A reader who is not an administrator gets 403 here, and that is not an
-  // error to put on their screen: the panel simply is not theirs.
-  const [visible, setVisible] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  // A reader who is not an administrator gets 403 here, and that is not an
+  // error to put on their screen: the panel simply is not theirs. A read that
+  // fails any other way is thwip failing, and hiding that would show an
+  // administrator the same page a whole chain shows.
+  const [unreadable, setUnreadable] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
 
   const path = `/v1/queue/${repositoryId}/heal?ref=${encodeURIComponent(baseRef)}`;
@@ -140,21 +143,35 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
     api<{ findings: readonly HealPlanView[] }>(path)
       .then((body) => {
         setPlans(body.findings);
-        setVisible(true);
+        setUnreadable(null);
       })
-      .catch(() => setVisible(false));
+      .catch((e: unknown) => {
+        setPlans(null);
+        setUnreadable(healPanelFailure(e instanceof ApiError ? e.status : undefined));
+      });
   }, [path]);
 
   useEffect(load, [load]);
 
-  if (!visible || plans === null || plans.length === 0) return null;
+  if (unreadable !== null) {
+    return (
+      <Panel title="This branch's record" meta="unread">
+        <p className="thwip-error">{unreadable}</p>
+      </Panel>
+    );
+  }
+  if (plans === null || plans.length === 0) return null;
 
   const resolve = (plan: HealPlanView) => {
     setBusy(plan.digest);
     setFailed(null);
     api(path, {
       method: "POST",
-      body: JSON.stringify({ finding: plan.digest, reason: reasons[plan.digest] ?? plan.detail }),
+      body: JSON.stringify({
+        finding: plan.digest,
+        code: plan.code,
+        reason: reasons[plan.digest] ?? plan.detail,
+      }),
     })
       .then(() => load())
       .catch((e: Error) => setFailed(e.message))

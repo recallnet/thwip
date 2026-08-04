@@ -163,6 +163,45 @@ describe("recordMergeFromIntent", () => {
     expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_ON_BASE" });
   });
 
+  /**
+   * A chain has a beginning, and it moves. `attested_from_sequence` says which
+   * link the current one starts at, and everything before it belongs to a
+   * chain this branch no longer keeps. A record from back there naming the
+   * commit would settle a write against a chain nobody verifies, so the merge
+   * would read as recorded while the live chain never mentions it.
+   */
+  it("does not let a record from a previous epoch stand in for one in this chain", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    raw
+      .prepare("UPDATE queue_projects SET attested_from_sequence = 5 WHERE github_repository_id = ?")
+      .run(REPO);
+    raw
+      .prepare(
+        `INSERT INTO queue_attestations
+           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, 'transition-record', ?, ?, 2, ?, ?, ?)`,
+      )
+      .run(
+        `sha256:${"c".repeat(64)}`,
+        REPO,
+        REF,
+        "att_previous_epoch",
+        JSON.stringify({ after: { baseSha: FIRST.mergeSha } }),
+        "jws-old",
+      );
+
+    const outcome = await recordMergeFromIntent(e, stubDeps, {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prin_test",
+    });
+
+    expect(outcome).toMatchObject({ status: "recorded", attemptId: FIRST.attemptId });
+  });
+
   it("refuses a commit the queue never authorized", async () => {
     const e = env();
     seed();

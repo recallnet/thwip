@@ -6,6 +6,7 @@ import {
   entryStateText,
   findingTitle,
   healActionLabel,
+  healPanelFailure,
   ownerGithubUrl,
   ownerName,
   outcome,
@@ -126,5 +127,17 @@ describe("chain findings", () => {
       "Record them",
     );
     expect(healActionLabel({ healable: false, steps: [] })).toBeNull();
+  });
+
+  /**
+   * The panel used to vanish on any refused read, so a 500 looked exactly like
+   * a reader who is not an administrator: a clean page with no findings on it.
+   * The one person who could act on a broken check was the one it was hidden
+   * from.
+   */
+  it("hides the panel from a reader it does not belong to and says so when thwip fails", () => {
+    expect(healPanelFailure(403)).toBeNull();
+    expect(healPanelFailure(500)).toContain("could not check");
+    expect(healPanelFailure(undefined)).toContain("could not check");
   });
 });

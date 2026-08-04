@@ -338,7 +338,11 @@ async function plans(app: App, e: QueueRouteEnv): Promise<PlanShape[]> {
 function heal(app: App, e: QueueRouteEnv, body: Record<string, unknown>): Promise<Response> {
   return app.request(
     `/v1/queue/${REPO}/heal?ref=${encodeURIComponent(REF)}`,
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "BASE_DISCONTINUITY", ...body }),
+    },
     e,
   );
 }
@@ -753,6 +757,45 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ code: "NO_SUCH_FINDING" });
+  });
+
+  /**
+   * A digest names the record a finding was reported at, and one record can be
+   * reported at for more than one reason, so the digest alone does not name the
+   * finding. Answering a finding thwip did not compute a plan for would carry
+   * out a remedy for a different problem against a chain that keeps it.
+   */
+  it("refuses a finding whose code is not the one reported at that digest", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedIntent(AUTHORIZED);
+    await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
+    const before = await records(app, e);
+    const finding = (await plans(app, e))[0]!.digest;
+
+    const response = await heal(app, e, { finding, code: "BROKEN_LINK", reason: REASON });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "NO_SUCH_FINDING" });
+    expect(await records(app, e)).toEqual(before);
+  });
+
+  it("requires the finding's code, because a digest alone does not name one", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    const response = await app.request(
+      `/v1/queue/${REPO}/heal?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ finding: `sha256:${"f".repeat(64)}`, reason: REASON }),
+      },
+      e,
+    );
+    expect(response.status).toBe(400);
   });
 
   it("requires a reason", async () => {
