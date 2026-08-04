@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   performMergeWrite,
   refUpdateRequestBody,
+  REF_UPDATE_ATTEMPTS,
   type MergeWriteGithub,
   type RefUpdate,
 } from "./merge-write.js";
@@ -32,8 +33,15 @@ class FakeGithub implements MergeWriteGithub {
   };
   pull: { merged: boolean; mergeCommitSha: string | null } | null = { merged: false, mergeCommitSha: null };
   contains: boolean | null = false;
+  /** What the required-check read answers, one entry per call, last one repeating. */
+  concluded: Array<boolean | null> = [true];
+  /** Every call, in order, so a test can read what happened before the branch moved. */
+  readonly calls: string[] = [];
+  /** Ref-update answers, one per call, the last one repeating. */
+  landings: Array<{ ok: true; sha: string } | { ok: false; status: number; message: string }> | null = null;
 
   async createCommit(input: { message: string; tree: string; parents: readonly string[] }) {
+    this.calls.push("createCommit");
     this.commits.push(input);
     return this.composed === null
       ? { ok: false as const, status: 422, message: "no sha" }
@@ -41,8 +49,11 @@ class FakeGithub implements MergeWriteGithub {
   }
 
   async updateRef(ref: string, update: RefUpdate) {
+    this.calls.push("updateRef");
     this.refUpdates.push({ ref, update });
-    return this.landed;
+    if (this.landings === null) return this.landed;
+    const at = Math.min(this.refUpdates.length - 1, this.landings.length - 1);
+    return this.landings[at]!;
   }
 
   async readPull() {
@@ -52,7 +63,16 @@ class FakeGithub implements MergeWriteGithub {
   async baseContainsHead() {
     return this.contains;
   }
+
+  async requiredTurnCheckConcluded() {
+    this.calls.push("requiredTurnCheckConcluded");
+    const at = Math.min(this.calls.filter((c) => c === "requiredTurnCheckConcluded").length - 1, this.concluded.length - 1);
+    return this.concluded[at]!;
+  }
 }
+
+/** GitHub's wording when the branch requires a check that has not concluded. */
+const IN_PROGRESS = { ok: false as const, status: 422, message: 'Required status check "thwip / turn" is in progress.' };
 
 const noWait = { sleep: async () => {} };
 
@@ -165,6 +185,70 @@ describe("performMergeWrite", () => {
     const outcome = await performMergeWrite(github, { ...intent, parentShas: [] }, noWait);
     expect(outcome).toMatchObject({ kind: "refused" });
     expect(github.commits).toEqual([]);
+  });
+
+  /**
+   * The Worker publishes `thwip / turn` green and moves the branch inside one
+   * request. GitHub's rule evaluation reads its own check runs behind that
+   * write, so the ref update was refused with 422 and the merge did not happen.
+   * `thwip-merge.yml` never met this: it is a second workflow, which starts
+   * after the required check has already concluded.
+   */
+  it("waits for GitHub to read the required check as concluded before moving the branch", async () => {
+    const github = new FakeGithub();
+    github.concluded = [false, false, true];
+    expect(await performMergeWrite(github, intent, noWait)).toEqual({ kind: "merged", mergeSha: LANDED });
+    expect(github.calls).toEqual([
+      "requiredTurnCheckConcluded",
+      "requiredTurnCheckConcluded",
+      "requiredTurnCheckConcluded",
+      "createCommit",
+      "updateRef",
+    ]);
+  });
+
+  it("moves the branch anyway when the required check cannot be read", async () => {
+    const github = new FakeGithub();
+    github.concluded = [null];
+    expect(await performMergeWrite(github, intent, noWait)).toEqual({ kind: "merged", mergeSha: LANDED });
+    expect(github.refUpdates).toHaveLength(1);
+  });
+
+  it("retries the branch move while GitHub says the required check is still in progress", async () => {
+    const github = new FakeGithub();
+    github.landings = [IN_PROGRESS, IN_PROGRESS, { ok: true, sha: LANDED }];
+    expect(await performMergeWrite(github, intent, noWait)).toEqual({ kind: "merged", mergeSha: LANDED });
+    expect(github.refUpdates).toHaveLength(3);
+    // One commit object, reused across the retries. Composing a second would
+    // leave orphans on the repository for every retry.
+    expect(github.commits).toHaveLength(1);
+  });
+
+  /**
+   * A required check that is genuinely unsatisfied must still refuse the merge.
+   * Only the reason that says GitHub has not caught up is retried.
+   */
+  it("does not retry a 422 that names a different reason", async () => {
+    const github = new FakeGithub();
+    github.landed = { ok: false, status: 422, message: 'Required status check "build" is expected.' };
+    expect(await performMergeWrite(github, intent, noWait)).toMatchObject({ kind: "not-merged" });
+    expect(github.refUpdates).toHaveLength(1);
+  });
+
+  /**
+   * Giving up concludes nothing. The retry ran out of patience with GitHub, and
+   * what became of this attempt is a question for the sweep rather than a
+   * refusal to write down.
+   */
+  it("leaves the operation unresolved when the in-progress refusal outlasts the retry", async () => {
+    const github = new FakeGithub();
+    github.landings = [IN_PROGRESS];
+    // Every read agrees the merge did not happen, and it still does not conclude.
+    github.pull = { merged: false, mergeCommitSha: null };
+    github.contains = false;
+    const outcome = await performMergeWrite(github, intent, noWait);
+    expect(outcome).toMatchObject({ kind: "unknown" });
+    expect(github.refUpdates).toHaveLength(REF_UPDATE_ATTEMPTS);
   });
 });
 

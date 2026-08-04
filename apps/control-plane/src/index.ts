@@ -2189,6 +2189,29 @@ const queueDeps = {
             mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
           };
         },
+        /**
+         * Whether GitHub reads its own copy of `thwip / turn` as concluded.
+         *
+         * The Worker publishes that check green and moves the branch inside one
+         * request, and the rule that requires it is evaluated from GitHub's
+         * read of its own check runs, which lags the write. Asking first turns a
+         * refused merge into a wait of a few hundred milliseconds.
+         *
+         * Null where the check runs could not be read or none is there yet.
+         * Neither is a decision: GitHub refuses the ref update either way, and
+         * the refusal is what the caller acts on.
+         */
+        async requiredTurnCheckConcluded() {
+          const res = await fetch(
+            `${api}/commits/${encodeURIComponent(intent.headSha)}/check-runs?check_name=${encodeURIComponent(TURN_CHECK)}`,
+            { headers },
+          );
+          if (!res.ok) return null;
+          const body = (await res.json()) as { check_runs?: Array<{ status?: string }> };
+          const runs = body.check_runs ?? [];
+          if (runs.length === 0) return null;
+          return runs.every((run) => run.status === "completed");
+        },
         async baseContainsHead() {
           const branch = intent.baseRef.replace(/^refs\/heads\//, "");
           const res = await fetch(
