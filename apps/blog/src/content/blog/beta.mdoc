@@ -135,9 +135,8 @@ the tree GitHub is asked to merge.
 
 {% product-shot src="/blog/fig-trace-vs-tree.svg" alt="An agent execution graph of tool calls and file writes, reduced to a single tree hash" caption="Figure 1. The typed execution graph the survey literature attests, reduced to the one object thwip signs. We throw away everything to the left of the hash on purpose." /%}
 
-Content addressing is what makes the settings below checkable. Each one names a
-tree, and any reader can fetch that tree and find out for themselves whether the
-suites pass on it.
+Every setting below names a tree, and the suites either pass on that tree or
+they do not.
 
 {% product-shot src="/blog/fig-toctou.svg" alt="Timeline showing a validation-to-use window in the observe model, and no window when the subject is a content hash" caption="Figure 2. Where the state-validation window opens when a check inspects mutable runtime state, and why binding to a tree hash removes it." /%}
 
@@ -178,15 +177,13 @@ Every profile except `fast` requires a run lease, good for 1800 seconds. That is
 what the `run.lease` field in the predicate carries.
 
 The step from `fast` to `fresh` buys a run against the integrated candidate with
-no compute moving into the cloud. That step exists because the thing under
-signature is a content hash. The assignment names a tree, the receipt names the
-same tree, and a reader who disbelieves both can fetch that tree and run the
-suites.
+no compute moving into the cloud. The assignment names a tree and the receipt
+names the same tree, which is the whole reason the queue can accept a run it
+never saw.
 
 ## What a CI minute costs
 
-GitHub publishes its rates, so this arithmetic is open to anybody who wants to
-redo it with their own numbers. A standard 2-core x64 runner is
+A standard 2-core x64 runner is
 [priced](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
 at $0.006 per minute on Linux and $0.010 on Windows, and a 3-core or 4-core
 macOS runner is $0.062. A macOS minute costs roughly ten Linux minutes. GitHub
@@ -219,11 +216,11 @@ once on the integrated candidate. That is 4,000 runner-minutes a week. On Linux
 the bill is $24 a week, near enough $1,250 a year. Move the same 4,000 minutes
 onto macOS and they cost $248 a week, or about $12,900 a year.
 
-Runner class dominates that calculation: a suite pinned to macOS for platform
-reasons spends ten Linux minutes for every minute it runs, which is why hybrid
-matrices sit on the open problems list below.
+A suite pinned to macOS for platform reasons spends ten Linux minutes for every
+minute it runs, which is why hybrid matrices sit on the open problems list
+below.
 
-Agents push on the second input.
+The second input is where agents change the arithmetic.
 [Xu, Subramanian and Karthik](https://arxiv.org/abs/2607.04697v2) found that
 79.4% of agent-authored pull requests overlap in time with another one on the
 same repository, and a merge queue answers that overlap by re-verifying the
@@ -235,9 +232,8 @@ mean of 3.4%.
 
 ## Measurements
 
-Everything below comes from this repository between 28 July and 3 August 2026.
-We pulled the numbers out of the git history, the GitHub API, and the published
-chain. The monorepo is public, so you can recompute every one of them.
+Everything below comes from this repository between 28 July and 3 August 2026,
+out of the git history, the GitHub API and the published chain.
 
 **Proof coverage.** 168 commits on `main` carry a `thwip-proof` trailer. Every
 one of those envelopes decodes and parses against the shipped schema, all 168 of
@@ -369,9 +365,9 @@ At the `fast` end we offer reproducibility and a public record. On any single
 merge, an observer who watched the process knows something we do not. The record
 pays off across a run of merges, because every proof binds to a content hash
 anybody can check out and re-run, and a signer whose claims stop reproducing
-shows up in public where a private runtime trace would stay hidden. It needs
-volume to work. A repository merging 131 times a week builds up enough history
-to compare against.
+shows up in public where a private runtime trace would stay hidden. None of that
+helps on a quiet repository, since a signer with four merges behind them has
+given nobody enough to compare against.
 
 The gap we cannot close is the first bad merge after a key compromise on a
 profile with no second execution. Without observing the run we have no mechanism
