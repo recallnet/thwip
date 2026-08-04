@@ -664,6 +664,7 @@ describe("the receipt the machine signs", () => {
       driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
@@ -693,6 +694,7 @@ describe("the receipt the machine signs", () => {
       driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
