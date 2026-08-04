@@ -402,6 +402,17 @@ export async function runOnQueue<T>(
   baseRef: string,
   decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T | Promise<T>,
   publish?: (update: TurnCheckUpdate) => Promise<void>,
+  /**
+   * Keep the status comment on every pull request in this queue in step.
+   *
+   * Handed the whole snapshot rather than a diff, because the comment says
+   * where an entry is in line and who is ahead of it. Those are facts about the
+   * line, so one entry leaving changes what every entry behind it should say,
+   * and a diff over the entry that moved would leave five comments claiming
+   * position 3. What stops that costing five GitHub calls is a fingerprint the
+   * publisher compares before it writes.
+   */
+  comment?: (snapshot: QueueSnapshot) => Promise<void>,
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
   const recordDecision = queueDecisionRecorder({
@@ -462,6 +473,18 @@ export async function runOnQueue<T>(
       } catch {
         /* the check may lag; the queue has already decided */
       }
+    }
+  }
+
+  // The comment goes after the check, for the same reason the check goes after
+  // the write: both are calls to GitHub and neither is worth holding a
+  // compare-and-swap open across. A comment the App could not write is loud in
+  // the Worker's own log and is never a reason to fail a merge.
+  if (comment !== undefined) {
+    try {
+      await comment(out.snapshot);
+    } catch (error) {
+      console.error(`[queue status comment] publishing for ${repositoryId} ${baseRef} threw: ${String(error)}`);
     }
   }
   return out;

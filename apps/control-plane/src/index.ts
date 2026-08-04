@@ -48,7 +48,7 @@ import { reconsiderHead } from "./queue/reconsider-head.js";
 import { driveQueue } from "./queue/drive-queue.js";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
-import { requestTurn } from "./queue/queue-operations.js";
+import { requestTurn, type QueueSnapshot } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
@@ -61,6 +61,8 @@ import {
   unplaceableUpdate,
   type TurnCheckUpdate,
 } from "./queue/turn-check.js";
+import { commentViews } from "./queue/status-comment.js";
+import { writeStatusComment, type CommentApi } from "./queue/status-comment-write.js";
 import { externalPushFromWebhook, pushedQueueBranch } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { backfillAttestations } from "./queue/attestation-backfill.js";
@@ -1813,7 +1815,112 @@ async function driveTurnFor(env: Env, repositoryId: string, pullRequestNumber: n
  * left the queue rotating turns nobody could take.
  */
 const queueOnQueue: OnQueue<Env> = (env, repositoryId, baseRef, decide) =>
-  runOnQueue(env, repositoryId, baseRef, decide, (update) => publishTurnCheckFor(env, repositoryId, update));
+  runOnQueue(
+    env,
+    repositoryId,
+    baseRef,
+    decide,
+    (update) => publishTurnCheckFor(env, repositoryId, update),
+    (snapshot) => publishStatusCommentsFor(env, repositoryId, baseRef, snapshot),
+  );
+
+/**
+ * Where the App may say anything on a pull request at all.
+ *
+ * The App receives `pull_request` deliveries for every repository it is
+ * installed on, and most of them never enrolled. A bot that starts commenting
+ * on pull requests in a repository somebody merely installed it on is
+ * uninstalled the same week, so this is the gate and it is deliberately the
+ * same row and the same column the tick reads. One answer to whether the queue
+ * is running on a branch.
+ *
+ * Observing is on the commenting side of that line. A repository observing has
+ * enrolled and its entries are real, so its authors get a comment that says
+ * what the queue would do.
+ */
+async function commentingProject(
+  env: Env,
+  repositoryId: string,
+  baseRef: string,
+): Promise<{ name: string; installationId: string; observing: boolean } | null> {
+  const row = await env.DB.prepare(
+    "SELECT p.github_name AS name, o.installation_id AS installationId, q.activation_state AS activation " +
+      "FROM queue_projects q " +
+      "JOIN projects p ON p.github_repository_id = q.github_repository_id " +
+      "JOIN organizations o ON o.id = q.organization_id " +
+      "WHERE q.github_repository_id = ? AND q.base_ref = ? AND q.enabled = 1",
+  )
+    .bind(repositoryId, baseRef)
+    .first<{ name: string; installationId: string | null; activation: string | null }>();
+  if (row === null || row.installationId === null) return null;
+  return { name: row.name, installationId: row.installationId, observing: row.activation === "observe" };
+}
+
+/**
+ * Keep thwip's one comment on every pull request in this queue current.
+ *
+ * Every entry, not the one that moved: a position in line and a list of who is
+ * ahead are facts about the line. What keeps that cheap is `writeStatusComment`
+ * comparing a stored fingerprint first, so a queue where nothing changed spends
+ * one D1 read per entry and no GitHub call at all.
+ */
+async function publishStatusCommentsFor(
+  env: Env,
+  repositoryId: string,
+  baseRef: string,
+  snapshot: QueueSnapshot,
+): Promise<void> {
+  const project = await commentingProject(env, repositoryId, baseRef);
+  if (project === null) return;
+  const token = await installationToken(env, project.installationId);
+  const call = (path: string, init?: RequestInit) =>
+    fetch(`https://api.github.com/repos/${project.name}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "thwip-control-plane",
+        ...(init?.headers ?? {}),
+      },
+    });
+  // Errors carry the status, because `writeStatusComment` tells a missing
+  // permission from a broken request by reading it. Matching GitHub's wording
+  // instead would go quiet the next time GitHub rewords it, and the App would
+  // look like it was commenting fine.
+  const refuse = async (response: Response, what: string): Promise<never> => {
+    throw Object.assign(new Error(`${what}: ${response.status} ${await response.text()}`), {
+      status: response.status,
+    });
+  };
+  const api: CommentApi = {
+    async list(pullRequestNumber) {
+      const response = await call(`/issues/${pullRequestNumber}/comments?per_page=100`);
+      if (!response.ok) return refuse(response, "listing comments");
+      return (await response.json()) as Array<{ id: number; body: string }>;
+    },
+    async create(pullRequestNumber, body) {
+      const response = await call(`/issues/${pullRequestNumber}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body }),
+      });
+      if (!response.ok) return refuse(response, "creating the comment");
+      return ((await response.json()) as { id: number }).id;
+    },
+    async update(commentId, body) {
+      const response = await call(`/issues/comments/${commentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+      });
+      if (!response.ok) return refuse(response, "editing the comment");
+    },
+  };
+
+  const now = new Date().toISOString();
+  for (const view of commentViews(snapshot, { observing: project.observing, now })) {
+    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now);
+  }
+}
 
 async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnCheckUpdate): Promise<void> {
   const project = await env.DB.prepare(
