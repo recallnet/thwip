@@ -1034,7 +1034,7 @@ describe("settling a write the workflow walked away from", () => {
 
     expect(result.settledWrites).toBe(1);
     const remaining = await withQueueState(db, "1", REF, async (store) =>
-      store.unresolvedMergeOperations(new Date().toISOString()),
+      store.unresolvedMergeOperations(new Date().toISOString(), new Date().toISOString()),
     );
     expect(remaining).toEqual([]);
   });
@@ -1074,7 +1074,7 @@ describe("settling a write the workflow walked away from", () => {
     expect(asked).toEqual([ORPHAN.pullRequestNumber]);
     expect(result.settledWrites).toBe(1);
     const remaining = await withQueueState(db, "1", REF, async (store) =>
-      store.unresolvedMergeOperations(new Date().toISOString()),
+      store.unresolvedMergeOperations(new Date().toISOString(), new Date().toISOString()),
     );
     expect(remaining).toEqual([]);
   });
@@ -1142,10 +1142,12 @@ describe("settling a write the workflow walked away from", () => {
     );
 
     expect(result.settledWrites).toBe(0);
-    const remaining = await withQueueState(db, "1", REF, async (store) =>
-      store.unresolvedMergeOperations(new Date().toISOString()),
-    );
+    // The row is open and named. It waits out a backoff before the sweep reads
+    // GitHub about it again, so it is read from the full list rather than from
+    // the sweep's own selection.
+    const remaining = await withQueueState(db, "1", REF, async (store) => store.mergeOperations());
     expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({ outcome: null });
   });
 
   /**
@@ -1176,6 +1178,60 @@ describe("settling a write the workflow walked away from", () => {
     );
 
     expect(asked.size).toBe(5);
+  });
+
+  /**
+   * What four merge operations on this repository cost, tick after tick.
+   *
+   * Each was examined every five minutes, refused every time for the same
+   * reason, and each refusal ran the full three-round absence backoff. The
+   * sweep spent its GitHub budget on them before it reached a write nobody had
+   * looked at, and on 4 August that spent the invocation's subrequests and
+   * failed both queues. Nothing about a row changes between two ticks five
+   * minutes apart, so the second read could never have learned anything the
+   * first did not.
+   */
+  it("spends no GitHub reads on a write it examined and refused last tick", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    let asked = 0;
+    const reads = {
+      ...readsThatSayMerged(),
+      // Merged with no commit named: the arm that can never conclude. It is
+      // exactly the shape of the four writes that would not clear.
+      pullRequestMergeState: async () => {
+        asked += 1;
+        return { merged: true, mergeCommitSha: null };
+      },
+      baseContainsSha: async () => {
+        asked += 1;
+        return null;
+      },
+    };
+    const ports = {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
+    };
+
+    await tickAllQueues(e, ports, reads, recordDepsThatRecord());
+    expect(asked).toBeGreaterThan(0);
+
+    const spentOnce = asked;
+    await tickAllQueues(e, ports, reads, recordDepsThatRecord());
+    expect(asked).toBe(spentOnce);
+
+    // Held back, and still open, still named, with the reason it was refused
+    // for. A write nobody can settle stays visible.
+    const [row] = await withQueueState(db, "1", REF, async (store) => store.mergeOperations());
+    expect(row).toMatchObject({ outcome: null, refusalCount: 1 });
+    expect(row!.refusalReason).toMatch(/named no commit/);
   });
 
   /**
