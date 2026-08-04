@@ -2392,7 +2392,7 @@ Revoking/disconnecting a device does not erase its human principal’s queue ent
 
 | Reason | User-facing summary | Primary next action |
 |---|---|---|
-| `SETUP_INCOMPLETE` | Queue guardrails are not fully installed. | Continue setup and run `thwip queue doctor --strict`. |
+| `SETUP_INCOMPLETE` | Queue guardrails are not fully installed. | Continue setup and run `thwip queue doctor`. |
 | `APP_PERMISSION_DRIFT` | The GitHub App no longer has a required grant. | Organization owner accepts/repairs App permissions. |
 | `RULESET_DRIFT` | GitHub protection no longer matches the approved Queue policy. | Review generated `gh` diff; re-attest rules. |
 | `LOCAL_RECEIPT_MISSING` | This head has no accepted local receipt. | Run `thwip ship --no-queue`; this existing entry re-evaluates automatically. |
@@ -2591,7 +2591,7 @@ thwip queue work [--repo <owner/name>] [--pr <number> | --next] [--wait | --watc
 thwip queue delegate-run --pr <number> --to <github-login>
 thwip queue repair --pr <number>
 thwip queue retry --pr <number>
-thwip queue doctor [--repo <owner/name>] [--explain] [--strict] [--json]
+thwip queue doctor [--repo <owner/name>] [--explain] [--allow-unread] [--json]
 ```
 
 Administrator:
@@ -4870,8 +4870,7 @@ gh api \
 
 thwip queue doctor \
   --repo "$THWIP_OWNER/$THWIP_REPO" \
-  --source-pin-negative-canary \
-  --strict
+  --source-pin-negative-canary
 
 gh api \
   --method POST \
@@ -4931,7 +4930,7 @@ After the App actually merges and certifies that canary:
 thwip queue promote \
   --repo "$THWIP_OWNER/$THWIP_REPO" \
   --to enforced
-thwip queue doctor --repo "$THWIP_OWNER/$THWIP_REPO" --strict
+thwip queue doctor --repo "$THWIP_OWNER/$THWIP_REPO"
 ```
 
 For an eligible GitHub-native repository:
@@ -5425,7 +5424,7 @@ An authorized administrator action is still “external” to the normal proof p
 2. Resolve the exact effective rule/source/permission delta.
 3. Show an owner the generated repair plan and `gh` commands.
 4. Require the App permission upgrade acceptance when applicable.
-5. Rerun the App-token endpoint probe and `thwip queue doctor --strict`.
+5. Rerun the App-token endpoint probe and `thwip queue doctor`.
 6. If branch movement occurred during the gap, record it before resuming.
 
 Do not let the App restore Administration rules itself; runtime compromise must not be able to rewrite its own guardrails.

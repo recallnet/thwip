@@ -40,7 +40,7 @@ describe("what doctor reports", () => {
   it("runs to a clean finish for a member who cannot read App permissions", () => {
     const report = reportDoctor(
       [installed, running, observation({ section: "app", status: 403, body: { error: "repository admin required" } })],
-      { repo: REPO, ref: REF, strict: false },
+      { repo: REPO, ref: REF, allowUnread: true },
     );
     expect(report.exitCode).toBe(EXIT.ok);
     expect(report.unread).toEqual(["app"]);
@@ -60,7 +60,7 @@ describe("what doctor reports", () => {
         }),
         observation({ section: "app", status: 403, body: {} }),
       ],
-      { repo: REPO, ref: REF, strict: false },
+      { repo: REPO, ref: REF, allowUnread: true },
     );
     const said = report.lines.join("\n");
     expect(said).toContain("paused");
@@ -85,7 +85,7 @@ describe("what doctor reports", () => {
         }),
         observation({ section: "app", status: 403, body: {} }),
       ],
-      { repo: REPO, ref: REF, strict: false },
+      { repo: REPO, ref: REF, allowUnread: true },
     );
     expect(report.lines.join("\n")).toContain("#12");
     expect(report.lines.join("\n")).toContain("Ask for a review");
@@ -115,7 +115,7 @@ describe("what doctor reports", () => {
         }),
         observation({ section: "app", status: 403, body: {} }),
       ],
-      { repo: REPO, ref: REF, strict: false },
+      { repo: REPO, ref: REF, allowUnread: true },
     );
     const said = report.lines.join("\n");
     expect(said).toContain("1 waiting");
@@ -128,7 +128,7 @@ describe("what doctor reports", () => {
     const report = reportDoctor([observation({ section: "repository", status: 404, body: {} })], {
       repo: REPO,
       ref: REF,
-      strict: false,
+      allowUnread: true,
     });
     expect(report.exitCode).toBe(EXIT.setupInvalid);
     expect(report.lines.join("\n")).toContain(REPO);
@@ -144,23 +144,78 @@ describe("what doctor reports", () => {
           body: { missingPermissions: { checks: "write" }, canPublishMergeCheck: false, rulesets: [] },
         }),
       ],
-      { repo: REPO, ref: REF, strict: false },
+      { repo: REPO, ref: REF, allowUnread: true },
     );
     expect(report.exitCode).toBe(EXIT.setupInvalid);
     expect(report.lines.join("\n")).toContain("checks");
   });
 
-  it("treats an unreadable section as a failure only when asked to be strict", () => {
+  it("fails on a section it could not read, and passes only when asked to allow that", () => {
     const refused: DoctorObservation[] = [installed, running, observation({ section: "app", status: 403, body: {} })];
-    expect(reportDoctor(refused, { repo: REPO, ref: REF, strict: false }).exitCode).toBe(EXIT.ok);
-    expect(reportDoctor(refused, { repo: REPO, ref: REF, strict: true }).exitCode).toBe(EXIT.permission);
+    expect(reportDoctor(refused, { repo: REPO, ref: REF, allowUnread: false }).exitCode).toBe(EXIT.permission);
+    expect(reportDoctor(refused, { repo: REPO, ref: REF, allowUnread: true }).exitCode).toBe(EXIT.ok);
+  });
+
+  it("reports a refused queue as unread rather than as a queue with nothing wrong", () => {
+    const report = reportDoctor(
+      [installed, observation({ section: "queue", status: 403, body: {} }), observation({ section: "app", status: 403, body: {} })],
+      { repo: REPO, ref: REF, allowUnread: false },
+    );
+    expect(report.exitCode).toBe(EXIT.permission);
+    expect(report.unread).toEqual(["queue", "app"]);
+  });
+
+  it("carries a status for every section, so nothing unread is filed as a pass", () => {
+    const report = reportDoctor(
+      [installed, running, observation({ section: "app", status: 403, body: {} })],
+      { repo: REPO, ref: REF, allowUnread: true },
+    );
+    expect(report.sections.map((s) => [s.section, s.status])).toEqual([
+      ["repository", "pass"],
+      ["queue", "pass"],
+      ["app", "unread"],
+    ]);
+  });
+
+  it("marks a section fail rather than unread when the answer was read and was bad", () => {
+    const report = reportDoctor(
+      [
+        installed,
+        running,
+        observation({
+          section: "app",
+          body: { missingPermissions: { checks: "write" }, canPublishMergeCheck: false, rulesets: [] },
+        }),
+      ],
+      { repo: REPO, ref: REF, allowUnread: true },
+    );
+    expect(report.sections.find((s) => s.section === "app")?.status).toBe("fail");
+  });
+
+  it("does not let allow-unread forgive a control plane that never answered", () => {
+    // Not being an admin is the caller's standing, which is what the opt-out is
+    // for. A service that is down is not, and answering zero there would be the
+    // same lie one layer along.
+    const report = reportDoctor(
+      [installed, observation({ section: "queue", status: 0, body: null }), observation({ section: "app", status: 0, body: null })],
+      { repo: REPO, ref: REF, allowUnread: true },
+    );
+    expect(report.exitCode).toBe(EXIT.unavailable);
+  });
+
+  it("does not let allow-unread forgive an unauthenticated session", () => {
+    const report = reportDoctor(
+      [installed, observation({ section: "queue", status: 401, body: {} }), observation({ section: "app", status: 401, body: {} })],
+      { repo: REPO, ref: REF, allowUnread: true },
+    );
+    expect(report.exitCode).toBe(EXIT.authRequired);
   });
 
   it("says the control plane was unreachable rather than reporting a healthy queue", () => {
     const report = reportDoctor([observation({ section: "repository", status: 0, body: null })], {
       repo: REPO,
       ref: REF,
-      strict: false,
+      allowUnread: true,
     });
     expect(report.exitCode).toBe(EXIT.unavailable);
   });
@@ -169,7 +224,7 @@ describe("what doctor reports", () => {
     const report = reportDoctor([observation({ section: "repository", status: 401, body: {} })], {
       repo: REPO,
       ref: REF,
-      strict: false,
+      allowUnread: true,
     });
     expect(report.exitCode).toBe(EXIT.authRequired);
     expect(report.lines.join("\n")).toContain("thwip login");
