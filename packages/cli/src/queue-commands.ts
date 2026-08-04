@@ -375,7 +375,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
       // It used to name `/admin/queue/doctor`, which only an operator token
       // opens, so the command failed for every developer who ran it. A
       // diagnostic an administrator has to run is not a diagnostic.
-      const unknown = rejectUnknown(flags, ["repo", "branch", "explain", "strict", "json"]);
+      const unknown = rejectUnknown(flags, ["repo", "branch", "explain", "allow-unread", "json"]);
       if (unknown !== null) return unknown;
       const repo = requireRepo(flags);
       if (isPlan(repo)) return repo;

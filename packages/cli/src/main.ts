@@ -876,7 +876,7 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
   }
   const repo = flag(argv, "--repo") ?? "";
   const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
-  const strict = argv.includes("--strict");
+  const allowUnread = argv.includes("--allow-unread");
   const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
   const auth = await apiAuthHeader();
   if (auth === null) {
@@ -907,7 +907,7 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
     }
   }
 
-  const report = reportDoctor(observations, { repo, ref, strict });
+  const report = reportDoctor(observations, { repo, ref, allowUnread });
   if (argv.includes("--json")) {
     process.stdout.write(JSON.stringify({ repo, ref, sections: observations, unread: report.unread }) + "\n");
   } else {
