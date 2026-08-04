@@ -108,6 +108,39 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
    * credential has no way to do it and must go on letting the workflow write.
    */
   mergeWrite?(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
+  /** The backoff between reads that have to outlast GitHub's own lag. */
+  sleep?(ms: number): Promise<void>;
+}
+
+/**
+ * Ask git whether the branch contains the commit, until it says yes or the
+ * backoff runs out.
+ *
+ * One read is not an answer here for the same reason one read is not an answer
+ * in `confirmMergeAbsence`: GitHub's reads lag GitHub's own writes, and the
+ * caller has just moved this branch itself. Pull request 183 merged on 4 August
+ * 2026, the queue confirmed the merge from the commit, and the comparison that
+ * gates the record answered that the branch did not contain it. No record was
+ * written for a merge that had already landed.
+ *
+ * Only `true` proceeds. A read that never agrees records nothing, because a
+ * record written on a read nobody could complete is the failure this guard
+ * exists to prevent.
+ */
+const CONTAINS_ATTEMPTS = 3;
+const CONTAINS_DELAYS_MS = [1000, 2000, 4000] as const;
+
+async function baseContainsAfterOurOwnWrite(
+  ask: () => Promise<boolean | null>,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean | null> {
+  let last: boolean | null = null;
+  for (let i = 0; i < CONTAINS_ATTEMPTS; i += 1) {
+    if (i > 0) await sleep(CONTAINS_DELAYS_MS[Math.min(i - 1, CONTAINS_DELAYS_MS.length - 1)] ?? 1000);
+    last = await ask();
+    if (last === true) return true;
+  }
+  return last;
 }
 
 /**
@@ -209,7 +242,10 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // Asked before the replay lookup, so a report naming a commit that is not on
   // the branch never takes the chain position that the correct report of the
   // same merge would then be deduplicated against.
-  const onBase = await deps.baseContainsSha(env, input.repositoryId, input.baseRef, input.mergeSha);
+  const onBase = await baseContainsAfterOurOwnWrite(
+    () => deps.baseContainsSha(env, input.repositoryId, input.baseRef, input.mergeSha),
+    deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+  );
   if (onBase !== true) {
     return skip(
       onBase === false
@@ -651,7 +687,11 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       await driveLane(env, deps, input.repositoryId, input.baseRef, recorded.snapshot);
       return {
         merged: true,
-        recorded: true,
+        // What was actually written, not that the call returned. A skipped
+        // transition used to be reported as `recorded: true` with the skip
+        // sitting in a field nobody reads, which is how a merge with no record
+        // looked like a merge with one.
+        recorded: recorded.digest !== null,
         transition: recorded.transition,
         transitionDigest: recorded.digest,
         detail: recorded.detail,
