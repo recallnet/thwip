@@ -609,6 +609,14 @@ export interface AuthorizationRefusal {
   readonly code: "NO_INTENT" | "AMBIGUOUS_ATTEMPT" | "INTENTS_DISAGREE";
   /** The attempts that authorized this commit, where more than one did. */
   readonly attemptIds: readonly string[];
+  /**
+   * Every intent that pins this commit's tree on this commit's parents.
+   *
+   * Empty where nothing pinned it. Where two intents disagree the disagreement
+   * is between these two documents and nothing else identifies them, so a
+   * person asked to settle it has to be handed both digests to read.
+   */
+  readonly intentDigests: readonly string[];
 }
 
 export async function authorizationFor(
@@ -655,14 +663,17 @@ export async function authorizationFor(
         "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
       code: "NO_INTENT",
       attemptIds: [],
+      intentDigests: [],
     };
   }
+  const digests = matched.map((m) => m.intentDigest);
   const attempts = [...new Set(matched.map((m) => m.intent.attemptId))];
   if (attempts.length > 1) {
     return {
       refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}`,
       code: "AMBIGUOUS_ATTEMPT",
       attemptIds: attempts,
+      intentDigests: digests,
     };
   }
 
@@ -681,6 +692,7 @@ export async function authorizationFor(
       refused: "this commit's merge intents disagree about what they authorized",
       code: "INTENTS_DISAGREE",
       attemptIds: attempts,
+      intentDigests: digests,
     };
   }
   return first;

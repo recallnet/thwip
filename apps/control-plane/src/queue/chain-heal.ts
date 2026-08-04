@@ -54,8 +54,21 @@ export type HealStep =
       readonly action: "ask-a-person";
       readonly commitSha: string;
       readonly attemptIds: readonly string[];
+      /** Which of the ways a commit stops thwip short this is. */
+      readonly reason: AskReason;
       readonly sentence: string;
     };
+
+/**
+ * Why a commit needs a person.
+ *
+ * Three different questions, and the summary an administrator reads has to ask
+ * the right one. Two attempts authorize the commit and somebody must say which
+ * merged it. One attempt signed two intents that disagree and somebody must say
+ * which the merge ran under. Or the intent is one whose record cites evidence
+ * the intent does not carry, so nothing can rebuild it.
+ */
+type AskReason = "AMBIGUOUS_ATTEMPT" | "INTENTS_DISAGREE" | "NOT_REBUILDABLE";
 
 export interface HealPlan {
   readonly code: SelfCheckFinding["code"];
@@ -140,16 +153,25 @@ async function commitsInGap<TEnv extends QueueRouteEnv>(
   return { walked: walked.reverse() };
 }
 
+/** What is left for a person, said as the question they have to answer. */
+function stuckSentence(reason: AskReason): string {
+  if (reason === "AMBIGUOUS_ATTEMPT") {
+    return "Two attempts authorize one of these commits, so thwip will not choose between them. Somebody has to say which attempt merged it.";
+  }
+  if (reason === "INTENTS_DISAGREE") {
+    return "One attempt signed two merge intents that disagree about what they authorized, so thwip cannot tell which one a record should cite. Somebody has to read both and say which the merge ran under.";
+  }
+  return "A record for one of these merges repeats evidence its intent never carried, so thwip cannot rebuild it from what survives. Somebody has to record it from the verifier result or the override that authorized it.";
+}
+
 /** One English sentence for a plan, so the product does not have to compose one. */
 function summarize(steps: readonly HealStep[]): string {
-  const stuck = steps.filter((s) => s.action === "ask-a-person");
+  const stuck = steps.filter((s): s is Extract<HealStep, { action: "ask-a-person" }> => s.action === "ask-a-person");
   const merges = steps.filter((s) => s.action === "record-merge").length;
   const moves = steps.filter((s) => s.action === "record-movement").length;
   if (stuck.length > 0) {
-    return (
-      `Two attempts authorize ${stuck.length === 1 ? "one of these commits" : "some of these commits"}, ` +
-      `so thwip will not choose between them. Somebody has to say which attempt merged it.`
-    );
+    const reasons = [...new Set(stuck.map((s) => s.reason))];
+    return reasons.map(stuckSentence).join(" ");
   }
   const parts: string[] = [];
   if (merges > 0) {
@@ -206,7 +228,25 @@ export async function planHeal<TEnv extends QueueRouteEnv>(
           action: "ask-a-person",
           commitSha: commit.sha,
           attemptIds: authorization.attemptIds,
+          reason: "AMBIGUOUS_ATTEMPT",
           sentence: `${commit.sha} is authorized by ${authorization.attemptIds.join(" and ")}`,
+        });
+        continue;
+      }
+      // Signed intents pin this commit. They reached here only because one or
+      // more of them pins exactly this tree on exactly these parents, and they
+      // differ over something a record repeats. A movement record would say
+      // the queue never certified a movement its own signatures pin, so both
+      // documents go to a person by digest instead.
+      if (authorization.code === "INTENTS_DISAGREE") {
+        steps.push({
+          action: "ask-a-person",
+          commitSha: commit.sha,
+          attemptIds: authorization.attemptIds,
+          reason: "INTENTS_DISAGREE",
+          sentence:
+            `${commit.sha} is pinned by merge intents that disagree about what they authorized: ` +
+            `${authorization.intentDigests.join(" and ")}. A record has to cite one of them.`,
         });
         continue;
       }
@@ -248,7 +288,13 @@ export type HealOutcome =
   | { readonly status: "healed"; readonly wrote: ReadonlyArray<{ commitSha: string; kind: string; sequence: number }> }
   | { readonly status: "refused"; readonly code: HealRefusal; readonly detail: string };
 
-export type HealRefusal = "NOT_HEALABLE" | "MERGE_NOT_ON_BASE" | "BASE_UNREADABLE" | "SIGNING_REFUSED" | "CHAIN_MOVED";
+export type HealRefusal =
+  | "NOT_HEALABLE"
+  | "MERGE_NOT_ON_BASE"
+  | "BASE_UNREADABLE"
+  | "SIGNING_REFUSED"
+  | "CHAIN_MOVED"
+  | "INTENT_PINS_COMMIT";
 
 export interface ApplyHealDeps<TEnv extends QueueRouteEnv> extends RecordFromIntentDeps<TEnv> {}
 
@@ -353,6 +399,27 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
 
   const facts = await deps.commitFacts(env, repositoryId, commitSha);
   if (facts === null) return { refused: `could not read ${commitSha}`, code: "BASE_UNREADABLE" };
+
+  // The record about to be signed says no signed intent pins this commit. The
+  // planner decided that, and a plan travels here as data, so the claim is
+  // checked again against the rows it is a claim about. A movement record for a
+  // commit the queue did pin would be a permanent signed denial of the queue's
+  // own signature, and it is the one thing this path must never write.
+  const pinned = await authorizationFor(db, {
+    repositoryId,
+    baseRef,
+    treeOid: facts.treeOid,
+    parentShas: facts.parentShas,
+  });
+  if (!("refused" in pinned) || pinned.code !== "NO_INTENT") {
+    const digests = "refused" in pinned ? pinned.intentDigests : [pinned.intentDigest];
+    return {
+      refused:
+        `${commitSha} is pinned by ${digests.length === 1 ? "a signed merge intent" : "signed merge intents"} ` +
+        `(${digests.join(", ")}), so thwip will not record that the queue did not certify it`,
+      code: "INTENT_PINS_COMMIT",
+    };
+  }
 
   const reachable = await deps.baseContainsSha(env, repositoryId, baseRef, commitSha);
   if (reachable !== true) {

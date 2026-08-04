@@ -1,8 +1,9 @@
 import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
+import { applyHeal, type ApplyHealDeps, type HealPlan } from "./chain-heal.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 
 /**
@@ -129,6 +130,7 @@ async function seedIntent(merge: {
   baseSha: string;
   headSha: string;
   treeOid: string;
+  proofCheckRunId?: string;
 }): Promise<string> {
   const signed = await signReusedIntent({
     operationId: `merge_${merge.attemptId}`,
@@ -152,7 +154,7 @@ async function seedIntent(merge: {
       policyDigest: `sha256:${"2".repeat(64)}` as Sha256,
       pipelineDigest: `sha256:${"3".repeat(64)}` as Sha256,
       requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
-      proofCheckRunId: "91289436271",
+      proofCheckRunId: merge.proofCheckRunId ?? "91289436271",
     },
     mergeMethod: "merge",
     createdAt: "2026-08-02T07:00:00.000Z",
@@ -356,6 +358,31 @@ describe("GET /v1/queue/:repositoryId/heal", () => {
     expect(found[0]?.steps[0]?.attemptIds).toEqual([AUTHORIZED.attemptId, "att_rival"]);
   });
 
+  /**
+   * One attempt re-signs its intent whenever a merge run restarts, so a commit
+   * can have two intents that pin exactly its tree on exactly its parents and
+   * disagree about something a record repeats. That is the opposite of nothing
+   * having authorized the commit, and a movement record says the queue never
+   * certified a movement two of its own signatures pin. Both digests are named
+   * because the disagreement is between them and a person has to read both.
+   */
+  it("asks a person where one attempt's intents disagree about what they authorized", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    const first = await seedIntent(AUTHORIZED);
+    const second = await seedIntent({ ...AUTHORIZED, proofCheckRunId: "91289436272" });
+    await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
+
+    const found = await plans(app, e);
+
+    expect(found[0]?.healable).toBe(false);
+    expect(found[0]?.steps[0]?.action).toBe("ask-a-person");
+    expect(found[0]?.steps[0]?.sentence).toContain(first);
+    expect(found[0]?.steps[0]?.sentence).toContain(second);
+  });
+
   it("is closed to anyone who is not a repository administrator", async () => {
     const e = env();
     seed();
@@ -534,6 +561,24 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     };
   });
 
+  it("writes nothing where one attempt's intents disagree", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedIntent(AUTHORIZED);
+    await seedIntent({ ...AUTHORIZED, proofCheckRunId: "91289436272" });
+    await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
+    const before = await records(app, e);
+    const finding = (await plans(app, e))[0]!.digest;
+
+    const response = await heal(app, e, { finding, reason: REASON });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "NOT_HEALABLE" });
+    expect(await records(app, e)).toEqual(before);
+  });
+
   it("refuses a finding this branch's chain does not report", async () => {
     const e = env();
     seed();
@@ -559,5 +604,68 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     seed();
     const response = await heal(routes(false), e, { finding: `sha256:${"f".repeat(64)}`, reason: REASON });
     expect(response.status).toBe(403);
+  });
+});
+
+/**
+ * The invariant does not live in the planner alone.
+ *
+ * A movement record's whole claim is that no signed intent pins this commit.
+ * The planner decides that, and a plan reaches `applyHeal` as data, so the
+ * write itself asks the same question again against the same rows. Anything
+ * that reaches this with a movement step for a pinned commit is wrong about
+ * the commit, and signing it would put a false claim in an append-only chain.
+ */
+describe("applyHeal", () => {
+  function applyDeps(): ApplyHealDeps<QueueRouteEnv> {
+    return {
+      commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
+      baseContainsSha: async () => true,
+      activePolicy: async () => ({
+        policyDigest: `sha256:${"2".repeat(64)}`,
+        pipelineDigest: `sha256:${"3".repeat(64)}`,
+        requiredSuites: ["unit"],
+        organizationId: "org_acme",
+      }),
+      signRecordBytes: async (_e, bytes, typ) =>
+        new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid: "test-key", typ }).sign(signingKey),
+      storeEvidence: async () => "no-bucket",
+      onQueue: (e, repositoryId, baseRef, decide) => runOnQueue(e, repositoryId, baseRef, decide),
+    };
+  }
+
+  it("refuses to record a movement for a commit a signed intent pins", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedIntent(AUTHORIZED);
+    const before = await records(app, e);
+    const plan: HealPlan = {
+      code: "BASE_DISCONTINUITY",
+      sequence: 1,
+      digest: `sha256:${"a".repeat(64)}`,
+      detail: "the branch moved and no record accounts for it",
+      summary: "recording this writes one movement",
+      steps: [
+        {
+          action: "record-movement",
+          commitSha: AUTHORIZED.mergeSha,
+          sentence: "no signed intent pins this commit",
+        },
+      ],
+      healable: true,
+    };
+
+    const outcome = await applyHeal(e, applyDeps(), {
+      repositoryId: REPO,
+      baseRef: REF,
+      plan,
+      actorPrincipalId: "prn_acme",
+      reason: REASON,
+    });
+
+    expect(outcome).toMatchObject({ status: "refused", code: "INTENT_PINS_COMMIT" });
+    expect(await records(app, e)).toEqual(before);
   });
 });
