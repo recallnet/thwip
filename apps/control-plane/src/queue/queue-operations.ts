@@ -152,6 +152,26 @@ export interface QueueDiagnosis {
   deadlines: Array<{ kind: string; attemptId: string; dueAt: string }>;
   outbox: Array<{ kind: string; attemptId?: string; attempts: number }>;
   attempts: Array<{ attemptId: string; phase: string; outcome: string | null; outcomeUnknown: boolean }>;
+  /**
+   * Every merge write the queue has started, oldest first, settled or not.
+   *
+   * A write outlives the attempt that started it, because the attempt is what a
+   * stranded write cannot rely on. Reporting attempts alone left the four
+   * unrecorded merges of 2 August visible only to a SQL statement run against
+   * the live database.
+   */
+  mergeOperations: Array<{
+    operationId: string;
+    attemptId: string;
+    attemptRevision: number;
+    pullRequestNumber: number | null;
+    expectedBaseSha: string;
+    expectedHeadSha: string;
+    expectedTreeOid: string;
+    writeStartedAt: string;
+    outcome: string | null;
+    resolvedAt: string | null;
+  }>;
   events: Array<{ sequence: number; at: string; type: string; detail: string }>;
 }
 
@@ -178,6 +198,18 @@ export function diagnose(store: SnapshotQueueStore, limit = 25): QueueDiagnosis 
       phase: a.phase,
       outcome: a.outcome,
       outcomeUnknown: a.outcomeUnknown,
+    })),
+    mergeOperations: store.mergeOperations().map((row) => ({
+      operationId: row.operationId,
+      attemptId: row.attemptId,
+      attemptRevision: row.attemptRevision,
+      pullRequestNumber: row.pullRequestNumber,
+      expectedBaseSha: row.expectedBaseSha,
+      expectedHeadSha: row.expectedHeadSha,
+      expectedTreeOid: row.expectedTreeOid,
+      writeStartedAt: row.writeStartedAt,
+      outcome: row.outcome,
+      resolvedAt: row.resolvedAt,
     })),
     events: store.recentEvents(limit).map((row) => {
       const body = row.body as Record<string, unknown>;
