@@ -1,30 +1,24 @@
 name: thwip-drain
 
-run-name: "thwip: drain pull requests blocked by a queue outage"
+run-name: "thwip: nudge an idle queue lane"
 
-# Re-drive pull requests whose thwip check failed because the queue was down.
+# Wake a queue lane whose offered turn has nobody left to drive it.
 #
-# A refusal and an outage look identical to GitHub: both are a red check that
-# stays red until someone re-runs it. So a transient queue failure stopped every
-# merge in the repository and stayed stopped, waiting for a human. That is not a
-# durable queue, it is a queue with a person standing behind it.
-#
-# This closes that. It only acts when the queue is answering again, it only
-# re-runs checks that already failed, and it leaves the decision entirely to the
-# queue: a pull request that genuinely does not hold the turn fails again, which
-# is the correct answer.
+# Pull requests are enrolled from GitHub App deliveries now, and queue
+# authorization is deliberately non-fatal to the proof check. A queue outage no
+# longer leaves a failed required check behind. Re-running failed proof checks
+# here would only retry real proof refusals, including records for pull requests
+# that have already merged. The scheduled job therefore nudges the queue and
+# nothing else.
 on:
   schedule:
     # Off the hour on purpose. Every scheduled workflow in the world fires at :00.
     - cron: "23,53 * * * *"
   workflow_dispatch:
 
-# Only what it uses. The pull request API is unreachable with GITHUB_TOKEN on this
-# repository, and asking for a permission that does nothing is a claim about what
-# this job touches that is not true.
+# Only what the health check and authenticated nudge use.
 permissions:
   contents: read
-  actions: write
   # The nudge endpoint drives GitHub Actions on the repository it names, so it
   # asks who is calling. A scheduled job holds no session; an Actions OIDC token
   # is the identity it does have, and it names this repository.
@@ -39,9 +33,8 @@ jobs:
     name: drain
     runs-on: ubuntu-latest
     steps:
-      - name: Re-run thwip checks the queue can now answer
+      - name: Nudge the queue after an idle offer
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: https://thwip.recall.net
           REPO_ID: ${{ github.event.repository.id }}
         run: |
@@ -70,35 +63,3 @@ jobs:
           n=$(curl -sS -X POST -H "authorization: Bearer $(oidc)" \
             "$THWIP_ENDPOINT/v1/queue/$REPO_ID/nudge?ref=refs%2Fheads%2Fmain" || true)
           echo "nudge: $n"
-
-          # The Actions API only. GITHUB_TOKEN cannot reach the pull request API
-          # on this repository, through gh pr list or through REST, so the drain
-          # asks about workflow runs instead: which thwip runs failed, and re-run
-          # them. It never needs to know a pull request number.
-          cutoff=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-            || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
-          echo "re-running thwip runs that failed before $cutoff"
-
-          runs=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/thwip-required.yml/runs?status=failure&event=pull_request&per_page=30" \
-            --jq ".workflow_runs[] | select(.updated_at < \"$cutoff\") | \"\(.id) \(.head_branch)\"" || true)
-
-          if [ -z "$runs" ]; then
-            echo "nothing failed long enough ago to re-drive"
-            exit 0
-          fi
-
-          # One re-run per branch: a branch with several failed runs only needs its
-          # most recent one, and re-running the older ones would spend Actions
-          # minutes proving the same thing.
-          seen=""
-          printf '%s\n' "$runs" | while read -r id branch; do
-            [ -n "$id" ] || continue
-            case " $seen " in *" $branch "*) continue ;; esac
-            seen="$seen $branch"
-            if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs" >/dev/null 2>&1; then
-              echo "re-ran thwip for $branch (run $id)"
-            else
-              echo "could not re-run $branch (run $id)"
-            fi
-          done
