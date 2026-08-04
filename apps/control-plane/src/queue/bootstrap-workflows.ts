@@ -120,8 +120,6 @@ jobs:
         continue-on-error: true
         env:
           THWIP_ENDPOINT: __ENDPOINT__
-          # gh reads the candidate commit, so this step needs a token of its own.
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           REPO_ID: \${{ github.event.repository.id }}
           PR: \${{ github.event.pull_request.number }}
           HEAD_SHA: \${{ github.event.pull_request.head.sha }}
@@ -148,28 +146,12 @@ jobs:
             exit 1
           fi
 
-          # The candidate GitHub simulated for this pull request. The queue pins
-          # these objects, and it will refuse to confirm a merge whose tree is not
-          # the one it authorized.
-          cand=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \\
-            --jq '{baseSha:.base.sha, mergeCommitSha:.merge_commit_sha}')
-          merge_sha=$(printf '%s' "$cand" | jq -r '.mergeCommitSha // empty')
-          base_sha=$(printf '%s' "$cand" | jq -r '.baseSha')
-          candidate='null'
-          if [ -n "$merge_sha" ]; then
-            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" \\
-              --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
-            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \\
-              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \\
-              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \\
-              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
-          fi
-
+          # The base, the candidate and its tree are read by the queue, from
+          # GitHub, at the moment it pins them. This step sends none of them.
           body=$(jq -nc \\
             --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \\
             --arg author "$AUTHOR_ID" --argjson draft "\${DRAFT:-false}" \\
-            --argjson candidate "$candidate" \\
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true}')
 
           # A refusal and an outage are different answers. The queue saying "not
           # your turn" is about this pull request. The queue being unreachable is
@@ -330,20 +312,16 @@ jobs:
 
           # Ask the queue again. Idempotent, and it is the queue — not this
           # workflow — that decides whether this pull request holds the turn.
-          base_sha=$(printf '%s' "$pr" | jq -r .base.sha)
-          merge_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.merge_commit_sha // empty')
-          candidate='null'
-          if [ -n "$merge_sha" ]; then
-            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
-            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \\
-              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \\
-              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \\
-              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
-          fi
-
+          #
+          # This run used to read the base, the test merge and its tree and send
+          # all three. The queue signed against whatever that reading had become
+          # by the time it arrived, and on 2 August 2026 four merges landed on a
+          # base signed sixteen seconds earlier than the branch had moved. The
+          # queue reads those objects for itself now, at the moment it pins
+          # them, so nothing about the commit is sent from here.
           body=$(jq -nc --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \\
-            --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" --argjson candidate "$candidate" \\
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate, prepare:true}')
+            --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" \\
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, prepare:true}')
 
           # Ask once. That call starts the candidate verification if nothing has
           # run this tree yet.

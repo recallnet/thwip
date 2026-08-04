@@ -138,6 +138,15 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
+    // The candidate GitHub has integrated, which is where the queue reads the
+    // base it pins. Head shas in this file are a pull request number padded
+    // with "a", so this answers about whichever one is asking.
+    integratedCandidate: async (_e, _r, _ref, pr) => ({
+      baseSha: "b".repeat(40),
+      headSha: String(pr).padStart(40, "a"),
+      candidateSha: "c".repeat(40),
+      candidateTreeOid: TREE,
+    }),
     // A refusal the queue can confirm: GitHub says not merged and the base does
     // not contain the head. Every test that reports a refusal means this one,
     // and the tests that mean a stale read say so themselves.
@@ -1294,7 +1303,13 @@ describe("the record behind a merge", () => {
       },
       e,
     );
-    return (await response.json()) as { transition: string; transitionDigest: string | null; detail?: string };
+    return (await response.json()) as {
+      transition?: string;
+      transitionDigest?: string | null;
+      detail?: string;
+      code?: string;
+      error?: string;
+    };
   }
 
   function linkCount(): number {
@@ -1310,11 +1325,13 @@ describe("the record behind a merge", () => {
     const app = routes();
 
     // Two parents and the authorized tree, so every shape check passes. It sits
-    // on a commit this attempt was never assigned.
+    // on a commit this attempt was never assigned, which the queue refuses to
+    // confirm as its own merge: an intent binds the parents as well as the
+    // tree, so nothing signed could ever name this commit.
     const merged = await reportParents(app, e, 59, ["d".repeat(40), String(59).padStart(40, "a")]);
 
-    expect(merged.transition).toBe("skipped");
-    expect(merged.transitionDigest).toBeNull();
+    expect(merged.code).toBe("RESULT_NOT_AUTHORIZED");
+    expect(merged.error).toMatch(/first parent/i);
     expect(linkCount()).toBe(0);
   });
 
@@ -1335,8 +1352,8 @@ describe("the record behind a merge", () => {
 
     const merged = await reportParents(app, e, 59, ["d".repeat(40)]);
 
-    expect(merged.transition).toBe("skipped");
-    expect(merged.transitionDigest).toBeNull();
+    expect(merged.code).toBe("RESULT_NOT_AUTHORIZED");
+    expect(merged.error).toMatch(/first parent/i);
     expect(linkCount()).toBe(0);
   });
 });
@@ -1432,18 +1449,18 @@ describe("the queue keeps its footing over a long run", () => {
    */
   it("still holds one lane after many merges, with a bounded document", async () => {
     const e = env();
-    const app = routes();
+    // A candidate per pull request, so each merge lands its own tree.
+    const app = routes({
+      integratedCandidate: async (_e, _r, _ref, pr) => ({
+        baseSha: "b".repeat(40),
+        headSha: String(pr).padStart(40, "a"),
+        candidateSha: String(pr).padStart(40, "c"),
+        candidateTreeOid: String(pr).padStart(40, "7"),
+      }),
+    });
 
     for (let pr = 100; pr < 140; pr += 1) {
-      const holder = await authorize(app, e, pr, {
-        prepare: true,
-        candidate: {
-          baseSha: "b".repeat(40),
-          candidateSha: String(pr).padStart(40, "c"),
-          candidateTreeOid: String(pr).padStart(40, "7"),
-          parentShas: ["b".repeat(40), "6".repeat(40)],
-        },
-      });
+      const holder = await authorize(app, e, pr, { prepare: true });
       if (holder.operationId === null) continue;
       await app.request(
         `/v1/queue/${REPO}/merged`,
@@ -1842,17 +1859,16 @@ describe("the sha a record says the base branch became", () => {
   /** Only the commit that is on main. The candidate is on no branch. */
   const onMain = async (_e: QueueRouteEnv, _r: string, _ref: string, sha: string) => sha === LANDED;
 
+  /** What GitHub reports for this pull request, which is what the queue pins. */
+  const integrated = async () => ({
+    baseSha: BASE,
+    headSha: HEAD,
+    candidateSha: CANDIDATE,
+    candidateTreeOid: MERGED_TREE,
+  });
+
   async function report(app: App, e: QueueRouteEnv, mergeSha: string) {
-    const holder = await authorize(app, e, 107, {
-      headSha: HEAD,
-      prepare: true,
-      candidate: {
-        baseSha: BASE,
-        candidateSha: CANDIDATE,
-        candidateTreeOid: MERGED_TREE,
-        parentShas: [BASE, HEAD],
-      },
-    });
+    const holder = await authorize(app, e, 107, { headSha: HEAD, prepare: true });
     const response = await app.request(
       `/v1/queue/${REPO}/merged`,
       {
@@ -1882,7 +1898,11 @@ describe("the sha a record says the base branch became", () => {
 
   it("refuses to sign a record for a commit the base branch does not contain", async () => {
     const e = env();
-    const app = routes({ baseContainsSha: onMain, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+    const app = routes({
+      baseContainsSha: onMain,
+      integratedCandidate: integrated,
+      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+    });
 
     const reported = await report(app, e, CANDIDATE);
 
@@ -1893,7 +1913,11 @@ describe("the sha a record says the base branch became", () => {
 
   it("signs the record for the commit that is on the base branch", async () => {
     const e = env();
-    const app = routes({ baseContainsSha: onMain, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+    const app = routes({
+      baseContainsSha: onMain,
+      integratedCandidate: integrated,
+      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+    });
 
     const reported = await report(app, e, LANDED);
 
@@ -1904,7 +1928,11 @@ describe("the sha a record says the base branch became", () => {
 
   it("does not sign when GitHub cannot be asked, rather than signing an unchecked claim", async () => {
     const e = env();
-    const app = routes({ baseContainsSha: async () => null, commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }) });
+    const app = routes({
+      baseContainsSha: async () => null,
+      integratedCandidate: integrated,
+      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+    });
 
     const reported = await report(app, e, LANDED);
 

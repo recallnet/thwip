@@ -62,8 +62,6 @@ jobs:
         continue-on-error: true
         env:
           THWIP_ENDPOINT: https://thwip.recall.net
-          # gh reads the candidate commit, so this step needs a token of its own.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_ID: ${{ github.event.repository.id }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -90,28 +88,12 @@ jobs:
             exit 1
           fi
 
-          # The candidate GitHub simulated for this pull request. The queue pins
-          # these objects, and it will refuse to confirm a merge whose tree is not
-          # the one it authorized.
-          cand=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
-            --jq '{baseSha:.base.sha, mergeCommitSha:.merge_commit_sha}')
-          merge_sha=$(printf '%s' "$cand" | jq -r '.mergeCommitSha // empty')
-          base_sha=$(printf '%s' "$cand" | jq -r '.baseSha')
-          candidate='null'
-          if [ -n "$merge_sha" ]; then
-            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" \
-              --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
-            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \
-              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \
-              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \
-              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
-          fi
-
+          # The base, the candidate and its tree are read by the queue, from
+          # GitHub, at the moment it pins them. This step sends none of them.
           body=$(jq -nc \
             --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
             --arg author "$AUTHOR_ID" --argjson draft "${DRAFT:-false}" \
-            --argjson candidate "$candidate" \
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate}')
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true}')
 
           # A refusal and an outage are different answers. The queue saying "not
           # your turn" is about this pull request. The queue being unreachable is

@@ -2439,13 +2439,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorGithubUserId?: string;
       proofAccepted?: boolean;
       draft?: boolean;
-      /** The integrated candidate GitHub simulated for this pull request. */
-      candidate?: {
-        baseSha?: string;
-        candidateSha?: string;
-        candidateTreeOid?: string;
-        parentShas?: string[];
-      };
       workReceiptDigest?: string;
       /**
        * Walk the held attempt to the point a merge may be written. Only the caller
@@ -2709,16 +2702,99 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     let operationId: string | null = null;
     let latest = held;
-    const cand = body.candidate;
-    if (
-      body.prepare === true &&
-      held.activeAttemptId !== null &&
-      cand?.baseSha !== undefined &&
-      cand.candidateSha !== undefined &&
-      cand.candidateTreeOid !== undefined
-    ) {
+    // Only for the entry that holds the lane. Somebody else's turn is answered
+    // from the snapshot below, and reading GitHub for a pull request that is
+    // merely waiting would spend a call to say what the queue already knows.
+    if (body.prepare === true && held.activeAttemptId !== null && held.activeEntryId === entryId) {
       const attemptId = held.activeAttemptId;
       const holder = held.entries.find((e) => e.entryId === entryId);
+
+      // The base and the candidate, read here rather than taken from whoever is
+      // asking.
+      //
+      // The caller used to send all four objects. A workflow read the pull
+      // request, sent what it saw, and the queue signed against that reading
+      // however old it had become on the way. On 2 August 2026 four pull
+      // requests merged into this repository and no chain record could be
+      // written for any of them: pull request 117's intent was signed sixteen
+      // seconds after its base had already been superseded, the merge landed on
+      // the tip the branch really had, and none of the seventy stored intents
+      // pins any of the four trees that landed. `authorizationFor` compares the
+      // exact tree and the exact parents, so a merge nothing pinned can only be
+      // filed as an external transition, which claims far less than a merge.
+      //
+      // So the queue asks GitHub itself, inside the guard that signs. Nothing
+      // below reads the caller's numbers.
+      const current =
+        deps.integratedCandidate === undefined
+          ? null
+          : await deps
+              .integratedCandidate(c.env, repositoryId, baseRef, body.pullRequestNumber)
+              .catch(() => null);
+      if (current === null) {
+        // A base nobody can read is a base nobody may pin. The turn is kept and
+        // the caller asks again, because an unreadable answer says nothing about
+        // this pull request.
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: "BASE_UNREADABLE",
+          detail: nextAction("BASE_UNREADABLE"),
+          entryId,
+          operationId: null,
+          retryAfterSeconds: 20,
+        });
+      }
+      if (current.headSha !== headSha) {
+        // A push landed while this turn was being asked about. The candidate
+        // GitHub is offering integrates a commit whose proof nothing here has
+        // read, and the entry's own head follows on the next ask.
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: "HEAD_MOVED",
+          detail: nextAction("HEAD_MOVED"),
+          entryId,
+          operationId: null,
+        });
+      }
+
+      // The branch has moved off the base this attempt was integrated against.
+      //
+      // The reducer holds a pinned candidate immutable, so this turn can only
+      // ever produce a merge onto a base that is gone. Signing anything for it
+      // would pin a tree no branch will take, and walking it would mint an
+      // operation for a write that fails. The attempt ends BASE_MOVED, which
+      // defers: the place in line is kept and the next turn is taken against
+      // the base that is there now.
+      const alreadyPinned = held.activeCandidate;
+      if (alreadyPinned !== null && alreadyPinned.baseSha !== current.baseSha) {
+        const { snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+          if (store.state().activeAttemptId !== attemptId) return;
+          commands.terminateAttempt({
+            idempotencyKey: `authorize:base-moved:${attemptId}:${current.baseSha}`,
+            attemptId,
+            outcome: "BASE_MOVED",
+          });
+        });
+        await driveLane(c.env, deps, repositoryId, after);
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: "CANDIDATE_BASE_MOVED",
+          detail: `${nextAction("CANDIDATE_BASE_MOVED")} ${baseRef} is ${current.baseSha}, and this candidate was integrated against ${alreadyPinned.baseSha}.`,
+          entryId,
+          operationId: null,
+        });
+      }
+      const cand = {
+        baseSha: current.baseSha,
+        candidateSha: current.candidateSha,
+        candidateTreeOid: current.candidateTreeOid,
+      };
 
       // Nothing may be certified until the integrated candidate has actually been
       // run. Until this check existed the walk below used a constant in place of a
