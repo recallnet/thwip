@@ -203,6 +203,45 @@ export type Enrollment =
   | { readonly ok: true; readonly project: QueueProject }
   | { readonly ok: false; readonly reason: string };
 
+/** The file the control plane dispatches `thwip-queue-verify` to. */
+export const VERIFIER_WORKFLOW_PATH = ".github/workflows/thwip-queue-verify.yml";
+
+/**
+ * Who may say "the integrated candidate passed".
+ *
+ * Any workflow in a repository can obtain an OIDC token for that repository, so
+ * the queue pins the workflow's path and refuses anything else. Nothing wrote
+ * this record: `queue_projects.verifier_json` has existed since migration 0005
+ * and enrolment never filled it in, so `remote` and `audited` refused every
+ * merge with NO_PINNED_VERIFIER and `candidate-result` answered 409 to the
+ * verdict that would have cleared it. This repository's own row was typed into
+ * D1 by hand, which is why the gap survived.
+ *
+ * The revision is deliberately not pinned. A run triggered by
+ * repository_dispatch executes the default branch's current head, so an exact
+ * revision would need re-pinning after every merge and a stale pin refuses
+ * every verdict. The path on the default branch is what carries the weight, and
+ * only a merge can change it.
+ */
+export function pinnedVerifierFor(input: {
+  repositoryId: string;
+  ownerId: string;
+  repository: string;
+  baseRef: string;
+}): Record<string, unknown> {
+  const ref = `${input.repository}/${VERIFIER_WORKFLOW_PATH}@${input.baseRef}`;
+  return {
+    repositoryId: input.repositoryId,
+    repositoryOwnerId: input.ownerId,
+    workflowRef: ref,
+    workflowSha: null,
+    reusableWorkflowRef: ref,
+    reusableWorkflowSha: null,
+    expectedEventName: "repository_dispatch",
+    defaultBranchRef: input.baseRef,
+  };
+}
+
 /**
  * Create the queue project.
  *
@@ -213,9 +252,13 @@ export type Enrollment =
  */
 export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest): Promise<Enrollment> {
   const installed = await db
-    .prepare("SELECT organization_id AS organizationId FROM projects WHERE github_repository_id = ?")
+    .prepare(
+      `SELECT p.organization_id AS organizationId, p.github_name AS repository, o.github_org_id AS ownerId
+         FROM projects p JOIN organizations o ON o.id = p.organization_id
+        WHERE p.github_repository_id = ?`,
+    )
     .bind(request.repositoryId)
-    .first<{ organizationId: string }>();
+    .first<{ organizationId: string; repository: string; ownerId: string }>();
   if (installed === null) {
     return { ok: false, reason: "the Thwip App is not installed on this repository" };
   }
@@ -224,8 +267,8 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
     .prepare(
       `INSERT INTO queue_projects
          (id, organization_id, github_repository_id, base_ref, backend, merge_method,
-          enabled, activation_state, bootstrap_progress_json)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'configured', '{}')
+          enabled, activation_state, bootstrap_progress_json, verifier_json)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'configured', '{}', ?)
        ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
     )
     .bind(
@@ -235,6 +278,14 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       request.baseRef,
       request.backend ?? "managed",
       request.mergeMethod ?? "squash",
+      JSON.stringify(
+        pinnedVerifierFor({
+          repositoryId: request.repositoryId,
+          ownerId: installed.ownerId,
+          repository: installed.repository,
+          baseRef: request.baseRef,
+        }),
+      ),
     )
     .run();
 

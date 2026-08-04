@@ -66,15 +66,28 @@ jobs:
 
       # Each required suite runs separately so the verdict can say which one
       # failed, rather than reporting a single opaque failure.
+      #
+      # The list comes from the dispatch, which the control plane composes from
+      # the activated policy. It used to be typed into this file, and a verdict
+      # covering a different set of suites than the policy requires is refused as
+      # CANDIDATE_SUITES_INCOMPLETE — a refusal nobody could fix from here. It is
+      # also not read from the candidate checkout, because a pull request that
+      # could edit its own suite list would be verifying itself.
       - name: Run required suites
         id: suites
         env:
           NODE_OPTIONS: --max-old-space-size=4096
+          REQUIRED_SUITES: ${{ toJSON(github.event.client_payload.requiredSuites) }}
         run: |
           set -uo pipefail
+          names=$(printf '%s' "$REQUIRED_SUITES" | jq -r '.[]? // empty')
+          if [ -z "$names" ]; then
+            echo "::error::the dispatch named no required suites; nothing was run"
+            exit 1
+          fi
           results=""
           overall=0
-          for suite in lint typecheck test; do
+          for suite in $names; do
             start=$(date +%s%3N)
             if pnpm run "$suite"; then
               outcome=passed
