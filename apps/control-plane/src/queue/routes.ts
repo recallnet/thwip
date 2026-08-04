@@ -481,7 +481,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // already produced is idempotent all the way through rather than only at
   // the transition.
   const db = env.DB as unknown as D1Like;
-  const existingDigest = await transitionRecordFor(db, input.attemptId);
+  const existingDigest = await transitionRecordFor(db, input.repositoryId, input.baseRef, input.attemptId);
   if (existingDigest !== null) {
     // Read back what was actually stored: a plain replay stored a
     // "reused-proof-merge" record, but a process that died between storing
@@ -3816,7 +3816,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // the partial unique index on attempt_id refuses a second row that claims a
     // position, so two callers racing cannot both write one.
     const correctionKey = `correction:${correctsDigest}`;
-    const already = await transitionRecordFor(db, correctionKey);
+    const already = await transitionRecordFor(db, repositoryId, baseRef, correctionKey);
     if (already !== null) {
       return c.json({ corrected: "already", corrects: correctsDigest, transitionDigest: already });
     }

@@ -463,11 +463,51 @@ export async function storeAttestation(
       return { stored: true };
     } catch (error) {
       if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
-      const winner = await transitionRecordFor(db, row.attemptId);
-      // The constraint only fires because a row for this attempt already holds a
-      // position, so the record that won the race is there to be read back.
-      if (winner === null) throw error;
-      return { stored: false, digest: winner };
+      const winner = await transitionRecordFor(db, row.repositoryId, row.baseRef, row.attemptId);
+      // The constraint fires because a row for this attempt already holds a
+      // position. When that row sits in this epoch, `transitionRecordFor`
+      // finds it and this is the record that won the race.
+      //
+      // An epoch bump like migration 0016's produces the other case: the
+      // attempt's old record sits exactly where it was, still holding the
+      // partial index's one slot for that attempt id, while
+      // `transitionRecordFor` now correctly stops seeing it because the
+      // chain a verifier reads starts somewhere past it. That old row's
+      // slot is freed the same way a losing race's row is freed elsewhere
+      // in this file: the position is cleared, the bytes and signature
+      // stay for anyone auditing what happened, and the insert this
+      // attempt actually asked for is retried into the now-open slot.
+      if (winner !== null) return { stored: false, digest: winner };
+      const stale = await db
+        .prepare(
+          `SELECT digest FROM queue_attestations WHERE attempt_id = ? AND transition_sequence IS NOT NULL LIMIT 1`,
+        )
+        .bind(row.attemptId)
+        .first<{ digest: string }>();
+      if (stale === null) throw error;
+      await db
+        .prepare(`UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?`)
+        .bind(stale.digest)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO queue_attestations
+             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(digest) DO NOTHING`,
+        )
+        .bind(
+          row.digest,
+          row.kind,
+          row.repositoryId,
+          row.baseRef,
+          row.transitionSequence,
+          row.attemptId,
+          new TextDecoder().decode(row.bytes),
+          row.jws,
+        )
+        .run();
+      return { stored: true };
     }
   })();
 
@@ -521,16 +561,34 @@ export async function storeAttestation(
  * signed records both claiming the same position in the chain. Checking here
  * first, before anything is built or signed, is what makes the second report
  * of a merge an idempotent no-op rather than a second link.
+ *
+ * Scoped to this epoch, the same way `recordCoveringCommit` is and for the
+ * same reason. An operator can raise `attested_from_sequence` past a record
+ * this same attempt already produced, the way migration `0016` did: the row
+ * does not stop existing, it stops being part of the chain a verifier reads.
+ * Answering from it here would report the merge as already recorded while
+ * the live chain never mentions it, and the repair that would have fixed
+ * that never runs because this said there was nothing to do.
  */
-export async function transitionRecordFor(db: D1Like, attemptId: string): Promise<string | null> {
+export async function transitionRecordFor(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  attemptId: string,
+): Promise<string | null> {
   const row = await db
     .prepare(
       `SELECT digest FROM queue_attestations
-        WHERE attempt_id = ? AND transition_sequence IS NOT NULL
+        WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ? AND transition_sequence IS NOT NULL
+          AND transition_sequence >= COALESCE(
+            (SELECT attested_from_sequence FROM queue_projects
+              WHERE github_repository_id = ? AND base_ref = ?),
+            0
+          )
         ORDER BY created_at ASC
         LIMIT 1`,
     )
-    .bind(attemptId)
+    .bind(repositoryId, baseRef, attemptId, repositoryId, baseRef)
     .first<{ digest: string }>();
   return row === null ? null : row.digest;
 }

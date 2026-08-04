@@ -191,7 +191,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
   const attemptId = intent.attemptId;
 
-  const already = await transitionRecordFor(db, attemptId);
+  const already = await transitionRecordFor(db, repositoryId, baseRef, attemptId);
   if (already !== null) {
     return { status: "already", attemptId, pullRequestNumber: intent.pullRequestNumber, transitionDigest: already };
   }
