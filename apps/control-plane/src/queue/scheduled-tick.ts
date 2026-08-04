@@ -12,7 +12,13 @@ import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./route
 import { readActivePolicy } from "../active-policy.js";
 import { serviceKey } from "../service-signing.js";
 import type { Env } from "../env.js";
-import { ORPHANED_WRITE_GRACE_MS, ORPHANED_WRITE_SWEEP_LIMIT, settleOrphanedWrite } from "./orphaned-writes.js";
+import {
+  MERGED_WITHOUT_RECORD_WINDOW_MS,
+  ORPHANED_WRITE_GRACE_MS,
+  ORPHANED_WRITE_SWEEP_LIMIT,
+  settleOrphanedWrite,
+} from "./orphaned-writes.js";
+import { transitionRecordFor } from "./attestation.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { findingsForChain } from "./chain-self-check.js";
 
@@ -314,9 +320,26 @@ async function sweepOrphanedWrites(
   recordDeps: RecordFromIntentDeps<QueueRouteEnv>,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
-  const orphaned = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
-    store.unresolvedMergeOperations(cutoff),
-  );
+  const since = new Date(Date.now() - MERGED_WITHOUT_RECORD_WINDOW_MS).toISOString();
+  const { open, settledRecently } = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => ({
+    open: store.unresolvedMergeOperations(cutoff),
+    settledRecently: store.mergedWritesResolvedAfter(since),
+  }));
+
+  // A write is finished when the chain has a record for it, not when the row
+  // says MERGED. The two came apart on 4 August 2026 and nothing owned the
+  // difference: the merge landed, the record was skipped on a read that had
+  // not caught up, the row was resolved, and the unresolved sweep could not
+  // see it. Asked of the record store rather than of the queue document,
+  // because the document keeps only the most recent transitions and an
+  // absence there is not an absence.
+  const unrecorded: typeof open = [];
+  for (const write of settledRecently) {
+    if ((await transitionRecordFor(db, row.repositoryId, row.baseRef, write.attemptId)) === null) {
+      unrecorded.push(write);
+    }
+  }
+  const orphaned = [...open, ...unrecorded];
 
   let settled = 0;
   // Oldest first, so a backlog clears the longest-stranded merge first and the
