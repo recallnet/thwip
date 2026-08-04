@@ -490,6 +490,50 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     };
   });
 
+  /**
+   * The sweep that settles stranded merge writes calls the repair path and
+   * leaves the row alone when it refuses. A commit no intent authorizes refuses
+   * forever, so the four writes stranded on 2 August 2026 would have been read
+   * from GitHub every five minutes for the rest of the account's life, and the
+   * heal that put them in the chain would have changed nothing about that.
+   *
+   * A chain that already carries a record for the commit has nothing left to
+   * put back. That is not the operator's word for it: the record is signed, it
+   * is in the chain, and the sweep confirmed the merge from GitHub before it got
+   * here.
+   */
+  it("tells a caller a healed commit is already in the chain instead of refusing it", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedRecordPastTheGap(app, e, UNAUTHORIZED.mergeSha);
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+    };
+    const finding = (await plans(app, e))[0]!.digest;
+    await heal(app, e, { finding, reason: REASON });
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/repair?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mergeSha: UNAUTHORIZED.mergeSha, reason: "the sweep asking again" }),
+      },
+      e,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recorded: "already" });
+
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+    };
+  });
+
   it("refuses a finding this branch's chain does not report", async () => {
     const e = env();
     seed();

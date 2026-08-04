@@ -536,6 +536,36 @@ export async function transitionRecordFor(db: D1Like, attemptId: string): Promis
 }
 
 /**
+ * The record this branch's chain already has for a commit, whatever wrote it.
+ *
+ * `transitionRecordFor` answers the same question keyed on the attempt, which
+ * covers the merge that reported itself twice. It cannot cover a commit the
+ * chain reached by another road: a movement record carries no attempt, because
+ * the absence of one is the finding it answers. Without this, the sweep that
+ * settles stranded merge writes would call the repair path, be refused for a
+ * commit already sitting in the chain, and leave the row open to be read from
+ * GitHub again on the next tick, forever.
+ */
+export async function recordCoveringCommit(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  sha: string,
+): Promise<{ digest: string; attemptId: string | null } | null> {
+  const row = await db
+    .prepare(
+      `SELECT digest, attempt_id AS attemptId FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+          AND json_extract(bytes, '$.after.baseSha') = ?
+        ORDER BY transition_sequence ASC
+        LIMIT 1`,
+    )
+    .bind(repositoryId, baseRef, sha)
+    .first<{ digest: string; attemptId: string | null }>();
+  return row === null ? null : { digest: row.digest, attemptId: row.attemptId };
+}
+
+/**
  * The signed merge intent that authorizes exactly this commit.
  *
  * A merge is recorded from the attempt that authorized it, and an attempt does
