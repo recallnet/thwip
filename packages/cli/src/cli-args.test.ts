@@ -97,6 +97,25 @@ describe("help", () => {
   });
 });
 
+describe("thwip doctor", () => {
+  it("is a top-level command, because onboarding fails above the queue as often as inside it", () => {
+    const action = parseCliArgs(["doctor"]);
+    expect(action).toEqual({ kind: "command", invocation: { command: "doctor", argv: [] } });
+  });
+
+  it("refuses a flag it does not know rather than silently ignoring it", () => {
+    expect(parseCliArgs(["doctor", "--strict"])).toEqual({ kind: "error", message: "unknown flag --strict" });
+  });
+
+  it("documents the opt-out and the exit contract in its own help", () => {
+    const action = parseCliArgs(["doctor", "--help"]);
+    expect(action.kind).toBe("help");
+    const text = action.kind === "help" ? action.text : "";
+    expect(text).toContain("--allow-unread");
+    expect(text).toContain("zero only");
+  });
+});
+
 describe("fail-closed arguments", () => {
   const invalid = [
     ["--unknown"],
@@ -144,6 +163,9 @@ describe("dispatch", () => {
     [["run"], "run"],
     [["verify", "--json"], "verify"],
     [["policy", "digest"], "policy-digest"],
+    [["doctor"], "doctor"],
+    [["doctor", "--json", "--allow-unread"], "doctor"],
+    [["doctor", "--repo", "recallnet/thwip", "--branch", "main"], "doctor"],
   ] as const)("routes %j to %s only after validation", async (argv, expected) => {
     const dispatch = vi.fn(async () => 0);
     await expect(

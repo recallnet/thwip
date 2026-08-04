@@ -51,7 +51,13 @@ required:
 | `thwip verify` | Run the same checks the protected check will run |
 | `thwip ship` | Run, sign, push, open the pull request, take a queue turn |
 | `thwip keys status` | Report which key signs, and whether GitHub lists it |
+| `thwip doctor` | Check the whole chain, from your key to the App's grants |
 | `thwip queue` | Inspect and administer the merge queue |
+
+`thwip doctor` changes nothing and exits zero only when every check passed. A
+check nobody could read fails on its own, so a report that says fine is a report
+that looked. Reading App permissions needs repository admin; pass
+`--allow-unread` when you are not one.
 
 Run `thwip --help` for the full list.
 

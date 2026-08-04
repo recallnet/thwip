@@ -45,6 +45,7 @@ import {
   type BuildIdentity,
 } from "./build-identity.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
+import { runDoctor, type LocalReads, type PolicyRead, type SigningKeyRead } from "./doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
 import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
@@ -935,6 +936,124 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
   return report.exitCode;
 }
 
+/**
+ * `thwip doctor`. Runs the reads the other commands already make, in one pass,
+ * and answers once.
+ *
+ * The three remote sections are `thwip queue doctor`'s own probes. The session,
+ * the signing key and the policy are the reads behind `thwip keys status` and
+ * `thwip policy digest`. Nothing is asked for twice and nothing new is invented,
+ * so a sentence a developer reads here is the sentence they read there.
+ */
+async function cmdDoctor(argv: string[]): Promise<number> {
+  const cwd = process.cwd();
+  const allowUnread = argv.includes("--allow-unread");
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const repo = flag(argv, "--repo") ?? (await originName(cwd)) ?? "";
+  const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
+  const auth = await apiAuthHeader();
+
+  const local: LocalReads = {
+    session: auth === null ? "signed-out" : "signed-in",
+    signingKey: await readSigningKey(cwd),
+    policy: await readPolicy(cwd, endpoint, auth),
+  };
+
+  // A signed-out session cannot read any of the three remote sections, and
+  // asking anyway would report three unreadable things when the one that
+  // matters is already named.
+  const observations: DoctorObservation[] = auth === null ? [] : await probeRemote(endpoint, auth, repo, ref);
+
+  const report = runDoctor({ local, observations, repo, ref, allowUnread });
+  if (argv.includes("--json")) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          repo,
+          ref,
+          checks: report.checks.map((one) => ({
+            check: one.check,
+            status: one.status,
+            reasonCode: one.reasonCode,
+            facts: one.facts,
+          })),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+  } else {
+    process.stdout.write(report.lines.join("\n") + "\n");
+  }
+  return report.exitCode;
+}
+
+/** The key that would sign here, and whether GitHub attributes it to anybody. */
+async function readSigningKey(cwd: string): Promise<SigningKeyRead> {
+  try {
+    const config = await loadConfig();
+    const key = await discoverSigningKey(cwd, config.signingKey);
+    if (!key) return { kind: "missing" };
+    const identity = await resolveGithubIdentity(config);
+    const listed = await githubSigningKeys(identity.login);
+    const fingerprints = await Promise.all(listed.map((k) => fingerprintOfPublicKey(k.key)));
+    const registered = fingerprints.includes(key.fingerprint);
+    return {
+      kind: registered ? "registered" : "unregistered",
+      fingerprint: key.fingerprint,
+      path: key.privateKeyPath,
+    };
+  } catch (error) {
+    return { kind: "unread", detail: failureDetail(error) };
+  }
+}
+
+/** What a proof made here would have to cover, from the policy in force. */
+async function readPolicy(cwd: string, endpoint: string, auth: string | null): Promise<PolicyRead> {
+  try {
+    const project = await loadProjectConfigAtHead(cwd, endpoint, auth);
+    return {
+      kind: "read",
+      policyDigest: project.policyDigest,
+      pipelineDigest: project.pipelineDigest,
+      version: project.policy.version,
+      requiredSuites: project.policy.pipeline.requiredSuites,
+      configSource: project.configSource,
+    };
+  } catch (error) {
+    return { kind: "unread", detail: failureDetail(error) };
+  }
+}
+
+/** The three sections `thwip queue doctor` reads, from the same probe list. */
+async function probeRemote(
+  endpoint: string,
+  auth: string,
+  repo: string,
+  ref: string,
+): Promise<DoctorObservation[]> {
+  const observations: DoctorObservation[] = [];
+  let repositoryId: string | null = null;
+  for (const probe of doctorProbes({ repo, ref, events: 5 })) {
+    if (probe.path.includes("{repositoryId}") && repositoryId === null) break;
+    const path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
+      headers: { authorization: auth },
+    })
+      .then(async (res) => ({
+        status: res.status,
+        body: (await res.json().catch(() => null)) as Record<string, unknown> | null,
+      }))
+      .catch(() => ({ status: 0, body: null }));
+    observations.push({ section: probe.section, ...answer });
+    if (probe.section === "repository" && answer.status === 200) {
+      const id = answer.body?.["repositoryId"];
+      repositoryId = typeof id === "string" ? id : null;
+    }
+  }
+  return observations;
+}
+
 /** What this repository is called on GitHub, from the origin remote. */
 async function originName(cwd: string): Promise<string | null> {
   try {
@@ -1132,6 +1251,8 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
     case "version":
       process.stdout.write(versionReport(await runningBuild()));
       return 0;
+    case "doctor":
+      return cmdDoctor([...invocation.argv]);
   }
 }
 
