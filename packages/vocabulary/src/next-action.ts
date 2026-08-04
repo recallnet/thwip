@@ -74,6 +74,20 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "Another machine holds this turn. Run thwip ship on the machine that claimed it, or wait for the queue to offer the turn here.",
   CANDIDATE_UNAVAILABLE:
     "This machine cannot fetch the merged commit the queue built, so there is nothing to run the suites against. Check that you can reach origin, then run thwip ship again.",
+  INTEGRATION_ASSIGNMENT_MISSING:
+    "This project runs the integration on your own machine and no machine ever took the turn. Keep `thwip ship --wait` running and the queue will hand it one.",
+  INTEGRATION_RECEIPT_MISSING:
+    "The machine holding this turn has not sent back a signed receipt for the integration run. Let it finish, or run thwip ship again to take a fresh turn.",
+  INTEGRATION_RECEIPT_TREE_MISMATCH:
+    "The receipt this machine signed covers a different merge than the one being written. The queue is rebuilding the candidate and will hand out another turn.",
+  INTEGRATION_ASSIGNMENT_MISMATCH:
+    "The receipt for this turn answers an assignment the queue never issued for it, so nothing was merged. Send this output to whoever runs the queue.",
+  INTEGRATION_RECEIPT_MISMATCH:
+    "The queue holds two accounts of this turn's receipt and they do not match, so nothing was merged. Send this output to whoever runs the queue.",
+  INTEGRATION_RECEIPT_DEVICE_MISMATCH:
+    "The receipt came from a machine other than the one that claimed this turn. Run thwip ship on the machine holding the turn.",
+  CANDIDATE_CHANGED:
+    "GitHub is now integrating a different merge commit than the one this turn ran against. The queue will pin the new one and hand out another turn.",
 
   /* The local machine stopped before it could name anything better. */
   PUSH_REJECTED:
@@ -138,6 +152,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   CONVERSATION_UNRESOLVED: "Resolve the open review conversations.",
   REQUIRED_CHECK_PENDING: "A required check is still running.",
   REQUIRED_CHECK_FAILED: "A required check failed. Fix it and push again; your place is kept.",
+  REQUIRED_CHECK_MISSING:
+    "A check the base branch requires is not on this commit, so GitHub would refuse the merge. Publish that check, or ask an admin to drop it from the branch rules.",
   VERIFICATION_REJECTED:
     "The verifier refused this candidate. Run thwip verify to see why; your place is kept.",
   PR_DRAFT: "Mark the pull request ready for review.",
