@@ -66,11 +66,13 @@ export type HealStep =
 /**
  * Why a commit needs a person.
  *
- * Three different questions, and the summary an administrator reads has to ask
- * the right one. Two attempts authorize the commit and somebody must say which
- * merged it. One attempt signed two intents that disagree and somebody must say
- * which the merge ran under. Or the intent is one whose record cites evidence
- * the intent does not carry, so nothing can rebuild it.
+ * The summary an administrator reads has to ask the question this reason
+ * actually raises. `AMBIGUOUS_ATTEMPT` means two attempts authorize the
+ * commit and somebody has to say which one merged it. `INTENTS_DISAGREE`
+ * means one attempt signed two intents that disagree and somebody has to say
+ * which the merge ran under. `NOT_REBUILDABLE` means the intent's record
+ * cites evidence the intent itself does not carry, so nothing here can
+ * rebuild it.
  */
 type AskReason = "AMBIGUOUS_ATTEMPT" | "INTENTS_DISAGREE" | "NOT_REBUILDABLE";
 
@@ -414,8 +416,8 @@ function refusalOf(code: string): HealRefusal {
  * The movement record this commit already has, and where it sits.
  *
  * Both callers report a sequence back to an operator who will go looking for
- * that link, so the answer has to be the position in the chain rather than the
- * position this run was aiming at.
+ * that link, so the answer has to name the position the chain actually holds
+ * for it, whatever position this run was computing on its way to finding out.
  */
 async function movementAlreadyInChain(
   db: D1Like,

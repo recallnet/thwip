@@ -317,5 +317,5 @@ export function healActionLabel(plan: { healable: boolean; steps: readonly unkno
  */
 export function healPanelFailure(status: number | undefined): string | null {
   if (status === 403) return null;
-  return "thwip could not check this branch's record. That is thwip failing rather than the chain passing, so read it again before trusting the rest of this page.";
+  return "thwip could not check this branch's record. The check itself failed, so read it again before trusting the rest of this page.";
 }
