@@ -24,7 +24,13 @@ export interface ShipPorts {
    * letting git's error escape ended the process on a stack trace and exit 1.
    */
   push(): Promise<{ reasonCode?: string }>;
-  openOrUpdatePullRequest(): Promise<{ pullRequestNumber: number }>;
+  /**
+   * Opens the pull request, or says it did not. The old signature could only
+   * describe success, so a failed `gh pr create` came back as a number nobody
+   * looked at and ship carried on to the queue. Null means no open pull request
+   * exists, which is a refusal however it happened.
+   */
+  openOrUpdatePullRequest(): Promise<{ pullRequestNumber: number | null; reasonCode?: string }>;
   joinQueue(): Promise<{ reasonCode?: string }>;
   /**
    * Say this machine is here, so a profile that runs the turn on a device can
@@ -130,9 +136,14 @@ async function perform(ports: ShipPorts, step: string): Promise<{ reasonCode?: s
     }
     case "push":
       return ports.push();
-    case "open-or-update-pr":
-      await ports.openOrUpdatePullRequest();
-      return {};
+    case "open-or-update-pr": {
+      const result = await ports.openOrUpdatePullRequest();
+      if (result.reasonCode !== undefined) return { reasonCode: result.reasonCode };
+      // Having called the step is not evidence that it worked. What counts is a
+      // number, and its absence stops the run instead of falling through to the
+      // queue.
+      return result.pullRequestNumber === null ? { reasonCode: "PR_NOT_OPENED" } : {};
+    }
     case "join-queue":
       return ports.joinQueue();
     case "await-turn":
