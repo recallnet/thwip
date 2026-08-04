@@ -42,7 +42,46 @@ it cannot run the other way round.
 git checkout -b my-change
 # ...edit, commit...
 pnpm build          # once
-thwip run                            # runs lint/typecheck/test, signs, amends HEAD
-git push -u origin my-change
-gh pr create --fill  # auto-merges via merge queue once the thwip check is green
+thwip run           # runs lint/typecheck/test, signs, amends HEAD
+thwip ship          # pushes, opens the pull request, joins the queue
+```
+
+### Which thwip are you running
+
+Inside a checkout, `thwip` runs that checkout's build from `packages/cli/dist`.
+Outside one, it runs the published release. So a person editing CLI code runs
+the code they edited, in whichever worktree they are standing in, and nobody has
+to re-point anything after a build.
+
+`scripts/thwip-resolver.sh` decides that, and it has to be the `thwip` on your
+PATH for any of it to hold. The installer puts it there:
+
+```sh
+node scripts/install-thwip.mjs              # add --write-path to edit your shell rc
+```
+
+It writes `~/.local/bin/thwip`, fetches the published release into
+`~/.local/share/thwip/release`, tells you the one line to add if
+`~/.local/bin` is not on your PATH, and then runs `command -v thwip`,
+`thwip --version` and `thwip keys status` before it says it worked. Run it
+again any time; it changes nothing that is already right.
+
+The resolver walks up for a checkout whose `packages/cli` is this project and
+runs that build. A checkout that has not been built falls back to the release
+and says so on stderr. Nothing in the resolver reaches the network. To undo the
+lot, delete `~/.local/bin/thwip` and `~/.local/share/thwip`.
+
+Pointing `thwip` straight at one worktree's `dist/main.js` is what this
+replaced, and it cost a day: five worktrees ran the sixth one's build, so a bug
+in `thwip ship` that reported a queued pull request which did not exist survived
+every run of it.
+
+`pnpm exec thwip` also runs this checkout's build, from any directory in it.
+
+`thwip version` prints the version, the commit the build was made from, and the
+file that is running. A build standing in a checkout it did not come from says
+so on stderr before it does anything, which is the net under all of the above.
+
+```sh
+thwip version
 ```

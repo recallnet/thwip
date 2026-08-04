@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   canonicalDigest,
   extractCarrier,
@@ -36,6 +37,13 @@ import { type CommandInvocation } from "./cli-args.js";
 import { classifyFailure, failureDetail, runCliProcess } from "./cli-failure.js";
 import { forceArgs, planPush } from "./push-plan.js";
 import { openPullRequestNumber } from "./pull-request.js";
+import {
+  buildMismatchWarning,
+  findCliCheckout,
+  parseBuildStamp,
+  versionReport,
+  type BuildIdentity,
+} from "./build-identity.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
@@ -1121,10 +1129,43 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
       return 0;
     case "policy-digest":
       return cmdPolicyDigest();
+    case "version":
+      process.stdout.write(versionReport(await runningBuild()));
+      return 0;
   }
 }
 
+/**
+ * What this build is, read from the stamp written beside it at build time.
+ * Resolved through `import.meta.url`, so it names the file node is executing
+ * rather than whatever checkout the shell happened to be in.
+ */
+async function runningBuild(): Promise<BuildIdentity> {
+  const mainPath = fileURLToPath(import.meta.url);
+  const stamp = await readFile(join(dirname(mainPath), "build-stamp.json"), "utf8").catch(() => null);
+  return parseBuildStamp(stamp, mainPath);
+}
+
+/**
+ * Say so when the build that is running did not come from the checkout it is
+ * standing in. A warning, never a failure: running a released thwip inside this
+ * repository is an ordinary thing to do, and the person who meant it should not
+ * be stopped. The person who did not mean it now finds out on the first line
+ * instead of after a day of testing a build nobody was editing.
+ */
+async function warnAboutForeignBuild(): Promise<void> {
+  const { existsSync } = await import("node:fs");
+  const identity = await runningBuild();
+  const warning = buildMismatchWarning({
+    runningMainPath: identity.mainPath,
+    checkoutRoot: findCliCheckout(process.cwd(), existsSync),
+    identity,
+  });
+  if (warning !== null) process.stderr.write(warning + "\n");
+}
+
 async function main(): Promise<void> {
+  await warnAboutForeignBuild();
   const code = await runCliProcess(process.argv.slice(2), {
     dispatch: dispatchCli,
     stdout: (text) => process.stdout.write(text),

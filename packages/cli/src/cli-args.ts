@@ -11,7 +11,8 @@ export type CliCommand =
   | "keys-status"
   | "setup"
   | "run"
-  | "policy-digest";
+  | "policy-digest"
+  | "version";
 
 export interface CommandInvocation {
   readonly command: CliCommand;
@@ -35,6 +36,7 @@ interface OptionSpec {
 }
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
+const VERSION_FLAGS = new Set(["--version", "-v"]);
 
 const HELP = `thwip — verified local CI (https://thwip.recall.net)
 
@@ -56,6 +58,7 @@ COMMANDS
   verify                    Parse and print the proof on HEAD.
   verify-chain              Fetch and verify a branch's merge chain.
   policy digest             Print policy and pipeline digests.
+  version                   Print this build's version, commit, and path.
 
 Run \`thwip <command> --help\` for command-specific help.
 `;
@@ -87,6 +90,11 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Run approved suites against the committed tree and attach a signed proof to HEAD.\n`,
   "policy-digest":
     `Usage: thwip policy digest\n\nPrint the canonical policy and pipeline digests for HEAD.\n`,
+  version:
+    `Usage: thwip version\n\n` +
+    `Print the version this build carries, the commit it was built from, and the\n` +
+    `file that is running. Use it when a thwip on your PATH may belong to another\n` +
+    `checkout than the one you are standing in.\n`,
 };
 
 const QUEUE_SUBCOMMANDS = [
@@ -260,6 +268,9 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
   const [name, ...rest] = argv;
   if (name === undefined || HELP_FLAGS.has(name)) return { kind: "help", text: HELP };
   if (name === "help") return helpFor(rest);
+  // `--version` and `-v` are what everybody types, so they route to the command
+  // rather than being reported as unknown flags.
+  if (VERSION_FLAGS.has(name)) return simpleCommand("version", rest);
 
   switch (name) {
     case "login":
@@ -285,6 +296,8 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
     }
     case "setup":
       return simpleCommand("setup", rest);
+    case "version":
+      return simpleCommand("version", rest);
     case "run":
       return simpleCommand("run", rest, { value: ["--base"] });
     case "policy": {
