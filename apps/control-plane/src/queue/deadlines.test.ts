@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -63,18 +64,12 @@ const REPO = "1315419165";
 const REF = "refs/heads/main";
 
 function routes() {
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => null,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
+      activePolicy: async () => null,
+      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 async function authorize(app: ReturnType<typeof routes>, e: QueueRouteEnv, pullRequestNumber: number) {

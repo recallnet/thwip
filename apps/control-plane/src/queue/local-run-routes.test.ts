@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { signSsh } from "@thwip/sshsig";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
@@ -149,41 +150,30 @@ const driven: number[] = [];
 
 function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId = "alice", githubUserId = "1") {
   driven.length = 0;
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId, githubUserId, isAdmin: false }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => policy,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async () => "alice",
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async (_e, _r, pullRequestNumber) => {
-      driven.push(pullRequestNumber);
-    },
-    // The merged endpoint reads the commit it is told about, so the merge
-    // commit answers with the base and the head under it. Anything else here is
-    // the pull request head, carrying its proof.
-    commitFacts: async (_e, _r, sha) =>
-      sha === MERGE_SHA
-        ? { treeOid: TREE, parentShas: [BASE, HEAD] }
-        : {
-            treeOid: TREE,
-            parentShas: [BASE],
-            message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
-          },
-    integratedCandidate: async () => ({
-      status: "pinned",
-      baseSha: BASE,
-      headSha: HEAD,
-      candidateSha: CANDIDATE,
-      candidateTreeOid: TREE,
-    }),
-    proofCheckRunId: async () => "998877",
-    signRecordBytes: async () => "eyJhbGciOiJFUzI1NiJ9.payload.signature",
-    baseContainsSha: async () => true,
-    ...over,
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD, principalId, githubUserId, isAdmin: false }, {
+      activePolicy: async () => policy,
+      principalFor: async () => "alice",
+      driveTurn: async (_e: unknown, _r: string, pullRequestNumber: number) => {
+        driven.push(pullRequestNumber);
+      },
+      // The merged endpoint reads the commit it is told about, so the merge
+      // commit answers with the base and the head under it. Anything else here is
+      // the pull request head, carrying its proof.
+      commitFacts: async (_e: unknown, _r: string, sha: string) =>
+        sha === MERGE_SHA
+          ? { treeOid: TREE, parentShas: [BASE, HEAD] }
+          : {
+              treeOid: TREE,
+              parentShas: [BASE],
+              message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
+            },
+      proofCheckRunId: async () => "998877",
+      signRecordBytes: async () => "eyJhbGciOiJFUzI1NiJ9.payload.signature",
+      baseContainsSha: async () => true,
+      ...over,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 type Routes = ReturnType<typeof app>;

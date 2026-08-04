@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
@@ -43,18 +44,13 @@ const DEVICE = `SHA256:${"a".repeat(43)}`;
 const SECOND_DEVICE = `SHA256:${"b".repeat(43)}`;
 
 function routes(principalId = "alice") {
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId, githubUserId: "1", isAdmin: false }),
-    verifyOidc: async () => null,
-    pinnedVerifier: async () => null,
-    activePolicy: async () => null,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async () => null,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, principalId, isAdmin: false }, {
+      verifyOidc: async () => null,
+      activePolicy: async () => null,
+      principalFor: async () => null,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 function heartbeat(app: ReturnType<typeof routes>, e: QueueRouteEnv, deviceKeyId = DEVICE) {
