@@ -18,7 +18,10 @@ function link(sequence: number, priorDigest: string | null) {
   return {
     transition_sequence: sequence,
     kind: "verified",
-    digest: `sha256:${String(sequence).repeat(4).padEnd(64, "0")}`,
+    // Not padded with zeroes: the reducer reads a digest ending in twenty four
+    // zero nibbles as a commit sha somebody stretched to digest width, which is
+    // what it always has been.
+    digest: `sha256:${String(sequence).repeat(4).padEnd(64, "e")}`,
     prior_digest: priorDigest,
     base_sha: String(sequence).padStart(40, "b"),
   };
