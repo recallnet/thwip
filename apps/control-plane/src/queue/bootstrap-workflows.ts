@@ -8,11 +8,18 @@
  * already has, before either Thwip ruleset is active, which is the whole point
  * of `merge-setup-pr` being the first bootstrap step.
  *
- * The two workflows are this repository's own, with two changes. The action is
- * a published reference rather than the local checkout only this repository
- * has, and the endpoint is the control plane the caller is deployed at.
+ * The workflows are this repository's own, with two changes. The action is a
+ * published reference rather than the local checkout only this repository has,
+ * and the endpoint is the control plane the caller is deployed at.
  * `bootstrap-workflows.test.ts` compares the names and triggers against the
  * originals, because those are what the ruleset pins.
+ *
+ * The candidate verifier was missing from this list entirely. `remote` and
+ * `audited` claim the integrated candidate was run, and the control plane asks
+ * for that run with `repository_dispatch: thwip-queue-verify`. Every repository
+ * enrolled through the product got a dispatch nothing listened to, because this
+ * repository's own copy of the answering workflow was written by hand and the
+ * template never learned about it.
  *
  * The merge workflow is not a copy at all any more. There were two of them and
  * they drifted twice: the attribution trailer went missing from one, and PR 123
@@ -579,6 +586,187 @@ jobs:
           printf '%s' "$report" | sed '$d'
 `;
 
+const VERIFY_WORKFLOW = `name: thwip-queue-verify
+
+run-name: >-
+  thwip: verify candidate \${{ github.event.client_payload.candidateSha }}
+  for PR #\${{ github.event.client_payload.pullRequestNumber }}
+
+# Dispatched by the control plane when a pull request holds the turn and its
+# integrated candidate has not been tested yet.
+#
+# repository_dispatch always runs the default branch's copy of this file. That is
+# the point: a pull request can edit a workflow that runs on pull_request, and a
+# verifier a contributor can edit verifies nothing. Everything below — the suite
+# commands, the toolchain, the reporting — comes from main. Only the code under
+# test comes from the candidate.
+on:
+  repository_dispatch:
+    types: [thwip-queue-verify]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    name: verify candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The candidate commit itself: the merge GitHub simulated for this pull
+      # request. This is the integration that will land, which is the thing no
+      # earlier check has ever run.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: \${{ github.event.client_payload.candidateSha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+
+      # Confirm the checkout is the tree the control plane pinned before running
+      # anything. If it is not, the run would report on code the queue did not ask
+      # about, and reporting it would be worse than not running.
+      - name: Confirm the candidate tree
+        env:
+          EXPECTED_TREE: \${{ github.event.client_payload.candidateTreeOid }}
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD^{tree})
+          echo "candidate tree: $actual (expected $EXPECTED_TREE)"
+          if [ "$actual" != "$EXPECTED_TREE" ]; then
+            echo "::error::checked out tree does not match the pinned candidate"
+            exit 1
+          fi
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Workspace packages resolve to their built types, so typecheck cannot run
+      # from a clean checkout until they exist. A developer's tree already has
+      # them, which is why only a clean-room run of the candidate ever noticed.
+      - name: Build workspace packages
+        run: pnpm build
+
+      # Each required suite runs separately so the verdict can say which one
+      # failed, rather than reporting a single opaque failure.
+      #
+      # The list comes from the dispatch, which the control plane composes from
+      # the activated policy. It used to be typed into this file, and a verdict
+      # covering a different set of suites than the policy requires is refused as
+      # CANDIDATE_SUITES_INCOMPLETE — a refusal nobody could fix from here. It is
+      # also not read from the candidate checkout, because a pull request that
+      # could edit its own suite list would be verifying itself.
+      - name: Run required suites
+        id: suites
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          REQUIRED_SUITES: \${{ toJSON(github.event.client_payload.requiredSuites) }}
+        run: |
+          set -uo pipefail
+          names=$(printf '%s' "$REQUIRED_SUITES" | jq -r '.[]? // empty')
+          if [ -z "$names" ]; then
+            echo "::error::the dispatch named no required suites; nothing was run"
+            exit 1
+          fi
+          results=""
+          overall=0
+          for suite in $names; do
+            start=$(date +%s%3N)
+            if pnpm run "$suite"; then
+              outcome=passed
+            else
+              outcome=failed
+              overall=1
+            fi
+            end=$(date +%s%3N)
+            echo "suite $suite: $outcome ($((end - start))ms)"
+            results=$(jq -c \\
+              --arg n "$suite" --arg o "$outcome" --argjson d "$((end - start))" \\
+              '. + [{name:$n, outcome:$o, durationMs:$d}]' <<< "\${results:-[]}")
+          done
+          {
+            echo "suites=$results"
+            echo "accepted=$([ "$overall" -eq 0 ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      # Reported even when the suites failed: a refusal the queue never hears is
+      # a pull request that waits forever.
+      - name: Report the verdict to Thwip Queue
+        if: always() && steps.suites.outcome != 'skipped'
+        env:
+          THWIP_ENDPOINT: __ENDPOINT__
+          REPO_ID: \${{ github.event.repository.id }}
+          SUITES: \${{ steps.suites.outputs.suites }}
+          ACCEPTED: \${{ steps.suites.outputs.accepted }}
+          PR: \${{ github.event.client_payload.pullRequestNumber }}
+          BASE_REF: \${{ github.event.client_payload.baseRef }}
+          BASE_SHA: \${{ github.event.client_payload.baseSha }}
+          CANDIDATE_SHA: \${{ github.event.client_payload.candidateSha }}
+          CANDIDATE_TREE: \${{ github.event.client_payload.candidateTreeOid }}
+        run: |
+          set -uo pipefail
+          raw=$(curl -sS -w '\\n%{http_code}' \\
+            -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \\
+            "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=\${THWIP_ENDPOINT}/api/github-actions" || true)
+          code=$(printf '%s' "$raw" | tail -n1)
+          payload=$(printf '%s' "$raw" | sed '$d')
+          if [ "$code" != "200" ]; then
+            echo "::error::could not obtain an OIDC token (http $code)"
+            exit 1
+          fi
+          oidc=$(printf '%s' "$payload" | jq -r '.value // empty')
+          if [ -z "$oidc" ]; then
+            echo "::error::OIDC response carried no token"
+            exit 1
+          fi
+
+          suites="\${SUITES:-[]}"
+          accepted="\${ACCEPTED:-false}"
+          reasons='[]'
+          if [ "$accepted" != "true" ]; then
+            reasons='["SUITE_NOT_PASSED"]'
+          fi
+
+          body=$(jq -nc \\
+            --arg base "$BASE_REF" --argjson pr "$PR" \\
+            --arg bsha "$BASE_SHA" --arg csha "$CANDIDATE_SHA" --arg tree "$CANDIDATE_TREE" \\
+            --argjson accepted "$accepted" --argjson suites "$suites" --argjson reasons "$reasons" \\
+            '{baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
+              candidateTreeOid:$tree, accepted:$accepted, suites:$suites, reasonCodes:$reasons}')
+
+          out=$(curl -sS -w '\\n%{http_code}' -X POST \\
+            -H "authorization: Bearer $oidc" -H "content-type: application/json" \\
+            -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/candidate-result" || true)
+          rcode=$(printf '%s' "$out" | tail -n1)
+          echo "candidate-result: http $rcode"
+          printf '%s\\n' "$out" | sed '$d'
+          if [ "$rcode" != "202" ]; then
+            echo "::error::Thwip Queue did not accept the candidate verdict (http $rcode)"
+            exit 1
+          fi
+
+      # The verdict is published on the pull request head by the App, from the
+      # report above, not from here.
+      #
+      # This step used to do it and could not: it asks GitHub for \`checks: write\`,
+      # which the repository's default workflow permission does not grant, so every
+      # passing verification ended as a failed run. The App already holds the
+      # permission and already publishes the other two checks, and it has the
+      # verdict before this job ends.
+      # The job's own conclusion still reflects whether the candidate passed, so a
+      # failure is visible in the Actions list and not only inside the queue.
+      - name: Fail when a required suite failed
+        if: steps.suites.outputs.accepted != 'true'
+        run: |
+          echo "::error::a required suite failed against the integrated candidate"
+          exit 1
+`;
+
 export interface SetupPullRequestInput {
   /** The control plane the workflows talk to. */
   readonly endpoint: string;
@@ -594,6 +782,7 @@ export function setupPullRequestFiles(input: SetupPullRequestInput): readonly Se
   return [
     { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) },
     { path: ".github/workflows/thwip-merge.yml", content: render(MERGE_WORKFLOW, input) },
+    { path: ".github/workflows/thwip-queue-verify.yml", content: render(VERIFY_WORKFLOW, input) },
     { path: "thwip.yaml", content: THWIP_YAML },
   ];
 }
@@ -607,6 +796,7 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
     "",
     "- `.github/workflows/thwip-required.yml` publishes the `thwip` check, which says whether the proof is good for the tree, and places the pull request in the queue.",
     "- `.github/workflows/thwip-merge.yml` performs the merge the queue authorizes. It needs a `THWIP_ENQUEUE_TOKEN` repository secret; without one it declines and leaves the merge to a maintainer.",
+    "- `.github/workflows/thwip-queue-verify.yml` runs the required suites against the integrated candidate when the queue asks for it. The `remote` and `audited` profiles need it; `fast` and `fresh` never dispatch to it.",
     "- `thwip.yaml` says which suites have to pass. Edit it before merging if these are not the right ones.",
     "",
     "The merge is a merge commit, composed on the base the queue verified against and landed with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. A squash cannot be bound that way: it does not contain the pull request head, so this branch's own required checks refuse it and GitHub cannot tell the pull request was merged. If this repository squashes, the workflow says so, merges nothing, and hands the lane back. Set the queue to merge commits before enabling it.",

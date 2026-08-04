@@ -25,11 +25,14 @@ import {
 export const PRODUCTION_ENDPOINT = "https://thwip.recall.net";
 
 /**
- * The workflow this repository checks in and the template writes. Only the
- * merge: this repository's proof workflow runs the action from its own
- * checkout, which no other repository can do.
+ * The workflows this repository checks in and the template writes. Not the
+ * proof workflow: this repository's copy runs the action from its own checkout,
+ * which no other repository can do.
  */
-export const RENDERED_HERE = ".github/workflows/thwip-merge.yml";
+export const RENDERED_HERE = [
+  ".github/workflows/thwip-merge.yml",
+  ".github/workflows/thwip-queue-verify.yml",
+];
 
 /** Every workflow the template emits, by path. */
 export function generatedWorkflows() {
@@ -44,7 +47,7 @@ export function generatedWorkflows() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for (const [path, content] of Object.entries(generatedWorkflows())) {
-    if (path !== RENDERED_HERE) continue;
+    if (!RENDERED_HERE.includes(path)) continue;
     writeFileSync(path, content);
     console.log(`wrote ${path}`);
   }

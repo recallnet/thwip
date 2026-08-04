@@ -79,7 +79,7 @@ for (const f of workerSources) {
       console.error(`lint: ${e.message}`);
       failures++;
     }
-    if (path === RENDERED_HERE && readFileSync(path, "utf8") !== content) {
+    if (RENDERED_HERE.includes(path) && readFileSync(path, "utf8") !== content) {
       console.error(`lint: ${path} is not what the template renders; run node scripts/generate-workflows.mjs`);
       failures++;
     }

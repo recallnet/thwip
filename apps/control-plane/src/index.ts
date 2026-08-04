@@ -2517,6 +2517,7 @@ app.route(
         baseSha: string;
         candidateSha: string;
         candidateTreeOid: string;
+        requiredSuites: readonly string[];
       },
     ) {
       const project = await env.DB.prepare(

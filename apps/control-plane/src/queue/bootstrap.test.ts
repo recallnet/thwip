@@ -159,6 +159,30 @@ describe("enrollQueueProject", () => {
     expect(rows.n).toBe(1);
   });
 
+  /**
+   * `remote` and `audited` refuse every merge with NO_PINNED_VERIFIER unless
+   * `queue_projects.verifier_json` names one, and no code path ever wrote that
+   * column. This repository's own row was typed into D1 by hand, which is why
+   * nobody noticed that enrolment never produced one.
+   */
+  it("pins the verifier the candidate dispatch will run", async () => {
+    await enrollQueueProject(d1.db, { repositoryId: REPOSITORY_ID, baseRef: BASE_REF });
+    const row = d1.raw
+      .prepare("SELECT verifier_json FROM queue_projects WHERE github_repository_id = ?")
+      .get(REPOSITORY_ID) as { verifier_json: string | null };
+    expect(row.verifier_json).not.toBeNull();
+    expect(JSON.parse(row.verifier_json!)).toEqual({
+      repositoryId: REPOSITORY_ID,
+      repositoryOwnerId: "42",
+      workflowRef: "acme/widgets/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+      workflowSha: null,
+      reusableWorkflowRef: "acme/widgets/.github/workflows/thwip-queue-verify.yml@refs/heads/main",
+      reusableWorkflowSha: null,
+      expectedEventName: "repository_dispatch",
+      defaultBranchRef: BASE_REF,
+    });
+  });
+
   it("does not enable the queue merely by enrolling", async () => {
     await enrollQueueProject(d1.db, { repositoryId: REPOSITORY_ID, baseRef: BASE_REF });
     const project = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
