@@ -1870,17 +1870,18 @@ async function publishStatusCommentsFor(
   repositoryId: string,
   baseRef: string,
   snapshot: QueueSnapshot,
+  /**
+   * What this pass has left to spend. The sweep hands one object to every
+   * queue, so the fleet shares a Worker invocation's subrequests rather than
+   * each queue helping itself to a full allowance.
+   */
+  budget: CommentBudget = { remaining: 8 },
 ): Promise<void> {
   const project = await commentingProject(env, repositoryId, baseRef);
   if (project === null) return;
   const api = await commentApi(env, project);
 
   const now = new Date().toISOString();
-  // A Worker invocation gets fifty subrequests and each comment costs up to
-  // two. The installation token, the check run and the lane driving are all
-  // spending from the same fifty, so this leaves them room. A queue where
-  // nothing moved spends none of it, and a backlog drains over a few passes.
-  const budget: CommentBudget = { remaining: 8 };
   for (const view of commentViews(snapshot, { observing: project.observing, now })) {
     await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now, budget);
   }
@@ -2901,8 +2902,8 @@ export default {
         // The comments on every pull request in the queue, held against the
         // queue this tick just advanced. A write GitHub refused on a transition
         // leaves the page behind with nothing that owns coming back for it.
-        publishStatusComments: (repositoryId, baseRef, snapshot) =>
-          publishStatusCommentsFor(env, repositoryId, baseRef, snapshot),
+        publishStatusComments: (repositoryId, baseRef, snapshot, budget) =>
+          publishStatusCommentsFor(env, repositoryId, baseRef, snapshot, budget),
         retireStatusComments: (repositoryId, baseRef, pullRequestNumbers) =>
           retireStatusCommentsFor(env, repositoryId, baseRef, pullRequestNumbers),
         onQueueTicked: () => {},
