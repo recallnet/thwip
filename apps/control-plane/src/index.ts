@@ -2723,6 +2723,11 @@ export default {
     if (controller.cron === "*/5 * * * *") {
       const result = await tickAllQueues(env as unknown as QueueRouteEnv, {
         driveTurn: (repositoryId, pullRequestNumber) => driveTurnFor(env, repositoryId, pullRequestNumber),
+        // The same walk the `pull_request` delivery and the proof consumer
+        // make. The tick is where a delivery that never landed its projection
+        // write gets asked again, and one derivation answers all three.
+        reconsiderHead: (repositoryId, headSha) =>
+          reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
         onQueueTicked: () => {},
         onQueueFailed: (repositoryId, error) => {
           // wrangler tail is how this account observes the Worker. A heartbeat
@@ -2732,7 +2737,8 @@ export default {
       });
       console.log(
         `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed} ` +
-          `reconciled=${result.reconciled} settledWrites=${result.settledWrites} chainFindings=${result.chainFindings}`,
+          `reconciled=${result.reconciled} settledWrites=${result.settledWrites} ` +
+          `readinessRechecked=${result.readinessRechecked} chainFindings=${result.chainFindings}`,
       );
       return;
     }
