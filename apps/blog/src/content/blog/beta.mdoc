@@ -1,6 +1,6 @@
 ---
 title: "How close can you get to trustless CI on your own machine"
-description: "thwip has four security profiles, and each one takes something off the list of things you have to believe for a merge to mean what it says. We describe what each setting costs and what it returns, with measurements from a repository where agents wrote 524 commits in seven days, and what happened when our own chain checker found four merges nobody had recorded."
+description: "thwip has four security profiles, and each one takes something off the list of things you have to believe for a merge to mean what it says. We describe what each setting costs and what it returns, with measurements from a repository where agents wrote 524 commits in seven days."
 author: thwip
 pubDate: 2026-08-04T12:00:00.000Z
 tags:
@@ -178,8 +178,7 @@ what the `run.lease` field in the predicate carries.
 
 The step from `fast` to `fresh` buys a run against the integrated candidate with
 no compute moving into the cloud. The assignment names a tree and the receipt
-names the same tree, which is the whole reason the queue can accept a run it
-never saw.
+names the same tree, so the queue can accept a run it never saw.
 
 ## What a CI minute costs
 
@@ -291,7 +290,7 @@ dependencies and build outputs already present, take 12.5 seconds. Those 36
 seconds are what `fresh` skips, because the machine that already built the tree
 is the machine that runs the suites against it.
 
-{% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, re-verifying in the cloud spends most of its time rebuilding a state the edge machine already holds, which is the cost `fresh` skips." /%}
+{% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, re-verifying in the cloud spends most of its time rebuilding a state the edge machine already holds. `fresh` skips that rebuild." /%}
 
 **The chain.** `node scripts/verify-chain.mjs 1315419165` walks the published
 merge chain from outside thwip, needing no account or token. When this was
@@ -312,34 +311,6 @@ the morning of 2 August.
 Behind them were 2 signers holding 3 device keys, working under 3 distinct
 pipeline digests and policy versions 1, 3, and 4.
 
-## Four merges with no record
-
-We claim a signed chain is falsifiable by anybody, so on 3 August we pointed the
-check at our own chain. It returned three `BASE_DISCONTINUITY` findings covering
-four pull requests that had merged into `main` the day before with no record at
-all.
-
-The queue signs a merge intent pinning a candidate tree and the parents that
-tree hangs from, and then asks GitHub to merge. In between, the base moved.
-GitHub merged each head onto the branch's real tip, producing a tree that no
-intent had pinned. Pull request 117's intent was signed sixteen seconds after
-its base had already been superseded. Of the seventy merge intents in storage,
-zero pin any of the four trees that landed.
-
-Nothing in the queue noticed, because the duty to settle a merge write lived on
-the attempt that issued it. We compacted that attempt with its write still open,
-and the attempt did not survive the failure that needed settling. Anyone running
-async work with compaction has that waiting for them.
-
-The chain carries an
-[`external-transition`](https://github.com/recallnet/thwip/blob/main/docs/heal.md)
-for each of the four merges, saying that the base moved from one commit to
-another and thwip did not certify the move. Those records name no pull request
-and no policy, because neither would be true of them. A merge record was the
-stronger claim available, and since the evidence did not support it, the queue
-wrote down the weaker record. The queue now runs the chain verifier against its
-own chain on every tick.
-
 ## What this repository demonstrates
 
 This repository is where thwip gets built, and it merges through thwip, so what
@@ -357,17 +328,16 @@ proof, with the dial sitting on `fast` for the rest of the week.
 **A compromised signing device beats us.** An attacker holding an enrolled
 private key can sign a well-formed proof over a tree whose suites never passed,
 and the App will accept it. The App checks a signature and a subject, with no
-view of the execution behind them, and that hole is what discarding the trace
-costs us. Moving the dial to `remote` or `audited` puts GitHub's own execution
-behind the same merge, which is the answer available today.
+view of the execution behind them. Discarding the trace costs us that. Under
+`remote` and `audited`, GitHub runs the suites itself.
 
 At the `fast` end we offer reproducibility and a public record. On any single
 merge, an observer who watched the process knows something we do not. The record
 pays off across a run of merges, because every proof binds to a content hash
 anybody can check out and re-run, and a signer whose claims stop reproducing
 shows up in public where a private runtime trace would stay hidden. None of that
-helps on a quiet repository, since a signer with four merges behind them has
-given nobody enough to compare against.
+helps on a quiet repository, since a signer with a handful of merges behind them
+has given nobody enough to compare against.
 
 The gap we cannot close is the first bad merge after a key compromise on a
 profile with no second execution. Without observing the run we have no mechanism
@@ -381,7 +351,7 @@ The rest of the bounds:
   key. A human still has to review the code for security, and the check says
   nothing about how the product behaves.
 - Local and remote environments diverge. Work that needs the cloud as its
-  execution environment should run there, which is what `remote` is for.
+  execution environment should run there under `remote`.
 - Identity is GitHub's. Membership and repository permission come from the
   organisation, and we add no second invite graph.
 - A receipt under `fresh` is signed by the same class of device key that signs a
@@ -405,8 +375,11 @@ pnpm install && pnpm build
 node scripts/verify-chain.mjs recallnet/thwip
 ```
 
-That script caught us, and the section above is its output. If you break our
-chain with it, open an issue and paste what it printed, and we will act on it.
+A merge that lands without a record leaves the base of one record short of the
+next, which the walk reports as `BASE_DISCONTINUITY` and names the commit the
+chain never accounted for. The queue runs this same verifier against its own
+chain on every tick. If you break our chain, open an issue and paste what the
+script printed, and we will act on it.
 
 ## Open problems
 
