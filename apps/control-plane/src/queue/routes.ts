@@ -443,8 +443,12 @@ export async function runOnQueue<T>(
   });
   try {
     await projectQueueState(db, projectionMessageFrom(repositoryId, baseRef, out.snapshot));
-  } catch {
-    /* the projection may lag; the command already succeeded */
+  } catch (error) {
+    // The projection may lag; the command already succeeded, so this is not
+    // fatal. It still has to be seen: a write that fails every time looks, from
+    // out here, identical to one that never fails, and that is how a dashboard
+    // came to show a stale readiness with nothing to explain it.
+    console.error(`[queue projection] write failed for ${repositoryId} ${baseRef}:`, error);
   }
 
   // After the write, never inside it. Publishing is a call to GitHub, and holding
@@ -1008,8 +1012,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         c.env.DB as unknown as D1Like,
         projectionMessageFrom(repositoryId, baseRef, snapshot),
       );
-    } catch {
-      /* the projection may lag; the read already has its answer */
+    } catch (error) {
+      // Same argument as the write in `runOnQueue`: the read already has its
+      // answer, so this cannot be fatal, but a failure here is a projection
+      // that is never getting backfilled, and that has to be visible.
+      console.error(`[queue projection] write failed for ${repositoryId} ${baseRef}:`, error);
     }
     return c.json({ ...snapshot, source: "queue" });
   });
