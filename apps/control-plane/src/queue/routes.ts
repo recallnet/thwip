@@ -48,6 +48,7 @@ import {
 import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { proofBindingFrom, proofShortfall, workReceiptDigestFrom, type ProofBinding } from "./work-receipt.js";
 import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
+import type { CandidateStateReason, IntegratedCandidate } from "./candidate.js";
 import {
   authorizationFor,
   readAttestation,
@@ -1041,21 +1042,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * The integrated candidate GitHub has computed for a pull request.
    *
    * What a device is dispatched to run under `fresh`, so it comes from GitHub
-   * rather than from the machine asking for work. Null while GitHub has not
-   * finished computing mergeability, or when the pull request cannot be merged
-   * at all, and either way there is nothing to hand out.
+   * rather than from the machine asking for work. When there is no candidate to
+   * hand out this says which of the eight states GitHub is in, because the
+   * caller acts on them differently: a conflict ends the turn, a mergeability
+   * GitHub has not finished computing does not. Null only when the repository
+   * itself could not be read, which says nothing about the pull request.
    */
   integratedCandidate?(
     env: TEnv,
     repositoryId: string,
     baseRef: string,
     pullRequestNumber: number,
-  ): Promise<{
-    baseSha: string;
-    headSha: string;
-    candidateSha: string;
-    candidateTreeOid: string;
-  } | null>;
+  ): Promise<IntegratedCandidate | null>;
   /**
    * Ask the pinned verifier to run the required suites against a candidate.
    *
@@ -1692,12 +1690,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "CANDIDATE_UNAVAILABLE", detail: "this deployment cannot resolve a candidate" }, 503);
     }
     const candidate = await deps.integratedCandidate(c.env, repositoryId, baseRef, entry.pullRequestNumber);
-    if (candidate === null) {
+    if (candidate === null || candidate.status !== "pinned") {
       // GitHub computes mergeability asynchronously, and a pull request that
       // cannot be integrated has no candidate at all. Neither is a reason to
-      // hand a device a tree to run.
+      // hand a device a tree to run, and the device is told which it is.
       return c.json(
-        { error: "CANDIDATE_UNAVAILABLE", detail: "GitHub has no integrated candidate for this pull request yet" },
+        {
+          error: "CANDIDATE_UNAVAILABLE",
+          detail:
+            candidate === null
+              ? "GitHub would not say what this pull request integrates to"
+              : nextAction(candidate.reason),
+        },
         409,
       );
     }
@@ -2731,25 +2735,68 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           : await deps
               .integratedCandidate(c.env, repositoryId, baseRef, body.pullRequestNumber)
               .catch(() => null);
-      if (current === null) {
-        // A base nobody can read is a base nobody may pin. The turn is kept and
-        // the caller asks again, because an unreadable answer says nothing about
+      if (current === null || current.status !== "pinned") {
+        // Why there is no candidate, in the words of the state GitHub is
+        // actually in. All eight used to arrive as `BASE_UNREADABLE`, so a pull
+        // request that had developed a conflict was told GitHub was
+        // unreachable, and the attempt held the lane until the execution
+        // deadline reaped it. `BASE_UNREADABLE` now means only what it says:
+        // the repository itself could not be read, which says nothing about
         // this pull request.
+        const reason: CandidateStateReason | "BASE_UNREADABLE" =
+          current === null ? "BASE_UNREADABLE" : current.reason;
+
+        // A pull request that is closed or conflicting cannot merge from this
+        // turn or any turn until somebody changes it, so the turn ends here and
+        // the lane goes to whoever is behind it. Everything else is transient:
+        // mergeability GitHub has not finished computing, a candidate it has
+        // not rebuilt yet. Those keep the turn and are asked again.
+        let after: QueueSnapshot | null = null;
+        if (reason === "MERGE_CONFLICT") {
+          ({ snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+            if (store.state().activeAttemptId !== attemptId) return;
+            commands.terminateAttempt({
+              idempotencyKey: `authorize:conflict:${attemptId}`,
+              attemptId,
+              outcome: "MERGE_CONFLICT",
+            });
+          }));
+        } else if (reason === "PR_CLOSED") {
+          ({ snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+            commands.cancel({
+              idempotencyKey: `authorize:closed:${entryId}:${headSha}`,
+              entryId,
+              actorPrincipalId: "github",
+              reason: "the pull request is closed",
+            });
+          }));
+        }
+
+        // The lane, driven on the way out. GitHub invalidates mergeability for
+        // every open pull request the moment one lands, so the run dispatched a
+        // second later reads null, is refused here, and is spent. Nothing re-drove
+        // the lane, so the next attempt waited for the five-minute cron and the
+        // branch merged once per five minutes.
+        await driveLane(c.env, deps, repositoryId, after ?? held);
         return c.json({
           authorized: false,
           enforcing: true,
           activationState: project.activationState,
-          reason: "BASE_UNREADABLE",
-          detail: nextAction("BASE_UNREADABLE"),
+          reason,
+          detail: nextAction(reason),
           entryId,
           operationId: null,
-          retryAfterSeconds: 20,
+          // Only where asking again is the answer. A turn that ended here waits
+          // on a person, and telling the caller to come back in twenty seconds
+          // would say the opposite.
+          ...(after === null ? { retryAfterSeconds: 20 } : {}),
         });
       }
       if (current.headSha !== headSha) {
         // A push landed while this turn was being asked about. The candidate
         // GitHub is offering integrates a commit whose proof nothing here has
         // read, and the entry's own head follows on the next ask.
+        await driveLane(c.env, deps, repositoryId, held);
         return c.json({
           authorized: false,
           enforcing: true,

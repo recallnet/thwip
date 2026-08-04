@@ -104,6 +104,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
     integratedCandidate: async () => ({
+      status: "pinned",
       baseSha: "b".repeat(40),
       headSha: HEAD,
       candidateSha: "c".repeat(40),

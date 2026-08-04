@@ -166,6 +166,7 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId 
       message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
     }),
     integratedCandidate: async () => ({
+      status: "pinned",
       baseSha: BASE,
       headSha: HEAD,
       candidateSha: CANDIDATE,
@@ -514,6 +515,7 @@ describe("the receipt the machine signs", () => {
     let tree = TREE;
     const routes = app({
       integratedCandidate: async () => ({
+        status: "pinned",
         baseSha: BASE,
         headSha: HEAD,
         candidateSha: CANDIDATE,

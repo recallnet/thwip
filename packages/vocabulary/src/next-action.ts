@@ -167,6 +167,12 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   CANDIDATE_BASE_MOVED: "The base moved, so the queue is rebuilding the candidate and running it again.",
   BASE_UNREADABLE:
     "GitHub would not say what the base branch is right now. The queue pins no base it cannot read, and it will ask again.",
+  MERGEABILITY_UNKNOWN: "GitHub is still working out whether this merges. The queue will ask again shortly.",
+  CANDIDATE_MISSING: "GitHub has not built a merge commit for this pull request yet. The queue will ask again shortly.",
+  CANDIDATE_STALE:
+    "GitHub is rebuilding the merge commit for this pull request. The queue will ask again once it has.",
+  CANDIDATE_PARENTS_UNEXPECTED:
+    "The merge commit GitHub offers does not sit on this pull request's base and head, so the queue will not pin it. It will ask again once GitHub has rebuilt it.",
 
   /* What was being integrated is no longer what is there. */
   HEAD_MOVED: "You pushed during your turn, so the queue needs a proof for the new head. Run thwip ship again.",

@@ -51,6 +51,40 @@ export type CandidateBlockReason =
   | "CANDIDATE_PARENTS_UNEXPECTED"
   | "CANDIDATE_STALE";
 
+/** Every state candidate resolution can be in when it hands out no candidate. */
+export type CandidateStateReason = CandidateBlockReason | "MERGEABILITY_UNKNOWN";
+
+/**
+ * What the control plane hands its routes: the four objects a turn binds, or
+ * the state that stopped them being read.
+ *
+ * The reason travels because the routes act on these differently. A conflict
+ * ends the turn and frees the lane; mergeability GitHub has not finished
+ * computing keeps both. Collapsing them to null made every one of the eight
+ * read, to the operator, as GitHub being unreachable.
+ */
+export type IntegratedCandidate =
+  | {
+      readonly status: "pinned";
+      readonly baseSha: string;
+      readonly headSha: string;
+      readonly candidateSha: string;
+      readonly candidateTreeOid: string;
+    }
+  | { readonly status: "pending" | "blocked"; readonly reason: CandidateStateReason };
+
+/** The four objects a turn binds, or the state that stopped them being read. */
+export function integratedCandidateFrom(result: CandidateResult): IntegratedCandidate {
+  if (result.status !== "pinned") return { status: result.status, reason: result.reason };
+  return {
+    status: "pinned",
+    baseSha: result.subject.baseSha,
+    headSha: result.subject.headSha,
+    candidateSha: result.subject.candidateSha,
+    candidateTreeOid: result.subject.candidateTreeOid,
+  };
+}
+
 /**
  * Turn live pull request facts and the candidate commit into a pinned subject,
  * or say precisely why not.

@@ -229,6 +229,7 @@ describe("the decision behind a turn", () => {
       driveTurn: async () => {},
       commitFacts: async () => ({ treeOid: TREE, parentShas: [BASE], message: `feat: work\n\nthwip-proof: ${CARRIER}\n` }),
       integratedCandidate: async () => ({
+        status: "pinned",
         baseSha: BASE,
         headSha: HEAD,
         candidateSha: CANDIDATE,
