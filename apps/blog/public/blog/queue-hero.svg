@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Six branches into one lane, the candidate pinned, merged on evidence">
+  <defs>
+    <linearGradient id="qbg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1419"/>
+      <stop offset="100%" stop-color="#1b1b1b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#qbg)"/>
+  <rect x="0" y="0" width="8" height="630" fill="#005ea2"/>
+  <text x="72" y="88" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="#7eb6e8" letter-spacing="0.12em">THWIP QUEUE</text>
+  <text x="72" y="150" font-family="ui-sans-serif, system-ui, sans-serif" font-size="44" font-weight="700" fill="#ffffff">Six agents. One branch.</text>
+  <text x="72" y="206" font-family="ui-sans-serif, system-ui, sans-serif" font-size="44" font-weight="700" fill="#ffffff">One lane.</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <rect x="72" y="280" width="272" height="200" fill="#1e252d" stroke="#3d4654" stroke-width="2"/>
+    <text x="96" y="330" font-size="15" fill="#7eb6e8">01</text>
+    <text x="96" y="370" font-size="22" font-weight="600" fill="#ffffff">in line</text>
+    <text x="96" y="410" font-size="16" fill="#a8b0ba">one turn per person</text>
+    <path d="M364 380 H420" stroke="#005ea2" stroke-width="4"/>
+    <polygon points="420,370 440,380 420,390" fill="#005ea2"/>
+    <rect x="460" y="280" width="272" height="200" fill="#1e252d" stroke="#3d4654" stroke-width="2"/>
+    <text x="484" y="330" font-size="15" fill="#7eb6e8">02</text>
+    <text x="484" y="370" font-size="22" font-weight="600" fill="#ffffff">candidate</text>
+    <text x="484" y="410" font-size="16" fill="#a8b0ba">commit, parents, tree</text>
+    <path d="M752 380 H808" stroke="#005ea2" stroke-width="4"/>
+    <polygon points="808,370 828,380 808,390" fill="#005ea2"/>
+    <rect x="848" y="280" width="280" height="200" fill="#1e252d" stroke="#00a91c" stroke-width="2"/>
+    <text x="872" y="330" font-size="15" fill="#5dca6a">03</text>
+    <text x="872" y="370" font-size="22" font-weight="600" fill="#ffffff">merged</text>
+    <text x="872" y="410" font-size="16" fill="#a8b0ba">on signed evidence</text>
+  </g>
+  <text x="72" y="560" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#71767a">thwip.recall.net · a merge queue that spends no cloud run</text>
+</svg>
