@@ -142,12 +142,14 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
     `Usage: thwip queue reconcile --repo OWNER/NAME --observed RESULT --reason TEXT ` +
     `[--merge-sha OID] [--branch BRANCH]\n`,
   doctor:
-    `Usage: thwip queue doctor --repo OWNER/NAME [--branch BRANCH] [--explain] [--strict] [--json]\n\n` +
+    `Usage: thwip queue doctor --repo OWNER/NAME [--branch BRANCH] [--explain] [--allow-unread] [--json]\n\n` +
     `Report whether thwip is installed here, what the queue is doing on this\n` +
-    `branch, and what the GitHub App is granted. Any member can run it. The App\n` +
+    `branch, and what the GitHub App is granted. Any member can run it. Every\n` +
+    `section passes, fails, or goes unread, and an unread section exits non-zero,\n` +
+    `because a section nobody read says nothing about this project. The App\n` +
     `permissions come from GitHub under the installation and need repository\n` +
-    `admin, so for anyone else that section is named as unread and the rest is\n` +
-    `still reported. Use --strict to make an unread section fail.\n`,
+    `admin, so pass --allow-unread when you are not an admin and want the rest\n` +
+    `of the report to stand on its own.\n`,
   work:
     `Usage: thwip queue work --repo OWNER/NAME --watch [--branch BRANCH]\n\n` +
     `Make this machine available for a fresh/audited turn: heartbeat on an\n` +
