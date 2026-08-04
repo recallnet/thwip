@@ -28,6 +28,22 @@ export const SERVICE_REASONS = [
   "WORK_RECEIPT_UNREADABLE",
   "MERGE_EVIDENCE_INCOMPLETE",
   "MERGE_INTENT_INVALID",
+  // What the base branch's own rules require of the head, read before the queue
+  // commits to a merge (apps/control-plane/src/queue/authorize-turn.ts).
+  "REQUIRED_CHECK_MISSING",
+  // How a merge is refused under `fresh` and `audited` when the device's run is
+  // absent or is about another tree (apps/control-plane/src/queue/
+  // local-run-gate.ts).
+  "INTEGRATION_ASSIGNMENT_MISSING",
+  "INTEGRATION_RECEIPT_MISSING",
+  "INTEGRATION_RECEIPT_TREE_MISMATCH",
+  // How the walk to a merge write refuses when the queue document and the
+  // evidence disagree about the same turn (apps/control-plane/src/queue/
+  // queue-operations.ts).
+  "INTEGRATION_ASSIGNMENT_MISMATCH",
+  "INTEGRATION_RECEIPT_MISMATCH",
+  "INTEGRATION_RECEIPT_DEVICE_MISMATCH",
+  "CANDIDATE_CHANGED",
   "CANDIDATE_DISPATCH_FAILED",
   "CANDIDATE_NOT_VERIFIED",
   "CANDIDATE_TREE_MISMATCH",

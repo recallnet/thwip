@@ -2,6 +2,8 @@ import { QueueCommands, type CommandResult, type DecisionRecorder, type QueueTim
 import type { MergeEvidence } from "./local-run-gate.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
+import type { BlockingReason } from "@thwip/queue-domain";
+import type { ReasonCode } from "@thwip/vocabulary";
 
 /**
  * What the queue does, separated from where its state lives.
@@ -85,7 +87,7 @@ export interface QueueSnapshot {
     pullRequestNumber: number;
     sponsorPrincipalId: string;
     state: string;
-    primaryReason: string | null;
+    primaryReason: BlockingReason | null;
     schedulerEligible: boolean;
     fairnessOrdinal: string;
     cooldownUntil: string | null;
@@ -271,7 +273,7 @@ export interface AdmitInput {
   headSha: string;
   ready: boolean;
   schedulerEligible: boolean;
-  primaryReason: string | null;
+  primaryReason: BlockingReason | null;
   readinessBucket: number;
   tickBucket: number;
   /**
@@ -376,7 +378,7 @@ export async function admit(
     entryId: input.entryId,
     ready: input.ready,
     schedulerEligible: input.schedulerEligible,
-    primaryReason: input.primaryReason as never,
+    primaryReason: input.primaryReason,
   });
   await commands.tick({
     idempotencyKey: `authorize:tick:${input.entryId}:${input.headSha}:${input.tickBucket}`,
@@ -427,6 +429,45 @@ export interface WalkInput {
   operationId: string;
 }
 
+/** Why the walk stopped short of a merge write. */
+export type WalkRefusal =
+  | "NO_SUCH_ATTEMPT"
+  | "INTEGRATION_ASSIGNMENT_MISMATCH"
+  | "INTEGRATION_RECEIPT_MISMATCH"
+  | "INTEGRATION_RECEIPT_TREE_MISMATCH"
+  | "INTEGRATION_RECEIPT_DEVICE_MISMATCH"
+  | "CANDIDATE_NOT_PINNED"
+  | "CANDIDATE_CHANGED"
+  | "VERIFICATION_NOT_STARTED"
+  | "MERGE_NOT_PERMITTED";
+
+/**
+ * The refusals the authorization answer hands back, rather than falling through
+ * to whatever the snapshot says.
+ *
+ * These five say the queue document and the evidence for this merge disagree,
+ * and an operator reading "waiting for turn" instead would have nothing to go
+ * on. The other four leave a better answer to the snapshot: a pause, or a base
+ * that moved.
+ *
+ * `satisfies` is the point of the annotation. Every code here goes out on the
+ * wire, so every code here has to be one the closed union declares, and adding
+ * one that is not fails the build. This used to be `refusal.startsWith
+ * ("INTEGRATION_")`, which let any code with the right prefix onto the wire
+ * whether a vocabulary knew it or not.
+ */
+export const ANSWERED_WALK_REFUSALS = [
+  "INTEGRATION_ASSIGNMENT_MISMATCH",
+  "INTEGRATION_RECEIPT_MISMATCH",
+  "INTEGRATION_RECEIPT_TREE_MISMATCH",
+  "INTEGRATION_RECEIPT_DEVICE_MISMATCH",
+  "CANDIDATE_CHANGED",
+] as const satisfies readonly Extract<WalkRefusal, ReasonCode>[];
+
+export function isAnsweredWalkRefusal(refusal: WalkRefusal): refusal is (typeof ANSWERED_WALK_REFUSALS)[number] {
+  return (ANSWERED_WALK_REFUSALS as readonly string[]).includes(refusal);
+}
+
 /**
  * Walk a held attempt to the point a merge may be written.
  *
@@ -444,9 +485,9 @@ export function walkToMergeReady(
   commands: QueueCommands,
   store: QueueStateStore,
   input: WalkInput,
-): { operationId: string | null; snapshot: QueueSnapshot; refusal?: string } {
+): { operationId: string | null; snapshot: QueueSnapshot; refusal?: WalkRefusal } {
   const ok = (r: { status: string }) => r.status === "applied" || r.status === "duplicate";
-  const done = (operationId: string | null, refusal?: string) => ({
+  const done = (operationId: string | null, refusal?: WalkRefusal) => ({
     operationId,
     snapshot: buildSnapshot(store),
     ...(refusal === undefined ? {} : { refusal }),
