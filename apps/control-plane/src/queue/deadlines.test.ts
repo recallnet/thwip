@@ -282,7 +282,7 @@ const PORTS = {
   driveTurn: async () => {},
   onQueueTicked: () => {},
   onQueueFailed: () => {},
-  reconsiderHead: async () => 0,
+  reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
 };
 
 /** Every read agrees the merge did not happen, which is what was true on the day. */
