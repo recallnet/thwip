@@ -293,11 +293,10 @@ function describeApp(o: DoctorObservation): Part {
   if (body["canPublishMergeCheck"] === false) {
     lines.push("Without the checks permission it cannot publish the check the branch requires, so nothing will ever merge.");
   }
-  // Named for what it costs. An installation granted before `issues: write`
-  // existed merges exactly as it always did and writes no status comment, and
-  // an operator reading the scope name alone cannot tell those apart.
+  // Named for what it costs. An operator reading a scope name alone cannot tell
+  // that the same permission carries the merge and the sentence on the page.
   if (body["canComment"] === false) {
-    lines.push("Without the issues permission it cannot write the status comment on a queued pull request. Merges are unaffected.");
+    lines.push("It also cannot write the status comment on a queued pull request, so nothing on the page will say why.");
   }
   lines.push(rulesets === 1 ? "1 ruleset applies to this repository." : `${rulesets} rulesets apply to this repository.`);
   const bad = missing.length > 0 || body["canPublishMergeCheck"] === false;

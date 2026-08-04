@@ -146,14 +146,18 @@ describe("which of the six a reader is looking at", () => {
   it("collapses to the chain record on merge", () => {
     const view = only(
       snapshot({
-        chainHead: { sequence: 42, digest: "c".repeat(64) },
+        chainHead: { sequence: 42, digest: `sha256:${"c".repeat(64)}` },
         entries: [entry({ state: "Merged" })],
       }),
     );
     expect(view.state).toBe("merged");
     const body = statusCommentBody(view, NOW);
     expect(body).toContain("42");
+    // Sixteen characters of the digest, not sixteen characters of the word
+    // "sha256". Live on pull request 180 this read `sha256:39966989f`, which
+    // names the algorithm and four bytes of the record.
     expect(body).toContain("cccccccccccccccc");
+    expect(body).not.toContain("sha256");
     // One line and the marker. A merged pull request has nowhere left to go and
     // a paragraph about it is somebody's unread notification.
     expect(body.split("\n").filter((line) => line.trim().length > 0 && !line.includes(COMMENT_MARKER))).toHaveLength(1);

@@ -62,7 +62,7 @@ import {
   type TurnCheckUpdate,
 } from "./queue/turn-check.js";
 import { commentViews } from "./queue/status-comment.js";
-import { writeStatusComment, type CommentApi } from "./queue/status-comment-write.js";
+import { writeStatusComment, type CommentApi, type CommentBudget } from "./queue/status-comment-write.js";
 import { externalPushFromWebhook, pushedQueueBranch } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { backfillAttestations } from "./queue/attestation-backfill.js";
@@ -1073,10 +1073,11 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
     canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
-    // Reported on its own, because losing it costs the status comment and
-    // nothing else. An installation granted before the scope existed goes on
-    // merging, and an operator reading a bare scope name has to guess that.
-    canComment: missing.every(([scope]) => scope !== "issues"),
+    // Reported on its own, because losing this costs the status comment as well
+    // as the merge and an operator reading a bare scope name has to guess that.
+    // Read off `pull_requests` rather than `issues`: the App wrote a comment on
+    // pull request 180 holding no `issues` scope, so that is what carries it.
+    canComment: missing.every(([scope]) => scope !== "pull_requests"),
     subscribedEvents: events.subscribed,
     handledEvents: events.handled,
     deadHandlers: events.deadHandlers,
@@ -1875,8 +1876,13 @@ async function publishStatusCommentsFor(
   const api = await commentApi(env, project);
 
   const now = new Date().toISOString();
+  // A Worker invocation gets fifty subrequests and each comment costs up to
+  // two. The installation token, the check run and the lane driving are all
+  // spending from the same fifty, so this leaves them room. A queue where
+  // nothing moved spends none of it, and a backlog drains over a few passes.
+  const budget: CommentBudget = { remaining: 8 };
   for (const view of commentViews(snapshot, { observing: project.observing, now })) {
-    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now);
+    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now, budget);
   }
 }
 
