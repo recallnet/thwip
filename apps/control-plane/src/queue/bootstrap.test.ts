@@ -37,6 +37,11 @@ function seedInstalledRepository(): void {
     .run("proj_1", "org_1", REPOSITORY_ID, "acme/widgets", "main");
 }
 
+/** The App publishes `thwip` only once an administrator has enforced it. */
+function enforceAppProofCheck(): void {
+  d1.raw.prepare("UPDATE projects SET proof_check_mode = 'enforced' WHERE id = 'proj_1'").run();
+}
+
 /**
  * A GitHub that remembers what was done to it, so a test can assert on the
  * repository's resulting configuration rather than on the calls made.
@@ -276,6 +281,9 @@ describe("runBootstrap", () => {
 
   it("enrols a repository end to end once the setup pull request has merged", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
+    // The App has to be the one publishing `thwip` before setup can pin the
+    // context to it, so a repository that has enforced finishes in one go.
+    enforceAppProofCheck();
     await runBootstrap(deps(github), await enrolled());
     const run = await runBootstrap(deps(github), await enrolled());
 
@@ -293,6 +301,7 @@ describe("runBootstrap", () => {
       "canary-negative-test": true,
       "activate-policy-and-ownership": true,
       "record-genesis": true,
+      "pin-proof-check-to-app": true,
     });
   });
 
@@ -301,6 +310,8 @@ describe("runBootstrap", () => {
     await runBootstrap(deps(github), await enrolled());
     await runBootstrap(deps(github), await enrolled());
 
+    // Still Actions: this repository has not enforced the App's proof check, so
+    // the App does not publish `thwip` and a pin on it would block the branch.
     expect(github.requiredChecks()).toEqual([
       { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
       { context: TURN_CHECK, integration_id: APP_INTEGRATION_ID },
@@ -316,16 +327,6 @@ describe("runBootstrap", () => {
     const ownership = github.rulesets.get(OWNERSHIP_RULESET_NAME);
     expect(ownership?.ruleset.bypass_actors).toEqual([
       { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
-    ]);
-  });
-
-  it("publishes the bootstrap check as the App context, against the disabled policy", async () => {
-    const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
-
-    expect(github.publishedChecks).toEqual([
-      { name: TURN_CHECK, headSha: BASE_SHA, conclusion: "neutral" },
     ]);
   });
 
@@ -375,11 +376,174 @@ describe("runBootstrap", () => {
 
   it("is safe to run again after it has finished", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
+    enforceAppProofCheck();
     await runBootstrap(deps(github), await enrolled());
     await runBootstrap(deps(github), await enrolled());
     const again = await runBootstrap(deps(github), await enrolled());
     expect(again.outcomes).toEqual([{ kind: "complete" }]);
     expect(again.enabled).toBe(true);
+  });
+});
+
+/**
+ * Moving the required `thwip` context from GitHub Actions to the App.
+ *
+ * Any workflow in an adopter's repository can publish a green check named
+ * `thwip`, and while the context is sourced from Actions that satisfies the
+ * requirement. Sourcing it from the App narrows that to one publisher.
+ *
+ * The order is the whole problem. The App publishes `thwip` only where
+ * `proof_check_mode` is `enforced`; in `observe` it publishes
+ * `thwip / proof (observe)` and never the enforced name. Moving the pin first
+ * would leave the branch requiring a check nothing publishes, and every open
+ * pull request in the repository stuck. So the publisher moves first and the
+ * pin follows it, which is the property every test below holds.
+ */
+describe("the required proof check moving to the App", () => {
+  async function enrolled() {
+    await enrollQueueProject(d1.db, { repositoryId: REPOSITORY_ID, baseRef: BASE_REF });
+    const loaded = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    if (loaded === null) throw new Error("enrolment did not persist");
+    return loaded;
+  }
+
+  it("leaves the pin with Actions while the App is still only observing", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    const run = await runBootstrap(deps(github), await enrolled());
+
+    expect(github.requiredChecks()).toContainEqual({
+      context: PROOF_CHECK,
+      integration_id: GITHUB_ACTIONS_INTEGRATION_ID,
+    });
+    // Enabled and merging. Nothing about an unfinished pin blocks the branch.
+    expect(run.enabled).toBe(true);
+    expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+  });
+
+  it("says what an administrator has to do before the pin can move", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    const run = await runBootstrap(deps(github), await enrolled());
+    const waiting = run.outcomes.at(-1);
+    expect(waiting?.kind).toBe("waiting");
+    if (waiting?.kind === "waiting") expect(waiting.detail).toMatch(/enforce/i);
+  });
+
+  it("moves the pin to the App once the App is the one publishing the check", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    await runBootstrap(deps(github), await enrolled());
+
+    enforceAppProofCheck();
+    const run = await runBootstrap(deps(github), await enrolled());
+
+    expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
+    expect(github.requiredChecks()).toEqual([
+      { context: PROOF_CHECK, integration_id: APP_INTEGRATION_ID },
+      { context: TURN_CHECK, integration_id: APP_INTEGRATION_ID },
+    ]);
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
+  });
+
+  /**
+   * The same failure `canary-negative-test` exists for, at the pin that now
+   * carries the weight. A ruleset that accepted the payload and dropped the
+   * source leaves `thwip` satisfiable by any workflow in the repository, which
+   * is the thing this change removes.
+   */
+  it("refuses when GitHub drops the pin it was sent", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    await runBootstrap(deps(github), await enrolled());
+
+    enforceAppProofCheck();
+    const replace = github.replaceRuleset.bind(github);
+    github.replaceRuleset = async (id, ruleset) =>
+      replace(id, {
+        ...ruleset,
+        rules: ruleset.rules.map((rule) =>
+          rule.type === "required_status_checks"
+            ? {
+                type: rule.type,
+                parameters: {
+                  ...rule.parameters,
+                  required_status_checks: (
+                    rule.parameters?.["required_status_checks"] as Array<{ context: string }>
+                  ).map((c) => ({ context: c.context })),
+                },
+              }
+            : rule,
+        ),
+      });
+
+    const run = await runBootstrap(deps(github), await enrolled());
+    expect(run.outcomes.at(-1)).toMatchObject({ kind: "refused", step: "pin-proof-check-to-app" });
+  });
+
+  /**
+   * A repository enrolled before this step existed has every earlier step
+   * recorded and an active policy. Re-running setup has to reach the new step
+   * and nothing else, because everything before it is already done.
+   */
+  it("reaches a repository that finished setup before the step existed", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    await runBootstrap(deps(github), await enrolled());
+    d1.raw
+      .prepare("UPDATE queue_projects SET bootstrap_progress_json = ? WHERE github_repository_id = ?")
+      .run(
+        JSON.stringify({
+          "merge-setup-pr": true,
+          "create-disabled-policy-without-source": true,
+          "publish-bootstrap-check": true,
+          "attach-integration-id-while-disabled": true,
+          "canary-negative-test": true,
+          "activate-policy-and-ownership": true,
+          "record-genesis": true,
+        }),
+        REPOSITORY_ID,
+      );
+
+    enforceAppProofCheck();
+    const run = await runBootstrap(deps(github), await enrolled());
+    expect(run.outcomes.map((o) => ("step" in o ? o.step : "complete"))).toEqual([
+      "pin-proof-check-to-app",
+      "complete",
+    ]);
+    expect(github.requiredChecks()).toContainEqual({
+      context: PROOF_CHECK,
+      integration_id: APP_INTEGRATION_ID,
+    });
+  });
+
+  /**
+   * GitHub offers an App as the expected source of a context only where the App
+   * has recently published a check by that name. The turn check gets that
+   * treatment already; the proof check needs it for the same reason.
+   */
+  it("publishes the proof context from the App so GitHub will offer it as a source", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    await runBootstrap(deps(github), await enrolled());
+
+    expect(github.publishedChecks).toEqual([
+      { name: TURN_CHECK, headSha: BASE_SHA, conclusion: "neutral" },
+      { name: PROOF_CHECK, headSha: BASE_SHA, conclusion: "neutral" },
+    ]);
+  });
+
+  it("pins the App from the start where the App was already enforcing", async () => {
+    enforceAppProofCheck();
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await runBootstrap(deps(github), await enrolled());
+    const run = await runBootstrap(deps(github), await enrolled());
+
+    expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
+    expect(github.requiredChecks()).toEqual([
+      { context: PROOF_CHECK, integration_id: APP_INTEGRATION_ID },
+      { context: TURN_CHECK, integration_id: APP_INTEGRATION_ID },
+    ]);
   });
 });
 
@@ -397,6 +561,7 @@ describe("bootstrapStatus", () => {
 describe("handleBootstrapRequest", () => {
   it("enrols and bootstraps in one call", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
+    enforceAppProofCheck();
     const first = await handleBootstrapRequest({
       ...deps(github),
       repositoryId: REPOSITORY_ID,

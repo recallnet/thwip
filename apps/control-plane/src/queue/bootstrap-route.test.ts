@@ -29,6 +29,16 @@ function env(): BootstrapRouteEnv {
   };
 }
 
+/**
+ * The App publishes `thwip` only where the proof check is enforced, and setup's
+ * last step will not pin the context to the App until it does. A repository that
+ * has not enforced is enrolled, enabled and merging, with that one step still
+ * waiting, which is a 202.
+ */
+function enforceAppProofCheck(): void {
+  d1.raw.prepare("UPDATE projects SET proof_check_mode = 'enforced' WHERE id = 'proj_1'").run();
+}
+
 function seedInstalledRepository(options: { installationId?: string | null } = {}): void {
   d1.raw
     .prepare("INSERT INTO organizations (id, github_org_id, github_login, installation_id) VALUES (?, ?, ?, ?)")
@@ -148,6 +158,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("enrols the repository the operator used to write by hand", async () => {
     seedInstalledRepository();
+    enforceAppProofCheck();
     // Already reviewed and merged, which is the second call an administrator
     // makes. The first opens the pull request and stops.
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
@@ -170,6 +181,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("lets an owner run setup, not only an admin", async () => {
     seedInstalledRepository();
+    enforceAppProofCheck();
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
     const response = await bootstrapRouteResponse(
       env(),
@@ -179,6 +191,21 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
       port,
     );
     expect(response.status).toBe(200);
+  });
+
+  it("enables the queue while the proof check is still an administrator's to enforce", async () => {
+    seedInstalledRepository();
+    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    const response = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      {},
+      port,
+    );
+
+    expect(response.status).toBe(202);
+    expect(queueProjectRow()?.enabled).toBe(1);
   });
 
   it("takes the backend the caller asked for", async () => {
