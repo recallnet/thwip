@@ -780,6 +780,44 @@ describe("an operator reconciles a lane that never merged", () => {
     // offer expired unclaimed.
     expect(driven).toContain(61);
   });
+
+  /**
+   * Record 121 on this repository's chain, and the three findings it cost.
+   *
+   * Reconciling used to append a link whose digest was the commit sha padded
+   * with zeroes. No record was built, so nothing hashed to it, so the chain
+   * route served no link at that position and the next real merge named a
+   * predecessor a reader could not fetch. Every tick reported the same
+   * BROKEN_LINK, SEQUENCE_GAP and BASE_DISCONTINUITY, and nothing a tick does
+   * could ever have cleared them.
+   */
+  it("writes no chain link for a merge it certifies nothing about", async () => {
+    const e = env();
+    const app = routes({ driveTurn: async () => {} });
+    await authorize(app, e, 59);
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/reconcile?ref=${encodeURIComponent(REF)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          observed: "merged-outside-the-turn",
+          reason: "operator found it merged by hand",
+          mergeSha: "7cf3967bd5751cea12d2f91368b57454b0d6e5ba",
+        }),
+      },
+      e,
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { note: string };
+    // A reader is told where the record comes from instead of being handed one
+    // that does not exist.
+    expect(body.note).toMatch(/heal/);
+
+    const links = raw.prepare("SELECT digest FROM queue_transitions_index").all() as Array<{ digest: string }>;
+    expect(links).toHaveLength(0);
+  });
 });
 
 describe("a verifier rejects the candidate", () => {
