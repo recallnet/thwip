@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -62,37 +63,12 @@ afterEach(() => {
 const HEALTHY = { rulesetEnforced: true, appPermissionsHealthy: true, sponsorAuthorized: true };
 
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
-  return queueRoutes({
-    publishTurnCheck: async () => {},
-    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => ({
-      policyDigest: `sha256:${"b".repeat(64)}`,
-      pipelineDigest: `sha256:${"c".repeat(64)}`,
-      requiredSuites: ["unit"],
-      securityProfile: "fast",
-      organizationId: "org_1",
-      verifier: null,
-    }),
-    proofCheckRunId: async () => "778899",
-    signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    integratedCandidate: async () => ({
-      status: "pinned",
-      baseSha: "b".repeat(40),
-      headSha: HEAD,
-      candidateSha: "c".repeat(40),
-      candidateTreeOid: TREE,
-    }),
-    commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
-    sleep: async () => {},
-    ...over,
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, treeOid: TREE, headShaFor: () => HEAD }, {
+      commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
+      ...over,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 interface Verdict {

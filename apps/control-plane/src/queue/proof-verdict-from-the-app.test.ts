@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 
@@ -53,21 +54,15 @@ function verified(outcome: string): void {
 }
 
 function app() {
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId: "principal_1", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => null,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" as const }),
-    principalFor: async () => "principal_1",
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-    proofCheckRunId: async () => null,
-    baseContainsSha: async () => true,
-    signRecordBytes: async () => "jws",
-  } as unknown as Parameters<typeof queueRoutes>[0]);
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, principalId: "principal_1", headShaFor: () => HEAD }, {
+      activePolicy: async () => null,
+      principalFor: async () => "principal_1",
+      proofCheckRunId: async () => null,
+      baseContainsSha: async () => true,
+      signRecordBytes: async () => "jws",
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 async function ask(e: QueueRouteEnv, body: Record<string, unknown>): Promise<Record<string, unknown>> {
