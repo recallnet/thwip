@@ -64,8 +64,15 @@ import {
 } from "./attestation.js";
 import { applyHeal, planHeal, type HealPlan } from "./chain-heal.js";
 import { findingsForChain } from "./chain-self-check.js";
-import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
+import {
+  DEFAULT_MERGE_METHOD,
+  mergeCommitMessage,
+  mergeCommitTitle,
+  mergeOperationId,
+  type MergeMethod,
+} from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
+import type { MergeIntent, MergeWriteOutcome, MergeWriter } from "./merge-write.js";
 import {
   parseQueueDecision,
   parseTransitionRecord,
@@ -1081,7 +1088,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string; mergeMethod: MergeMethod } | null>;
+  ): Promise<{ activationState: string; mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
+  /**
+   * Perform the merge the queue just authorized, from the Worker.
+   *
+   * Optional, because a deployment that cannot reach GitHub with the App's own
+   * credential has no way to do it and must go on letting the workflow write.
+   * Absent is the same answer as `merge_writer = 'workflow'`.
+   */
+  mergeWrite?(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /**
@@ -1298,6 +1313,225 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         ? Promise.resolve()
         : deps.publishTurnCheck(env, repositoryId, update),
     );
+
+/**
+ * Record a merge the queue authorized and that has landed.
+ *
+ * One implementation for the two callers: the `/merged` report a workflow sends
+ * and the write the Worker performs itself. Both have to confirm before they
+ * record, because the record that becomes the chain link binds the tree that
+ * actually landed and cannot be built until the queue has accepted that this is
+ * the tree it authorized.
+ */
+  const recordLandedMerge = async (
+    env: TEnv,
+    input: {
+      repositoryId: string;
+      baseRef: string;
+      attemptId: string;
+      operationId: string;
+      mergeSha: string;
+      witnessPrincipalIds: readonly string[];
+    },
+  ): Promise<
+    | { readonly ok: false; readonly code: "MERGE_UNREADABLE" | "RESULT_NOT_AUTHORIZED"; readonly detail: string }
+    | {
+        readonly ok: true;
+        readonly confirmed: string;
+        readonly transition: string;
+        readonly sequence: number | null;
+        readonly digest: string | null;
+        readonly detail: string | null;
+        readonly snapshot: QueueSnapshot;
+      }
+  > => {
+  // What the commit carries, read from GitHub. The caller names the commit and
+  // the queue reads it, so a record never repeats a figure it was handed.
+  const landed = await deps.commitFacts(env, input.repositoryId, input.mergeSha);
+  if (landed === null) {
+    return { ok: false, code: "MERGE_UNREADABLE", detail: "could not read that commit" };
+  }
+
+  const { result: confirmation, snapshot: afterConfirm } = await onQueue(
+    env,
+    input.repositoryId,
+    input.baseRef,
+    async ({ commands, store }) =>
+      confirmOnly(commands, store, {
+        attemptId: input.attemptId,
+        operationId: input.operationId,
+        mergeSha: input.mergeSha,
+        mergeTree: landed.treeOid,
+        parentShas: landed.parentShas,
+      }),
+  );
+
+  if (confirmation.confirmed.status === "rejected") {
+    // The reducer refuses a tree that is not the candidate it authorized, so a
+    // rejection here means something other than the verified integration landed.
+    return { ok: false, code: "RESULT_NOT_AUTHORIZED", detail: confirmation.confirmed.detail };
+  }
+
+  const recorded = await recordMergedTransition(env, deps, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    attemptId: input.attemptId,
+    mergeSha: input.mergeSha,
+    mergeTree: landed.treeOid,
+    parentShas: landed.parentShas,
+    attempt: confirmation.attempt,
+    chainHead: confirmation.chainHead,
+    queueEpoch: afterConfirm.queueEpoch,
+    turnSequence: afterConfirm.turnSequence,
+    pullRequestNumber:
+      afterConfirm.entries.find((e) => e.entryId === confirmation.attempt?.entryId)?.pullRequestNumber ?? null,
+    witnessPrincipalIds: [...input.witnessPrincipalIds],
+    onQueue,
+  });
+
+  return {
+    ok: true,
+    confirmed: confirmation.confirmed.status,
+    transition: recorded.status,
+    sequence: recorded.sequence,
+    digest: recorded.digest,
+    detail: recorded.detail ?? null,
+    snapshot: recorded.snapshot ?? afterConfirm,
+  };
+  };
+
+/**
+ * Free the lane for an attempt whose merge did not happen.
+ *
+ * An outcome already in doubt has to be declared unknown before it can be
+ * resolved, which is the reducer refusing to skip reconciliation.
+ */
+  const resolveNotMerged = async (
+    env: TEnv,
+    input: { repositoryId: string; baseRef: string; attemptId: string; operationId: string },
+  ): Promise<{ status: string; snapshot: QueueSnapshot }> => {
+  const { result, snapshot } = await onQueue(
+    env,
+    input.repositoryId,
+    input.baseRef,
+    async ({ commands }) => {
+      commands.mergeOutcomeUnknown({
+        idempotencyKey: `not-merged:unknown:${input.attemptId}`,
+        attemptId: input.attemptId,
+      });
+      return await commands.confirmNotMerged({
+        idempotencyKey: `not-merged:${input.attemptId}`,
+        attemptId: input.attemptId,
+        operationId: input.operationId,
+      });
+    },
+  );
+  return { status: result.status, snapshot };
+  };
+
+  /**
+   * Write the merge, then say what became of it.
+   *
+   * The write used to be shell in the adopter's `thwip-merge.yml`, behind a
+   * token the adopter minted. Every outcome it had to handle is handled here,
+   * from the same reads, because GitHub's reads lag its own writes and a
+   * refusal from our own call says what the call did rather than what became of
+   * the pull request.
+   */
+  const performMergeFromWorker = async (
+    env: TEnv,
+    input: {
+      repositoryId: string;
+      baseRef: string;
+      attemptId: string;
+      operationId: string;
+      pullRequestNumber: number;
+      merge: { baseSha: string; headSha: string; treeOid: string; parentShas: string[] };
+      mergeMethod: MergeMethod;
+    },
+  ): Promise<Record<string, unknown>> => {
+    // A squash commit does not contain the pull request head, so the branch's
+    // own required checks refuse the ref update and GitHub cannot tell the pull
+    // request was merged. Refusing costs a squash repository its merges; merging
+    // anyway costs everyone the one claim this queue makes.
+    if (input.mergeMethod !== "merge") {
+      const freed = await resolveNotMerged(env, input);
+      await driveLane(env, deps, input.repositoryId, freed.snapshot);
+      return {
+        merged: false,
+        reason: "SQUASH_UNBINDABLE",
+        detail: `this repository merges by ${input.mergeMethod}, and a ${input.mergeMethod} commit does not contain the pull request head, so there is no way to bind it to the base the queue verified`,
+      };
+    }
+
+    const outcome = await deps.mergeWrite!(env, input.repositoryId, {
+      baseRef: input.baseRef,
+      pullRequestNumber: input.pullRequestNumber,
+      baseSha: input.merge.baseSha,
+      headSha: input.merge.headSha,
+      treeOid: input.merge.treeOid,
+      parentShas: input.merge.parentShas,
+      message: `${mergeCommitTitle(input.pullRequestNumber)}\n\n${mergeCommitMessage(input.operationId)}`,
+    });
+
+    if (outcome.kind === "merged" && outcome.mergeSha !== null) {
+      const recorded = await recordLandedMerge(env, {
+        repositoryId: input.repositoryId,
+        baseRef: input.baseRef,
+        attemptId: input.attemptId,
+        operationId: input.operationId,
+        mergeSha: outcome.mergeSha,
+        witnessPrincipalIds: [],
+      });
+      if (!recorded.ok) return { merged: true, recorded: false, reason: recorded.code, detail: recorded.detail };
+      await driveLane(env, deps, input.repositoryId, recorded.snapshot);
+      return {
+        merged: true,
+        recorded: true,
+        transition: recorded.transition,
+        transitionDigest: recorded.digest,
+        detail: recorded.detail,
+      };
+    }
+
+    if (outcome.kind === "merged") {
+      // Git settled it and the branch would not name the commit, which is the
+      // one case where guessing writes a false record.
+      const { snapshot } = await onQueue(env, input.repositoryId, input.baseRef, ({ commands }) =>
+        commands.mergeOutcomeUnknown({
+          idempotencyKey: `worker-merge:unknown:${input.attemptId}`,
+          attemptId: input.attemptId,
+        }),
+      );
+      await driveLane(env, deps, input.repositoryId, snapshot);
+      return { merged: true, recorded: false, reason: "MERGE_UNNAMED" };
+    }
+
+    if (outcome.kind === "base-moved" || outcome.kind === "not-merged" || outcome.kind === "refused") {
+      // The queue authorized a merge that is not going to happen, so it hears
+      // that here. Otherwise the lane stays held until its deadline and every
+      // pull request behind this one waits on a merge nobody is going to make.
+      const freed = await resolveNotMerged(env, input);
+      await driveLane(env, deps, input.repositoryId, freed.snapshot);
+      return {
+        merged: false,
+        reason: outcome.kind === "base-moved" ? "BASE_MOVED" : "MERGE_REFUSED",
+        detail: outcome.detail,
+        resolved: freed.status,
+      };
+    }
+
+    // Unknown is never reported as a refusal. Reconciliation reads for itself
+    // and can still end in a confirmed merge with a record behind it.
+    const { snapshot } = await onQueue(env, input.repositoryId, input.baseRef, ({ commands }) =>
+      commands.mergeOutcomeUnknown({
+        idempotencyKey: `worker-merge:unknown:${input.attemptId}`,
+        attemptId: input.attemptId,
+      }),
+    );
+    await driveLane(env, deps, input.repositoryId, snapshot);
+    return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };
+  };
 
   // One place where a thrown error becomes a named one.
   app.onError((error, c) => {
@@ -3362,6 +3596,46 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
                 : [pinned.baseSha, pinned.headSha],
           };
 
+    // The Worker performs the write itself where the repository has moved to it.
+    //
+    // One writer at a time. Two racing for one turn is how a merge that landed
+    // gets reported as a base that moved, so a repository still running
+    // `thwip-merge.yml` is answered with the pins and writes its own, and one
+    // that has stopped is answered with none and this writes it.
+    const mergeWriter = project.mergeWriter ?? "workflow";
+    if (
+      mergeWriter === "app" &&
+      deps.mergeWrite !== undefined &&
+      merge !== null &&
+      operationId !== null &&
+      authorized &&
+      enforcing
+    ) {
+      const written = await performMergeFromWorker(c.env, {
+        repositoryId,
+        baseRef,
+        attemptId: snapshot.activeAttemptId!,
+        operationId,
+        pullRequestNumber: body.pullRequestNumber,
+        merge,
+        mergeMethod: project.mergeMethod,
+      });
+      return c.json({
+        authorized,
+        enforcing,
+        activationState: project.activationState,
+        mergeMethod: project.mergeMethod,
+        // Named, not sent. An old workflow reading this answer finds no pins and
+        // errors rather than merging, which is the loud half of a repository
+        // that flipped the writer without dropping the workflow.
+        mergeWriter,
+        merge: null,
+        entryId,
+        operationId,
+        ...written,
+      });
+    }
+
     return c.json({
       authorized,
       enforcing,
@@ -3369,6 +3643,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // What the workflow must tell GitHub when it performs this merge, so the
       // method it uses and the method the signed record binds can never drift.
       mergeMethod: project.mergeMethod,
+      mergeWriter,
       merge,
       reason: halted
         ? snapshot.rebaselineRequired
@@ -4116,19 +4391,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       });
     }
 
-    const { result: resolved, snapshot } = await onQueue(c.env, repositoryId, baseRef, async ({ commands }) => {
-      // An outcome already in doubt has to be declared unknown before it can be
-      // resolved, which is the reducer refusing to skip reconciliation.
-      commands.mergeOutcomeUnknown({
-        idempotencyKey: `not-merged:unknown:${attemptId}`,
-        attemptId,
-      });
-      return await commands.confirmNotMerged({
-        idempotencyKey: `not-merged:${attemptId}`,
-        attemptId,
-        operationId,
-      });
-    });
+    const resolution = await resolveNotMerged(c.env, { repositoryId, baseRef, attemptId, operationId });
+    const resolved = { status: resolution.status };
+    const snapshot = resolution.snapshot;
 
     // This is the path a losing merge run takes when GitHub refuses the merge.
     // Confirming not-merged frees the lane, and the next offer expires unclaimed
@@ -4177,72 +4442,34 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const attemptId = body.attemptId!;
     const mergeSha = body.mergeSha!;
 
-    // What the commit carries, read from GitHub. The workflow reporting the
-    // merge used to send the tree and the parents alongside the sha, and both
-    // went into a signed record: the queue certified numbers its caller chose.
-    // The reducer bounded that to a lie which reproduces the pin exactly, and a
-    // record still must never repeat a figure it was handed. GitHub holds the
-    // commit, so GitHub says what is in it.
-    const landed = await deps.commitFacts(c.env, repositoryId, mergeSha);
-    // A merge the queue cannot describe is not recorded. Falling back to what
-    // the caller said would put the trust back where this took it from, and the
-    // attempt stays open for reconciliation to settle from its own reads.
-    if (landed === null) return c.json({ error: "could not read that commit", code: "MERGE_UNREADABLE" }, 404);
-
-    // Confirm first. The record that becomes the chain link binds the tree that
-    // actually landed, so it cannot be built until the queue has accepted that
-    // this is the tree it authorized.
-    const { result: confirmation, snapshot: afterConfirm } = await onQueue(
-      c.env,
-      repositoryId,
-      baseRef,
-      async ({ commands, store }) =>
-        confirmOnly(commands, store, {
-          attemptId,
-          operationId: body.operationId!,
-          mergeSha,
-          mergeTree: landed.treeOid,
-          parentShas: landed.parentShas,
-        }),
-    );
-
-    if (confirmation.confirmed.status === "rejected") {
-      // The reducer refuses a tree that is not the candidate it authorized, so a
-      // rejection here means something other than the verified integration landed.
-      return c.json({ error: confirmation.confirmed.detail, code: "RESULT_NOT_AUTHORIZED" }, 409);
-    }
-
-    // The transition record, signed, and its digest is the link. This was the
-    // merge commit id padded out to sixty-four characters — a value shaped like a
-    // digest that was the digest of nothing, so the chain recorded that merges
-    // happened and attested to none of them.
-    const recorded = await recordMergedTransition(c.env, deps, {
+    const outcome = await recordLandedMerge(c.env, {
       repositoryId,
       baseRef,
       attemptId,
+      operationId: body.operationId!,
       mergeSha,
-      mergeTree: landed.treeOid,
-      parentShas: landed.parentShas,
-      attempt: confirmation.attempt,
-      chainHead: confirmation.chainHead,
-      queueEpoch: afterConfirm.queueEpoch,
-      turnSequence: afterConfirm.turnSequence,
-      pullRequestNumber:
-        afterConfirm.entries.find((e) => e.entryId === confirmation.attempt?.entryId)?.pullRequestNumber ?? null,
       witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
-      onQueue,
     });
+    if (!outcome.ok) {
+      // A merge the queue cannot describe is not recorded. Falling back to what
+      // the caller said would put the trust back where this took it from, and
+      // the attempt stays open for reconciliation to settle from its own reads.
+      return c.json(
+        { error: outcome.detail, code: outcome.code },
+        outcome.code === "MERGE_UNREADABLE" ? 404 : 409,
+      );
+    }
 
-    await driveLane(c.env, deps, repositoryId, recorded.snapshot ?? afterConfirm);
+    await driveLane(c.env, deps, repositoryId, outcome.snapshot);
     return c.json({
       merged: true,
-      confirmed: confirmation.confirmed.status,
-      transition: recorded.status,
-      sequence: recorded.sequence,
-      transitionDigest: recorded.digest,
-      // Said plainly when a link could not be built, because a chain short by one
-      // is something an operator has to be able to see.
-      detail: recorded.detail,
+      confirmed: outcome.confirmed,
+      transition: outcome.transition,
+      sequence: outcome.sequence,
+      transitionDigest: outcome.digest,
+      // Said plainly when a link could not be built, because a chain short by
+      // one is something an operator has to be able to see.
+      detail: outcome.detail,
     });
   });
 
