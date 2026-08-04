@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BOOTSTRAP_STEPS,
-  bootstrapCheckRun,
+  bootstrapCheckRuns,
   checkRulesetForBackend,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
@@ -237,20 +237,33 @@ describe("bootstrap sequence", () => {
   });
 });
 
-describe("bootstrapCheckRun", () => {
+describe("bootstrapCheckRuns", () => {
   it("publishes configuration evidence only while the policy is disabled", () => {
-    const ok = bootstrapCheckRun({ headSha: "a".repeat(40), policyEnforcement: "disabled" });
+    const ok = bootstrapCheckRuns({ headSha: "a".repeat(40), policyEnforcement: "disabled" });
     expect(ok).toMatchObject({ ok: true });
     if (ok.ok) {
-      expect(ok.checkRun.name).toBe(TURN_CHECK);
-      expect(ok.checkRun.conclusion).toBe("neutral");
-      expect(ok.checkRun.external_id.startsWith("bootstrap:")).toBe(true);
-      expect(ok.checkRun.output.summary).toMatch(/not CI and it is not merge verification/);
+      expect(ok.checkRuns.map((run) => run.name)).toEqual([TURN_CHECK, PROOF_CHECK]);
+      for (const run of ok.checkRuns) {
+        expect(run.conclusion).toBe("neutral");
+        expect(run.external_id.startsWith("bootstrap:")).toBe(true);
+        expect(run.output.summary).toMatch(/not CI and it is not merge verification/);
+      }
     }
   });
 
+  /**
+   * One per context the policy is about to pin to the App. GitHub offers an App
+   * as the expected source of a context only where the App has recently posted
+   * a check by that name, and `thwip` moved to the App.
+   */
+  it("names each context separately so two postings cannot collide", () => {
+    const ok = bootstrapCheckRuns({ headSha: "a".repeat(40), policyEnforcement: "disabled" });
+    if (!ok.ok) throw new Error("expected configuration evidence");
+    expect(new Set(ok.checkRuns.map((run) => run.external_id)).size).toBe(ok.checkRuns.length);
+  });
+
   it("refuses to publish a neutral check against an enforcing policy", () => {
-    expect(bootstrapCheckRun({ headSha: "a".repeat(40), policyEnforcement: "active" })).toMatchObject({
+    expect(bootstrapCheckRuns({ headSha: "a".repeat(40), policyEnforcement: "active" })).toMatchObject({
       ok: false,
     });
   });
