@@ -21,7 +21,13 @@ import {
   type MergeMethod,
 } from "./merge-commit.js";
 import type { MergeIntent, MergeWriteOutcome, MergeWriter } from "./merge-write.js";
-import { requiredSuitesDigest, type Sha256 } from "@thwip/queue-protocol";
+import {
+  TRANSITION_KINDS as RECORD_KINDS,
+  requiredSuitesDigest,
+  type Sha256,
+  type TransitionRecordKind,
+} from "@thwip/queue-protocol";
+import { transitionKindOf, type TransitionKind } from "@thwip/queue-domain";
 import { putEvidence, type R2Like } from "./evidence-store.js";
 import { acceptedReceiptFor } from "./assignment-store.js";
 
@@ -194,6 +200,22 @@ async function proofBindingForHead<TEnv extends QueueRouteEnv>(
  * is visible and can be retried, while a link naming a record nobody has is the
  * thing this replaces.
  */
+/**
+ * What kind of transition a stored record is, read from the record itself.
+ *
+ * Null where the row is missing, or carries a kind this build does not know.
+ * Both used to answer "reused", so an unreadable record and a record kind added
+ * after this code was written both went into the chain claiming the merge rested
+ * on the head's own proof. That claim is exactly what a reader auditing the
+ * chain relies on, and it was the one thing nobody was checking.
+ */
+function storedTransitionKind(kind: string | undefined): TransitionKind | null {
+  if (kind === undefined) return null;
+  return (RECORD_KINDS as readonly string[]).includes(kind)
+    ? transitionKindOf(kind as TransitionRecordKind)
+    : null;
+}
+
 export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   env: TEnv,
   deps: MergeLaneDeps<TEnv>,
@@ -271,8 +293,10 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     // "candidate-verified-merge" record here too, and hardcoding "reused"
     // would misreport that merge as a reuse forever.
     const existing = await readAttestation(db, existingDigest);
-    const existingKind =
-      existing?.kind === "candidate-verified-merge" || existing?.kind === "verified-merge" ? "verified" : "reused";
+    const existingKind = storedTransitionKind(existing?.kind);
+    if (existingKind === null) {
+      return skip(`the stored record for this merge does not say what kind it is: ${existingDigest}`);
+    }
     const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
       recordOnly(commands, store, {
         attemptId: input.attemptId,
@@ -376,13 +400,14 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
   // Stored before the link is written, so a link never names a record that
   // cannot be read back.
+  const recordKind: TransitionRecordKind = verifiedMerge
+    ? "verified-merge"
+    : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
+      ? "candidate-verified-merge"
+      : "reused-proof-merge";
   const stored = await storeAttestation(db, {
     digest: signed.digest,
-    kind: verifiedMerge
-      ? "verified-merge"
-      : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
-        ? "candidate-verified-merge"
-        : "reused-proof-merge",
+    kind: recordKind,
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
@@ -405,20 +430,21 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // is already stored and is what the transition has to cite — this call's
   // own signed bytes never occupy a link and are not persisted.
   let digest = signed.digest;
-  let kind =
-    verifiedMerge || ("verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined)
-      ? "verified"
-      : "reused";
+  let kind = transitionKindOf(recordKind);
   if (!stored.stored) {
     digest = stored.digest as Sha256;
     const winner = await readAttestation(db, stored.digest);
-    kind = winner?.kind === "candidate-verified-merge" || winner?.kind === "verified-merge" ? "verified" : "reused";
+    const winnerKind = storedTransitionKind(winner?.kind);
+    if (winnerKind === null) {
+      return skip(`the record that won this chain position does not say what kind it is: ${stored.digest}`);
+    }
+    kind = winnerKind;
   }
 
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
     recordOnly(commands, store, {
       attemptId: input.attemptId,
-      kind: kind as "verified" | "reused",
+      kind,
       digest,
       baseSha: input.mergeSha,
       witnessPrincipalIds: input.witnessPrincipalIds,
