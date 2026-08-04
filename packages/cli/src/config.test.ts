@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadProjectConfigAtHead } from "./config.js";
+import { loadProjectConfigAtHead, loadProjectConfigForRun } from "./config.js";
 
 const exec = promisify(execFile);
 const directories: string[] = [];
@@ -29,6 +29,45 @@ afterEach(async () => {
 });
 
 describe("effective CLI configuration", () => {
+  it("runs an edited policy under the active base configuration", async () => {
+    const cwd = await repository({
+      "thwip.yaml": "version: 1\nprofile: fast\nrequired: [test]\nsuites:\n  test: npm test\n",
+    });
+    const baseSha = (await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+    await writeFile(
+      join(cwd, "thwip.yaml"),
+      "version: 2\nprofile: fast\nrequired: [lint]\nsuites:\n  lint: npm run lint\n",
+    );
+    await exec("git", ["add", "thwip.yaml"], { cwd });
+    await exec("git", ["commit", "-qm", "edit policy"], { cwd });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ defaults: null, activePolicySourceSha: baseSha }),
+      ),
+    );
+
+    const config = await loadProjectConfigForRun(cwd, "https://thwip.example", "Bearer token");
+
+    expect(config.policy.version).toBe(1);
+    expect(config.pipeline.suites).toEqual([{ id: "test", command: ["sh", "-c", "npm test"] }]);
+  });
+
+  it("uses the candidate configuration while bootstrapping the first policy", async () => {
+    const cwd = await repository({
+      "thwip.yaml": "version: 4\nprofile: fast\nrequired: [test]\nsuites:\n  test: npm test\n",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ defaults: null, activePolicySourceSha: null })),
+    );
+
+    const config = await loadProjectConfigForRun(cwd, "https://thwip.example", "Bearer token");
+
+    expect(config.policy.version).toBe(4);
+    expect(config.pipeline.suites).toEqual([{ id: "test", command: ["sh", "-c", "npm test"] }]);
+  });
+
   it("loads organization defaults for a repository with no thwip.yaml", async () => {
     const cwd = await repository({ "package-lock.json": "{}" });
     vi.stubGlobal(
