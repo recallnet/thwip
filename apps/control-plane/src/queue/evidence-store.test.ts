@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evidenceKey, hasEvidence, putEvidence, type EvidenceKind, type R2Like } from "./evidence-store.js";
+import { evidenceKey, putEvidence, type EvidenceKind, type R2Like } from "./evidence-store.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 
 /**
@@ -151,23 +151,6 @@ describe("putEvidence", () => {
     expect(
       await putEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes }),
     ).toMatchObject({ stored: true });
-    expect(await hasEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d })).toBe(
-      true,
-    );
-  });
-});
-
-describe("hasEvidence", () => {
-  it("answers without transferring the object", async () => {
-    const { impl } = bucket();
-    const bytes = bytesOf("y");
-    const d = await digest(bytes);
-    expect(await hasEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d })).toBe(
-      false,
-    );
-    await putEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes });
-    expect(await hasEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d })).toBe(
-      true,
-    );
+    expect(await impl.head(evidenceKey({ organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d }))).not.toBeNull();
   });
 });

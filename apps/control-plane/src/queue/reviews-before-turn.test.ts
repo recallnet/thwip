@@ -16,7 +16,7 @@ import type { PullRequestGates } from "./readiness.js";
  *
  * What that cost: the pull request was called ready, given the lane ahead of
  * everyone waiting, run through the full pipeline on a developer's machine, and
- * handed a signed merge-intent attestation. Then the merge workflow's ref update
+ * handed a signed merge-intent attestation. Then the App's ref update
  * came back 422, the entry was blocked with "GitHub refused the merge. Read the
  * branch protection rules on the base branch.", and the sentence that actually
  * explained it — "at least 1 approving review is required" — sat in one line of
@@ -100,10 +100,9 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
     integratedCandidate: async () => ({
       status: "pinned",
       baseSha: "b".repeat(40),
@@ -137,7 +136,6 @@ async function askForTurn(app: ReturnType<typeof routes>, e: QueueRouteEnv): Pro
         baseRef: REF,
         authorGithubUserId: "1",
         draft: false,
-        prepare: true,
         candidate: {
           baseSha: "b".repeat(40),
           candidateSha: "c".repeat(40),
@@ -222,7 +220,7 @@ describe("what GitHub requires of a pull request, read before the offer", () => 
 
     const verdict = await askForTurn(app, e);
     expect(verdict.reason).toBe("HOLDS_TURN");
-    expect(verdict.operationId).not.toBeNull();
+    expect(verdict.operationId).toBeNull();
   });
 
   it("goes ahead when GitHub could not be read, because unknown is not a refusal", async () => {
@@ -231,14 +229,14 @@ describe("what GitHub requires of a pull request, read before the offer", () => 
     const e = env();
     const app = routes({ pullRequestGates: async () => null });
 
-    expect((await askForTurn(app, e)).operationId).not.toBeNull();
+    expect((await askForTurn(app, e)).reason).toBe("HOLDS_TURN");
   });
 
   it("goes ahead when nothing supplies the read at all", async () => {
     const e = env();
     const app = routes({});
 
-    expect((await askForTurn(app, e)).operationId).not.toBeNull();
+    expect((await askForTurn(app, e)).reason).toBe("HOLDS_TURN");
   });
 });
 

@@ -2,10 +2,9 @@
  * Which GitHub webhook events the code acts on, and whether the App sends them.
  *
  * The installed App had delivered eighty-two `check_suite` webhooks and nothing
- * else. Not one `pull_request`, `push` or `check_run`, which
- * means `queueFromPullRequest`, `externalPushFromWebhook`, the policy-push sync
- * and the App-native proof check had never run in this deployment. Everything
- * that worked, worked because the workflows call `/authorize` themselves.
+ * else. Not one `pull_request`, `push` or `check_run`, which meant
+ * `queueFromPullRequest`, `externalPushFromWebhook`, policy-push sync, and the
+ * App-native proof check could not run in that deployment.
  *
  * The App manifest declared all ten from the start, and that was no help: a
  * manifest describes a fresh registration and says nothing about an App already
@@ -28,7 +27,7 @@ export const REQUIRED_WEBHOOK_EVENTS = [
 
 /**
  * GitHub can send `merge_group` to Actions, but does not offer it in this App's
- * event-subscription UI. The managed queue does not use GitHub merge groups, so
+ * event-subscription UI. The App-owned queue does not use GitHub merge groups, so
  * its absence must not make an otherwise-correct App installation unhealthy.
  * The handler remains useful if GitHub exposes the event to Apps later.
  */
@@ -44,7 +43,7 @@ export type HandledWebhookEvent = (typeof HANDLED_WEBHOOK_EVENTS)[number];
 
 /**
  * What a fresh registration asks for. The same required list, not a copy of it:
- * the two drifting is what leaves a managed-path handler with no delivery.
+ * the two drifting is what leaves a handler with no delivery.
  */
 export const APP_MANIFEST_EVENTS: string[] = [...REQUIRED_WEBHOOK_EVENTS];
 

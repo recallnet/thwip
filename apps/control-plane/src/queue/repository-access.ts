@@ -8,7 +8,7 @@ import type { D1Like } from "./projection.js";
  * said. Thirteen queue routes read it as though it also said the caller may
  * see the repository in the path, which it does not, and two routes added on
  * 2026-07-31 inherited the same reading. One of them writes the queue document
- * and dispatches GitHub Actions on the repository named.
+ * and can wake the App-owned writer for the repository named.
  *
  * The relation this used to walk was one comparison:
  *

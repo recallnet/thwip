@@ -6,9 +6,9 @@ import type { CandidateVerdict } from "./store.js";
 
 /**
  * Verdicts and dispatch claims live in D1 rather than in the Durable Object, so
- * the merge workflow can wait for a candidate without waking the coordination
- * object. These are the same properties the object enforced, checked where the
- * data actually is now.
+ * candidate progress can be read without waking the coordination object. These
+ * are the same properties the object enforced, checked where the data actually
+ * is now.
  */
 
 const open: Array<{ close(): void }> = [];

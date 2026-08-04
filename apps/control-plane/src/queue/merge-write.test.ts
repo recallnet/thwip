@@ -123,7 +123,7 @@ describe("performMergeWrite", () => {
    * GitHub's reads lag its own writes: a pull request that merged at 16:41:38
    * answered `merged: false` at 16:41:39. A refusal from our own call says what
    * the call did, not what became of the pull request, so the outcome is
-   * resolved the same way `/not-merged` resolves it.
+   * resolved through the same reconciliation reads.
    */
   it("asks what became of the pull request rather than believing its own refusal", async () => {
     const github = new FakeGithub();
@@ -191,8 +191,8 @@ describe("performMergeWrite", () => {
    * The Worker publishes `thwip / turn` green and moves the branch inside one
    * request. GitHub's rule evaluation reads its own check runs behind that
    * write, so the ref update was refused with 422 and the merge did not happen.
-   * `thwip-merge.yml` never met this: it is a second workflow, which starts
-   * after the required check has already concluded.
+   * The App therefore waits for GitHub to observe the concluded check before
+   * attempting the branch move.
    */
   it("waits for GitHub to read the required check as concluded before moving the branch", async () => {
     const github = new FakeGithub();

@@ -17,7 +17,6 @@ import {
 import { githubHttp } from "./github-port.js";
 import type { D1Like } from "./projection.js";
 import { isOrgAdmin } from "./repository-access.js";
-import type { Backend, MergeMethod } from "./rulesets.js";
 import type { Env } from "../env.js";
 
 /**
@@ -37,8 +36,6 @@ import type { Env } from "../env.js";
 
 /** What the caller may choose. The base ref comes from the repository. */
 export interface BootstrapRouteBody {
-  readonly backend?: Backend;
-  readonly mergeMethod?: MergeMethod;
   readonly includeRepositoryConfig?: boolean;
   readonly confirmQueueEnforcement?: boolean;
   readonly confirmRulesetBypassActors?: boolean;
@@ -108,7 +105,6 @@ const githubPort: BootstrapPort = async (env, repo, setup = {}) => {
       body: setupPullRequestBody({
         endpoint: env.PUBLIC_ORIGIN,
         actionRef: QUEUE_ACTION_REF,
-        mergeWriter: "app",
         ...(setup.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       }),
     },
@@ -159,13 +155,6 @@ export async function bootstrapRouteResponse(
   if (!/^[0-9]{1,32}$/.test(repositoryId)) {
     return { status: 400, body: { error: "invalid repository id" } };
   }
-  if (body.mergeMethod !== undefined && body.mergeMethod !== "merge") {
-    return {
-      status: 400,
-      body: { error: "Thwip Queue setup requires merge commits", code: "MERGE_COMMITS_REQUIRED" },
-    };
-  }
-
   const repo = await repositoryFor(env, repositoryId);
   if (repo === null) return UNKNOWN;
 
@@ -182,8 +171,6 @@ export async function bootstrapRouteResponse(
       baseRef: repo.baseRef,
       ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       ...(body.confirmQueueEnforcement === true ? { confirmQueueEnforcement: true } : {}),
-      ...(body.backend === undefined ? {} : { backend: body.backend }),
-      ...(body.mergeMethod === undefined ? {} : { mergeMethod: body.mergeMethod }),
       ...(body.confirmRulesetBypassActors === true ? { confirmRulesetBypassActors: true } : {}),
     });
   } catch (error) {

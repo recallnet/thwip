@@ -1065,16 +1065,15 @@ async function originName(cwd: string): Promise<string | null> {
 }
 
 /**
- * The two facts about a repository THWIP.md changes on: which backend merges it
- * and how far activation has got. Enrolment owns both, so they are read from
+ * How far repository activation has got. Enrolment owns it, so it is read from
  * the bootstrap route. A repository that has not been enrolled yet is
  * `configured`, which is what the file should say about it.
  */
 async function queueFacts(
   endpoint: string,
   repo: string,
-): Promise<{ backend: "managed" | "native"; activationState: "configured" | "observe" | "canary" | "enforced" }> {
-  const fallback = { backend: "managed", activationState: "configured" } as const;
+): Promise<{ activationState: "configured" | "observe" | "canary" | "enforced" }> {
+  const fallback = { activationState: "configured" } as const;
   const auth = await apiAuthHeader();
   if (auth === null) return fallback;
   const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
@@ -1083,9 +1082,8 @@ async function queueFacts(
     headers: { authorization: auth },
   });
   if (!res.ok) return fallback;
-  const body = (await res.json()) as { backend?: string; activationState?: string };
+  const body = (await res.json()) as { activationState?: string };
   return {
-    backend: body.backend === "native" ? "native" : "managed",
     activationState:
       body.activationState === "observe" ||
       body.activationState === "canary" ||
@@ -1127,11 +1125,10 @@ async function cmdQueueSetup(argv: string[]): Promise<number> {
     hasDaggerModule = false;
   }
 
-  const { backend, activationState } = await queueFacts(endpoint, repo);
+  const { activationState } = await queueFacts(endpoint, repo);
   const instructions = queueInstructions({
     repositoryName: repo,
     baseRef: `refs/heads/${branch}`,
-    backend,
     activationState,
     hasDaggerModule,
   });

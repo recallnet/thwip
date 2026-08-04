@@ -134,23 +134,6 @@ export async function getEvidence(
 }
 
 /**
- * Whether evidence for a digest is already present, without transferring it. Used
- * before signing work: if the envelope is already stored, the attempt is a replay
- * and the bytes do not need to be sent again.
- */
-export async function hasEvidence(
-  bucket: R2Like,
-  input: {
-    readonly organizationId: string;
-    readonly repositoryId: string;
-    readonly kind: EvidenceKind;
-    readonly digest: Sha256;
-  },
-): Promise<boolean> {
-  return (await bucket.head(evidenceKey(input))) !== null;
-}
-
-/**
  * Write the scheduling decision an offer is about to bind, and hand back its
  * digest (plan.md §21.2).
  *

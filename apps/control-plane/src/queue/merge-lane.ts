@@ -3,7 +3,6 @@ import type { D1Like } from "./projection.js";
 import { confirmOnly, recordOnly, type QueueSnapshot } from "./queue-operations.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
-import { requiresDeviceOnly } from "./runners.js";
 import { proofBindingFrom, type ProofBinding } from "./work-receipt.js";
 import {
   readAttestation,
@@ -14,13 +13,8 @@ import {
   transitionRecordFor,
   verifiedEvidenceFor,
 } from "./attestation.js";
-import {
-  DEFAULT_MERGE_METHOD,
-  mergeCommitMessage,
-  mergeCommitTitle,
-  type MergeMethod,
-} from "./merge-commit.js";
-import type { MergeIntent, MergeWriteOutcome, MergeWriter } from "./merge-write.js";
+import { mergeCommitText } from "./merge-commit.js";
+import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
 import {
   TRANSITION_KINDS as RECORD_KINDS,
   requiredSuitesDigest,
@@ -80,17 +74,6 @@ export interface ActivePolicy {
  */
 export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
   activePolicy(env: TEnv, repositoryId: string): Promise<ActivePolicy | null>;
-  /**
-   * The merge method the record must bind, and who performs the write. Both
-   * read from the row rather than assumed: a record that claims "merge" for a
-   * squash fails its own shape check, and two writers racing for one turn is
-   * how a merge that landed gets reported as a base that moved.
-   */
-  queueProject(
-    env: TEnv,
-    repositoryId: string,
-    baseRef: string,
-  ): Promise<{ mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
   proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
    * Whether the base branch already contains a commit, from git ancestry.
@@ -105,15 +88,10 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
     repositoryId: string,
     sha: string,
   ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
-  /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
-  driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /**
    * Perform the merge the queue just authorized, from the Worker.
-   *
-   * Optional, because a deployment that cannot reach GitHub with the App's own
-   * credential has no way to do it and must go on letting the workflow write.
    */
-  mergeWrite?(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
+  mergeWrite(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
   /** The backoff between reads that have to outlast GitHub's own lag. */
   sleep?(ms: number): Promise<void>;
 }
@@ -358,16 +336,9 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // itself can say that.
   const before = await deps.commitFacts(env, input.repositoryId, attempt.baseSha);
 
-  // The same method the workflow was told to merge with, read from the same
-  // row rather than assumed. A record that claims "merge" for a squash landing
-  // fails its own two-parent shape check and never reaches the chain — that is
-  // the bug this binds shut.
-  const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
-  const mergeMethod = project?.mergeMethod ?? DEFAULT_MERGE_METHOD;
-
   const recordSubject = {
     attemptId: input.attemptId,
-    mergeMethod,
+    mergeMethod: "merge" as const,
     git: {
       objectFormat: "sha1" as const,
       repositoryId: input.repositoryId,
@@ -454,105 +425,11 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 }
 
 /**
- * Why a lane was, or was not, driven through Actions.
- *
- * `nudge` reports these to its caller as a reason code; every other caller of
- * `driveLane` fires and forgets, so it can ignore the return value entirely.
- */
-export type DriveLaneOutcome =
-  | { readonly dispatched: false; readonly reason: "LANE_IDLE" }
-  | { readonly dispatched: false; readonly reason: "APP_WRITES"; readonly pullRequestNumber: number }
-  | { readonly dispatched: false; readonly reason: "DEVICE_ONLY"; readonly pullRequestNumber: number }
-  | { readonly dispatched: false; readonly reason: "DISPATCH_FAILED"; readonly pullRequestNumber: number }
-  | { readonly dispatched: false; readonly reason: "ALREADY_RUNNING"; readonly pullRequestNumber: number }
-  | { readonly dispatched: true; readonly pullRequestNumber: number };
-
-export async function driveLane<TEnv extends QueueRouteEnv>(
-  env: TEnv,
-  deps: Pick<MergeLaneDeps<TEnv>, "driveTurn" | "activePolicy" | "queueProject">,
-  repositoryId: string,
-  baseRef: string,
-  snapshot: QueueSnapshot,
-  /**
-   * The pull request whose own run is making this call, when one is.
-   *
-   * `/authorize` drives after it walks, because the walk can hand the lane to a
-   * different pull request and nothing else would tell that one. The caller is
-   * a run already executing for its own turn, so a dispatch back to it starts a
-   * second run for work in flight, and `thwip-merge.yml` serialises on one
-   * group per queue, so the second cancels the first. The cancelled one is the
-   * run that would have written the merge.
-   *
-   * That ran 100 times in 35 minutes on 5 August 2026, one dispatch every
-   * twenty seconds, and nothing merged for as long as it lasted.
-   */
-  options: { readonly exceptPullRequestNumber?: number } = {},
-): Promise<DriveLaneOutcome> {
-  const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-  // Under a device-only profile the run is over by the time the merge has to be
-  // written, and writing it is still Actions' job.
-  const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
-  if (running === undefined && ran === undefined) return { dispatched: false, reason: "LANE_IDLE" };
-
-  // The security profile is a repository-wide setting, not a per-entry one,
-  // so one lookup answers for whichever entry holds the lane. `fresh` and
-  // `audited` have no fallback to GitHub Actions for the run itself: the offer
-  // is only ever claimed by a connected device, over the heartbeat response, so
-  // dispatching while that device still holds the turn would spend an Actions
-  // run to be told there is nothing for it to do. Once the device's receipt has
-  // been accepted there is something to do, and it is dispatched then.
-  //
-  // This is the one place `driveTurn` is ever called. Every caller that wants
-  // to drive a lane goes through here, so this predicate cannot be forgotten
-  // at a call site the way it was at `/nudge` and the candidate-verdict
-  // callback.
-  const policy = await deps.activePolicy(env, repositoryId);
-  const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
-
-  // A repository whose writer is the App has no merge workflow to dispatch.
-  //
-  // The dispatch existed to start `thwip-merge.yml`, which asked `/authorize`
-  // for the pins and wrote the branch. Once the App writes, that file is gone,
-  // and a `repository_dispatch` for a workflow that is not there is a call to
-  // GitHub that starts nothing. The queue walks the holder itself, and the push
-  // its own merge produces wakes it for the next one.
-  const project = await deps.queueProject(env, repositoryId, baseRef);
-  if (project?.mergeWriter === "app") {
-    const holder = running ?? ran;
-    return holder === undefined
-      ? { dispatched: false, reason: "LANE_IDLE" }
-      : { dispatched: false, reason: "APP_WRITES", pullRequestNumber: holder.pullRequestNumber };
-  }
-
-  let holder = running;
-  if (deviceOnly) {
-    if (running !== undefined) {
-      return { dispatched: false, reason: "DEVICE_ONLY", pullRequestNumber: running.pullRequestNumber };
-    }
-    holder = ran;
-  }
-  if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
-  const pullRequestNumber = holder.pullRequestNumber;
-  if (pullRequestNumber === options.exceptPullRequestNumber) {
-    return { dispatched: false, reason: "ALREADY_RUNNING", pullRequestNumber };
-  }
-
-  try {
-    await deps.driveTurn(env, repositoryId, pullRequestNumber);
-  } catch {
-    /* the turn survives; a later tick or the drain asks again */
-    return { dispatched: false, reason: "DISPATCH_FAILED", pullRequestNumber };
-  }
-  return { dispatched: true, pullRequestNumber };
-}
-
-/**
  * The three things a caller does with a lane once the queue has authorized a
  * merge: write it, write it down, or hand it back.
  *
- * Built from the deps a caller already holds, so the route that answers a
- * workflow and the path that writes from the Worker cannot differ about what
- * confirmation, what record, and what freed lane a merge produces.
+ * Built from the deps the App drive path already holds, so every internal wake
+ * uses the same confirmation and recording logic.
  */
 export function mergeLaneFor<TEnv extends QueueRouteEnv>(
   deps: MergeLaneDeps<TEnv>,
@@ -561,11 +438,8 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
 /**
  * Record a merge the queue authorized and that has landed.
  *
- * One implementation for the two callers: the `/merged` report a workflow sends
- * and the write the Worker performs itself. Both have to confirm before they
- * record, because the record that becomes the chain link binds the tree that
- * actually landed and cannot be built until the queue has accepted that this is
- * the tree it authorized.
+ * The record that becomes the chain link binds the tree that actually landed,
+ * so confirmation happens before recording.
  */
   const recordLandedMerge = async (
     env: TEnv,
@@ -676,11 +550,9 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
   /**
    * Write the merge, then say what became of it.
    *
-   * The write used to be shell in the adopter's `thwip-merge.yml`, behind a
-   * token the adopter minted. Every outcome it had to handle is handled here,
-   * from the same reads, because GitHub's reads lag its own writes and a
-   * refusal from our own call says what the call did rather than what became of
-   * the pull request.
+   * Every write outcome is handled here from the same reads, because GitHub's
+   * reads lag its own writes and a refusal from our own call says what the call
+   * did rather than what became of the pull request.
    */
   const performMergeFromWorker = async (
     env: TEnv,
@@ -691,31 +563,16 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       operationId: string;
       pullRequestNumber: number;
       merge: { baseSha: string; headSha: string; treeOid: string; parentShas: string[] };
-      mergeMethod: MergeMethod;
     },
   ): Promise<Record<string, unknown>> => {
-    // A squash commit does not contain the pull request head, so the branch's
-    // own required checks refuse the ref update and GitHub cannot tell the pull
-    // request was merged. Refusing costs a squash repository its merges; merging
-    // anyway costs everyone the one claim this queue makes.
-    if (input.mergeMethod !== "merge") {
-      const freed = await resolveNotMerged(env, input);
-      await driveLane(env, deps, input.repositoryId, input.baseRef, freed.snapshot);
-      return {
-        merged: false,
-        reason: "SQUASH_UNBINDABLE",
-        detail: `this repository merges by ${input.mergeMethod}, and a ${input.mergeMethod} commit does not contain the pull request head, so there is no way to bind it to the base the queue verified`,
-      };
-    }
-
-    const outcome = await deps.mergeWrite!(env, input.repositoryId, {
+    const outcome = await deps.mergeWrite(env, input.repositoryId, {
       baseRef: input.baseRef,
       pullRequestNumber: input.pullRequestNumber,
       baseSha: input.merge.baseSha,
       headSha: input.merge.headSha,
       treeOid: input.merge.treeOid,
       parentShas: input.merge.parentShas,
-      message: `${mergeCommitTitle(input.pullRequestNumber)}\n\n${mergeCommitMessage(input.operationId)}`,
+      message: mergeCommitText(input.pullRequestNumber, input.operationId),
     });
 
     if (outcome.kind === "merged" && outcome.mergeSha !== null) {
@@ -728,7 +585,6 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         witnessPrincipalIds: [],
       });
       if (!recorded.ok) return { merged: true, recorded: false, reason: recorded.code, detail: recorded.detail };
-      await driveLane(env, deps, input.repositoryId, input.baseRef, recorded.snapshot);
       return {
         merged: true,
         // What was actually written, not that the call returned. A skipped
@@ -751,7 +607,6 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
           attemptId: input.attemptId,
         }),
       );
-      await driveLane(env, deps, input.repositoryId, input.baseRef, snapshot);
       return { merged: true, recorded: false, reason: "MERGE_UNNAMED" };
     }
 
@@ -760,7 +615,6 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       // that here. Otherwise the lane stays held until its deadline and every
       // pull request behind this one waits on a merge nobody is going to make.
       const freed = await resolveNotMerged(env, input);
-      await driveLane(env, deps, input.repositoryId, input.baseRef, freed.snapshot);
       return {
         merged: false,
         reason: outcome.kind === "base-moved" ? "BASE_MOVED" : "MERGE_REFUSED",
@@ -777,7 +631,6 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         attemptId: input.attemptId,
       }),
     );
-    await driveLane(env, deps, input.repositoryId, input.baseRef, snapshot);
     return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };
   };
 

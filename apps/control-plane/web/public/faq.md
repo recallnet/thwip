@@ -101,9 +101,9 @@ commits.
 ## What happens on a rebase or squash?
 
 The proof binds the exact tree and ancestry, so a rebase, squash, or
-cherry-pick needs a new `thwip run`. The merge queue uses the MERGE method so
-the trailer survives into the merge group, where every member PR's head proof
-is verified again.
+cherry-pick needs a new `thwip run`. Thwip Queue itself always writes a merge
+commit on the exact base and tree it verified; setup exposes no merge-method
+choice.
 
 ## Where do project settings live?
 
@@ -114,10 +114,10 @@ never used to approve itself.
 
 ## Who publishes the required proof check?
 
-The thwip GitHub App evaluates the exact pull-request head or merge-group
-members and publishes the `thwip` check directly. New and migrated projects
-start with a distinct `thwip / proof (observe)` check, and an administrator
-enforces it once that check has passed.
+The thwip GitHub App evaluates the exact pull-request head and publishes the
+`thwip` check directly. New projects start with a distinct
+`thwip / proof (observe)` check, and an administrator enforces it once that
+check has passed.
 
 A branch running Thwip Queue requires `thwip` from whoever publishes it. While
 the repository is observing that is GitHub Actions, satisfied by the
