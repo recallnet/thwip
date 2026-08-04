@@ -18,6 +18,23 @@ export function withOrg(path: string): string {
   return path + (path.includes("?") ? "&" : "?") + "org=" + encodeURIComponent(org);
 }
 
+/**
+ * A refusal with the status still on it.
+ *
+ * Callers that treat every failure alike show a reader who is not allowed in
+ * the same screen as a reader whose request broke, and the two want opposite
+ * treatment. The status travels so they can tell.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(withOrg(path), {
     credentials: "include",
@@ -26,7 +43,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `${res.status}`);
+    throw new ApiError(body.error ?? `${res.status}`, res.status);
   }
   return res.json() as Promise<T>;
 }

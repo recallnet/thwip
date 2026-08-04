@@ -5,7 +5,13 @@ import { buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
 import { loadQueueState } from "./queue-state.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
-import { authorizationFor, signReusedRecord, storeAttestation, transitionRecordFor } from "./attestation.js";
+import {
+  authorizationFor,
+  recordCoveringCommit,
+  signReusedRecord,
+  storeAttestation,
+  transitionRecordFor,
+} from "./attestation.js";
 
 /**
  * Putting a merge back into the chain from what survives the attempt.
@@ -56,7 +62,8 @@ export type RecordFromIntentResult =
     }
   | {
       readonly status: "already";
-      readonly attemptId: string;
+      /** Null where the record that covers this commit cites no attempt. */
+      readonly attemptId: string | null;
       readonly pullRequestNumber: number | null;
       readonly transitionDigest: string;
     }
@@ -149,6 +156,18 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
 
   const db = env.DB as unknown as D1Like;
+
+  // Asked before the authorization, because a chain that already carries this
+  // commit has nothing left to put back and the reason no intent authorizes it
+  // may be the reason a movement record was written for it. The sweep leaves a
+  // row alone whenever this path refuses, so refusing here for a commit that is
+  // already in the chain would keep a settled write open and re-read from
+  // GitHub on every tick for as long as the account lives.
+  const covered = await recordCoveringCommit(db, repositoryId, baseRef, mergeSha);
+  if (covered !== null) {
+    return { status: "already", attemptId: covered.attemptId, pullRequestNumber: null, transitionDigest: covered.digest };
+  }
+
   const authorization = await authorizationFor(db, {
     repositoryId,
     baseRef,
@@ -172,7 +191,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
   const attemptId = intent.attemptId;
 
-  const already = await transitionRecordFor(db, attemptId);
+  const already = await transitionRecordFor(db, repositoryId, baseRef, attemptId);
   if (already !== null) {
     return { status: "already", attemptId, pullRequestNumber: intent.pullRequestNumber, transitionDigest: already };
   }

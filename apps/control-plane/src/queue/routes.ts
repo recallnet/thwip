@@ -61,6 +61,8 @@ import {
   transitionRecordFor,
   verifiedEvidenceFor,
 } from "./attestation.js";
+import { applyHeal, planHeal, type HealPlan } from "./chain-heal.js";
+import { findingsForChain } from "./chain-self-check.js";
 import { DEFAULT_MERGE_METHOD, mergeOperationId, type MergeMethod } from "./merge-commit.js";
 import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
 import {
@@ -134,6 +136,36 @@ export function recordFromIntentDepsFor<TEnv extends QueueRouteEnv>(
     storeEvidence,
     onQueue,
   };
+}
+
+/**
+ * Verify one branch's chain and work out the remedy for every finding.
+ *
+ * One producer for both heal routes, so what the page shows and what the button
+ * does cannot drift apart. The plan the POST carries out is computed by this,
+ * from a fresh verification, at the moment it runs.
+ */
+async function healPlans<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  reads: { commitFacts: RecordFromIntentDeps<TEnv>["commitFacts"] },
+  repositoryId: string,
+  baseRef: string,
+): Promise<{ plans: HealPlan[] } | { error: string }> {
+  const db = env.DB as unknown as D1Like;
+  const project = await db
+    .prepare(
+      "SELECT attested_from_sequence AS epoch FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
+    )
+    .bind(repositoryId, baseRef)
+    .first<{ epoch: number }>();
+  if (project === null) return { error: "no queue for that branch" };
+
+  const findings = await findingsForChain(db, { repositoryId, baseRef, epochStartsAt: project.epoch });
+  const plans: HealPlan[] = [];
+  for (const finding of findings) {
+    plans.push(await planHeal(env, db, reads, { repositoryId, baseRef, finding }));
+  }
+  return { plans };
 }
 
 /**
@@ -449,7 +481,7 @@ async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // already produced is idempotent all the way through rather than only at
   // the transition.
   const db = env.DB as unknown as D1Like;
-  const existingDigest = await transitionRecordFor(db, input.attemptId);
+  const existingDigest = await transitionRecordFor(db, input.repositoryId, input.baseRef, input.attemptId);
   if (existingDigest !== null) {
     // Read back what was actually stored: a plain replay stored a
     // "reused-proof-merge" record, but a process that died between storing
@@ -3533,6 +3565,106 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
+   * What is wrong with this branch's chain, and what thwip would do about it.
+   *
+   * Read-only, and it exists so that reading a finding is not the start of an
+   * afternoon in D1. The heartbeat has reported these findings since the day
+   * the first unrecorded merge was understood, and a finding on its own leaves
+   * a person to list the merge intents, ask GitHub about every commit in the
+   * gap, compare trees and parent vectors, and work out which attempt
+   * authorized which commit. The queue holds both halves of every one of those
+   * comparisons, so it does the search and says what it found.
+   *
+   * The same verification the tick runs and the same one an outside reader runs
+   * against the published chain. A remedy computed from a different reading of
+   * the chain than the one that reported the problem would be a remedy for a
+   * different problem.
+   */
+  app.get("/v1/queue/:repositoryId/heal", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const plans = await healPlans(c.env, deps, repositoryId, baseRef);
+    if ("error" in plans) return c.json({ error: plans.error }, 404);
+    return c.json({ findings: plans.plans });
+  });
+
+  /**
+   * Answer one finding.
+   *
+   * The administrator names the finding and says why, and nothing else. No
+   * tree, no parent vector, no commit sha: the finding names the two ends of
+   * the gap, the commits in between come from GitHub, and which of them a merge
+   * record may be written for is decided by whether a signed intent pins that
+   * tree on those parents. An operator who could name the commit could name the
+   * throwaway merge GitHub computes for an open pull request, which is how
+   * record 54 reached the chain.
+   *
+   * The plan is recomputed here from a fresh verification rather than accepted
+   * from the caller, so a heal cannot answer a gap that has closed, or a gap
+   * that never existed.
+   *
+   * Where two attempts authorize one commit this refuses and names both. There
+   * is no flag that makes it choose, because choosing would be a guess wearing
+   * a signature.
+   */
+  app.post("/v1/queue/:repositoryId/heal", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const body = (await c.req.json().catch(() => ({}))) as { finding?: string; code?: string; reason?: string };
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+    if (typeof body.finding !== "string" || !/^sha256:[0-9a-f]{64}$/.test(body.finding)) {
+      return c.json({ error: "finding required: the digest the finding was reported at" }, 400);
+    }
+    // The digest names the record the finding was reported at, and one record
+    // can be reported at for more than one reason: a link can name the wrong
+    // predecessor and begin somewhere the record before it did not end. So the
+    // digest alone does not name a finding, and picking by it could carry out
+    // the remedy for the other one against a chain that keeps whatever it is
+    // given.
+    if (typeof body.code !== "string" || body.code.length === 0) {
+      return c.json({ error: "code required: the finding's code, because one record can carry two" }, 400);
+    }
+    const reason = body.reason.trim();
+
+    const plans = await healPlans(c.env, deps, repositoryId, baseRef);
+    if ("error" in plans) return c.json({ error: plans.error }, 404);
+    const plan = plans.plans.find((p) => p.digest === body.finding && p.code === body.code);
+    if (plan === undefined) {
+      return c.json({ error: "this branch's chain has no such finding", code: "NO_SUCH_FINDING" }, 404);
+    }
+
+    const outcome = await applyHeal(c.env, recordFromIntentDepsFor<TEnv>(deps, onQueue), {
+      repositoryId,
+      baseRef,
+      plan,
+      actorPrincipalId: who.principalId,
+      reason,
+    });
+    if (outcome.status === "refused") {
+      return c.json({ error: outcome.detail, code: outcome.code, steps: plan.steps }, 409);
+    }
+    return c.json({
+      healed: "applied",
+      finding: plan.digest,
+      wrote: outcome.wrote,
+      actor: who.principalId,
+      reason,
+    });
+  });
+
+  /**
    * Correct a record that names a sha the branch does not have.
    *
    * Record 54 says pull request 107's merge left the base at the throwaway test
@@ -3684,7 +3816,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // the partial unique index on attempt_id refuses a second row that claims a
     // position, so two callers racing cannot both write one.
     const correctionKey = `correction:${correctsDigest}`;
-    const already = await transitionRecordFor(db, correctionKey);
+    const already = await transitionRecordFor(db, repositoryId, baseRef, correctionKey);
     if (already !== null) {
       return c.json({ corrected: "already", corrects: correctsDigest, transitionDigest: already });
     }

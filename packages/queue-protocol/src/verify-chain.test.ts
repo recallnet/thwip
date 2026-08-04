@@ -126,6 +126,31 @@ describe("verifying a chain", () => {
       expect(findings[0]?.detail).toContain(unrecorded);
     });
 
+    /**
+     * The two shas a reader needs are in the sentence, and a sentence is not
+     * something another program can act on. Whoever repairs this gap has to
+     * name both ends of it, and parsing them back out of English is how a
+     * repair tool starts disagreeing with the verifier it reads from.
+     */
+    it("names both ends of the gap in fields, not only in the sentence", async () => {
+      const fiftyTwo = await makeLink({
+        sequence: 52,
+        previous: D("a"),
+        before: fiftyTwoBefore,
+        after: fiftyTwoAfter,
+        head: "aaff7ce48dc0eb613ae11d2291ae1cebc137febe",
+      });
+      const fiftyThree = await makeLink({
+        sequence: 53,
+        previous: fiftyTwo.digest,
+        before: unrecorded,
+        after: fiftyThreeAfter,
+        head: "e9bc094f8a436cbfd9744b3ae5e94f1b0ed69541",
+      });
+      const { findings } = await verifyChain([fiftyTwo, fiftyThree], atEpoch);
+      expect(findings[0]?.gap).toEqual({ from: fiftyTwoAfter, to: unrecorded });
+    });
+
     it("says nothing when record 53 begins where record 52 ended", async () => {
       const fiftyTwo = await makeLink({
         sequence: 52,
