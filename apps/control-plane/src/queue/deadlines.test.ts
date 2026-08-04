@@ -66,8 +66,6 @@ const REF = "refs/heads/main";
 function routes() {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
-      activePolicy: async () => null,
-      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
     }) as Parameters<typeof queueRoutes>[0],
   );
 }

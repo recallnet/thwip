@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { queueRouteDeps } from "../../test/queue-deps.js";
+import { fixturePolicy, queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -111,7 +111,7 @@ function entryFor(entries: Awaited<ReturnType<typeof snapshotEntries>>, pr: numb
 function routesAs(principalId: string, securityProfile: string) {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF, principalId, githubUserId: principalId.replace("principal_", "") }, {
-      activePolicy: async () => ({ securityProfile }),
+      activePolicy: async () => fixturePolicy({ securityProfile }),
     }) as Parameters<typeof queueRoutes>[0],
   );
 }

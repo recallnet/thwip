@@ -64,11 +64,9 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   driven.length = 0;
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
-      activePolicy: async () => null,
       driveTurn: async (_e: unknown, _r: string, pullRequestNumber: number) => {
         driven.push(pullRequestNumber);
       },
-      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
       ...over,
     }) as Parameters<typeof queueRoutes>[0],
   );
