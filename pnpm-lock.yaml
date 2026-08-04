@@ -208,7 +208,11 @@ importers:
         specifier: ^2.0.0
         version: 2.1.0
 
-  packages/queue-domain: {}
+  packages/queue-domain:
+    dependencies:
+      '@thwip/queue-protocol':
+        specifier: workspace:*
+        version: link:../queue-protocol
 
   packages/queue-protocol:
     dependencies:

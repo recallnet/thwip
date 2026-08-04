@@ -1,3 +1,5 @@
+import type { TransitionRecordKind } from "@thwip/queue-protocol";
+
 /**
  * Stable vocabulary for the branch queue. Every list here is closed: an
  * unrecognized value fails closed rather than being treated as benign
@@ -142,22 +144,55 @@ export const RECONCILING_RESOLUTIONS = [
 
 export type ReconcilingResolution = (typeof RECONCILING_RESOLUTIONS)[number];
 
-/** How a transition entered the canonical chain (plan.md §21.8, §24). */
 /**
+ * How a transition entered the canonical chain (plan.md §21.8, §24).
+ *
+ * The protocol's record kinds are the source. They are what gets signed, so
+ * they are what a reader auditing the chain actually sees; this list is the
+ * shorter spelling the event log and the projection have carried since before
+ * the records were signed at all, and rows written under it are still in D1.
+ *
+ * The two were written by hand, separately, and disagreed on both count and
+ * spelling. The control plane bridged them in three places, each of the form
+ * `kind === "candidate-verified-merge" || kind === "verified-merge" ?
+ * "verified" : "reused"`, so a record kind nobody updated all three for would
+ * have been filed as a reuse without a word. The map below is the only bridge
+ * now, and it is total over the protocol's list, so a new record kind fails the
+ * build until somebody says which of these it is.
+ *
  * `reused` is a merge that rested on the proof already carried by the head. It
  * is distinct from `verified` because a verified transition claims something ran
  * against the integrated candidate, and under that profile nothing did. A reader
  * auditing the chain has no other way to tell the two apart.
- */
-/**
+ *
  * `correction` is a record that names an earlier record and states the sha that
  * record should have named. It moves nothing on the branch: it is appended
  * because the chain is hash-linked and the record it corrects cannot be edited
  * without re-signing every record after it.
  */
-export const TRANSITION_KINDS = ["genesis", "verified", "reused", "override", "external", "correction"] as const;
+const KIND_OF_RECORD = {
+  genesis: "genesis",
+  // Both claim a run against the integrated candidate, and the chain keeps them
+  // apart by who ran it. The event log never carried that distinction, and
+  // widening it would rewrite rows already written.
+  "verified-merge": "verified",
+  "candidate-verified-merge": "verified",
+  "reused-proof-merge": "reused",
+  "override-merge": "override",
+  "external-transition": "external",
+  "base-correction": "correction",
+} as const satisfies Record<TransitionRecordKind, string>;
 
-export type TransitionKind = (typeof TRANSITION_KINDS)[number];
+export type TransitionKind = (typeof KIND_OF_RECORD)[TransitionRecordKind];
+
+export const TRANSITION_KINDS: readonly TransitionKind[] = [
+  ...new Set<TransitionKind>(Object.values(KIND_OF_RECORD)),
+];
+
+/** The event log's spelling for a record the protocol signed. */
+export function transitionKindOf(record: TransitionRecordKind): TransitionKind {
+  return KIND_OF_RECORD[record];
+}
 
 /** Who executed the integration run for an attempt (plan.md §8.2, §10). */
 export const EXECUTION_MODES = ["device", "fast-reuse", "remote"] as const;
