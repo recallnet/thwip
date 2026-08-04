@@ -195,6 +195,16 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   // A candidate this machine cannot fetch is a reachability problem, and the
   // same commit is very likely there on the next attempt.
   CANDIDATE_UNAVAILABLE: EXIT.unavailable,
+  // The queue could not read the repository, so it says nothing about this pull
+  // request and the next ask very likely gets an answer.
+  BASE_UNREADABLE: EXIT.unavailable,
+  // GitHub recomputes mergeability and rebuilds the merge commit after every
+  // merge on the branch, and answers about neither while it does. Waiting is the
+  // whole answer, so these retry rather than sending anybody to edit code.
+  MERGEABILITY_UNKNOWN: EXIT.unavailable,
+  CANDIDATE_MISSING: EXIT.unavailable,
+  CANDIDATE_STALE: EXIT.unavailable,
+  CANDIDATE_PARENTS_UNEXPECTED: EXIT.unavailable,
   SERVICE_UNAVAILABLE: EXIT.unavailable,
   NETWORK_UNAVAILABLE: EXIT.unavailable,
   BUNDLE_UNAVAILABLE: EXIT.unavailable,

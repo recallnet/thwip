@@ -81,6 +81,13 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
+    integratedCandidate: async () => ({
+      status: "pinned",
+      baseSha: "b".repeat(40),
+      headSha: HEAD,
+      candidateSha: "c".repeat(40),
+      candidateTreeOid: TREE,
+    }),
     commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
     sleep: async () => {},
     ...over,

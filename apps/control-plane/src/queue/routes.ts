@@ -48,6 +48,7 @@ import {
 import { nextAction, turnCheckUpdates, unplaceableUpdate, type TurnCheckUpdate } from "./turn-check.js";
 import { proofBindingFrom, proofShortfall, workReceiptDigestFrom, type ProofBinding } from "./work-receipt.js";
 import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-port.js";
+import type { CandidateStateReason, IntegratedCandidate } from "./candidate.js";
 import {
   authorizationFor,
   readAttestation,
@@ -1041,21 +1042,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * The integrated candidate GitHub has computed for a pull request.
    *
    * What a device is dispatched to run under `fresh`, so it comes from GitHub
-   * rather than from the machine asking for work. Null while GitHub has not
-   * finished computing mergeability, or when the pull request cannot be merged
-   * at all, and either way there is nothing to hand out.
+   * rather than from the machine asking for work. When there is no candidate to
+   * hand out this says which of the eight states GitHub is in, because the
+   * caller acts on them differently: a conflict ends the turn, a mergeability
+   * GitHub has not finished computing does not. Null only when the repository
+   * itself could not be read, which says nothing about the pull request.
    */
   integratedCandidate?(
     env: TEnv,
     repositoryId: string,
     baseRef: string,
     pullRequestNumber: number,
-  ): Promise<{
-    baseSha: string;
-    headSha: string;
-    candidateSha: string;
-    candidateTreeOid: string;
-  } | null>;
+  ): Promise<IntegratedCandidate | null>;
   /**
    * Ask the pinned verifier to run the required suites against a candidate.
    *
@@ -1692,12 +1690,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "CANDIDATE_UNAVAILABLE", detail: "this deployment cannot resolve a candidate" }, 503);
     }
     const candidate = await deps.integratedCandidate(c.env, repositoryId, baseRef, entry.pullRequestNumber);
-    if (candidate === null) {
+    if (candidate === null || candidate.status !== "pinned") {
       // GitHub computes mergeability asynchronously, and a pull request that
       // cannot be integrated has no candidate at all. Neither is a reason to
-      // hand a device a tree to run.
+      // hand a device a tree to run, and the device is told which it is.
       return c.json(
-        { error: "CANDIDATE_UNAVAILABLE", detail: "GitHub has no integrated candidate for this pull request yet" },
+        {
+          error: "CANDIDATE_UNAVAILABLE",
+          detail:
+            candidate === null
+              ? "GitHub would not say what this pull request integrates to"
+              : nextAction(candidate.reason),
+        },
         409,
       );
     }
@@ -2439,13 +2443,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorGithubUserId?: string;
       proofAccepted?: boolean;
       draft?: boolean;
-      /** The integrated candidate GitHub simulated for this pull request. */
-      candidate?: {
-        baseSha?: string;
-        candidateSha?: string;
-        candidateTreeOid?: string;
-        parentShas?: string[];
-      };
       workReceiptDigest?: string;
       /**
        * Walk the held attempt to the point a merge may be written. Only the caller
@@ -2709,16 +2706,142 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     let operationId: string | null = null;
     let latest = held;
-    const cand = body.candidate;
-    if (
-      body.prepare === true &&
-      held.activeAttemptId !== null &&
-      cand?.baseSha !== undefined &&
-      cand.candidateSha !== undefined &&
-      cand.candidateTreeOid !== undefined
-    ) {
+    // Only for the entry that holds the lane. Somebody else's turn is answered
+    // from the snapshot below, and reading GitHub for a pull request that is
+    // merely waiting would spend a call to say what the queue already knows.
+    if (body.prepare === true && held.activeAttemptId !== null && held.activeEntryId === entryId) {
       const attemptId = held.activeAttemptId;
       const holder = held.entries.find((e) => e.entryId === entryId);
+
+      // The base and the candidate, read here rather than taken from whoever is
+      // asking.
+      //
+      // The caller used to send all four objects. A workflow read the pull
+      // request, sent what it saw, and the queue signed against that reading
+      // however old it had become on the way. On 2 August 2026 four pull
+      // requests merged into this repository and no chain record could be
+      // written for any of them: pull request 117's intent was signed sixteen
+      // seconds after its base had already been superseded, the merge landed on
+      // the tip the branch really had, and none of the seventy stored intents
+      // pins any of the four trees that landed. `authorizationFor` compares the
+      // exact tree and the exact parents, so a merge nothing pinned can only be
+      // filed as an external transition, which claims far less than a merge.
+      //
+      // So the queue asks GitHub itself, inside the guard that signs. Nothing
+      // below reads the caller's numbers.
+      const current =
+        deps.integratedCandidate === undefined
+          ? null
+          : await deps
+              .integratedCandidate(c.env, repositoryId, baseRef, body.pullRequestNumber)
+              .catch(() => null);
+      if (current === null || current.status !== "pinned") {
+        // Why there is no candidate, in the words of the state GitHub is
+        // actually in. All eight used to arrive as `BASE_UNREADABLE`, so a pull
+        // request that had developed a conflict was told GitHub was
+        // unreachable, and the attempt held the lane until the execution
+        // deadline reaped it. `BASE_UNREADABLE` now means only what it says:
+        // the repository itself could not be read, which says nothing about
+        // this pull request.
+        const reason: CandidateStateReason | "BASE_UNREADABLE" =
+          current === null ? "BASE_UNREADABLE" : current.reason;
+
+        // A pull request that is closed or conflicting cannot merge from this
+        // turn or any turn until somebody changes it, so the turn ends here and
+        // the lane goes to whoever is behind it. Everything else is transient:
+        // mergeability GitHub has not finished computing, a candidate it has
+        // not rebuilt yet. Those keep the turn and are asked again.
+        let after: QueueSnapshot | null = null;
+        if (reason === "MERGE_CONFLICT") {
+          ({ snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+            if (store.state().activeAttemptId !== attemptId) return;
+            commands.terminateAttempt({
+              idempotencyKey: `authorize:conflict:${attemptId}`,
+              attemptId,
+              outcome: "MERGE_CONFLICT",
+            });
+          }));
+        } else if (reason === "PR_CLOSED") {
+          ({ snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) => {
+            commands.cancel({
+              idempotencyKey: `authorize:closed:${entryId}:${headSha}`,
+              entryId,
+              actorPrincipalId: "github",
+              reason: "the pull request is closed",
+            });
+          }));
+        }
+
+        // The lane, driven on the way out. GitHub invalidates mergeability for
+        // every open pull request the moment one lands, so the run dispatched a
+        // second later reads null, is refused here, and is spent. Nothing re-drove
+        // the lane, so the next attempt waited for the five-minute cron and the
+        // branch merged once per five minutes.
+        await driveLane(c.env, deps, repositoryId, after ?? held);
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason,
+          detail: nextAction(reason),
+          entryId,
+          operationId: null,
+          // Only where asking again is the answer. A turn that ended here waits
+          // on a person, and telling the caller to come back in twenty seconds
+          // would say the opposite.
+          ...(after === null ? { retryAfterSeconds: 20 } : {}),
+        });
+      }
+      if (current.headSha !== headSha) {
+        // A push landed while this turn was being asked about. The candidate
+        // GitHub is offering integrates a commit whose proof nothing here has
+        // read, and the entry's own head follows on the next ask.
+        await driveLane(c.env, deps, repositoryId, held);
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: "HEAD_MOVED",
+          detail: nextAction("HEAD_MOVED"),
+          entryId,
+          operationId: null,
+        });
+      }
+
+      // The branch has moved off the base this attempt was integrated against.
+      //
+      // The reducer holds a pinned candidate immutable, so this turn can only
+      // ever produce a merge onto a base that is gone. Signing anything for it
+      // would pin a tree no branch will take, and walking it would mint an
+      // operation for a write that fails. The attempt ends BASE_MOVED, which
+      // defers: the place in line is kept and the next turn is taken against
+      // the base that is there now.
+      const alreadyPinned = held.activeCandidate;
+      if (alreadyPinned !== null && alreadyPinned.baseSha !== current.baseSha) {
+        const { snapshot: after } = await onQueue(c.env, repositoryId, baseRef, ({ store, commands }) => {
+          if (store.state().activeAttemptId !== attemptId) return;
+          commands.terminateAttempt({
+            idempotencyKey: `authorize:base-moved:${attemptId}:${current.baseSha}`,
+            attemptId,
+            outcome: "BASE_MOVED",
+          });
+        });
+        await driveLane(c.env, deps, repositoryId, after);
+        return c.json({
+          authorized: false,
+          enforcing: true,
+          activationState: project.activationState,
+          reason: "CANDIDATE_BASE_MOVED",
+          detail: `${nextAction("CANDIDATE_BASE_MOVED")} ${baseRef} is ${current.baseSha}, and this candidate was integrated against ${alreadyPinned.baseSha}.`,
+          entryId,
+          operationId: null,
+        });
+      }
+      const cand = {
+        baseSha: current.baseSha,
+        candidateSha: current.candidateSha,
+        candidateTreeOid: current.candidateTreeOid,
+      };
 
       // Nothing may be certified until the integrated candidate has actually been
       // run. Until this check existed the walk below used a constant in place of a
