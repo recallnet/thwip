@@ -903,6 +903,54 @@ describe("settling a write the workflow walked away from", () => {
     expect(remaining).toEqual([]);
   });
 
+  /**
+   * A write that landed, was resolved, and never got a record.
+   *
+   * The obligation to finish a merge write used to end at "resolved", and
+   * resolved is not finished: the record is. On 4 August 2026 pull request 183
+   * merged under the App's own write, the queue confirmed it, the ancestry read
+   * that gates the record had not caught up, and the operation was resolved
+   * MERGED with no link in the chain. The sweep looked only at unresolved rows,
+   * so nothing owned it and nothing ever came back for it.
+   */
+  it("records a merge that was resolved and never written down", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    await withQueueState(db, "1", REF, async (store) =>
+      store.resolveMergeOperation(`merge_${ORPHAN.attemptId}`, "MERGED", new Date().toISOString()),
+    );
+    expect(await readChain(db, "1", REF)).toHaveLength(0);
+
+    const result = await tickAllQueues(
+      e,
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+    );
+
+    expect(result.settledWrites).toBe(1);
+    expect(await readChain(db, "1", REF)).toHaveLength(1);
+  });
+
+  /** And it stops asking once the record is there. */
+  it("leaves a merge that already has its record alone", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const ports = { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} };
+    await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
+    const again = await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
+
+    expect(again.settledWrites).toBe(0);
+    expect(await readChain(db, "1", REF)).toHaveLength(1);
+  });
+
   /** A row that came back unknown was examined, not settled. */
   it("counts only the writes it actually settled", async () => {
     const e = env();
