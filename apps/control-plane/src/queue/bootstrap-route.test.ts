@@ -60,6 +60,7 @@ function seedInstalledRepository(options: { installationId?: string | null } = {
 class FakeGitHub implements BootstrapGitHub {
   rulesets = new Map<string, StoredRuleset>();
   pull: SetupPullRequestState | null = null;
+  openedFiles: string[] = [];
   private nextId = 100;
 
   async baseSha(): Promise<string> {
@@ -70,7 +71,8 @@ class FakeGitHub implements BootstrapGitHub {
     return this.pull;
   }
 
-  async openSetupPullRequest(): Promise<SetupPullRequestState> {
+  async openSetupPullRequest(input: { files: ReadonlyArray<{ path: string }> }): Promise<SetupPullRequestState> {
+    this.openedFiles = input.files.map((file) => file.path);
     this.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
     return this.pull;
   }
@@ -121,13 +123,19 @@ async function applyManualRulesets(changes: readonly ManualRulesetChange[]): Pro
   }
 }
 
-async function postThroughManualSetup(githubOrgRole: "admin" | "owner" = "admin") {
+async function postThroughManualSetup(
+  githubOrgRole: "admin" | "owner" = "admin",
+  confirmQueueEnforcement = true,
+) {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const response = await bootstrapRouteResponse(
       env(),
       { githubOrgRole },
       REPOSITORY_ID,
-      { confirmRulesetBypassActors: true },
+      {
+        ...(confirmQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
+        confirmRulesetBypassActors: true,
+      },
       port,
     );
     const body = response.body as {
@@ -198,7 +206,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(row?.organization_id).toBe("org_1");
     expect(row?.base_ref).toBe("refs/heads/main");
     expect(row?.enabled).toBe(1);
-    expect(row?.activation_state).toBe("observe");
+    expect(row?.activation_state).toBe("enforced");
     expect(row?.backend).toBe("managed");
     expect(row?.merge_method).toBe("merge");
     expect(row?.merge_writer).toBe("app");
@@ -220,6 +228,48 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
     expect(response.status).toBe(202);
     expect(queueProjectRow()?.enabled).toBe(1);
+  });
+
+  it("keeps ownership disabled until the administrator explicitly enforces after observing", async () => {
+    seedInstalledRepository();
+    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+
+    const observing = await postThroughManualSetup("admin", false);
+    expect(observing).toMatchObject({ status: 202, body: { activationState: "observe" } });
+    const outcomes = (observing.body as { outcomes: Array<Record<string, unknown>> }).outcomes;
+    expect(outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "activate-policy-and-ownership",
+      confirmationRequired: "queue-enforcement",
+    });
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+
+    const started = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      { confirmQueueEnforcement: true },
+      port,
+    );
+    expect(started).toMatchObject({ status: 202, body: { activationState: "canary" } });
+  });
+
+  it("omits repository policy by default and adds it only on explicit request", async () => {
+    seedInstalledRepository();
+    await bootstrapRouteResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID, {}, port);
+    expect(github.openedFiles).not.toContain("thwip.yaml");
+  });
+
+  it("adds a repository policy when the administrator explicitly chooses an override", async () => {
+    seedInstalledRepository();
+    await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      { includeRepositoryConfig: true },
+      port,
+    );
+    expect(github.openedFiles).toContain("thwip.yaml");
   });
 
   it("takes the backend the caller asked for", async () => {

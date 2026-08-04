@@ -39,6 +39,8 @@ import type { Env } from "../env.js";
 export interface BootstrapRouteBody {
   readonly backend?: Backend;
   readonly mergeMethod?: MergeMethod;
+  readonly includeRepositoryConfig?: boolean;
+  readonly confirmQueueEnforcement?: boolean;
   readonly confirmRulesetBypassActors?: boolean;
 }
 
@@ -90,9 +92,10 @@ async function repositoryFor(
 export type BootstrapPort = (
   env: BootstrapRouteEnv,
   repo: { owner: string; repo: string; baseRef: string; installationId: string },
+  setup?: { readonly includeRepositoryConfig?: boolean },
 ) => Promise<BootstrapGitHub>;
 
-const githubPort: BootstrapPort = async (env, repo) => {
+const githubPort: BootstrapPort = async (env, repo, setup = {}) => {
   // `installationToken` asks for the whole binding and reads two fields of it,
   // both of which are here.
   const token = await installationToken(env as Env, repo.installationId);
@@ -106,6 +109,7 @@ const githubPort: BootstrapPort = async (env, repo) => {
         endpoint: env.PUBLIC_ORIGIN,
         actionRef: QUEUE_ACTION_REF,
         mergeWriter: "app",
+        ...(setup.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       }),
     },
   );
@@ -168,13 +172,16 @@ export async function bootstrapRouteResponse(
   try {
     return await handleBootstrapRequest({
       db: env.DB as unknown as D1Like,
-      github: await port(env, repo),
+      github: await port(env, repo, {
+        ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
+      }),
       integrationId: Number(env.GITHUB_APP_ID),
       endpoint: env.PUBLIC_ORIGIN,
       actionRef: QUEUE_ACTION_REF,
-      review: { requiredApprovingReviewCount: 1, requireCodeOwnerReview: false },
       repositoryId,
       baseRef: repo.baseRef,
+      ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
+      ...(body.confirmQueueEnforcement === true ? { confirmQueueEnforcement: true } : {}),
       ...(body.backend === undefined ? {} : { backend: body.backend }),
       ...(body.mergeMethod === undefined ? {} : { mergeMethod: body.mergeMethod }),
       ...(body.confirmRulesetBypassActors === true ? { confirmRulesetBypassActors: true } : {}),

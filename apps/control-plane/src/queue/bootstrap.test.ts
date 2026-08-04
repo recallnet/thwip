@@ -119,14 +119,18 @@ class FakeGitHub implements BootstrapGitHub {
   }
 }
 
-function deps(github: BootstrapGitHub, confirmRulesetBypassActors = false) {
+function deps(
+  github: BootstrapGitHub,
+  confirmRulesetBypassActors = false,
+  confirmQueueEnforcement = true,
+) {
   return {
     db: d1.db,
     github,
     integrationId: APP_INTEGRATION_ID,
     endpoint: "https://thwip.example.test",
     actionRef: "recallnet/thwip@v1",
-    review: { requiredApprovingReviewCount: 1, requireCodeOwnerReview: false },
+    ...(confirmQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
     ...(confirmRulesetBypassActors ? { confirmRulesetBypassActors: true } : {}),
   };
 }
@@ -145,11 +149,15 @@ async function applyManualRulesets(
 async function runAsRepositoryAdministrator(
   github: FakeGitHub,
   confirmRulesetBypassActors = true,
+  confirmQueueEnforcement = true,
 ): Promise<BootstrapRun> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const project = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
     if (project === null) throw new Error("enrolment did not persist");
-    const run = await runBootstrap(deps(github, confirmRulesetBypassActors), project);
+    const run = await runBootstrap(
+      deps(github, confirmRulesetBypassActors, confirmQueueEnforcement),
+      project,
+    );
     const last = run.outcomes.at(-1);
     if (last?.kind === "waiting" && last.manualRulesets !== undefined) {
       await applyManualRulesets(github, last.manualRulesets);
@@ -273,7 +281,7 @@ describe("advanceBootstrap", () => {
     expect(outcome).toMatchObject({ kind: "waiting", step: "merge-setup-pr" });
     expect(github.openedFiles).toContain(".github/workflows/thwip-required.yml");
     expect(github.openedFiles).not.toContain(".github/workflows/thwip-merge.yml");
-    expect(github.openedFiles).toContain("thwip.yaml");
+    expect(github.openedFiles).not.toContain("thwip.yaml");
 
     const after = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
     expect(after?.progress["merge-setup-pr"]).toBeUndefined();
@@ -366,7 +374,7 @@ describe("runBootstrap", () => {
 
     const project = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
     expect(project?.enabled).toBe(true);
-    expect(project?.activationState).toBe("observe");
+    expect(project?.activationState).toBe("enforced");
     expect(project?.progress).toMatchObject({
       "merge-setup-pr": true,
       "create-disabled-policy-without-source": true,
@@ -415,14 +423,62 @@ describe("runBootstrap", () => {
       step: "activate-policy-and-ownership",
       confirmationRequired: "ruleset-bypass-actors",
     });
-    expect(waiting.enabled).toBe(false);
+    expect(waiting.enabled).toBe(true);
+    expect(waiting.outcomes.at(-1)).toMatchObject({
+      expectedBypassActors: [
+        {
+          ruleset: OWNERSHIP_RULESET_NAME,
+          bypassActors: [
+            { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
+          ],
+        },
+        { ruleset: POLICY_RULESET_NAME, bypassActors: [] },
+      ],
+    });
 
     const continued = await runBootstrap(
       deps(github, true),
       (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
     );
     expect(continued.enabled).toBe(true);
+    expect(continued.status.activationState).toBe("enforced");
     expect(continued.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+  });
+
+  it("observes before an explicit, recoverable enforcement handoff", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await enrolled();
+
+    const observing = await runAsRepositoryAdministrator(github, true, false);
+    expect(observing.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "activate-policy-and-ownership",
+      confirmationRequired: "queue-enforcement",
+    });
+    expect(observing.status.activationState).toBe("observe");
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+    expect(github.rulesets.has(OWNERSHIP_RULESET_NAME)).toBe(false);
+
+    const started = await runBootstrap(
+      deps(github, true, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    const changes = started.outcomes.at(-1);
+    expect(changes).toMatchObject({
+      kind: "waiting",
+      step: "activate-policy-and-ownership",
+      manualRulesets: [{ ruleset: { name: OWNERSHIP_RULESET_NAME } }, { ruleset: { name: POLICY_RULESET_NAME } }],
+    });
+    expect(started.status.activationState).toBe("canary");
+    if (changes?.kind !== "waiting") throw new Error("expected the enforcement rulesets");
+    await applyManualRulesets(github, changes.manualRulesets ?? []);
+
+    const enforced = await runBootstrap(
+      deps(github, true, false),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    expect(enforced.status.activationState).toBe("enforced");
+    expect(enforced.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
   });
 
   it("refuses to pin an integration the check did not come from", async () => {

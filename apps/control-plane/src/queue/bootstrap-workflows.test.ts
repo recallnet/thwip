@@ -20,6 +20,13 @@ const legacyFiles = setupPullRequestFiles({
   mergeWriter: "workflow",
 });
 
+const overrideFiles = setupPullRequestFiles({
+  endpoint: "https://thwip.example.test",
+  actionRef: "recallnet/thwip@v1.2.3",
+  mergeWriter: "app",
+  includeRepositoryConfig: true,
+});
+
 function file(path: string): string {
   const found = files.find((f) => f.path === path);
   if (found === undefined) throw new Error(`no generated file at ${path}`);
@@ -33,11 +40,10 @@ function legacyFile(path: string): string {
 }
 
 describe("setupPullRequestFiles", () => {
-  it("offers the workflows and the policy a new repository has none of", () => {
+  it("offers only the workflows while inheriting organization defaults", () => {
     expect(files.map((f) => f.path).sort()).toEqual([
       ".github/workflows/thwip-queue-verify.yml",
       ".github/workflows/thwip-required.yml",
-      "thwip.yaml",
     ]);
   });
 
@@ -109,8 +115,11 @@ describe("setupPullRequestFiles", () => {
     expect(body).toMatch(/No repository merge token is needed/);
   });
 
-  it("commits a thwip.yaml the policy layer can read", () => {
-    const policy = parse(file("thwip.yaml")) as { version: number; required: string[] };
+  it("commits a thwip.yaml only when the team explicitly chooses a repository override", () => {
+    expect(files.map((generated) => generated.path)).not.toContain("thwip.yaml");
+    const source = overrideFiles.find((generated) => generated.path === "thwip.yaml")?.content;
+    expect(source).toBeDefined();
+    const policy = parse(source!) as { version: number; required: string[] };
     expect(policy.version).toBeGreaterThanOrEqual(4);
     expect(policy.required.length).toBeGreaterThan(0);
   });
