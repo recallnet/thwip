@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -62,42 +63,18 @@ afterEach(() => {
 });
 
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
-  return queueRoutes({
-    publishTurnCheck: async () => {},
-    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => ({
-      policyDigest: `sha256:${"b".repeat(64)}`,
-      pipelineDigest: `sha256:${"c".repeat(64)}`,
-      requiredSuites: ["unit"],
-      securityProfile: "fast",
-      organizationId: "org_1",
-      verifier: null,
-    }),
-    proofCheckRunId: async () => "778899",
-    signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge", mergeWriter: "app" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async (_e, _r, sha) =>
-      sha === LANDED
-        ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "Merge pull request #117 (Thwip Queue)" }
-        : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
-    integratedCandidate: async () => ({
-      status: "pinned",
-      baseSha: BASE,
-      headSha: HEAD,
-      candidateSha: CANDIDATE,
-      candidateTreeOid: TREE,
-    }),
-    baseContainsSha: async () => true,
-    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
-    sleep: async () => {},
-    ...over,
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD }, {
+      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge", mergeWriter: "app" }),
+      commitFacts: async (_e: unknown, _r: string, sha: string) =>
+        sha === LANDED
+          ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "Merge pull request #117 (Thwip Queue)" }
+          : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
+      baseContainsSha: async () => true,
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+      ...over,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 /** A write port that records the intent it was handed and answers as told. */

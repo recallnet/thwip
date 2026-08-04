@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -108,18 +109,11 @@ function entryFor(entries: Awaited<ReturnType<typeof snapshotEntries>>, pr: numb
 
 /** A routes app whose session belongs to `principalId`, so it can heartbeat as that principal. */
 function routesAs(principalId: string, securityProfile: string) {
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId, githubUserId: principalId.replace("principal_", ""), isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => ({ securityProfile }),
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, principalId, githubUserId: principalId.replace("principal_", "") }, {
+      activePolicy: async () => ({ securityProfile }),
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 /** A device id shaped the way `thwip queue work` sends one: a signing key fingerprint. */
