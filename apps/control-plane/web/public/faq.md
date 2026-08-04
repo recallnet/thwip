@@ -116,9 +116,13 @@ never used to approve itself.
 
 The thwip GitHub App evaluates the exact pull-request head or merge-group
 members and publishes the `thwip` check directly. New and migrated projects
-start with a distinct `thwip / proof (observe)` check. After that check passes,
-an administrator can enforce the App check and pin the required context to the
-thwip App without an unprotected cutover.
+start with a distinct `thwip / proof (observe)` check, and an administrator
+enforces it once that check has passed.
+
+A branch running Thwip Queue also requires `thwip` from GitHub Actions, which
+the `thwip-required.yml` workflow the setup pull request adds is what satisfies.
+Both checks appear on the commit and both run the same verifier. The Actions one
+is what the branch waits on.
 
 Every evaluation produces a service-signed audit record containing the exact
 subject, base, policy, verifier version, signer outcomes, and GitHub check-run
