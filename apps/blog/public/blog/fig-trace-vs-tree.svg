@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="An agent execution graph of prompts, tool calls, file writes and shell runs on the left, reduced on the right to a single git tree hash that a proof covers">
+  <rect width="1200" height="520" fill="#ffffff"/>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+
+    <text x="64" y="50" font-size="20" font-weight="700" fill="#1b1b1b">Two different objects to sign</text>
+
+    <!-- LEFT: execution graph -->
+    <text x="64" y="92" font-size="14" font-weight="700" fill="#565c65" letter-spacing="0.08em">EXECUTION PROVENANCE</text>
+    <text x="64" y="114" font-size="14" fill="#71767a">the typed graph of the run</text>
+
+    <rect x="52" y="132" width="520" height="300" fill="#f7f8f9" stroke="#dfe1e2" stroke-width="1"/>
+
+    <g stroke="#8f9ba7" stroke-width="1.5" fill="none">
+      <path d="M132 190 L242 190"/>
+      <path d="M132 190 L242 246"/>
+      <path d="M302 190 L412 246"/>
+      <path d="M302 246 L412 246"/>
+      <path d="M132 190 L242 302"/>
+      <path d="M302 302 L412 302"/>
+      <path d="M302 302 L412 358"/>
+      <path d="M472 246 L472 302"/>
+      <path d="M132 190 L242 358"/>
+      <path d="M302 358 L412 358"/>
+    </g>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">
+      <g fill="#ffffff">
+        <rect x="72" y="176" width="60" height="28" fill="#00436d"/>
+        <text x="102" y="195" text-anchor="middle" fill="#ffffff">prompt</text>
+      </g>
+      <g>
+        <rect x="242" y="176" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="272" y="195" text-anchor="middle" fill="#1b1b1b">read</text>
+        <rect x="242" y="232" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="272" y="251" text-anchor="middle" fill="#1b1b1b">tool</text>
+        <rect x="242" y="288" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="272" y="307" text-anchor="middle" fill="#1b1b1b">write</text>
+        <rect x="242" y="344" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="272" y="363" text-anchor="middle" fill="#1b1b1b">shell</text>
+
+        <rect x="412" y="232" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="442" y="251" text-anchor="middle" fill="#1b1b1b">edit</text>
+        <rect x="412" y="288" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="442" y="307" text-anchor="middle" fill="#1b1b1b">edit</text>
+        <rect x="412" y="344" width="60" height="28" fill="#ffffff" stroke="#8f9ba7"/>
+        <text x="442" y="363" text-anchor="middle" fill="#1b1b1b">test</text>
+      </g>
+    </g>
+
+    <text x="312" y="410" font-size="13" fill="#71767a" text-anchor="middle">unreplayable, so a signature over it asserts the recorder's integrity</text>
+
+    <!-- ARROW -->
+    <g>
+      <path d="M596 282 H676" stroke="#005ea2" stroke-width="4"/>
+      <path d="M676 270 L700 282 L676 294 Z" fill="#005ea2"/>
+      <text x="648" y="264" font-size="13" font-weight="600" fill="#005ea2" text-anchor="middle">discarded</text>
+    </g>
+
+    <!-- RIGHT: tree -->
+    <text x="724" y="92" font-size="14" font-weight="700" fill="#565c65" letter-spacing="0.08em">THWIP</text>
+    <text x="724" y="114" font-size="14" fill="#71767a">the fixed point the run produced</text>
+
+    <rect x="712" y="132" width="436" height="300" fill="#f7f8f9" stroke="#dfe1e2" stroke-width="1"/>
+
+    <rect x="748" y="196" width="364" height="92" fill="#ffffff" stroke="#005ea2" stroke-width="2"/>
+    <text x="772" y="228" font-size="13" font-weight="600" fill="#565c65">subject</text>
+    <text x="772" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#1b1b1b">git-tree  8f8d717ab992…</text>
+
+    <text x="772" y="326" font-size="14" fill="#1b1b1b">signed by an enrolled device key</text>
+    <text x="772" y="352" font-size="14" fill="#1b1b1b">covering suite results and a policy digest</text>
+    <text x="930" y="410" font-size="13" fill="#71767a" text-anchor="middle">anybody can check this tree out and run it again</text>
+  </g>
+</svg>
