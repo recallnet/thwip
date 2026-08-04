@@ -325,8 +325,22 @@ export async function admit(
       });
     }
   }
+  // Keyed on the decision as well as the minute.
+  //
+  // The minute alone deduplicated a burst of parallel jobs asking about one
+  // head, which is what it is for, and it also deduplicated a *different*
+  // answer arriving in the same minute. That was survivable while a workflow
+  // polled this endpoint every twenty seconds for as long as it took. It is not
+  // survivable without one: the `pull_request` delivery lands before the App
+  // has verified the head, so the entry is blocked on a missing proof, and the
+  // verdict that arrives ten seconds later was dropped as a repeat. Nothing
+  // asked again, so the pull request stayed blocked on a proof that had passed.
+  //
+  // The decision in the key means a changed answer always applies, at once, and
+  // a repeated one still collapses.
+  const decision = `${input.ready}:${input.schedulerEligible}:${input.primaryReason ?? ""}`;
   commands.evaluateReadiness({
-    idempotencyKey: `authorize:ready:${input.entryId}:${input.headSha}:${input.readinessBucket}`,
+    idempotencyKey: `authorize:ready:${input.entryId}:${input.headSha}:${input.readinessBucket}:${decision}`,
     entryId: input.entryId,
     ready: input.ready,
     schedulerEligible: input.schedulerEligible,

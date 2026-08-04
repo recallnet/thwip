@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import type { PullRequestGates } from "./readiness.js";
 
@@ -124,6 +125,7 @@ interface Verdict {
 }
 
 async function askForTurn(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<Verdict> {
+  acceptProof(raw, REPO, HEAD);
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -134,7 +136,6 @@ async function askForTurn(app: ReturnType<typeof routes>, e: QueueRouteEnv): Pro
         headSha: HEAD,
         baseRef: REF,
         authorGithubUserId: "1",
-        proofAccepted: true,
         draft: false,
         prepare: true,
         candidate: {

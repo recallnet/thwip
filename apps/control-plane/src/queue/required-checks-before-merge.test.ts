@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { unsatisfiedRequiredChecks } from "./github-port.js";
 import { nonThwipCheckState } from "./readiness.js";
@@ -101,6 +102,7 @@ interface Verdict {
 }
 
 async function prepareMerge(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<Verdict> {
+  acceptProof(raw, REPO, HEAD);
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -111,7 +113,6 @@ async function prepareMerge(app: ReturnType<typeof routes>, e: QueueRouteEnv): P
         headSha: HEAD,
         baseRef: REF,
         authorGithubUserId: "1",
-        proofAccepted: true,
         draft: false,
         prepare: true,
         candidate: {

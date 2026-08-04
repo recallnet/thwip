@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import { buildSnapshot, commandsFor } from "./queue-operations.js";
@@ -77,6 +78,7 @@ function routes() {
 }
 
 async function authorize(app: ReturnType<typeof routes>, e: QueueRouteEnv, pullRequestNumber: number) {
+  acceptProof(raw, REPO, String(pullRequestNumber).padStart(40, "a"));
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -87,7 +89,6 @@ async function authorize(app: ReturnType<typeof routes>, e: QueueRouteEnv, pullR
         headSha: String(pullRequestNumber).padStart(40, "a"),
         baseRef: REF,
         authorGithubUserId: String(pullRequestNumber),
-        proofAccepted: true,
         draft: false,
       }),
     },

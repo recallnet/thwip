@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 
 /**
@@ -113,6 +114,7 @@ async function prepareMerge(
     parentShas: [BASE, HEAD],
   },
 ): Promise<Verdict> {
+  acceptProof(raw, REPO, HEAD);
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -123,7 +125,6 @@ async function prepareMerge(
         headSha: HEAD,
         baseRef: REF,
         authorGithubUserId: "1",
-        proofAccepted: true,
         draft: false,
         prepare: true,
         candidate,
@@ -152,6 +153,7 @@ function intents(): Array<{ baseSha: string; candidateTreeOid: string; candidate
  */
 async function pinCandidateWhilePaused(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<void> {
   // The turn first, so there is an attempt for the walk below to pin against.
+  acceptProof(raw, REPO, HEAD);
   await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -162,7 +164,6 @@ async function pinCandidateWhilePaused(app: ReturnType<typeof routes>, e: QueueR
         headSha: HEAD,
         baseRef: REF,
         authorGithubUserId: "1",
-        proofAccepted: true,
         draft: false,
       }),
     },

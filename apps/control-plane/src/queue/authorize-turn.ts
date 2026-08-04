@@ -28,6 +28,7 @@ import type { MergeWriter } from "./merge-write.js";
 import { requiredSuitesDigest, type Sha256 } from "@thwip/queue-protocol";
 import { decideCandidate, requiresRemoteVerification } from "./candidate-verdict.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
+import { headProofAccepted } from "./head-proof.js";
 import { candidateVerdict as readCandidateVerdict, claimCandidateDispatch } from "./candidate-store.js";
 import {
   driveLane,
@@ -64,12 +65,26 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
   ): Promise<{ activationState: string; mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
-  /** Who wrote a pull request, which branch it targets, and whether they are a bot. */
+  /**
+   * What GitHub says a pull request is, for a caller holding only its number.
+   *
+   * Author, base branch, bot-ness, draft and head, all from the one read. The
+   * first three settle who the turn belongs to and which queue the entry is on.
+   * The last two are what a caller that did not arrive on a `pull_request`
+   * delivery has no other way to know, and guessing either of them admits a
+   * draft or walks a head that has moved.
+   */
   pullRequestPlacement(
     env: TEnv,
     repositoryId: string,
     pullRequestNumber: number,
-  ): Promise<{ authorGithubUserId: string; baseRef: string; authorIsBot: boolean } | null>;
+  ): Promise<{
+    authorGithubUserId: string;
+    baseRef: string;
+    authorIsBot: boolean;
+    draft: boolean;
+    headSha: string;
+  } | null>;
   /** Publish whose turn it is, as a check GitHub can require. */
   publishTurnCheck?(env: TEnv, repositoryId: string, update: TurnCheckUpdate): Promise<void>;
   /** The integrated candidate GitHub has computed for a pull request. */
@@ -125,13 +140,6 @@ export interface TurnRequest {
   readonly headSha: string;
   readonly authorGithubUserId: string;
   readonly draft: boolean;
-  /**
-   * Whether this head's proof has been accepted.
-   *
-   * The caller establishes it; the queue does not take a claim about it on
-   * trust from anything the branch under test can author.
-   */
-  readonly proofAccepted: boolean;
   /**
    * Walk the held attempt to the point a merge may be written. Only the caller
    * that is about to write asks for this: preparing earlier starts the
@@ -394,9 +402,6 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // Capability is left out and folded below: `foldCapability` is where runner
   // presence is decided for every writer of `schedulerEligible`.
   const stated: ReadinessFacts = {
-    // Closing is carried by the `pull_request` webhook, which cancels the
-    // entry outright. Nothing on this request says whether it is open.
-    pullRequestState: "unread",
     draft: input.draft,
     // The three that cost a GitHub read each. They are read on the walk to a
     // merge, below, where one merge's worth is the right price for them.
@@ -405,7 +410,11 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
     rulesetEnforced: "unread",
     authorIsBot: unsponsored === null ? "unread" : unsponsored.authorIsBot,
     sponsorPrincipalId,
-    headProof: input.proofAccepted ? "accepted" : "missing",
+    // Read, never asserted. This was `proofAccepted` off the request body,
+    // which a workflow living in the branch under test composed, so the one
+    // fact the product exists to establish was claimed by the thing being
+    // checked. The App verified the proof itself and stored the verdict.
+    headProof: (await headProofAccepted(db, repositoryId, headSha)) ? "accepted" : "missing",
     proofShortfall: "unread",
     reviewsSatisfied: "unread",
     codeOwnerReviewSatisfied: "unread",

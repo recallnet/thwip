@@ -42,6 +42,10 @@ import {
   type MergeWriteOutcome,
 } from "./queue/merge-write.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
+import { authorizeTurn } from "./queue/authorize-turn.js";
+import { reconsiderHead } from "./queue/reconsider-head.js";
+import { GITHUB_READS } from "./queue/deadlines.js";
+import type { OnQueue } from "./queue/merge-lane.js";
 import { requestTurn } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
@@ -1490,98 +1494,33 @@ export async function queueFromPullRequest(env: Env, payload: {
     return { handled: false, detail: "author has no activated principal" };
   }
 
-  // Through `deriveReadiness`, from the facts this event carries.
+  // The same walk `/authorize` makes, from the same reads.
   //
-  // The pair of expressions that used to stand here named two reasons out of
-  // the twenty the derivation knows, and `/authorize` had a second, differently
-  // narrow copy. Neither reached the ruleset, the App's permissions or the
-  // sponsor's access.
+  // This used to enqueue and stop: `requestTurn` and `evaluateReadiness` from
+  // two facts on the payload, with everything else spread from a permissive
+  // constant, so the twenty-two facts a webhook cannot answer all read as no
+  // objection and a pull request with red CI or no approval was called ready.
+  // The scheduler was never ticked and no lane was ever driven, because all of
+  // that lived in a route only a workflow could call.
   //
-  // Every field is stated. This used to spread a permissive constant, so the
-  // twenty-two facts a webhook payload cannot answer all read as no objection
-  // and nothing distinguished them from the two it did answer. A fact this
-  // handler cannot read says `"unread"`, and `/authorize` reads the rest on the
-  // walk to a merge, where the cost is one merge's worth.
-  const draft = pr?.draft === true;
-  const open = pr?.state === "open";
-  const base = deriveReadiness({
-    pullRequestState: open ? "open" : "closed",
-    draft,
-    authorIsBot,
-    sponsorPrincipalId,
-    // Nothing about the repository, the head's proof or GitHub's own gates is
-    // on a pull_request payload, and a read per webhook delivery would buy an
-    // answer `/authorize` reads again a moment later on every ask.
-    ownerAuthorized: "unread",
-    appPermissionsHealthy: "unread",
-    rulesetEnforced: "unread",
-    headProof: "unread",
-    proofShortfall: "unread",
-    reviewsSatisfied: "unread",
-    codeOwnerReviewSatisfied: "unread",
-    approvalAfterPushSatisfied: "unread",
-    conversationsResolved: "unread",
-    nonThwipChecks: "unread",
-    mergeable: "unread",
+  // `authorizeTurn` reads what it needs with the App's own token, admits,
+  // evaluates, ticks, claims and drives. `prepare` is false: preparing starts
+  // the merge-confirmation clock, and this delivery is not the caller that is
+  // about to write.
+  const walked = await authorizeTurn(env, queueDeps as never, queueOnQueue, {
+    repositoryId: String(repositoryId),
+    baseRef: ref,
+    pullRequestNumber: number,
+    headSha,
+    authorGithubUserId: String(authorId),
+    draft: pr?.draft === true,
+    prepare: false,
   });
-  const ready = base.ready;
-  const basePrimaryReason: BlockingReason | null = base.primaryReason;
 
-  // A developer who is already heartbeating when the pull request is opened
-  // must not need an absent-to-present transition to become eligible — the
-  // heartbeat route only fires on that transition, so if this webhook wrote
-  // AGENT_OFFLINE unconditionally here, a machine that showed up first would
-  // never be corrected. Read before the transaction for the same reason
-  // `/authorize` does: `runOnQueue`'s callback is synchronous.
-  const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
-  const capability = ready
-    ? await capabilityFor(
-        env.DB as unknown as D1Like,
-        String(repositoryId),
-        sponsorPrincipalId,
-        new Date().toISOString(),
-        policy?.securityProfile ?? null,
-      )
-    : { serverExecutable: true, compatibleRunnerConnected: false };
-  const folded = foldCapability({ ready, primaryReason: basePrimaryReason }, capability);
-
-  await runOnQueue(
-    env,
-    String(repositoryId),
-    ref,
-    ({ store, commands }) => {
-      // Through `requestTurn`, so a pull request that was closed and reopened is
-      // placed again instead of being discarded against the entry its close
-      // cancelled. Reopening is the case this webhook exists to notice.
-      requestTurn(commands, store, {
-        idempotencyKey: `webhook:request:${entryId}`,
-        entryId,
-        pullRequestNumber: number,
-        sponsorPrincipalId,
-        sponsorGithubUserId,
-        headSha,
-      });
-
-      // Readiness is re-derived from what GitHub just told us plus what it
-      // already said; the event alone never decides it.
-      commands.evaluateReadiness({
-        idempotencyKey: `webhook:ready:${entryId}:${headSha}:${action}`,
-        entryId,
-        ready,
-        schedulerEligible: folded.schedulerEligible,
-        primaryReason: folded.primaryReason,
-      });
-    },
-    // This is where almost every entry starts, because GitHub delivers `opened`
-    // before the required workflow runs. Publishing only on a change is what
-    // keeps the check cheap, and it depends on whoever makes the change saying
-    // so. This writer did not, so `/authorize` arrived to find the entry already
-    // waiting, changed nothing, and published nothing: a pull request that was
-    // never offered the lane got no `thwip / turn` at all and could not merge.
-    (update) => publishTurnCheckFor(env, String(repositoryId), update),
-  );
-
-  return { handled: true, detail: `placed in ${project.activation_state}` };
+  return {
+    handled: walked.outcome !== "not-configured",
+    detail: walked.outcome === "not-configured" ? "no queue configured for this branch" : `placed in ${project.activation_state}`,
+  };
 }
 
 // --- GitHub webhooks -------------------------------------------------------
@@ -1823,6 +1762,16 @@ async function driveTurnFor(env: Env, repositoryId: string, pullRequestNumber: n
  * used to publish nothing at all, which left every pull request that waited
  * without the check the branch requires.
  */
+/**
+ * Run commands against one queue with the turn check wired in.
+ *
+ * The same binding `queueRoutes` makes for its routes. A caller that skipped it
+ * would move the lane without the check following, which is the failure that
+ * left the queue rotating turns nobody could take.
+ */
+const queueOnQueue: OnQueue<Env> = (env, repositoryId, baseRef, decide) =>
+  runOnQueue(env, repositoryId, baseRef, decide, (update) => publishTurnCheckFor(env, repositoryId, update));
+
 async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnCheckUpdate): Promise<void> {
   const project = await env.DB.prepare(
     "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
@@ -1891,757 +1840,786 @@ async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnC
 }
 
 /* The queue's own routes. Authorization reuses the GitHub projection: a viewer
-   is a queue participant through their principal, and repository admin comes
-   from the synced org role. */
-app.route(
-  "/",
-  queueRoutes<Env>({
-    async authenticate(c: { req: { raw: Request } }, env: Env) {
-      // The operator token authenticates too. Every administrative action needing a
-      // browser session was a reason to leave the terminal, and an operator fixing a
-      // stuck lane at 3am should not have to.
-      if (requireAdmin(env, c.req.raw)) {
-        return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true, operator: true };
-      }
-      const viewer = await resolveViewer(env, c.req.raw);
-      if (viewer === null) return { ok: false as const, status: 401 as const };
-      if (viewer.principalId === null) return { ok: false as const, status: 403 as const };
-      return {
-        ok: true as const,
-        principalId: viewer.principalId,
-        githubUserId: viewer.githubUserId,
-        isAdmin: isOrgAdmin(viewer.githubOrgRole),
-      };
-    },
-    async verifyOidc(c: { req: { raw: Request } }, env: Env) {
-      const claims = await verifyGithubOidc({ env, req: c.req });
-      return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
-    },
-    async queueProject(env: Env, repositoryId: string, baseRef: string) {
-      const row = await env.DB.prepare(
-        "SELECT activation_state, merge_method, merge_writer FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
-      )
-        .bind(repositoryId, baseRef)
-        .first<{ activation_state: string; merge_method: string; merge_writer: string | null }>();
-      if (row === null) return null;
-      // The column is a free-text default in the schema; a record must never
-      // bind a value the protocol does not recognize.
-      const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
-        ? row.merge_method
-        : DEFAULT_MERGE_METHOD;
-      return {
-        activationState: row.activation_state,
-        mergeMethod,
-        mergeWriter: mergeWriterOf(row.merge_writer),
-      };
-    },
-    async principalFor(env: Env, githubUserId: string) {
-      if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
-      const row = await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
-        .bind(githubUserId)
-        .first<{ id: string }>();
-      return row?.id ?? null;
-    },
-    /**
-     * Who wrote a pull request, whether that author is a bot, and which branch
-     * it targets, read from GitHub so none of it is the caller's to choose. Null
-     * on anything that is not an answer: no installation, a refused read, a
-     * payload missing a field.
-     */
-    async pullRequestPlacement(env: Env, repositoryId: string, pullRequestNumber: number) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const res = await fetch(`https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`, {
+/**
+ * Everything the queue reads and everything it may ask GitHub to do.
+ *
+ * One object, because the routes and the `pull_request` webhook walk the same
+ * turn. While the walk lived inside `/authorize` this list was an argument to
+ * one call and the webhook had no way to reach any of it, which is why a
+ * repository holding no workflow files could enqueue a pull request and never
+ * merge one.
+ */
+const queueDeps = {
+  async authenticate(c: { req: { raw: Request } }, env: Env) {
+    // The operator token authenticates too. Every administrative action needing a
+    // browser session was a reason to leave the terminal, and an operator fixing a
+    // stuck lane at 3am should not have to.
+    if (requireAdmin(env, c.req.raw)) {
+      return { ok: true as const, principalId: "operator", githubUserId: "0", isAdmin: true, operator: true };
+    }
+    const viewer = await resolveViewer(env, c.req.raw);
+    if (viewer === null) return { ok: false as const, status: 401 as const };
+    if (viewer.principalId === null) return { ok: false as const, status: 403 as const };
+    return {
+      ok: true as const,
+      principalId: viewer.principalId,
+      githubUserId: viewer.githubUserId,
+      isAdmin: isOrgAdmin(viewer.githubOrgRole),
+    };
+  },
+  async verifyOidc(c: { req: { raw: Request } }, env: Env) {
+    const claims = await verifyGithubOidc({ env, req: c.req });
+    return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
+  },
+  async queueProject(env: Env, repositoryId: string, baseRef: string) {
+    const row = await env.DB.prepare(
+      "SELECT activation_state, merge_method, merge_writer FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+    )
+      .bind(repositoryId, baseRef)
+      .first<{ activation_state: string; merge_method: string; merge_writer: string | null }>();
+    if (row === null) return null;
+    // The column is a free-text default in the schema; a record must never
+    // bind a value the protocol does not recognize.
+    const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
+      ? row.merge_method
+      : DEFAULT_MERGE_METHOD;
+    return {
+      activationState: row.activation_state,
+      mergeMethod,
+      mergeWriter: mergeWriterOf(row.merge_writer),
+    };
+  },
+  async principalFor(env: Env, githubUserId: string) {
+    if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
+    const row = await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
+      .bind(githubUserId)
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  },
+  /**
+   * Who wrote a pull request, whether that author is a bot, and which branch
+   * it targets, read from GitHub so none of it is the caller's to choose. Null
+   * on anything that is not an answer: no installation, a refused read, a
+   * payload missing a field.
+   */
+  async pullRequestPlacement(env: Env, repositoryId: string, pullRequestNumber: number) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const res = await fetch(`https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      },
+    });
+    if (!res.ok) return null;
+    const pull = (await res.json()) as {
+      user?: { id?: number; type?: string };
+      base?: { ref?: string };
+      head?: { sha?: string };
+      draft?: boolean;
+    };
+    const authorId = pull.user?.id;
+    const ref = pull.base?.ref;
+    const headSha = pull.head?.sha;
+    if (typeof authorId !== "number" || typeof ref !== "string" || ref === "") return null;
+    if (typeof headSha !== "string" || headSha === "") return null;
+    return {
+      authorGithubUserId: String(authorId),
+      baseRef: `refs/heads/${ref}`,
+      // The same field the `pull_request` webhook carries, so one source
+      // decides bot-ness for both paths.
+      authorIsBot: pull.user?.type === "Bot",
+      draft: pull.draft === true,
+      headSha,
+    };
+  },
+  /**
+   * The pull requests a commit belongs to, from git rather than from a payload.
+   *
+   * Read when a fact about a head changes and the queue has to work out which
+   * entries that answer belongs to. Null when GitHub could not be read, which
+   * has to stay apart from the empty array: one means the read did not happen,
+   * the other means the commit belongs to no pull request.
+   */
+  pullRequestNumbersForCommit(env: Env, repositoryId: string, sha: string) {
+    return GITHUB_READS.pullRequestNumbersForCommit(env, repositoryId, sha);
+  },
+  async commitFacts(env: Env, repositoryId: string, sha: string) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const res = await fetch(`https://api.github.com/repos/${project.github_name}/git/commits/${sha}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      },
+    });
+    if (!res.ok) return null;
+    const commit = (await res.json()) as {
+      tree?: { sha?: string };
+      parents?: Array<{ sha?: string }>;
+      message?: string;
+    };
+    const treeOid = commit.tree?.sha;
+    if (typeof treeOid !== "string") return null;
+    return {
+      // The message carries the proof trailer, which is where the work receipt
+      // digest comes from. Reading it here costs nothing extra: the commit has
+      // already been fetched.
+      message: typeof commit.message === "string" ? commit.message : "",
+      treeOid,
+      parentShas: (commit.parents ?? []).map((p) => p.sha).filter((v): v is string => typeof v === "string"),
+    };
+  },
+  async pinnedVerifier(env: Env, repositoryId: string) {
+    const row = await env.DB.prepare(
+      "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",
+    )
+      .bind(repositoryId)
+      .first<{ verifier_json: string }>();
+    return row === null ? null : (JSON.parse(row.verifier_json) as never);
+  },
+  /**
+   * What the active policy requires of an integrated candidate.
+   *
+   * Read from the policy bundle rather than from anything the caller sends, so
+   * the suite list a verdict is judged against is the one the project activated.
+   */
+  async activePolicy(env: Env, repositoryId: string) {
+    return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
+  },
+  /**
+   * Ask GitHub to run the merge workflow for a pull request the queue offered.
+   *
+   * repository_dispatch, because it needs only Contents: write, which the App
+   * has, and because it always runs the default branch's copy of the workflow.
+   */
+  async driveTurn(env: Env, repositoryId: string, pullRequestNumber: number) {
+    return driveTurnFor(env, repositoryId, pullRequestNumber);
+  },
+  /**
+   * The App's proof check that verified this head.
+   *
+   * Read from what the App recorded rather than from GitHub: the row is the
+   * App's own account of the evaluation it ran, and it is the thing a reuse
+   * record cites. Only an accepted verification counts — citing a check that
+   * refused the proof would make the record say the opposite of what happened.
+   */
+  async proofCheckRunId(env: Env, repositoryId: string, headSha: string) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const res = await fetch(
+      `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
+      {
         headers: {
           authorization: `Bearer ${token}`,
           accept: "application/vnd.github+json",
           "user-agent": "thwip-control-plane",
         },
-      });
-      if (!res.ok) return null;
-      const pull = (await res.json()) as { user?: { id?: number; type?: string }; base?: { ref?: string } };
-      const authorId = pull.user?.id;
-      const ref = pull.base?.ref;
-      if (typeof authorId !== "number" || typeof ref !== "string" || ref === "") return null;
-      return {
-        authorGithubUserId: String(authorId),
-        baseRef: `refs/heads/${ref}`,
-        // The same field the `pull_request` webhook carries, so one source
-        // decides bot-ness for both paths.
-        authorIsBot: pull.user?.type === "Bot",
-      };
-    },
-    async commitFacts(env: Env, repositoryId: string, sha: string) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const res = await fetch(`https://api.github.com/repos/${project.github_name}/git/commits/${sha}`, {
+      },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { check_runs?: Array<{ id?: number; conclusion?: string }> };
+    // Only a check that passed. Citing one that refused the proof would make
+    // the record say the opposite of what happened.
+    const run = body.check_runs?.find((r) => r.conclusion === "success");
+    return run?.id === undefined ? null : String(run.id);
+  },
+  /**
+   * The integrated candidate GitHub has computed for a pull request.
+   *
+   * What a device is handed to run under `fresh`. It comes from GitHub, never
+   * from the machine asking for work, so a runner cannot choose the tree it
+   * will be credited with having tested. When there is no candidate, the state
+   * GitHub is in travels with the answer: a conflict ends the turn and
+   * mergeability GitHub has not finished computing does not, and the caller
+   * cannot tell them apart from a bare null. Null is kept for the repository
+   * itself being unreadable.
+   */
+  async integratedCandidate(env: Env, repositoryId: string, baseRef: string, pullRequestNumber: number) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const [owner, repo] = project.github_name.split("/");
+    if (owner === undefined || repo === undefined) return null;
+    const token = await installationToken(env, project.installation_id);
+    const pinned = await resolveCandidate(
+      githubHttp(token),
+      { owner, repo, repositoryId, baseRef },
+      pullRequestNumber,
+    );
+    return integratedCandidateFrom(pinned);
+  },
+  async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
+    const { key, kid } = await serviceKey(env);
+    return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
+  },
+  /**
+   * What GitHub says the pull request is now.
+   *
+   * Read by the queue itself before it will record that a merge did not
+   * happen. Null when it cannot be read, which the caller treats as unknown
+   * rather than as a negative.
+   */
+  /**
+   * Perform the merge, with the App's own installation token.
+   *
+   * `contents: write` is what this needs and all it needs: writing a commit
+   * object and moving a branch ref are both Contents, and the ownership
+   * ruleset already names the App as the only actor that may update a managed
+   * branch. Nothing here decides anything about the merge — the base, the
+   * tree and the parents come from the queue document, and the ref update
+   * does not force, which is what makes GitHub refuse a base that moved.
+   */
+  async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) {
+      return { kind: "unknown", detail: "no installation for this repository" };
+    }
+    const token = await installationToken(env, project.installation_id);
+    const api = `https://api.github.com/repos/${project.github_name}`;
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "thwip-control-plane",
+    };
+    const refused = async (res: Response) => ({
+      status: res.status,
+      message: ((await res.json().catch(() => ({}))) as { message?: string }).message ?? "no message",
+    });
+
+    return performMergeWrite(
+      {
+        async createCommit(input) {
+          const res = await fetch(`${api}/git/commits`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ message: input.message, tree: input.tree, parents: input.parents }),
+          });
+          if (!res.ok) return { ok: false as const, ...(await refused(res)) };
+          const body = (await res.json()) as { sha?: string };
+          return typeof body.sha === "string"
+            ? { ok: true as const, sha: body.sha }
+            : { ok: false as const, status: res.status, message: "GitHub wrote the commit and named no sha" };
+        },
+        async updateRef(ref, update) {
+          const res = await fetch(`${api}/git/${ref}`, {
+            method: "PATCH",
+            headers,
+            // Built in one place, which is where force is held to false.
+            body: refUpdateRequestBody(update),
+          });
+          if (!res.ok) return { ok: false as const, ...(await refused(res)) };
+          const body = (await res.json()) as { object?: { sha?: string } };
+          return typeof body.object?.sha === "string"
+            ? { ok: true as const, sha: body.object.sha }
+            : { ok: false as const, status: res.status, message: "GitHub moved the ref and named no sha" };
+        },
+        // The same two reads `/not-merged` resolves an absence from. GitHub's
+        // reads lag its own writes, so one negative answer is not a negative.
+        async readPull() {
+          const res = await fetch(`${api}/pulls/${intent.pullRequestNumber}`, { headers });
+          if (!res.ok) return null;
+          const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
+          return {
+            merged: pull.merged === true,
+            mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
+          };
+        },
+        async baseContainsHead() {
+          const branch = intent.baseRef.replace(/^refs\/heads\//, "");
+          const res = await fetch(
+            `${api}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(intent.headSha)}`,
+            { headers },
+          );
+          if (!res.ok) return null;
+          const compared = (await res.json()) as { status?: string };
+          if (typeof compared.status !== "string") return null;
+          // `behind` means the head is behind the base branch, which is to say
+          // the base already contains it.
+          return compared.status === "behind" || compared.status === "identical";
+        },
+      },
+      intent,
+    );
+  },
+  async pullRequestMergeState(env: Env, repositoryId: string, pullRequestNumber: number) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const res = await fetch(
+      `https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`,
+      {
         headers: {
           authorization: `Bearer ${token}`,
           accept: "application/vnd.github+json",
           "user-agent": "thwip-control-plane",
         },
-      });
-      if (!res.ok) return null;
-      const commit = (await res.json()) as {
-        tree?: { sha?: string };
-        parents?: Array<{ sha?: string }>;
-        message?: string;
-      };
-      const treeOid = commit.tree?.sha;
-      if (typeof treeOid !== "string") return null;
-      return {
-        // The message carries the proof trailer, which is where the work receipt
-        // digest comes from. Reading it here costs nothing extra: the commit has
-        // already been fetched.
-        message: typeof commit.message === "string" ? commit.message : "",
-        treeOid,
-        parentShas: (commit.parents ?? []).map((p) => p.sha).filter((v): v is string => typeof v === "string"),
-      };
-    },
-    async pinnedVerifier(env: Env, repositoryId: string) {
-      const row = await env.DB.prepare(
-        "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",
-      )
-        .bind(repositoryId)
-        .first<{ verifier_json: string }>();
-      return row === null ? null : (JSON.parse(row.verifier_json) as never);
-    },
-    /**
-     * What the active policy requires of an integrated candidate.
-     *
-     * Read from the policy bundle rather than from anything the caller sends, so
-     * the suite list a verdict is judged against is the one the project activated.
-     */
-    async activePolicy(env: Env, repositoryId: string) {
-      return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
-    },
-    /**
-     * Ask GitHub to run the merge workflow for a pull request the queue offered.
-     *
-     * repository_dispatch, because it needs only Contents: write, which the App
-     * has, and because it always runs the default branch's copy of the workflow.
-     */
-    async driveTurn(env: Env, repositoryId: string, pullRequestNumber: number) {
-      return driveTurnFor(env, repositoryId, pullRequestNumber);
-    },
-    /**
-     * The App's proof check that verified this head.
-     *
-     * Read from what the App recorded rather than from GitHub: the row is the
-     * App's own account of the evaluation it ran, and it is the thing a reuse
-     * record cites. Only an accepted verification counts — citing a check that
-     * refused the proof would make the record say the opposite of what happened.
-     */
-    async proofCheckRunId(env: Env, repositoryId: string, headSha: string) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const res = await fetch(
-        `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
+      },
+    );
+    if (!res.ok) return null;
+    const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
+    return {
+      merged: pull.merged === true,
+      mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
+    };
+  },
+  /**
+   * Whether the base branch already contains a commit, from git ancestry.
+   *
+   * The second opinion the queue needs before it may certify that a merge did
+   * not happen. The pull request's own flag lagged its own merge by seconds;
+   * the ancestry did not.
+   */
+  async baseContainsSha(env: Env, repositoryId: string, baseRef: string, sha: string) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const branch = baseRef.replace(/^refs\/heads\//, "");
+    const res = await fetch(
+      `https://api.github.com/repos/${project.github_name}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(sha)}`,
+      {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
         },
-      );
-      if (!res.ok) return null;
-      const body = (await res.json()) as { check_runs?: Array<{ id?: number; conclusion?: string }> };
-      // Only a check that passed. Citing one that refused the proof would make
-      // the record say the opposite of what happened.
-      const run = body.check_runs?.find((r) => r.conclusion === "success");
-      return run?.id === undefined ? null : String(run.id);
-    },
-    /**
-     * The integrated candidate GitHub has computed for a pull request.
-     *
-     * What a device is handed to run under `fresh`. It comes from GitHub, never
-     * from the machine asking for work, so a runner cannot choose the tree it
-     * will be credited with having tested. When there is no candidate, the state
-     * GitHub is in travels with the answer: a conflict ends the turn and
-     * mergeability GitHub has not finished computing does not, and the caller
-     * cannot tell them apart from a bare null. Null is kept for the repository
-     * itself being unreadable.
-     */
-    async integratedCandidate(env: Env, repositoryId: string, baseRef: string, pullRequestNumber: number) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const [owner, repo] = project.github_name.split("/");
-      if (owner === undefined || repo === undefined) return null;
-      const token = await installationToken(env, project.installation_id);
-      const pinned = await resolveCandidate(
-        githubHttp(token),
-        { owner, repo, repositoryId, baseRef },
-        pullRequestNumber,
-      );
-      return integratedCandidateFrom(pinned);
-    },
-    async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
-      const { key, kid } = await serviceKey(env);
-      return new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid, typ }).sign(key);
-    },
-    /**
-     * What GitHub says the pull request is now.
-     *
-     * Read by the queue itself before it will record that a merge did not
-     * happen. Null when it cannot be read, which the caller treats as unknown
-     * rather than as a negative.
-     */
-    /**
-     * Perform the merge, with the App's own installation token.
-     *
-     * `contents: write` is what this needs and all it needs: writing a commit
-     * object and moving a branch ref are both Contents, and the ownership
-     * ruleset already names the App as the only actor that may update a managed
-     * branch. Nothing here decides anything about the merge — the base, the
-     * tree and the parents come from the queue document, and the ref update
-     * does not force, which is what makes GitHub refuse a base that moved.
-     */
-    async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) {
-        return { kind: "unknown", detail: "no installation for this repository" };
-      }
-      const token = await installationToken(env, project.installation_id);
-      const api = `https://api.github.com/repos/${project.github_name}`;
-      const headers = {
+      },
+    );
+    if (!res.ok) return null;
+    const compared = (await res.json()) as { status?: string };
+    if (typeof compared.status !== "string") return null;
+    // `behind` means the head is behind the base branch, which is to say the
+    // base already contains it.
+    return compared.status === "behind" || compared.status === "identical";
+  },
+  publishTurnCheck: publishTurnCheckFor,
+  /**
+   * What the branch requires of a head, and what the head says about it.
+   *
+   * The rules endpoint answers with the rules in force for one branch, across
+   * every ruleset that targets it, which is what the merge is actually held
+   * to. The check runs come back latest-per-name, so a rerun does not leave
+   * its own earlier failure lying next to it.
+   *
+   * Null on any unreadable answer. The caller treats that as unknown and goes
+   * ahead, because refusing a merge on our own failure to read GitHub would
+   * stop the queue every time GitHub had a bad minute.
+   */
+  async requiredCheckState(env: Env, repositoryId: string, baseRef: string, headSha: string) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const token = await installationToken(env, project.installation_id);
+    const read = async <T>(path: string): Promise<T | null> => {
+      const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
+        },
+      }).catch(() => null);
+      if (res === null || !res.ok) return null;
+      return (await res.json().catch(() => null)) as T | null;
+    };
+
+    const branch = baseRef.replace(/^refs\/heads\//, "");
+    const rules = await read<
+      Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
+    >(`/rules/branches/${encodeURIComponent(branch)}`);
+    if (rules === null) return null;
+    const required = rules
+      .filter((rule) => rule.type === "required_status_checks")
+      .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+      .map((check) => check.context)
+      .filter((context): context is string => typeof context === "string");
+    if (required.length === 0) return { required: [], runs: [] };
+
+    const checks = await read<{
+      check_runs?: Array<{ name?: string; status?: string; conclusion?: string | null }>;
+    }>(`/commits/${encodeURIComponent(headSha)}/check-runs?filter=latest&per_page=100`);
+    if (checks === null) return null;
+    // Commit statuses too. A required context may be satisfied by either, and a
+    // queue that read only check runs would call a context satisfied by a
+    // status absent and refuse a merge GitHub would have allowed.
+    const statuses = await read<{ statuses?: Array<{ context?: string; state?: string }> }>(
+      `/commits/${encodeURIComponent(headSha)}/status?per_page=100`,
+    );
+    if (statuses === null) return null;
+    return {
+      required,
+      runs: [
+        ...(checks.check_runs ?? [])
+          .filter((run): run is { name: string; status?: string; conclusion?: string | null } =>
+            typeof run.name === "string",
+          )
+          .map((run) => ({
+            name: run.name,
+            status: run.status ?? "queued",
+            conclusion: run.conclusion ?? null,
+          })),
+        ...(statuses.statuses ?? [])
+          .filter((status): status is { context: string; state?: string } => typeof status.context === "string")
+          .map((status) =>
+            status.state === "pending"
+              ? { name: status.context, status: "in_progress", conclusion: null }
+              : {
+                  name: status.context,
+                  status: "completed",
+                  conclusion: status.state === "success" ? "success" : "failure",
+                },
+          ),
+      ],
+    };
+  },
+  /**
+   * Whether the repository is still the one this queue's policy assumes.
+   *
+   * Three questions the queue never asked before it merged. The branch rules
+   * say whether the checks the queue publishes are still required and whether
+   * the branch can still be force-pushed or deleted; the installation says
+   * whether the App can still perform the merge it is about to certify; and
+   * the collaborator permission says whether the person whose turn this is may
+   * still write here.
+   *
+   * Three reads, once, on the walk to a merge. `requiredCheckState` already
+   * reads the same rules endpoint a moment later, and the duplicate is left
+   * standing rather than threading a cache through the dependency boundary:
+   * one extra read per merge against an hourly budget this account uses a
+   * fraction of is not worth a second cached shape that can go stale.
+   *
+   * Null on any unreadable answer, all the way down. Refusing a merge because
+   * GitHub had a bad minute would stop the queue for everyone, and that is a
+   * worse failure than the one this exists to catch.
+   */
+  async platformHealth(
+    env: Env,
+    repositoryId: string,
+    baseRef: string,
+    sponsorGithubUserId: string,
+  ): Promise<PlatformHealth | null> {
+    const project = await env.DB.prepare(
+      `SELECT p.github_name, o.installation_id, o.id AS organization_id
+         FROM projects p JOIN organizations o ON o.id = p.organization_id
+        WHERE p.github_repository_id = ?`,
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null; organization_id: string }>();
+    if (project === null || project.installation_id === null) return null;
+
+    // The sponsor by the name GitHub's permission endpoint takes. A numeric id
+    // will not address it, and guessing a login would ask about somebody else.
+    const sponsor = await env.DB.prepare(
+      "SELECT github_login FROM principals WHERE organization_id = ? AND github_user_id = ?",
+    )
+      .bind(project.organization_id, sponsorGithubUserId)
+      .first<{ github_login: string | null }>();
+    if (sponsor?.github_login == null) return null;
+
+    const token = await installationToken(env, project.installation_id);
+    const read = async <T>(path: string): Promise<T | null> => {
+      const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
+        },
+      }).catch(() => null);
+      if (res === null || !res.ok) return null;
+      return (await res.json().catch(() => null)) as T | null;
+    };
+
+    const branch = baseRef.replace(/^refs\/heads\//, "");
+    const rules = await read<
+      Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
+    >(`/rules/branches/${encodeURIComponent(branch)}`);
+    if (rules === null) return null;
+    const ruleTypes = new Set(rules.map((rule) => rule.type));
+    const requiredContexts = new Set(
+      rules
+        .filter((rule) => rule.type === "required_status_checks")
+        .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+        .map((check) => check.context),
+    );
+    // What the queue's own guarantee rests on, and nothing wider. The turn
+    // check is what stops a merge out of turn and the proof check is what
+    // stops an unproven one, so a branch that no longer requires both is a
+    // branch the queue cannot speak for. Force-push and deletion are the two
+    // ways the merged history it signs can be rewritten underneath it.
+    const rulesetEnforced =
+      requiredContexts.has(TURN_CHECK) &&
+      requiredContexts.has(PROOF_CHECK) &&
+      ruleTypes.has("non_fast_forward") &&
+      ruleTypes.has("deletion");
+
+    const permission = await read<{ permission?: string }>(
+      `/collaborators/${encodeURIComponent(sponsor.github_login)}/permission`,
+    );
+    if (permission === null) return null;
+    const sponsorAuthorized =
+      permission.permission === "admin" ||
+      permission.permission === "maintain" ||
+      permission.permission === "write";
+
+    // The installation's permissions, from the App's own view of it.
+    //
+    // Only the three the merge itself depends on: writing the branch,
+    // performing the merge, and publishing the check GitHub requires. `actions`
+    // is not among them deliberately — a verifier that cannot be dispatched
+    // stops the attempt long before this point, and refusing here would name
+    // the wrong problem.
+    const installations = await listInstallations(env).catch(() => null);
+    if (installations === null) return null;
+    const installation = installations.find((i) => String(i.id) === project.installation_id);
+    if (installation?.permissions === undefined) return null;
+    const permissions = installation.permissions;
+    const appPermissionsHealthy = ["contents", "pull_requests", "checks"].every(
+      (scope) => permissions[scope] === "write",
+    );
+
+    return { rulesetEnforced, appPermissionsHealthy, sponsorAuthorized };
+  },
+  /**
+   * What the branch's `pull_request` rule asks of this pull request, and
+   * whether GitHub says it is met.
+   *
+   * Two reads. The rules endpoint says which of the four gates apply, because
+   * a branch that does not require a code owner must never be told one is
+   * missing. GraphQL answers all of the rest in one round trip: the review
+   * decision GitHub itself computed under those rules, the outstanding code
+   * owner request, which commit each approval names, the open review threads,
+   * and mergeability.
+   *
+   * The decision is what refuses. Counting approvals here would refuse merges
+   * GitHub allows, because the rule can be satisfied by reviewers this queue
+   * cannot enumerate; the counts are only used to say which rule is unmet once
+   * GitHub has already said one is.
+   *
+   * Null on any unreadable answer, all the way down, for the same reason
+   * `requiredCheckState` is: a bad minute at GitHub must not stop the queue
+   * for everyone.
+   */
+  async pullRequestGates(
+    env: Env,
+    repositoryId: string,
+    baseRef: string,
+    pullRequestNumber: number,
+    headSha: string,
+  ): Promise<PullRequestGates | null> {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return null;
+    const [owner, repo] = project.github_name.split("/");
+    if (owner === undefined || repo === undefined) return null;
+    const token = await installationToken(env, project.installation_id);
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "thwip-control-plane",
+    };
+
+    const branch = baseRef.replace(/^refs\/heads\//, "");
+    const rulesRes = await fetch(
+      `https://api.github.com/repos/${project.github_name}/rules/branches/${encodeURIComponent(branch)}`,
+      { headers },
+    ).catch(() => null);
+    if (rulesRes === null || !rulesRes.ok) return null;
+    const rules = (await rulesRes.json().catch(() => null)) as Array<{
+      type?: string;
+      parameters?: {
+        required_approving_review_count?: number;
+        require_code_owner_review?: boolean;
+        require_last_push_approval?: boolean;
+        required_review_thread_resolution?: boolean;
+      };
+    }> | null;
+    if (rules === null) return null;
+    const pullRule = rules.find((rule) => rule.type === "pull_request")?.parameters ?? {};
+
+    const graphRes = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        query:
+          "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeable reviewDecision reviewRequests(first:100){nodes{asCodeOwner}} reviewThreads(first:100){nodes{isResolved isOutdated}} latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}",
+        variables: { owner, name: repo, number: pullRequestNumber },
+      }),
+    }).catch(() => null);
+    if (graphRes === null || !graphRes.ok) return null;
+    const answer = (await graphRes.json().catch(() => null)) as {
+      data?: {
+        repository?: {
+          pullRequest?: {
+            mergeable?: string;
+            reviewDecision?: string | null;
+            reviewRequests?: { nodes?: Array<{ asCodeOwner?: boolean }> };
+            reviewThreads?: { nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean }> };
+            latestOpinionatedReviews?: { nodes?: Array<{ state?: string; commit?: { oid?: string } }> };
+          } | null;
+        } | null;
+      };
+    } | null;
+    const pull = answer?.data?.repository?.pullRequest;
+    if (pull == null) return null;
+
+    const approving = (pull.latestOpinionatedReviews?.nodes ?? []).filter((r) => r.state === "APPROVED");
+    const decision =
+      pull.reviewDecision === "APPROVED" ||
+      pull.reviewDecision === "CHANGES_REQUESTED" ||
+      pull.reviewDecision === "REVIEW_REQUIRED"
+        ? pull.reviewDecision
+        : null;
+
+    return {
+      // `UNKNOWN` is GitHub still computing it, which is not a conflict.
+      mergeable:
+        pull.mergeable === "MERGEABLE" ? true : pull.mergeable === "CONFLICTING" ? false : null,
+      review: {
+        requiredApprovingReviewCount: pullRule.required_approving_review_count ?? 0,
+        requireCodeOwnerReview: pullRule.require_code_owner_review === true,
+        requireLastPushApproval: pullRule.require_last_push_approval === true,
+        requireThreadResolution: pullRule.required_review_thread_resolution === true,
+        reviewDecision: decision,
+        pendingCodeOwnerReview: (pull.reviewRequests?.nodes ?? []).some((r) => r.asCodeOwner === true),
+        approvals: approving.length,
+        approvalsOnHead: approving.filter((r) => r.commit?.oid === headSha).length,
+        // An outdated thread no longer applies to the head, and GitHub does
+        // not hold the merge on one.
+        unresolvedThreads: (pull.reviewThreads?.nodes ?? []).filter(
+          (t) => t.isResolved !== true && t.isOutdated !== true,
+        ).length,
+      },
+    };
+  },
+  /**
+   * The candidate verdict, as a check on the pull request head.
+   *
+   * Moved here from the verifier workflow, which asked GitHub for
+   * `checks: write` and was refused because this repository's default workflow
+   * permission is read-only. Every passing verification therefore finished as a
+   * failed run. The App already holds the permission and already publishes the
+   * other two checks.
+   *
+   * Not a required check: it reports what ran against the integrated candidate,
+   * and the queue decides the merge from the verdict it stored, not from this.
+   */
+  async publishCandidateCheck(
+    env: Env,
+    repositoryId: string,
+    update: { headSha: string; accepted: boolean; summary: string },
+  ) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) return;
+    const token = await installationToken(env, project.installation_id);
+    await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
+      method: "POST",
+      headers: {
         authorization: `Bearer ${token}`,
         accept: "application/vnd.github+json",
         "content-type": "application/json",
         "user-agent": "thwip-control-plane",
-      };
-      const refused = async (res: Response) => ({
-        status: res.status,
-        message: ((await res.json().catch(() => ({}))) as { message?: string }).message ?? "no message",
-      });
-
-      return performMergeWrite(
-        {
-          async createCommit(input) {
-            const res = await fetch(`${api}/git/commits`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ message: input.message, tree: input.tree, parents: input.parents }),
-            });
-            if (!res.ok) return { ok: false as const, ...(await refused(res)) };
-            const body = (await res.json()) as { sha?: string };
-            return typeof body.sha === "string"
-              ? { ok: true as const, sha: body.sha }
-              : { ok: false as const, status: res.status, message: "GitHub wrote the commit and named no sha" };
-          },
-          async updateRef(ref, update) {
-            const res = await fetch(`${api}/git/${ref}`, {
-              method: "PATCH",
-              headers,
-              // Built in one place, which is where force is held to false.
-              body: refUpdateRequestBody(update),
-            });
-            if (!res.ok) return { ok: false as const, ...(await refused(res)) };
-            const body = (await res.json()) as { object?: { sha?: string } };
-            return typeof body.object?.sha === "string"
-              ? { ok: true as const, sha: body.object.sha }
-              : { ok: false as const, status: res.status, message: "GitHub moved the ref and named no sha" };
-          },
-          // The same two reads `/not-merged` resolves an absence from. GitHub's
-          // reads lag its own writes, so one negative answer is not a negative.
-          async readPull() {
-            const res = await fetch(`${api}/pulls/${intent.pullRequestNumber}`, { headers });
-            if (!res.ok) return null;
-            const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
-            return {
-              merged: pull.merged === true,
-              mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
-            };
-          },
-          async baseContainsHead() {
-            const branch = intent.baseRef.replace(/^refs\/heads\//, "");
-            const res = await fetch(
-              `${api}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(intent.headSha)}`,
-              { headers },
-            );
-            if (!res.ok) return null;
-            const compared = (await res.json()) as { status?: string };
-            if (typeof compared.status !== "string") return null;
-            // `behind` means the head is behind the base branch, which is to say
-            // the base already contains it.
-            return compared.status === "behind" || compared.status === "identical";
-          },
+      },
+      body: JSON.stringify({
+        name: CANDIDATE_CHECK,
+        head_sha: update.headSha,
+        status: "completed",
+        conclusion: update.accepted ? "success" : "failure",
+        details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
+        output: {
+          title: "Required suites against the integrated candidate",
+          summary: update.summary,
         },
-        intent,
-      );
+      }),
+    });
+  },
+  async dispatchCandidateVerification(
+    env: Env,
+    repositoryId: string,
+    payload: {
+      baseRef: string;
+      pullRequestNumber: number;
+      attemptId: string;
+      baseSha: string;
+      candidateSha: string;
+      candidateTreeOid: string;
+      requiredSuites: readonly string[];
     },
-    async pullRequestMergeState(env: Env, repositoryId: string, pullRequestNumber: number) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const res = await fetch(
-        `https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`,
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
-        },
-      );
-      if (!res.ok) return null;
-      const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
-      return {
-        merged: pull.merged === true,
-        mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
-      };
-    },
-    /**
-     * Whether the base branch already contains a commit, from git ancestry.
-     *
-     * The second opinion the queue needs before it may certify that a merge did
-     * not happen. The pull request's own flag lagged its own merge by seconds;
-     * the ancestry did not.
-     */
-    async baseContainsSha(env: Env, repositoryId: string, baseRef: string, sha: string) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const branch = baseRef.replace(/^refs\/heads\//, "");
-      const res = await fetch(
-        `https://api.github.com/repos/${project.github_name}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(sha)}`,
-        {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
-        },
-      );
-      if (!res.ok) return null;
-      const compared = (await res.json()) as { status?: string };
-      if (typeof compared.status !== "string") return null;
-      // `behind` means the head is behind the base branch, which is to say the
-      // base already contains it.
-      return compared.status === "behind" || compared.status === "identical";
-    },
-    publishTurnCheck: publishTurnCheckFor,
-    /**
-     * What the branch requires of a head, and what the head says about it.
-     *
-     * The rules endpoint answers with the rules in force for one branch, across
-     * every ruleset that targets it, which is what the merge is actually held
-     * to. The check runs come back latest-per-name, so a rerun does not leave
-     * its own earlier failure lying next to it.
-     *
-     * Null on any unreadable answer. The caller treats that as unknown and goes
-     * ahead, because refusing a merge on our own failure to read GitHub would
-     * stop the queue every time GitHub had a bad minute.
-     */
-    async requiredCheckState(env: Env, repositoryId: string, baseRef: string, headSha: string) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const token = await installationToken(env, project.installation_id);
-      const read = async <T>(path: string): Promise<T | null> => {
-        const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
-        }).catch(() => null);
-        if (res === null || !res.ok) return null;
-        return (await res.json().catch(() => null)) as T | null;
-      };
-
-      const branch = baseRef.replace(/^refs\/heads\//, "");
-      const rules = await read<
-        Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
-      >(`/rules/branches/${encodeURIComponent(branch)}`);
-      if (rules === null) return null;
-      const required = rules
-        .filter((rule) => rule.type === "required_status_checks")
-        .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
-        .map((check) => check.context)
-        .filter((context): context is string => typeof context === "string");
-      if (required.length === 0) return { required: [], runs: [] };
-
-      const checks = await read<{
-        check_runs?: Array<{ name?: string; status?: string; conclusion?: string | null }>;
-      }>(`/commits/${encodeURIComponent(headSha)}/check-runs?filter=latest&per_page=100`);
-      if (checks === null) return null;
-      // Commit statuses too. A required context may be satisfied by either, and a
-      // queue that read only check runs would call a context satisfied by a
-      // status absent and refuse a merge GitHub would have allowed.
-      const statuses = await read<{ statuses?: Array<{ context?: string; state?: string }> }>(
-        `/commits/${encodeURIComponent(headSha)}/status?per_page=100`,
-      );
-      if (statuses === null) return null;
-      return {
-        required,
-        runs: [
-          ...(checks.check_runs ?? [])
-            .filter((run): run is { name: string; status?: string; conclusion?: string | null } =>
-              typeof run.name === "string",
-            )
-            .map((run) => ({
-              name: run.name,
-              status: run.status ?? "queued",
-              conclusion: run.conclusion ?? null,
-            })),
-          ...(statuses.statuses ?? [])
-            .filter((status): status is { context: string; state?: string } => typeof status.context === "string")
-            .map((status) =>
-              status.state === "pending"
-                ? { name: status.context, status: "in_progress", conclusion: null }
-                : {
-                    name: status.context,
-                    status: "completed",
-                    conclusion: status.state === "success" ? "success" : "failure",
-                  },
-            ),
-        ],
-      };
-    },
-    /**
-     * Whether the repository is still the one this queue's policy assumes.
-     *
-     * Three questions the queue never asked before it merged. The branch rules
-     * say whether the checks the queue publishes are still required and whether
-     * the branch can still be force-pushed or deleted; the installation says
-     * whether the App can still perform the merge it is about to certify; and
-     * the collaborator permission says whether the person whose turn this is may
-     * still write here.
-     *
-     * Three reads, once, on the walk to a merge. `requiredCheckState` already
-     * reads the same rules endpoint a moment later, and the duplicate is left
-     * standing rather than threading a cache through the dependency boundary:
-     * one extra read per merge against an hourly budget this account uses a
-     * fraction of is not worth a second cached shape that can go stale.
-     *
-     * Null on any unreadable answer, all the way down. Refusing a merge because
-     * GitHub had a bad minute would stop the queue for everyone, and that is a
-     * worse failure than the one this exists to catch.
-     */
-    async platformHealth(
-      env: Env,
-      repositoryId: string,
-      baseRef: string,
-      sponsorGithubUserId: string,
-    ): Promise<PlatformHealth | null> {
-      const project = await env.DB.prepare(
-        `SELECT p.github_name, o.installation_id, o.id AS organization_id
-           FROM projects p JOIN organizations o ON o.id = p.organization_id
-          WHERE p.github_repository_id = ?`,
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null; organization_id: string }>();
-      if (project === null || project.installation_id === null) return null;
-
-      // The sponsor by the name GitHub's permission endpoint takes. A numeric id
-      // will not address it, and guessing a login would ask about somebody else.
-      const sponsor = await env.DB.prepare(
-        "SELECT github_login FROM principals WHERE organization_id = ? AND github_user_id = ?",
-      )
-        .bind(project.organization_id, sponsorGithubUserId)
-        .first<{ github_login: string | null }>();
-      if (sponsor?.github_login == null) return null;
-
-      const token = await installationToken(env, project.installation_id);
-      const read = async <T>(path: string): Promise<T | null> => {
-        const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
-          headers: {
-            authorization: `Bearer ${token}`,
-            accept: "application/vnd.github+json",
-            "user-agent": "thwip-control-plane",
-          },
-        }).catch(() => null);
-        if (res === null || !res.ok) return null;
-        return (await res.json().catch(() => null)) as T | null;
-      };
-
-      const branch = baseRef.replace(/^refs\/heads\//, "");
-      const rules = await read<
-        Array<{ type?: string; parameters?: { required_status_checks?: Array<{ context?: string }> } }>
-      >(`/rules/branches/${encodeURIComponent(branch)}`);
-      if (rules === null) return null;
-      const ruleTypes = new Set(rules.map((rule) => rule.type));
-      const requiredContexts = new Set(
-        rules
-          .filter((rule) => rule.type === "required_status_checks")
-          .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
-          .map((check) => check.context),
-      );
-      // What the queue's own guarantee rests on, and nothing wider. The turn
-      // check is what stops a merge out of turn and the proof check is what
-      // stops an unproven one, so a branch that no longer requires both is a
-      // branch the queue cannot speak for. Force-push and deletion are the two
-      // ways the merged history it signs can be rewritten underneath it.
-      const rulesetEnforced =
-        requiredContexts.has(TURN_CHECK) &&
-        requiredContexts.has(PROOF_CHECK) &&
-        ruleTypes.has("non_fast_forward") &&
-        ruleTypes.has("deletion");
-
-      const permission = await read<{ permission?: string }>(
-        `/collaborators/${encodeURIComponent(sponsor.github_login)}/permission`,
-      );
-      if (permission === null) return null;
-      const sponsorAuthorized =
-        permission.permission === "admin" ||
-        permission.permission === "maintain" ||
-        permission.permission === "write";
-
-      // The installation's permissions, from the App's own view of it.
-      //
-      // Only the three the merge itself depends on: writing the branch,
-      // performing the merge, and publishing the check GitHub requires. `actions`
-      // is not among them deliberately — a verifier that cannot be dispatched
-      // stops the attempt long before this point, and refusing here would name
-      // the wrong problem.
-      const installations = await listInstallations(env).catch(() => null);
-      if (installations === null) return null;
-      const installation = installations.find((i) => String(i.id) === project.installation_id);
-      if (installation?.permissions === undefined) return null;
-      const permissions = installation.permissions;
-      const appPermissionsHealthy = ["contents", "pull_requests", "checks"].every(
-        (scope) => permissions[scope] === "write",
-      );
-
-      return { rulesetEnforced, appPermissionsHealthy, sponsorAuthorized };
-    },
-    /**
-     * What the branch's `pull_request` rule asks of this pull request, and
-     * whether GitHub says it is met.
-     *
-     * Two reads. The rules endpoint says which of the four gates apply, because
-     * a branch that does not require a code owner must never be told one is
-     * missing. GraphQL answers all of the rest in one round trip: the review
-     * decision GitHub itself computed under those rules, the outstanding code
-     * owner request, which commit each approval names, the open review threads,
-     * and mergeability.
-     *
-     * The decision is what refuses. Counting approvals here would refuse merges
-     * GitHub allows, because the rule can be satisfied by reviewers this queue
-     * cannot enumerate; the counts are only used to say which rule is unmet once
-     * GitHub has already said one is.
-     *
-     * Null on any unreadable answer, all the way down, for the same reason
-     * `requiredCheckState` is: a bad minute at GitHub must not stop the queue
-     * for everyone.
-     */
-    async pullRequestGates(
-      env: Env,
-      repositoryId: string,
-      baseRef: string,
-      pullRequestNumber: number,
-      headSha: string,
-    ): Promise<PullRequestGates | null> {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return null;
-      const [owner, repo] = project.github_name.split("/");
-      if (owner === undefined || repo === undefined) return null;
-      const token = await installationToken(env, project.installation_id);
-      const headers = {
+  ) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) {
+      return { ok: false as const, status: 0, detail: "no installation for this repository" };
+    }
+    const token = await installationToken(env, project.installation_id);
+    // repository_dispatch runs the default branch's copy of the workflow. That is
+    // the whole reason the candidate verifier is dispatched rather than triggered
+    // by the pull request: a pull request can edit its own workflow file, and a
+    // verifier a contributor can edit verifies nothing.
+    const res = await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
+      method: "POST",
+      headers: {
         authorization: `Bearer ${token}`,
         accept: "application/vnd.github+json",
+        "content-type": "application/json",
         "user-agent": "thwip-control-plane",
-      };
-
-      const branch = baseRef.replace(/^refs\/heads\//, "");
-      const rulesRes = await fetch(
-        `https://api.github.com/repos/${project.github_name}/rules/branches/${encodeURIComponent(branch)}`,
-        { headers },
-      ).catch(() => null);
-      if (rulesRes === null || !rulesRes.ok) return null;
-      const rules = (await rulesRes.json().catch(() => null)) as Array<{
-        type?: string;
-        parameters?: {
-          required_approving_review_count?: number;
-          require_code_owner_review?: boolean;
-          require_last_push_approval?: boolean;
-          required_review_thread_resolution?: boolean;
-        };
-      }> | null;
-      if (rules === null) return null;
-      const pullRule = rules.find((rule) => rule.type === "pull_request")?.parameters ?? {};
-
-      const graphRes = await fetch("https://api.github.com/graphql", {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({
-          query:
-            "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeable reviewDecision reviewRequests(first:100){nodes{asCodeOwner}} reviewThreads(first:100){nodes{isResolved isOutdated}} latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}",
-          variables: { owner, name: repo, number: pullRequestNumber },
-        }),
-      }).catch(() => null);
-      if (graphRes === null || !graphRes.ok) return null;
-      const answer = (await graphRes.json().catch(() => null)) as {
-        data?: {
-          repository?: {
-            pullRequest?: {
-              mergeable?: string;
-              reviewDecision?: string | null;
-              reviewRequests?: { nodes?: Array<{ asCodeOwner?: boolean }> };
-              reviewThreads?: { nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean }> };
-              latestOpinionatedReviews?: { nodes?: Array<{ state?: string; commit?: { oid?: string } }> };
-            } | null;
-          } | null;
-        };
-      } | null;
-      const pull = answer?.data?.repository?.pullRequest;
-      if (pull == null) return null;
-
-      const approving = (pull.latestOpinionatedReviews?.nodes ?? []).filter((r) => r.state === "APPROVED");
-      const decision =
-        pull.reviewDecision === "APPROVED" ||
-        pull.reviewDecision === "CHANGES_REQUESTED" ||
-        pull.reviewDecision === "REVIEW_REQUIRED"
-          ? pull.reviewDecision
-          : null;
-
-      return {
-        // `UNKNOWN` is GitHub still computing it, which is not a conflict.
-        mergeable:
-          pull.mergeable === "MERGEABLE" ? true : pull.mergeable === "CONFLICTING" ? false : null,
-        review: {
-          requiredApprovingReviewCount: pullRule.required_approving_review_count ?? 0,
-          requireCodeOwnerReview: pullRule.require_code_owner_review === true,
-          requireLastPushApproval: pullRule.require_last_push_approval === true,
-          requireThreadResolution: pullRule.required_review_thread_resolution === true,
-          reviewDecision: decision,
-          pendingCodeOwnerReview: (pull.reviewRequests?.nodes ?? []).some((r) => r.asCodeOwner === true),
-          approvals: approving.length,
-          approvalsOnHead: approving.filter((r) => r.commit?.oid === headSha).length,
-          // An outdated thread no longer applies to the head, and GitHub does
-          // not hold the merge on one.
-          unresolvedThreads: (pull.reviewThreads?.nodes ?? []).filter(
-            (t) => t.isResolved !== true && t.isOutdated !== true,
-          ).length,
-        },
-      };
-    },
-    /**
-     * The candidate verdict, as a check on the pull request head.
-     *
-     * Moved here from the verifier workflow, which asked GitHub for
-     * `checks: write` and was refused because this repository's default workflow
-     * permission is read-only. Every passing verification therefore finished as a
-     * failed run. The App already holds the permission and already publishes the
-     * other two checks.
-     *
-     * Not a required check: it reports what ran against the integrated candidate,
-     * and the queue decides the merge from the verdict it stored, not from this.
-     */
-    async publishCandidateCheck(
-      env: Env,
-      repositoryId: string,
-      update: { headSha: string; accepted: boolean; summary: string },
-    ) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) return;
-      const token = await installationToken(env, project.installation_id);
-      await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-          "user-agent": "thwip-control-plane",
-        },
-        body: JSON.stringify({
-          name: CANDIDATE_CHECK,
-          head_sha: update.headSha,
-          status: "completed",
-          conclusion: update.accepted ? "success" : "failure",
-          details_url: `${env.PUBLIC_ORIGIN}/dashboard/projects`,
-          output: {
-            title: "Required suites against the integrated candidate",
-            summary: update.summary,
-          },
-        }),
-      });
-    },
-    async dispatchCandidateVerification(
-      env: Env,
-      repositoryId: string,
-      payload: {
-        baseRef: string;
-        pullRequestNumber: number;
-        attemptId: string;
-        baseSha: string;
-        candidateSha: string;
-        candidateTreeOid: string;
-        requiredSuites: readonly string[];
       },
-    ) {
-      const project = await env.DB.prepare(
-        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-      )
-        .bind(repositoryId)
-        .first<{ github_name: string; installation_id: string | null }>();
-      if (project === null || project.installation_id === null) {
-        return { ok: false as const, status: 0, detail: "no installation for this repository" };
-      }
-      const token = await installationToken(env, project.installation_id);
-      // repository_dispatch runs the default branch's copy of the workflow. That is
-      // the whole reason the candidate verifier is dispatched rather than triggered
-      // by the pull request: a pull request can edit its own workflow file, and a
-      // verifier a contributor can edit verifies nothing.
-      const res = await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-          "user-agent": "thwip-control-plane",
-        },
-        body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
-      });
-      if (res.status === 204) return { ok: true as const };
-      const detail = (await res.text().catch(() => "")).slice(0, 300);
-      return { ok: false as const, status: res.status, detail };
-    },
-  }) as never,
-);
+      body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
+    });
+    if (res.status === 204) return { ok: true as const };
+    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    return { ok: false as const, status: res.status, detail };
+  },
+} as const;
+
+/* The queue's own routes. Authorization reuses the GitHub projection: a viewer
+   is a queue participant through their principal, and repository admin comes
+   from the synced org role. */
+app.route("/", queueRoutes<Env>(queueDeps as never));
 
 app.all("*", (c) => {
   // An unmatched path under a prefix the Worker owns is a missing route, and
@@ -2664,6 +2642,8 @@ export default {
       reconcileProjectProofChecks: (id) => reconcileProjectProofChecks(env, id),
       processAppProof: (request) => processAppProof(env, request),
       requestForRerequest: (verificationId) => requestForRerequest(env, verificationId),
+      reconsiderHead: (repositoryId, headSha) =>
+        reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
     };
     for (const msg of batch.messages) {
       try {
