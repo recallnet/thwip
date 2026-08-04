@@ -1116,7 +1116,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Ejecting frees the lane, and a freed lane is offered to somebody else. That
     // offer expires in ninety seconds, so telling nobody about it wastes a turn
     // and, on a quiet queue, stalls it entirely.
-    await driveLane(c.env, deps, repositoryId, snapshot);
+    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -1133,7 +1133,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.tick({ idempotencyKey: key }),
     );
-    await driveLane(c.env, deps, repositoryId, snapshot);
+    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
     return c.json({ result });
   });
 
@@ -1212,7 +1212,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             }
           }
         });
-        await driveLane(c.env, deps, repositoryId, snapshot);
+        await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
         if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
           holdsOffer = true;
         }
@@ -1668,7 +1668,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // The run is over and the merge still has to be written, which happens in
     // Actions. Under this profile nothing else asks for it: the lane was never
     // driven while the device held the turn, on purpose.
-    await driveLane(c.env, deps, repositoryId, snapshot);
+    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
 
     return c.json({ accepted: true });
   });
@@ -1811,7 +1811,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // eject or a reconcile that gives up on one. An accepted verdict leaves the
     // attempt live in MergeGuard, still holding the lane, so there is nothing to
     // drive there — only the rejection path needs this.
-    if (!verdict.accepted) await driveLane(c.env, deps, repositoryId, snapshot);
+    if (!verdict.accepted) await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
     return c.json({ result: result.applied }, result.applied.status === "rejected" ? 409 : 202);
   });
 
@@ -1968,7 +1968,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // already claimed over its heartbeat.
     if (body.accepted === true && stored.status === "applied") {
       const { snapshot: forDrive } = await readQueue(c.env, repositoryId, baseRef);
-      await driveLane(c.env, deps, repositoryId, forDrive);
+      await driveLane(c.env, deps, repositoryId, baseRef, forDrive);
     }
 
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
@@ -2043,7 +2043,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // at the only state it is ever stuck in. Two predicates for one question is
     // how that happened, so there is one now.
     const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-    const outcome = await driveLane(c.env, deps, repositoryId, snapshot);
+    const outcome = await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
     if (!outcome.dispatched) {
       return outcome.reason === "LANE_IDLE"
         ? c.json({ nudged: false, reason: outcome.reason })
@@ -2226,7 +2226,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       // Confirming ends the attempt and frees the lane; the offer that follows
       // expires unclaimed in ninety seconds unless something drives it.
-      await driveLane(c.env, deps, repositoryId, recorded.snapshot ?? afterConfirm);
+      await driveLane(c.env, deps, repositoryId, baseRef, recorded.snapshot ?? afterConfirm);
 
       return c.json({
         resolved: confirmation.confirmed.status,
@@ -2287,7 +2287,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       // Ending the attempt frees the lane; the next offer expires unclaimed in
       // ninety seconds unless something drives it.
-      await driveLane(c.env, deps, repositoryId, snapshot);
+      await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
 
       return c.json({
         resolved: "external",
@@ -2317,7 +2317,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     // Confirming not-merged frees the lane; the next offer expires unclaimed in
     // ninety seconds unless something drives it.
-    await driveLane(c.env, deps, repositoryId, afterNotMerged);
+    await driveLane(c.env, deps, repositoryId, baseRef, afterNotMerged);
 
     return c.json({
       resolved: resolved.status,
@@ -2831,7 +2831,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       const { snapshot: reconciling } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
         commands.mergeOutcomeUnknown({ idempotencyKey: `not-merged:unknown:${attemptId}`, attemptId }),
       );
-      await driveLane(c.env, deps, repositoryId, reconciling);
+      await driveLane(c.env, deps, repositoryId, baseRef, reconciling);
       return c.json({
         resolved: "reconciling",
         reason: evidence.reason,
@@ -2848,7 +2848,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Confirming not-merged frees the lane, and the next offer expires unclaimed
     // in ninety seconds unless something drives it — this is how the lane was
     // freed without being driven in production.
-    await driveLane(c.env, deps, repositoryId, snapshot);
+    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
 
     return c.json({ resolved: resolved.status, detail: body.detail ?? null });
   });
@@ -2909,7 +2909,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       );
     }
 
-    await driveLane(c.env, deps, repositoryId, outcome.snapshot);
+    await driveLane(c.env, deps, repositoryId, baseRef, outcome.snapshot);
     return c.json({
       merged: true,
       confirmed: outcome.confirmed,

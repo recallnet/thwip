@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
+import { externalPushFromWebhook, pushedQueueBranch, QUEUE_MERGE_TRAILER } from "./external-push.js";
 
 /**
  * A push to the protected branch that the queue did not cause.
@@ -100,6 +100,37 @@ describe("spotting a push the queue did not make", () => {
     const withoutCommit = push({ head_commit: null, after: "b".repeat(40) });
     expect(externalPushFromWebhook("push", withoutCommit)).toMatchObject({
       observedBaseSha: "b".repeat(40),
+    });
+  });
+});
+
+/**
+ * Waking the queue asks a different question from pausing it.
+ *
+ * `externalPushFromWebhook` refuses the queue's own merges, because pausing on
+ * one would stop the queue every time it worked. Waking on one is the point: the
+ * merge that just landed is what frees the lane for whoever is next.
+ */
+describe("a push to the branch a queue guards", () => {
+  it("names the branch whoever moved it, including the queue itself", () => {
+    const ours = push({ head_commit: { id: "a".repeat(40), message: `merge\n\n${QUEUE_MERGE_TRAILER}: merge_1` } });
+    expect(externalPushFromWebhook("push", ours)).toBeNull();
+    expect(pushedQueueBranch("push", ours)).toEqual({
+      repositoryId: String(REPO.id),
+      baseRef: "refs/heads/main",
+    });
+  });
+
+  it("says nothing about a push to another branch, a delete, or another event", () => {
+    expect(pushedQueueBranch("push", push({ ref: "refs/heads/feature" }))).toBeNull();
+    expect(pushedQueueBranch("push", push({ deleted: true }))).toBeNull();
+    expect(pushedQueueBranch("pull_request", push())).toBeNull();
+  });
+
+  it("needs no sha, because the branch is the only thing it names", () => {
+    expect(pushedQueueBranch("push", push({ head_commit: null, after: "" }))).toEqual({
+      repositoryId: String(REPO.id),
+      baseRef: "refs/heads/main",
     });
   });
 });
