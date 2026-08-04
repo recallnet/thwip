@@ -46,7 +46,7 @@ re-running.
 
 ## Which profile to choose
 
-Two profiles are available.
+Four profiles are available.
 
 `fast` merges on the proof already carried by the pull request head. That proof
 describes work done before the branch was integrated, which is what `fast` says
@@ -55,11 +55,19 @@ and all it says.
 `remote` runs the required suites in GitHub Actions against the merge candidate
 and merges on that verdict. It costs a CI run per merge; `fast` costs none.
 
-`fresh` and `audited` are described elsewhere as issuing an assignment and
-requiring an integration receipt signed on the machine that ran the suites.
-Nothing issues an assignment and nothing signs a receipt yet, so selecting
-either is refused rather than quietly giving you what `remote` gives under a
-name that claims more.
+`fresh` runs the required suites on the developer's own machine. The queue
+issues that machine a signed assignment naming the candidate tree and the
+suites it must run, and the machine answers with an integration receipt,
+signed on the same machine, naming what it ran and against what tree. The
+queue checks the receipt against the assignment before it counts as evidence.
+`fresh` costs a run on your own machine and buys a merge without spending an
+Actions run.
+
+`audited` is `fresh` plus a second run: the same suites execute again in
+GitHub Actions against the same candidate, and the queue withholds the merge
+until it holds both the local receipt and that remote verdict. It costs what
+`fresh` costs plus what `remote` costs, and buys agreement between a run you
+controlled and one you didn't.
 
 ## Candidate verification
 
