@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, useFetch } from "./api.js";
-import { Panel } from "./ui.js";
+import { ConfirmAction, Panel } from "./ui.js";
 import {
   blockedNextAction,
   entryStateText,
   entryStateTone,
+  findingTitle,
+  healActionLabel,
   ownerGithubUrl,
   ownerName,
   transitionKindText,
@@ -85,6 +87,128 @@ function Owner({ principalId, logins }: { principalId: string; logins: ReadonlyM
     <a href={url} target="_blank" rel="noreferrer">
       {name}
     </a>
+  );
+}
+
+/** One commit in a gap, and what the queue would record for it. */
+interface HealStepView {
+  readonly action: "record-merge" | "record-movement" | "ask-a-person";
+  readonly commitSha: string;
+  readonly sentence: string;
+}
+
+interface HealPlanView {
+  readonly code: string;
+  readonly digest: string;
+  readonly detail: string;
+  readonly summary: string;
+  readonly steps: readonly HealStepView[];
+  readonly healable: boolean;
+}
+
+/**
+ * What is wrong with this branch's record, and the one thing that fixes it.
+ *
+ * The queue has reported these findings on its heartbeat since the day the
+ * first unrecorded merge was understood, and that is where it stopped. Turning
+ * one into a whole chain meant reading `merge_operations` out of the database,
+ * listing every signed merge intent, asking GitHub about each commit in the
+ * gap, and matching trees and parents by hand. The queue holds both halves of
+ * every one of those comparisons, so the server does the search and this shows
+ * what it found.
+ *
+ * Nothing here sends a tree, a parent list or a commit sha. The administrator
+ * names the finding and says why. An operator who could name a commit could
+ * name the throwaway merge GitHub computes for an open pull request, which is
+ * how record 54 reached the chain.
+ *
+ * Findings the queue cannot answer from evidence it holds get no button. A
+ * control that produces a refusal teaches a reader to distrust the next thing
+ * this page tells them.
+ */
+function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; baseRef: string }) {
+  const [plans, setPlans] = useState<readonly HealPlanView[] | null>(null);
+  // A reader who is not an administrator gets 403 here, and that is not an
+  // error to put on their screen: the panel simply is not theirs.
+  const [visible, setVisible] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+
+  const path = `/v1/queue/${repositoryId}/heal?ref=${encodeURIComponent(baseRef)}`;
+  const load = useCallback(() => {
+    api<{ findings: readonly HealPlanView[] }>(path)
+      .then((body) => {
+        setPlans(body.findings);
+        setVisible(true);
+      })
+      .catch(() => setVisible(false));
+  }, [path]);
+
+  useEffect(load, [load]);
+
+  if (!visible || plans === null || plans.length === 0) return null;
+
+  const resolve = (plan: HealPlanView) => {
+    setBusy(plan.digest);
+    setFailed(null);
+    api(path, {
+      method: "POST",
+      body: JSON.stringify({ finding: plan.digest, reason: reasons[plan.digest] ?? plan.detail }),
+    })
+      .then(() => load())
+      .catch((e: Error) => setFailed(e.message))
+      .finally(() => setBusy(null));
+  };
+
+  return (
+    <Panel
+      title="This branch's record"
+      meta={plans.length === 1 ? "1 finding" : `${plans.length} findings`}
+    >
+      <>
+        {failed !== null && <p className="thwip-error">{failed}</p>}
+        {plans.map((plan) => {
+          const label = healActionLabel(plan);
+          return (
+            <div key={plan.digest} className="thwip-finding">
+              <p className="thwip-finding__title">{findingTitle(plan.code)}</p>
+              <p className="gp-panel__meta">{plan.detail}</p>
+              <p>{plan.summary}</p>
+              {plan.steps.length > 0 && (
+                <ul className="thwip-finding__steps">
+                  {plan.steps.map((step) => (
+                    <li key={step.commitSha}>
+                      <code className="gp-mono">{step.commitSha.slice(0, 8)}</code> {step.sentence}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {label === null ? null : (
+                <>
+                  <label className="thwip-finding__reason">
+                    Why you are recording this
+                    <input
+                      type="text"
+                      value={reasons[plan.digest] ?? plan.detail}
+                      onChange={(e) => setReasons((r) => ({ ...r, [plan.digest]: e.target.value }))}
+                    />
+                  </label>
+                  <ConfirmAction
+                    label={label}
+                    title={label}
+                    consequence={<p>{plan.summary} The chain is append-only, so this cannot be undone.</p>}
+                    confirmLabel={label}
+                    busy={busy === plan.digest}
+                    onConfirm={() => resolve(plan)}
+                  />
+                </>
+              )}
+            </div>
+          );
+        })}
+      </>
+    </Panel>
   );
 }
 
@@ -179,10 +303,12 @@ export function QueuePanel({
   );
 
   return (
-    <Panel
-      title={`Queue · ${repositoryName} · ${baseRef.replace(/^refs\/heads\//, "")}`}
-      meta={snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
-    >
+    <>
+      <ChainHealthPanel repositoryId={repositoryId} baseRef={baseRef} />
+      <Panel
+        title={`Queue · ${repositoryName} · ${baseRef.replace(/^refs\/heads\//, "")}`}
+        meta={snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
+      >
       <>
         {snapshot.paused && (
           <p className="thwip-error">
@@ -360,6 +486,7 @@ export function QueuePanel({
           </>
         )}
       </>
-    </Panel>
+      </Panel>
+    </>
   );
 }
