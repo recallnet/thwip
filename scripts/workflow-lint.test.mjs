@@ -32,6 +32,56 @@ jobs: {}
   });
 });
 
+describe("workflow lint: scheduled failure reruns", () => {
+  const workflow = (trigger, command) => `
+name: drain
+on:
+  ${trigger}
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ${command}
+`;
+
+  it("rejects a timer that replays failed workflow records", () => {
+    expect(() =>
+      validateWorkflow(
+        "drain.yml",
+        workflow(
+          `schedule:\n    - cron: "23,53 * * * *"`,
+          `gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs"`,
+        ),
+      ),
+    ).toThrow(/scheduled workflows must not call rerun-failed-jobs/);
+  });
+
+  it("accepts a scheduled queue nudge with no workflow replay", () => {
+    expect(() =>
+      validateWorkflow(
+        "drain.yml",
+        workflow(
+          `schedule:\n    - cron: "23,53 * * * *"`,
+          `curl -X POST "$THWIP_ENDPOINT/v1/queue/$REPO_ID/nudge"`,
+        ),
+      ),
+    ).not.toThrow();
+  });
+
+  it("leaves an explicitly requested manual rerun alone", () => {
+    expect(() =>
+      validateWorkflow(
+        "rerun.yml",
+        workflow(
+          "workflow_dispatch:",
+          `gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/rerun-failed-jobs"`,
+        ),
+      ),
+    ).not.toThrow();
+  });
+});
+
 // A workflow that PATCHes git/refs/heads moves a branch. That is the merge, and a
 // merge queue's whole claim is that one pull request at a time drives a branch.
 // So the group has to name the branch's queue and nothing narrower. thwip-merge

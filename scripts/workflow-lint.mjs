@@ -19,8 +19,37 @@ export function validateWorkflow(filename, source) {
     throw new Error(`${filename}: no trigger`);
   }
 
+  checkScheduledFailureReruns(filename, source, workflow);
   checkLaneConcurrency(filename, source, workflow);
   checkMergeBindsBase(filename, source);
+}
+
+const RERUN_FAILED_JOBS_API = /rerun-failed-jobs/;
+
+/**
+ * A scheduled rerun has no pull request event to prove the run is still live.
+ *
+ * thwip-drain once listed every failed workflow record older than thirty
+ * minutes and called rerun-failed-jobs on each one. A failed attempt refreshed
+ * updated_at, became eligible again on the next schedule, and sent a fresh
+ * notification for pull requests that had merged days earlier. Recovery for a
+ * live pull request has to start from that pull request's current head; a timer
+ * must never replay historical workflow records by itself.
+ */
+function checkScheduledFailureReruns(filename, source, workflow) {
+  const triggers = workflow.on;
+  const scheduled =
+    triggers !== null &&
+    typeof triggers === "object" &&
+    !Array.isArray(triggers) &&
+    Object.hasOwn(triggers, "schedule");
+
+  if (!scheduled || !RERUN_FAILED_JOBS_API.test(source)) return;
+
+  throw new Error(
+    `${filename}: scheduled workflows must not call rerun-failed-jobs; ` +
+      `retry from a current open pull request head instead of replaying historical workflow records`,
+  );
 }
 
 // A PATCH or POST to git/refs/heads is a branch moving, which is what a merge is.
