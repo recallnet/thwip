@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
@@ -129,55 +130,25 @@ function landed(sha: string, treeOid: string, parentShas: readonly string[]): vo
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   published.length = 0;
   commits.clear();
-  return queueRoutes({
-    publishTurnCheck: async (_e, _r, update) => {
-      published.push(update);
-    },
-    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    // A configured repository, which is what the queue actually runs against.
-    // Signing a merge record needs a policy to name; see the test that pins what
-    // happens without one.
-    activePolicy: async () => ({
-      policyDigest: `sha256:${"b".repeat(64)}`,
-      pipelineDigest: `sha256:${"c".repeat(64)}`,
-      requiredSuites: ["unit"],
-      securityProfile: "fast",
-      organizationId: "org_1",
-      verifier: null,
-    }),
-    proofCheckRunId: async () => "778899",
-    signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async (_e, _r, sha) =>
-      commits.get(sha) ?? { treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN },
-    // The candidate GitHub has integrated, which is where the queue reads the
-    // base it pins. Head shas in this file are a pull request number padded
-    // with "a", so this answers about whichever one is asking.
-    integratedCandidate: async (_e, _r, _ref, pr) => ({
-      status: "pinned",
-      baseSha: "b".repeat(40),
-      headSha: String(pr).padStart(40, "a"),
-      candidateSha: "c".repeat(40),
-      candidateTreeOid: TREE,
-    }),
-    // A refusal the queue can confirm: GitHub says not merged and the base does
-    // not contain the head. Every test that reports a refusal means this one,
-    // and the tests that mean a stale read say so themselves.
-    pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
-    // Two questions reach this. The head has not landed, which is the refusal
-    // above; the commit a test reports as merged has, which is what lets its
-    // record be signed. Head shas here are a pull request number padded with
-    // "a" and no test reports one as its merge, so the prefix separates them.
-    baseContainsSha: async (_e, _r, _ref, sha) => !sha.startsWith("a"),
-    sleep: async () => {},
-    ...over,
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, treeOid: TREE }, {
+      publishTurnCheck: async (_e: unknown, _r: string, update: never) => {
+        published.push(update);
+      },
+      commitFacts: async (_e: unknown, _r: string, sha: string) =>
+        commits.get(sha) ?? { treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN },
+      // A refusal the queue can confirm: GitHub says not merged and the base does
+      // not contain the head. Every test that reports a refusal means this one,
+      // and the tests that mean a stale read say so themselves.
+      pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
+      // Two questions reach this. The head has not landed, which is the refusal
+      // above; the commit a test reports as merged has, which is what lets its
+      // record be signed. Head shas here are a pull request number padded with
+      // "a" and no test reports one as its merge, so the prefix separates them.
+      baseContainsSha: async (_e: unknown, _r: string, _ref: string, sha: string) => !sha.startsWith("a"),
+      ...over,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 interface Verdict {

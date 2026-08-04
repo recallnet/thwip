@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -65,19 +66,14 @@ function seed(): void {
  * reaches the queue.
  */
 function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
-  return queueRoutes({
-    authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: true }),
-    verifyOidc: async () => ({ repository_id: REPO }),
-    pinnedVerifier: async () => null,
-    activePolicy: async () => null,
-    dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-    principalFor: async (_e: unknown, githubUserId: string) => (githubUserId === "2" ? "bob" : "alice"),
-    pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-    ...over,
-  });
+  return queueRoutes(
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
+      activePolicy: async () => null,
+      principalFor: async (_e: unknown, githubUserId: string) => (githubUserId === "2" ? "bob" : "alice"),
+      pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF, authorIsBot: false, draft: false, headSha: "a".repeat(40) }),
+      ...over,
+    }) as Parameters<typeof queueRoutes>[0],
+  );
 }
 
 function join(routes: ReturnType<typeof app>, e: QueueRouteEnv, over: Record<string, unknown> = {}) {
