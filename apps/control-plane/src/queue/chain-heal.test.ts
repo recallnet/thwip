@@ -17,11 +17,13 @@ import type { Sha256 } from "@thwip/queue-protocol";
  * `/repair` once per merge. The queue holds both halves of every one of those
  * comparisons, so it does the search itself.
  *
- * The search has three answers and these tests hold all three apart. One intent
+ * These tests hold every answer that search can give apart. One intent
  * authorizes the commit, so a merge record is written citing it. No intent
  * authorizes it, so the only true thing left is that the branch moved without
  * the queue certifying it, and that is what gets written. Two attempts
- * authorize it, so nothing is written and both are named.
+ * authorize it, or one attempt's two intents disagree, or the intent is a kind
+ * no record can be rebuilt from, so nothing is written and a person is told
+ * what to look at.
  */
 
 const open: Array<{ close(): void }> = [];
