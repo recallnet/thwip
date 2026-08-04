@@ -8,6 +8,7 @@
  * makes `npx thwip` a single download.
  */
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,9 @@ await build({
 });
 chmodSync(join(out, "thwip.mjs"), 0o755);
 
+// The bundle reads this beside itself to answer `thwip version`.
+execFileSync("node", [join(root, "scripts/stamp-build.mjs"), out], { stdio: "inherit" });
+
 writeFileSync(
   join(out, "package.json"),
   `${JSON.stringify(
@@ -52,7 +56,9 @@ writeFileSync(
       license: "Apache-2.0",
       type: "module",
       bin: { thwip: "thwip.mjs" },
-      files: ["thwip.mjs", "README.md"],
+      // build-stamp.json ships too. It is how an installed thwip answers
+      // `thwip version` with the commit it was built from instead of a shrug.
+      files: ["thwip.mjs", "build-stamp.json", "README.md"],
       engines: { node: ">=22" },
       dependencies: { yaml: "^2.9.0" },
       publishConfig: { access: "public" },

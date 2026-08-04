@@ -31,7 +31,21 @@ const HELP_TARGETS: readonly (readonly string[])[] = [
   ["verify"],
   ["policy"],
   ["policy", "digest"],
+  ["version"],
 ];
+
+describe("version", () => {
+  // A CLI that cannot say which build it is leaves everybody guessing which
+  // worktree the binary on their PATH came from, which is how a bug in ship
+  // survived a day of use.
+  it.each([["version"], ["--version"], ["-v"]])("routes %s to the version command", (argv) => {
+    expect(parseCliArgs([argv])).toEqual({ kind: "command", invocation: { command: "version", argv: [] } });
+  });
+
+  it("takes no options", () => {
+    expect(parseCliArgs(["version", "--json"])).toMatchObject({ kind: "error" });
+  });
+});
 
 describe("help", () => {
   it.each([[[]], [["--help"]], [["-h"]], [["help"]]])("prints global help for %j", async (argv) => {

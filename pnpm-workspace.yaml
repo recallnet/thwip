@@ -10,5 +10,3 @@ allowBuilds:
   # unmade fails every clean install with ERR_PNPM_IGNORED_BUILDS.
   sharp: false
   workerd: true
-overrides:
-  '@thwip/cli': link:packages/cli
