@@ -1,4 +1,4 @@
-import { EXIT, nextActionFor, type ExitCode } from "./queue-exit.js";
+import { EXIT, exitCodeFor, nextActionFor, type ExitCode, type ReasonCode } from "./queue-exit.js";
 
 /**
  * `thwip queue doctor`, as three reads rather than one.
@@ -72,8 +72,15 @@ export interface DoctorSectionResult {
   readonly section: DoctorSection;
   readonly status: CheckStatus;
   readonly lines: readonly string[];
-  /** What this section alone would exit with. */
+  /**
+   * The shared code for this section, so the sentence a person reads and the
+   * code a program branches on come from the same table.
+   */
+  readonly reasonCode: ReasonCode;
+  /** What this section alone would exit with, from the code above. */
   readonly exitCode: ExitCode;
+  /** Non-secret values this section actually read. Nothing is defaulted in. */
+  readonly facts: Record<string, unknown>;
 }
 
 export interface DoctorReport {
@@ -101,45 +108,56 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-type Part = { lines: string[]; status: CheckStatus; exitCode: ExitCode };
+/**
+ * One section's finding. The exit code is derived from `reasonCode` through the
+ * table every other command uses, so a section cannot exit under one meaning
+ * while saying another.
+ */
+type Part = {
+  lines: string[];
+  status: CheckStatus;
+  reasonCode: ReasonCode;
+  facts?: Record<string, unknown>;
+};
 
 function describeRepository(o: DoctorObservation, repo: string): Part {
   if (o.status === 0) {
     return {
       lines: [`Could not reach the control plane to look up ${repo}.`],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
   if (o.status === 401) {
-    return { lines: ["You are not signed in. Run thwip login."], status: "unread", exitCode: EXIT.authRequired };
+    return { lines: ["You are not signed in. Run thwip login."], status: "unread", reasonCode: "LOGIN_REQUIRED" };
   }
   if (o.status === 404) {
     return {
       lines: [`thwip is not installed on ${repo}. Ask an admin to install the Thwip App on it.`],
       status: "fail",
-      exitCode: EXIT.setupInvalid,
+      reasonCode: "APP_UNINSTALLED",
     };
   }
   if (o.status === 403) {
     return {
       lines: [`Looking up ${repo} was refused, so nothing below is about it.`],
       status: "unread",
-      exitCode: EXIT.permission,
+      reasonCode: "OWNER_UNAUTHORIZED",
     };
   }
   if (o.status >= 400) {
     return {
       lines: [`The control plane refused to look up ${repo} (${o.status}).`],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
   const id = record(o.body)["repositoryId"];
   return {
     lines: [`thwip is installed on ${repo} (repository ${String(id ?? "unknown")}).`],
     status: "pass",
-    exitCode: EXIT.ok,
+    reasonCode: "PASS",
+    facts: { repository: repo, repositoryId: typeof id === "string" ? id : null },
   };
 }
 
@@ -148,31 +166,31 @@ function describeQueue(o: DoctorObservation, ref: string): Part {
     return {
       lines: [`Could not reach the control plane to read the queue for ${ref}.`],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
   if (o.status === 401) {
     return {
       lines: [`Reading the queue for ${ref} needs a signed-in session. Run thwip login.`],
       status: "unread",
-      exitCode: EXIT.authRequired,
+      reasonCode: "LOGIN_REQUIRED",
     };
   }
   if (o.status === 403) {
     return {
       lines: [`Reading the queue for ${ref} was refused, so nothing below is from it.`],
       status: "unread",
-      exitCode: EXIT.permission,
+      reasonCode: "OWNER_UNAUTHORIZED",
     };
   }
   if (o.status === 404) {
-    return { lines: [`No queue is configured for ${ref}.`], status: "fail", exitCode: EXIT.setupInvalid };
+    return { lines: [`No queue is configured for ${ref}.`], status: "fail", reasonCode: "QUEUE_NOT_CONFIGURED" };
   }
   if (o.status >= 400) {
     return {
       lines: [`The control plane refused to read the queue for ${ref} (${o.status}).`],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
 
@@ -208,7 +226,17 @@ function describeQueue(o: DoctorObservation, ref: string): Part {
     lines.push(`  #${String(number)} ${state}: ${said}`);
   }
 
-  return { lines, status: "pass", exitCode: EXIT.ok };
+  return {
+    lines,
+    status: "pass",
+    reasonCode: "PASS",
+    facts: {
+      ref,
+      paused: snapshot["paused"] === true,
+      waiting: entries.length,
+      laneHeld: typeof snapshot["activeAttemptId"] === "string",
+    },
+  };
 }
 
 /**
@@ -225,14 +253,14 @@ function describeApp(o: DoctorObservation): Part {
     return {
       lines: ["Could not reach the control plane to read App permissions."],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
   if (o.status === 401) {
     return {
       lines: ["Reading App permissions needs a signed-in session. Run thwip login."],
       status: "unread",
-      exitCode: EXIT.authRequired,
+      reasonCode: "LOGIN_REQUIRED",
     };
   }
   if (o.status === 403) {
@@ -242,14 +270,14 @@ function describeApp(o: DoctorObservation): Part {
         "Ask an admin to run thwip queue doctor, or pass --allow-unread to accept not knowing.",
       ],
       status: "unread",
-      exitCode: EXIT.permission,
+      reasonCode: "OWNER_UNAUTHORIZED",
     };
   }
   if (o.status >= 400) {
     return {
       lines: [`The control plane refused to read App permissions (${o.status}).`],
       status: "unread",
-      exitCode: EXIT.unavailable,
+      reasonCode: "SERVICE_UNAVAILABLE",
     };
   }
 
@@ -267,7 +295,16 @@ function describeApp(o: DoctorObservation): Part {
   }
   lines.push(rulesets === 1 ? "1 ruleset applies to this repository." : `${rulesets} rulesets apply to this repository.`);
   const bad = missing.length > 0 || body["canPublishMergeCheck"] === false;
-  return { lines, status: bad ? "fail" : "pass", exitCode: bad ? EXIT.setupInvalid : EXIT.ok };
+  return {
+    lines,
+    status: bad ? "fail" : "pass",
+    reasonCode: bad ? "APP_PERMISSION_DRIFT" : "PASS",
+    facts: {
+      missingPermissions: missing,
+      canPublishMergeCheck: body["canPublishMergeCheck"] === true,
+      rulesets,
+    },
+  };
 }
 
 export function reportDoctor(
@@ -278,7 +315,14 @@ export function reportDoctor(
 
   const seen = (section: DoctorSection) => observations.find((o) => o.section === section);
   const add = (section: DoctorSection, part: Part) => {
-    sections.push({ section, status: part.status, lines: part.lines, exitCode: part.exitCode });
+    sections.push({
+      section,
+      status: part.status,
+      lines: part.lines,
+      reasonCode: part.reasonCode,
+      exitCode: exitCodeFor(part.reasonCode),
+      facts: part.facts ?? {},
+    });
   };
 
   const repository = seen("repository");
