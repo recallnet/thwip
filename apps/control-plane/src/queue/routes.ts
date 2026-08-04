@@ -4134,9 +4134,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /**
    * Report the merge the queue authorized. The write happens in CI because the App
-   * cannot yet merge, so the queue must be told what landed — and it refuses
-   * anything that is not the candidate it authorized, which is the guard that makes
-   * delegating the write safe.
+   * cannot yet merge, so the queue must be told which commit landed, and it refuses
+   * anything that is not the candidate it authorized. That refusal is the guard that
+   * makes delegating the write safe.
+   *
+   * A commit id is the whole report. The tree and the parents come from GitHub
+   * here, so the caller names the commit and the queue reads it.
    */
   app.post("/v1/queue/:repositoryId/merged", async (c) => {
     const claims = await deps.verifyOidc(c, c.env);
@@ -4152,9 +4155,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       attemptId?: string;
       operationId?: string;
       mergeSha?: string;
-      mergeTree?: string;
-      parentShas?: string[];
-      transitionDigest?: string;
       sponsorPrincipalId?: string;
     };
     const baseRef = branchRef(body.baseRef);
@@ -4163,13 +4163,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       ["attemptId", body.attemptId],
       ["operationId", body.operationId],
       ["mergeSha", body.mergeSha],
-      ["mergeTree", body.mergeTree],
     ] as const) {
       if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
     }
 
     const attemptId = body.attemptId!;
     const mergeSha = body.mergeSha!;
+
+    // What the commit carries, read from GitHub. The workflow reporting the
+    // merge used to send the tree and the parents alongside the sha, and both
+    // went into a signed record: the queue certified numbers its caller chose.
+    // The reducer bounded that to a lie which reproduces the pin exactly, and a
+    // record still must never repeat a figure it was handed. GitHub holds the
+    // commit, so GitHub says what is in it.
+    const landed = await deps.commitFacts(c.env, repositoryId, mergeSha);
+    // A merge the queue cannot describe is not recorded. Falling back to what
+    // the caller said would put the trust back where this took it from, and the
+    // attempt stays open for reconciliation to settle from its own reads.
+    if (landed === null) return c.json({ error: "could not read that commit", code: "MERGE_UNREADABLE" }, 404);
 
     // Confirm first. The record that becomes the chain link binds the tree that
     // actually landed, so it cannot be built until the queue has accepted that
@@ -4183,8 +4194,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
           attemptId,
           operationId: body.operationId!,
           mergeSha,
-          mergeTree: body.mergeTree!,
-          parentShas: body.parentShas ?? [],
+          mergeTree: landed.treeOid,
+          parentShas: landed.parentShas,
         }),
     );
 
@@ -4203,8 +4214,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       baseRef,
       attemptId,
       mergeSha,
-      mergeTree: body.mergeTree!,
-      parentShas: body.parentShas ?? [],
+      mergeTree: landed.treeOid,
+      parentShas: landed.parentShas,
       attempt: confirmation.attempt,
       chainHead: confirmation.chainHead,
       queueEpoch: afterConfirm.queueEpoch,
