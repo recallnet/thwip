@@ -35,6 +35,26 @@ landed unrecorded on 2 August were found by pulling merge operations out of
 `queue_state.document` with a remote SQL statement, because nothing served them.
 `/explain` serves them now, settled and unsettled, oldest first.
 
+## Reading a row that has no route yet
+
+For whoever does hold a D1 credential, and only for reads the table above cannot
+answer:
+
+```
+node scripts/d1.mjs "SELECT * FROM queue_attestations WHERE attempt_id = 'att_...' LIMIT 5"
+```
+
+It takes one statement, it has to open as `SELECT`, `WITH` or `EXPLAIN`, and it
+refuses anything containing a word that changes the database. It prints the
+wrangler command it is about to run before it runs it, so what was read is in
+the transcript. It fails closed: a `SELECT` whose text happens to contain
+`delete` is refused, and widening the quoting is the reader's problem rather
+than the parser's.
+
+`wrangler d1 execute` is no longer the documented way to look at production.
+Reaching for it means the statement was not a read, and a statement that is not
+a read belongs in the section below.
+
 ## Changing something
 
 Every mutation goes through a route that writes a record naming who asked.
