@@ -113,20 +113,16 @@ jobs:
 
           # Ask the queue again. Idempotent, and it is the queue — not this
           # workflow — that decides whether this pull request holds the turn.
-          base_sha=$(printf '%s' "$pr" | jq -r .base.sha)
-          merge_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.merge_commit_sha // empty')
-          candidate='null'
-          if [ -n "$merge_sha" ]; then
-            commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$merge_sha" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
-            candidate=$(jq -nc --arg base "$base_sha" --arg sha "$merge_sha" \
-              --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \
-              --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \
-              '{baseSha:$base, candidateSha:$sha, candidateTreeOid:$tree, parentShas:$parents}')
-          fi
-
+          #
+          # This run used to read the base, the test merge and its tree and send
+          # all three. The queue signed against whatever that reading had become
+          # by the time it arrived, and on 2 August 2026 four merges landed on a
+          # base signed sixteen seconds earlier than the branch had moved. The
+          # queue reads those objects for itself now, at the moment it pins
+          # them, so nothing about the commit is sent from here.
           body=$(jq -nc --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \
-            --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" --argjson candidate "$candidate" \
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, candidate:$candidate, prepare:true}')
+            --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" \
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, prepare:true}')
 
           # Ask once. That call starts the candidate verification if nothing has
           # run this tree yet.

@@ -32,6 +32,16 @@ export const SERVICE_REASONS = [
   "CANDIDATE_NOT_VERIFIED",
   "CANDIDATE_TREE_MISMATCH",
   "CANDIDATE_BASE_MOVED",
+  "BASE_UNREADABLE",
+  // The states candidate resolution can be in when it hands out no candidate
+  // and the pull request itself is the reason (apps/control-plane/src/queue/
+  // candidate.ts). The four the queue already blocks on — PR_CLOSED, PR_DRAFT,
+  // BASE_NOT_MANAGED, MERGE_CONFLICT — are blocking reasons and are declared
+  // there.
+  "MERGEABILITY_UNKNOWN",
+  "CANDIDATE_MISSING",
+  "CANDIDATE_STALE",
+  "CANDIDATE_PARENTS_UNEXPECTED",
   "CANDIDATE_REJECTED",
   "CANDIDATE_DIGEST_MISMATCH",
   "CANDIDATE_POLICY_MISMATCH",
