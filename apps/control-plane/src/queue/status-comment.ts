@@ -80,7 +80,18 @@ export interface CommentView {
   readonly reason: string | null;
   readonly cooldownUntil: string | null;
   readonly haltReason: HaltReason | null;
-  /** The chain record this pull request merged as, for a reader who wants it. */
+  /**
+   * The chain record this pull request merged as, for a reader who wants it.
+   *
+   * This entry's own link, found by the attempt that merged it. It was the
+   * chain head for an afternoon, and on 4 August pull requests 194, 197 and 198
+   * all named record 142: the head is the head of the whole chain, so every
+   * merged entry claimed whichever merge happened last. Three merges, one
+   * digest, and nothing about it looked wrong.
+   *
+   * Null when the chain no longer carries the link. Naming the head in its
+   * place is how that bug worked.
+   */
   readonly record: { sequence: number; digest: string } | null;
   /** The repository is enrolled and the queue merges nothing for it yet. */
   readonly observing: boolean;
@@ -148,10 +159,26 @@ export function commentViews(
       reason: entry.primaryReason,
       cooldownUntil: entry.cooldownUntil,
       haltReason: state === "halted" ? halted : null,
-      record: state === "merged" ? snapshot.chainHead : null,
+      record: state === "merged" ? recordFor(snapshot, entry.lastAttemptId) : null,
       observing: options.observing,
     };
   });
+}
+
+/**
+ * The chain link one entry merged as, found by the attempt that merged it.
+ *
+ * The attempt id is what joins an entry to its record, and it is the only thing
+ * that does. Reaching for the chain head instead gave three pull requests the
+ * same digest on 4 August.
+ */
+function recordFor(
+  snapshot: QueueSnapshot,
+  attemptId: string | null,
+): { sequence: number; digest: string } | null {
+  if (attemptId === null) return null;
+  const link = snapshot.transitions.find((transition) => transition.attemptId === attemptId);
+  return link === undefined ? null : { sequence: link.transitionSequence, digest: link.digest };
 }
 
 /** `21:14:17 UTC`, which is what a person reading a queue actually wants. */
