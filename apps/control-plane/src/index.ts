@@ -1127,7 +1127,7 @@ app.get("/v1/project-config/defaults", async (c) => {
   if (!/^[0-9]+$/.test(repositoryId)) return c.json({ error: "repositoryId invalid" }, 400);
   const project = await c.env.DB.prepare(
     `SELECT p.id, p.active_policy_digest, o.proof_defaults_json,
-            b.config_source
+            b.config_source, b.source_sha
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
        LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
@@ -1139,6 +1139,7 @@ app.get("/v1/project-config/defaults", async (c) => {
       active_policy_digest: string | null;
       proof_defaults_json: string | null;
       config_source: string | null;
+      source_sha: string | null;
     }>();
   if (project === null) return c.json({ error: "repository not installed for thwip" }, 404);
   if (identity.kind === "user") {
@@ -1153,6 +1154,7 @@ app.get("/v1/project-config/defaults", async (c) => {
     defaults:
       project.proof_defaults_json === null ? null : (JSON.parse(project.proof_defaults_json) as unknown),
     activePolicyDigest: project.active_policy_digest,
+    activePolicySourceSha: project.source_sha,
     activeConfigSource: project.config_source,
   });
 });

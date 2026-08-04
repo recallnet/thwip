@@ -32,12 +32,15 @@ export {
  * a map of id to shell command. That fallback cannot produce an action graph,
  * so it is the weaker tier and is labelled as such.
  */
-class GitHeadSnapshot implements RepositorySnapshot {
-  constructor(private readonly cwd: string) {}
+class GitRefSnapshot implements RepositorySnapshot {
+  constructor(
+    private readonly cwd: string,
+    private readonly ref: string,
+  ) {}
 
   async hasFile(path: string): Promise<boolean> {
     try {
-      await git(["cat-file", "-e", `HEAD:${path}`], this.cwd);
+      await git(["cat-file", "-e", `${this.ref}:${path}`], this.cwd);
       return true;
     } catch {
       return false;
@@ -45,12 +48,12 @@ class GitHeadSnapshot implements RepositorySnapshot {
   }
 
   async listFiles(path: string): Promise<string[]> {
-    const listed = await git(["ls-tree", "-r", "--name-only", "HEAD", "--", path], this.cwd);
+    const listed = await git(["ls-tree", "-r", "--name-only", this.ref, "--", path], this.cwd);
     return listed.length === 0 ? [] : listed.split("\n");
   }
 
   readFile(path: string): Promise<Uint8Array> {
-    return gitBytes(["show", `HEAD:${path}`], this.cwd);
+    return gitBytes(["show", `${this.ref}:${path}`], this.cwd);
   }
 }
 
@@ -86,12 +89,18 @@ export async function resolveRepositoryIds(
   return ids;
 }
 
-async function organizationDefaults(
+interface ProjectConfigState {
+  readonly defaults: ThwipYaml | null;
+  /** Null means bootstrap; undefined means the server predates source reporting. */
+  readonly activePolicySourceSha: string | null | undefined;
+}
+
+async function projectConfigState(
   endpoint: string,
   authHeader: string | null,
   repositoryId: string,
-): Promise<ThwipYaml | null> {
-  if (authHeader === null) return null;
+): Promise<ProjectConfigState> {
+  if (authHeader === null) return { defaults: null, activePolicySourceSha: undefined };
   const response = await fetch(
     `${endpoint}/v1/project-config/defaults?repositoryId=${encodeURIComponent(repositoryId)}`,
     { headers: { authorization: authHeader } },
@@ -99,14 +108,36 @@ async function organizationDefaults(
   // A newly upgraded CLI can still run against a control plane that has not
   // deployed organization defaults yet. A complete thwip.yaml remains enough
   // to derive the same effective policy during that rolling upgrade.
-  if (response.status === 404) return null;
+  if (response.status === 404) return { defaults: null, activePolicySourceSha: undefined };
   if (!response.ok) {
     throw new Error(`cannot resolve organization defaults (${response.status}): ${await response.text()}`);
   }
-  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return null;
-  const body = (await response.json()) as { defaults?: unknown };
-  if (body.defaults === null || body.defaults === undefined) return null;
-  return parseThwipYaml(JSON.stringify(body.defaults));
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) {
+    return { defaults: null, activePolicySourceSha: undefined };
+  }
+  const body = (await response.json()) as { defaults?: unknown; activePolicySourceSha?: unknown };
+  const defaults =
+    body.defaults === null || body.defaults === undefined
+      ? null
+      : parseThwipYaml(JSON.stringify(body.defaults));
+  const activePolicySourceSha =
+    body.activePolicySourceSha === null || typeof body.activePolicySourceSha === "string"
+      ? body.activePolicySourceSha
+      : undefined;
+  return { defaults, activePolicySourceSha };
+}
+
+async function loadProjectConfigAtRef(
+  cwd: string,
+  ref: string,
+  ids: { ownerId: string; repositoryId: string },
+  defaults: ThwipYaml | null,
+): Promise<ProjectConfig & { configSource: "global" | "repository-override" }> {
+  const snapshot = new GitRefSnapshot(cwd, ref);
+  const repositoryYaml = (await snapshot.hasFile("thwip.yaml"))
+    ? new TextDecoder().decode(await snapshot.readFile("thwip.yaml"))
+    : null;
+  return deriveEffectiveProjectConfig(defaults, repositoryYaml, ids, snapshot);
 }
 
 /**
@@ -119,11 +150,27 @@ export async function loadProjectConfigAtHead(
   endpoint: string,
   authHeader: string | null,
 ): Promise<ProjectConfig & { configSource: "global" | "repository-override" }> {
-  const snapshot = new GitHeadSnapshot(cwd);
   const ids = await resolveRepositoryIds(cwd, endpoint, authHeader);
-  const repositoryYaml = (await snapshot.hasFile("thwip.yaml"))
-    ? new TextDecoder().decode(await snapshot.readFile("thwip.yaml"))
-    : null;
-  const defaults = await organizationDefaults(endpoint, authHeader, ids.repositoryId);
-  return deriveEffectiveProjectConfig(defaults, repositoryYaml, ids, snapshot);
+  const state = await projectConfigState(endpoint, authHeader, ids.repositoryId);
+  return loadProjectConfigAtRef(cwd, "HEAD", ids, state.defaults);
+}
+
+/**
+ * Load the configuration a proof must satisfy.
+ *
+ * Once a project has an active policy, a pull request is judged by that policy,
+ * not by an edited thwip.yaml in the candidate tree. The control plane names
+ * the exact default-branch commit that produced the active policy. Before the
+ * first policy exists, HEAD remains the bootstrap candidate; an older server
+ * also keeps the prior HEAD behavior during a rolling deployment.
+ */
+export async function loadProjectConfigForRun(
+  cwd: string,
+  endpoint: string,
+  authHeader: string | null,
+): Promise<ProjectConfig & { configSource: "global" | "repository-override" }> {
+  const ids = await resolveRepositoryIds(cwd, endpoint, authHeader);
+  const state = await projectConfigState(endpoint, authHeader, ids.repositoryId);
+  const ref = state.activePolicySourceSha ?? "HEAD";
+  return loadProjectConfigAtRef(cwd, ref, ids, state.defaults);
 }
