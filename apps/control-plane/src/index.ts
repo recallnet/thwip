@@ -19,6 +19,7 @@ import {
 import { projectPolicyState } from "./policy-state.js";
 import { mintRunLease } from "./run-lease.js";
 import { serviceKey, signPayload } from "./service-signing.js";
+import { appliedMigrations } from "./schema-state.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
@@ -285,6 +286,25 @@ app.get("/health", async (c) => {
   const payload = { service: "thwip", env: c.env.THWIP_ENV, buildSha: c.env.BUILD_SHA, now: nowIso() };
   const jws = await signPayload(c.env, payload, "thwip-health+jws");
   return c.json({ ...payload, jws });
+});
+
+/**
+ * Which migrations this deployment's database has.
+ *
+ * `scripts/predeploy.mjs` refuses a deploy whose code needs a migration the
+ * database does not have, and it established that by running
+ * `wrangler d1 migrations list --remote`. That made shipping the Worker and
+ * rewriting its tables one authority, so a second contributor could not be
+ * given the first without the second.
+ *
+ * Public, and unauthenticated, for the same reason `/health` publishes the
+ * build it is running: a name in `migrations/` is the schema's version and says
+ * nothing about any row. Requiring a credential here would put the deploy gate
+ * back to needing one.
+ */
+app.get("/v1/schema", async (c) => {
+  const applied = await appliedMigrations(c.env.DB as unknown as D1Like);
+  return c.json({ applied, buildSha: c.env.BUILD_SHA }, 200, { "cache-control": "no-store" });
 });
 
 /**

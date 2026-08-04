@@ -24,15 +24,22 @@
  * deploy it belongs on, and the block below refuses while one the code needs is
  * still pending. See `scripts/schema-guard.mjs` for why that is a declaration
  * rather than a rule.
+ *
+ * That check used to shell `wrangler d1 migrations list --remote`, which made
+ * deploying and administering the database the same authority: a contributor
+ * could not be given one without the other. It asks the live Worker instead, at
+ * `/v1/schema`, and applying a migration is now `migrate:staging` under a
+ * separate credential. See `docs/production-access.md`.
  */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { deployIdentity, liveSchemaUrl } from "./deploy-identity.mjs";
 import {
   blockingMigrations,
   formatSchemaRefusal,
-  parseUnappliedMigrations,
   readMigrations,
+  unappliedAgainst,
   undeclaredMigrations,
 } from "./schema-guard.mjs";
 
@@ -51,6 +58,13 @@ try {
 }
 
 console.log(`deploying ${branch}@${head}${dirty ? " (uncommitted changes)" : ""}, ${behind} commit(s) behind origin/main`);
+
+const identity = deployIdentity(process.env);
+console.log(identity.note);
+if (identity.refusal !== null) {
+  console.error(`\n${identity.refusal}`);
+  process.exit(1);
+}
 
 const allow = process.env.THWIP_DEPLOY_ANYWAY === "1";
 if (behind !== "0" && behind !== "?" && !allow) {
@@ -107,25 +121,42 @@ if (undeclared.length > 0) {
   process.exit(1);
 }
 
-let listing = null;
+// Asked of the Worker, not of wrangler.
+//
+// This used to shell `wrangler d1 migrations list --remote`, which meant the
+// deploy gate needed a credential that could also rewrite the schema, and so
+// deploying and administering the database were one authority. The Worker holds
+// the binding already and `/v1/schema` says what it has, so the check is an
+// unauthenticated HTTP read and a deploy needs no database permission at all.
+// Applying migrations is `migrate:staging` now, run deliberately by whoever does
+// hold that authority. See docs/production-access.md.
+const schemaUrl = liveSchemaUrl(targetEnv);
+let unapplied = null;
 try {
-  listing = execFileSync("wrangler", ["d1", "migrations", "list", "DB", "--env", targetEnv, "--remote"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const response = await fetch(schemaUrl, { headers: { accept: "application/json" } });
+  if (response.status === 404) {
+    console.error(
+      `\nRefusing: ${schemaUrl} answered 404, so the live Worker predates the endpoint this gate reads.\n` +
+        `Deploy once with THWIP_DEPLOY_ANYWAY=1 to put it there, then this check works from now on.`,
+    );
+    process.exit(allow ? 0 : 1);
+  }
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const body = await response.json();
+  // A body without the field is not an empty list of migrations. Reading it as
+  // one is the exact shape of the failure this check was added for.
+  unapplied = Array.isArray(body.applied) ? unappliedAgainst(migrations, body.applied) : null;
 } catch (error) {
-  listing = null;
+  unapplied = null;
   console.error(`\nCould not ask ${targetEnv} which migrations it has: ${error.message.split("\n")[0]}`);
 }
 
-const unapplied = listing === null ? null : parseUnappliedMigrations(listing);
 if (unapplied === null) {
-  // An unreadable answer is not a clean one. Reading it as "nothing pending" is
-  // the exact shape of the failure this check was added for.
+  // An unreadable answer is not a clean one.
   if (!allow) {
     console.error(
-      `\nRefusing: the ${targetEnv} database could not be read, so nothing here knows whether the schema\n` +
-        `is ahead of or behind this code. Fix the wrangler credentials, or set THWIP_DEPLOY_ANYWAY=1.`,
+      `\nRefusing: ${schemaUrl} could not be read, so nothing here knows whether the schema\n` +
+        `is ahead of or behind this code. Check the live Worker is up, or set THWIP_DEPLOY_ANYWAY=1.`,
     );
     process.exit(1);
   }

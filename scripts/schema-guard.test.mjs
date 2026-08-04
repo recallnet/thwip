@@ -5,8 +5,8 @@ import {
   blockingMigrations,
   formatSchemaRefusal,
   parseDeployOrder,
-  parseUnappliedMigrations,
   readMigrations,
+  unappliedAgainst,
   undeclaredMigrations,
 } from "./schema-guard.mjs";
 
@@ -67,40 +67,52 @@ describe("which unapplied migrations refuse a deploy", () => {
     expect(blockingMigrations(migrations, [])).toEqual([]);
   });
 
+  /**
+   * The command it names is the repository's own, not a raw wrangler one.
+   * Telling a person to type `wrangler d1 migrations apply` is telling them to
+   * hold a credential that also runs `DELETE`, and it was the only remedy this
+   * guard offered.
+   */
   it("names every blocker and the command that applies them", () => {
     const message = formatSchemaRefusal(["0020_queue_runners.sql"], "staging");
     expect(message).toContain("0020_queue_runners.sql");
-    expect(message).toContain("wrangler d1 migrations apply");
-    expect(message).toContain("--env staging");
+    expect(message).toContain("run migrate:staging");
+    expect(message).not.toContain("wrangler d1");
   });
 });
 
-describe("reading wrangler's account of the database", () => {
-  it("takes the migration names out of the table it prints", () => {
-    const output = [
-      "Migrations to be applied:",
-      "┌────────────────────────────────┐",
-      "│ name                           │",
-      "├────────────────────────────────┤",
-      "│ 0020_queue_runners.sql         │",
-      "│ 0021_local_run_assignments.sql │",
-      "└────────────────────────────────┘",
-    ].join("\n");
-    expect(parseUnappliedMigrations(output)).toEqual([
-      "0020_queue_runners.sql",
-      "0021_local_run_assignments.sql",
-    ]);
+/**
+ * The gate no longer asks wrangler what the database has; it asks the Worker,
+ * which answers with what it has rather than with what is missing. Same
+ * question, subtracted here instead of parsed out of a box-drawn table.
+ */
+describe("what is still pending, given what the database says it has", () => {
+  const migrations = [
+    { name: "0001_first.sql", order: "before-worker" },
+    { name: "0002_second.sql", order: "after-worker" },
+    { name: "0003_third.sql", order: "before-worker" },
+  ];
+
+  it("is every migration the database has not named", () => {
+    expect(unappliedAgainst(migrations, ["0001_first.sql"])).toEqual(["0002_second.sql", "0003_third.sql"]);
   });
 
-  it("reads an up-to-date database as nothing pending", () => {
-    expect(parseUnappliedMigrations("✅ No migrations to apply!")).toEqual([]);
+  it("is empty when the database has them all", () => {
+    expect(unappliedAgainst(migrations, migrations.map((m) => m.name))).toEqual([]);
+  });
+
+  it("is everything when the database has never had a migration applied", () => {
+    expect(unappliedAgainst(migrations, [])).toEqual(migrations.map((m) => m.name));
   });
 
   /**
-   * Output that says neither is not an empty answer. Treating it as one is how
-   * a guard reports success while checking nothing.
+   * A database ahead of this checkout is not this function's problem, and
+   * reporting the extra name as pending would refuse a deploy that is fine.
    */
-  it("refuses to read output that names no migrations and does not say it is current", () => {
-    expect(parseUnappliedMigrations("wrangler: something else entirely")).toBeNull();
+  it("ignores a migration the database has and this tree does not", () => {
+    expect(unappliedAgainst(migrations, ["0001_first.sql", "0099_from_a_branch.sql"])).toEqual([
+      "0002_second.sql",
+      "0003_third.sql",
+    ]);
   });
 });
