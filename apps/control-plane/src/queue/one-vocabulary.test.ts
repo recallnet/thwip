@@ -4,6 +4,7 @@ import { REASON_CODES } from "@thwip/protocol";
 import { nextAction } from "./turn-check.js";
 import { nextActionFor } from "../../../../packages/cli/src/queue-exit.js";
 import { blockedNextAction, outcome } from "../../web/src/vocabulary.js";
+import { statusCommentBody } from "./status-comment.js";
 
 /**
  * The three surfaces, held against each other.
@@ -56,6 +57,35 @@ describe("one sentence per reason, whichever surface a developer meets first", (
     expect(nextAction("SOMETHING_A_NEWER_SERVICE_KNOWS")).toBe("Blocked: SOMETHING_A_NEWER_SERVICE_KNOWS.");
     expect(nextActionFor("SOMETHING_A_NEWER_SERVICE_KNOWS")).toContain("Update thwip");
     expect(blockedNextAction("SOMETHING_A_NEWER_SERVICE_KNOWS")).toContain("Something a newer service knows");
+  });
+
+  /**
+   * The comment on the pull request is the fourth surface, and it arrived after
+   * the other three had already drifted apart once. It renders the same
+   * sentence the check does, and this is what fails if somebody writes it a set
+   * of its own.
+   */
+  it("agrees with the check on every blocking reason it can render", () => {
+    for (const reason of BLOCKING_REASONS) {
+      if (reason === "PR_DRAFT") continue; // its own state, tested beside the renderer
+      const body = statusCommentBody(
+        {
+          entryId: "e1",
+          pullRequestNumber: 1,
+          state: "blocked",
+          position: 1,
+          queued: 1,
+          ahead: [],
+          reason,
+          cooldownUntil: null,
+          haltReason: null,
+          record: null,
+          observing: false,
+        },
+        "2026-08-04T21:14:02.000Z",
+      );
+      expect(body, `${reason} differs on the pull request`).toContain(nextAction(reason));
+    }
   });
 
   it("keeps the exceptions honest by holding each to what it says it is", () => {
