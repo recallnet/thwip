@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import type { QueueRouteEnv } from "./routes.js";
@@ -63,6 +63,22 @@ function env(): QueueRouteEnv {
     .run("alice", "org_1", "1", "alice");
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
+
+/**
+ * Nothing in this file is about GitHub, and until now every run of it called
+ * api.github.com for real: the walk publishes a check and a status comment, and
+ * both went out over the network to be told 401. That is somebody else's uptime
+ * deciding whether this suite passes, and it started failing two of these under
+ * load. GitHub answers nothing here.
+ */
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) =>
+      String(input).includes("/check-runs") ? Response.json({ check_runs: [] }) : Response.json([]),
+    ),
+  );
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

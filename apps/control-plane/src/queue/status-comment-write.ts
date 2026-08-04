@@ -27,6 +27,30 @@ export interface CommentApi {
  */
 export type CommentWriteOutcome = "unchanged" | "created" | "updated" | "failed" | "forbidden";
 
+/**
+ * The states that may open a conversation, as opposed to continue one.
+ *
+ * Found live on 4 August, on the first tick after this shipped. The queue
+ * document keeps every entry it has ever held, so the sweep walked fourteen
+ * pull requests that had merged weeks earlier and tried to comment on each of
+ * them. It spent the Worker's whole subrequest budget and took the tick down
+ * with it, and had GitHub let it through it would have mailed fourteen closed
+ * pull requests instead.
+ *
+ * So an ending is only worth saying to somebody thwip was already talking to. A
+ * merged entry with no comment behind it gets nothing, which is also what keeps
+ * the sweep's cost proportional to the live queue rather than to its history.
+ */
+const MAY_SPEAK_FIRST = new Set<CommentView["state"]>([
+  "draft",
+  "blocked",
+  "cooldown",
+  "waiting",
+  "holds",
+  "merging",
+  "halted",
+]);
+
 interface StoredComment {
   comment_id: number | null;
   fingerprint: string | null;
@@ -81,6 +105,9 @@ export async function writeStatusComment(
   if (record !== null && record.comment_id !== null && record.fingerprint === fingerprint) {
     return "unchanged";
   }
+
+  // An ending on a page thwip never spoke on. Nothing to close, nobody to tell.
+  if (record?.comment_id == null && !MAY_SPEAK_FIRST.has(view.state)) return "unchanged";
 
   const body = statusCommentBody(view, asOf);
 
