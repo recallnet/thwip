@@ -44,6 +44,7 @@ import {
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { authorizeTurn } from "./queue/authorize-turn.js";
 import { reconsiderHead } from "./queue/reconsider-head.js";
+import { driveQueue } from "./queue/drive-queue.js";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
 import { requestTurn } from "./queue/queue-operations.js";
@@ -59,7 +60,7 @@ import {
   unplaceableUpdate,
   type TurnCheckUpdate,
 } from "./queue/turn-check.js";
-import { externalPushFromWebhook } from "./queue/external-push.js";
+import { externalPushFromWebhook, pushedQueueBranch } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { backfillAttestations } from "./queue/attestation-backfill.js";
 import { hasEvidence, putEvidence, type R2Like } from "./queue/evidence-store.js";
@@ -1576,6 +1577,22 @@ app.post("/api/github/webhooks", async (c) => {
       queued = await queueExternalMove(c.env, external);
     } catch (error) {
       queued = { handled: false, detail: error instanceof Error ? error.message : "external move failed" };
+    }
+  }
+
+  // The base branch moved, so whoever holds the lane is walked again.
+  //
+  // Both cases are worth waking for. The queue's own merge frees the lane for
+  // whoever is next, and a push from outside it changes the base every waiting
+  // candidate was integrated against. `driveQueue` answers nothing for a
+  // repository that still runs `thwip-merge.yml`, where the dispatch already
+  // starts the workflow that asks.
+  const moved = pushedQueueBranch(event, payload as never);
+  if (moved !== null) {
+    try {
+      await driveQueue(c.env, queueDeps as never, queueOnQueue, moved);
+    } catch {
+      /* the lane survives; the next delivery or the tick asks again */
     }
   }
 

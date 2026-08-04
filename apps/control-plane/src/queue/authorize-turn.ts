@@ -532,7 +532,16 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // Only for the entry that holds the lane. Somebody else's turn is answered
   // from the snapshot below, and reading GitHub for a pull request that is
   // merely waiting would spend a call to say what the queue already knows.
-  if (input.prepare && held.activeAttemptId !== null && held.activeEntryId === entryId) {
+  // Prepared for the caller that asked, and for the App whenever it is the
+  // writer.
+  //
+  // Preparing starts the merge-confirmation clock, so the rule was that only
+  // the caller about to write asks for it. Once the App is that caller there is
+  // nobody else to ask: `thwip-merge.yml` is what used to arrive with
+  // `prepare: true`, and a repository that has stopped running it has no other
+  // trigger. So the writer decides, and the clock starts where the write does.
+  const walkToMerge = input.prepare || (project.mergeWriter ?? "workflow") === "app";
+  if (walkToMerge && held.activeAttemptId !== null && held.activeEntryId === entryId) {
     const attemptId = held.activeAttemptId;
     const holder = held.entries.find((e) => e.entryId === entryId);
 
@@ -600,7 +609,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
       // second later reads null, is refused here, and is spent. Nothing re-drove
       // the lane, so the next attempt waited for the five-minute cron and the
       // branch merged once per five minutes.
-      await driveLane(env, deps, repositoryId, after ?? held);
+      await driveLane(env, deps, repositoryId, baseRef, after ?? held);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -617,7 +626,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
       // A push landed while this turn was being asked about. The candidate
       // GitHub is offering integrates a commit whose proof nothing here has
       // read, and the entry's own head follows on the next ask.
-      await driveLane(env, deps, repositoryId, held);
+      await driveLane(env, deps, repositoryId, baseRef, held);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -645,7 +654,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
           outcome: "BASE_MOVED",
         });
       });
-      await driveLane(env, deps, repositoryId, after);
+      await driveLane(env, deps, repositoryId, baseRef, after);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -1096,7 +1105,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // evaluates, ticks and claims. If that offered the turn to somebody else,
   // nothing was telling them, and the lane sat until an unrelated call happened
   // to notice.
-  await driveLane(env, deps, repositoryId, snapshot);
+  await driveLane(env, deps, repositoryId, baseRef, snapshot);
 
   // An attempt already walked to merge-ready by an earlier caller still has an
   // operation, and the caller that will perform the write needs its id. Without

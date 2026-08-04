@@ -20,7 +20,7 @@ import {
   mergeCommitTitle,
   type MergeMethod,
 } from "./merge-commit.js";
-import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
+import type { MergeIntent, MergeWriteOutcome, MergeWriter } from "./merge-write.js";
 import { requiredSuitesDigest, type Sha256 } from "@thwip/queue-protocol";
 import { putEvidence, type R2Like } from "./evidence-store.js";
 import { acceptedReceiptFor } from "./assignment-store.js";
@@ -74,12 +74,17 @@ export interface ActivePolicy {
  */
 export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
   activePolicy(env: TEnv, repositoryId: string): Promise<ActivePolicy | null>;
-  /** The merge method the record must bind, read from the row rather than assumed. */
+  /**
+   * The merge method the record must bind, and who performs the write. Both
+   * read from the row rather than assumed: a record that claims "merge" for a
+   * squash fails its own shape check, and two writers racing for one turn is
+   * how a merge that landed gets reported as a base that moved.
+   */
   queueProject(
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ mergeMethod: MergeMethod } | null>;
+  ): Promise<{ mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
   proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
    * Whether the base branch already contains a commit, from git ancestry.
@@ -394,14 +399,16 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
  */
 export type DriveLaneOutcome =
   | { readonly dispatched: false; readonly reason: "LANE_IDLE" }
+  | { readonly dispatched: false; readonly reason: "APP_WRITES"; readonly pullRequestNumber: number }
   | { readonly dispatched: false; readonly reason: "DEVICE_ONLY"; readonly pullRequestNumber: number }
   | { readonly dispatched: false; readonly reason: "DISPATCH_FAILED"; readonly pullRequestNumber: number }
   | { readonly dispatched: true; readonly pullRequestNumber: number };
 
 export async function driveLane<TEnv extends QueueRouteEnv>(
   env: TEnv,
-  deps: Pick<MergeLaneDeps<TEnv>, "driveTurn" | "activePolicy">,
+  deps: Pick<MergeLaneDeps<TEnv>, "driveTurn" | "activePolicy" | "queueProject">,
   repositoryId: string,
+  baseRef: string,
   snapshot: QueueSnapshot,
 ): Promise<DriveLaneOutcome> {
   const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
@@ -424,6 +431,21 @@ export async function driveLane<TEnv extends QueueRouteEnv>(
   // callback.
   const policy = await deps.activePolicy(env, repositoryId);
   const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+
+  // A repository whose writer is the App has no merge workflow to dispatch.
+  //
+  // The dispatch existed to start `thwip-merge.yml`, which asked `/authorize`
+  // for the pins and wrote the branch. Once the App writes, that file is gone,
+  // and a `repository_dispatch` for a workflow that is not there is a call to
+  // GitHub that starts nothing. The queue walks the holder itself, and the push
+  // its own merge produces wakes it for the next one.
+  const project = await deps.queueProject(env, repositoryId, baseRef);
+  if (project?.mergeWriter === "app") {
+    const holder = running ?? ran;
+    return holder === undefined
+      ? { dispatched: false, reason: "LANE_IDLE" }
+      : { dispatched: false, reason: "APP_WRITES", pullRequestNumber: holder.pullRequestNumber };
+  }
 
   let holder = running;
   if (deviceOnly) {
@@ -598,7 +620,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
     // anyway costs everyone the one claim this queue makes.
     if (input.mergeMethod !== "merge") {
       const freed = await resolveNotMerged(env, input);
-      await driveLane(env, deps, input.repositoryId, freed.snapshot);
+      await driveLane(env, deps, input.repositoryId, input.baseRef, freed.snapshot);
       return {
         merged: false,
         reason: "SQUASH_UNBINDABLE",
@@ -626,7 +648,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         witnessPrincipalIds: [],
       });
       if (!recorded.ok) return { merged: true, recorded: false, reason: recorded.code, detail: recorded.detail };
-      await driveLane(env, deps, input.repositoryId, recorded.snapshot);
+      await driveLane(env, deps, input.repositoryId, input.baseRef, recorded.snapshot);
       return {
         merged: true,
         recorded: true,
@@ -645,7 +667,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
           attemptId: input.attemptId,
         }),
       );
-      await driveLane(env, deps, input.repositoryId, snapshot);
+      await driveLane(env, deps, input.repositoryId, input.baseRef, snapshot);
       return { merged: true, recorded: false, reason: "MERGE_UNNAMED" };
     }
 
@@ -654,7 +676,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       // that here. Otherwise the lane stays held until its deadline and every
       // pull request behind this one waits on a merge nobody is going to make.
       const freed = await resolveNotMerged(env, input);
-      await driveLane(env, deps, input.repositoryId, freed.snapshot);
+      await driveLane(env, deps, input.repositoryId, input.baseRef, freed.snapshot);
       return {
         merged: false,
         reason: outcome.kind === "base-moved" ? "BASE_MOVED" : "MERGE_REFUSED",
@@ -671,7 +693,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         attemptId: input.attemptId,
       }),
     );
-    await driveLane(env, deps, input.repositoryId, snapshot);
+    await driveLane(env, deps, input.repositoryId, input.baseRef, snapshot);
     return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };
   };
 
