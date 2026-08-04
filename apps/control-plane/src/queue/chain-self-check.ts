@@ -1,4 +1,8 @@
+import { compactVerify, createLocalJWKSet, type JSONWebKeySet } from "jose";
 import { verifyChain, type ChainFinding, type ChainLink, type ChainVerifierPorts } from "@thwip/queue-protocol";
+import { readChain } from "./attestation.js";
+import { verificationKeys } from "../service-keys.js";
+import type { D1Like } from "./projection.js";
 
 /**
  * Reading the queue's own chain the way an outsider would.
@@ -31,4 +35,41 @@ export async function checkOwnChain(
     });
   }
   return findings;
+}
+
+/**
+ * Read one branch's chain out of D1 and check it, with the keys the service
+ * publishes.
+ *
+ * One producer, so the heartbeat and the project page cannot disagree about
+ * whether a chain is whole. An administrator acting on a finding has to be
+ * acting on the same finding the tick reported, and two call sites assembling
+ * the verifier by hand is how that stops being true.
+ *
+ * The key set is read here, per call, rather than handed in. A record signed
+ * moments ago under a kid this isolate has only just published would be checked
+ * against a key set taken before that insert and reported as `BAD_SIGNATURE`:
+ * a false alarm on the exact signal this exists to make trustworthy, and one
+ * that clears itself on the next read, which makes it rarer and harder to
+ * diagnose rather than less bad.
+ */
+export async function findingsForChain(
+  db: D1Like,
+  input: { readonly repositoryId: string; readonly baseRef: string; readonly epochStartsAt: number },
+): Promise<SelfCheckFinding[]> {
+  const published: JSONWebKeySet = { keys: await verificationKeys(db) };
+  const keySet = createLocalJWKSet(published);
+  const links = await readChain(db, input.repositoryId, input.baseRef);
+  return checkOwnChain(links, {
+    epochStartsAt: input.epochStartsAt,
+    subject: { repositoryId: input.repositoryId, baseRef: input.baseRef },
+    async verifySignature(jws, bytes) {
+      try {
+        const { payload } = await compactVerify(jws, keySet);
+        return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
+      } catch {
+        return false;
+      }
+    },
+  });
 }

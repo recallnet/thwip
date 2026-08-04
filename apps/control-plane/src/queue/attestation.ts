@@ -563,6 +563,24 @@ export interface AuthorizedMerge {
   readonly intent: MergeIntentV1;
 }
 
+/**
+ * Why no single intent came back, in a form something other than a person can
+ * act on.
+ *
+ * `refused` is the sentence, and it stays because it is what an operator reads.
+ * Beside it is the reason as a code, because the three reasons want three
+ * different remedies: nothing authorized this commit at all, two attempts
+ * authorized it and one must be named, or two intents for one attempt disagree.
+ * A caller that had to tell those apart by matching on the sentence would drift
+ * away from this function the first time the wording improved.
+ */
+export interface AuthorizationRefusal {
+  readonly refused: string;
+  readonly code: "NO_INTENT" | "AMBIGUOUS_ATTEMPT" | "INTENTS_DISAGREE";
+  /** The attempts that authorized this commit, where more than one did. */
+  readonly attemptIds: readonly string[];
+}
+
 export async function authorizationFor(
   db: D1Like,
   input: {
@@ -572,7 +590,7 @@ export async function authorizationFor(
     readonly parentShas: readonly string[];
     readonly attemptId?: string;
   },
-): Promise<AuthorizedMerge | { refused: string }> {
+): Promise<AuthorizedMerge | AuthorizationRefusal> {
   const rows = await db
     .prepare(
       `SELECT digest, bytes FROM queue_attestations
@@ -605,11 +623,17 @@ export async function authorizationFor(
     return {
       refused:
         "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
+      code: "NO_INTENT",
+      attemptIds: [],
     };
   }
   const attempts = [...new Set(matched.map((m) => m.intent.attemptId))];
   if (attempts.length > 1) {
-    return { refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}` };
+    return {
+      refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}`,
+      code: "AMBIGUOUS_ATTEMPT",
+      attemptIds: attempts,
+    };
   }
 
   // One attempt can sign its intent more than once: a merge run that restarts
@@ -623,7 +647,11 @@ export async function authorizationFor(
   // force when the merge was asked for.
   const first = matched[0]!;
   if (matched.some((m) => cited(m.intent) !== cited(first.intent))) {
-    return { refused: "this commit's merge intents disagree about what they authorized" };
+    return {
+      refused: "this commit's merge intents disagree about what they authorized",
+      code: "INTENTS_DISAGREE",
+      attemptIds: attempts,
+    };
   }
   return first;
 }
