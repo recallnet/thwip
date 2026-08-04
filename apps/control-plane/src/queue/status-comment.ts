@@ -1,6 +1,6 @@
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import type { QueueSnapshot } from "./queue-operations.js";
-import { haltReasonOf, nextAction, type HaltReason } from "./turn-check.js";
+import { blockedTitle, haltReasonOf, nextAction, type HaltReason } from "./turn-check.js";
 
 /**
  * The one comment thwip keeps on a queued pull request.
@@ -211,7 +211,9 @@ function headline(view: CommentView): string {
     case "untracked":
       return "not queued · thwip no longer manages this branch";
     default:
-      return "blocked";
+      // The same short name the check puts in its title, so a reader meeting
+      // this reason twice meets one name for it.
+      return view.reason === null ? "blocked" : `blocked · ${blockedTitle(view.reason)}`;
   }
 }
 
