@@ -1,5 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
-import { CompactSign, compactVerify, createLocalJWKSet, type JSONWebKeySet } from "jose";
+import { CompactSign } from "jose";
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
@@ -11,12 +11,10 @@ import type { D1Like } from "./projection.js";
 import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
 import { serviceKey } from "../service-signing.js";
-import { verificationKeys } from "../service-keys.js";
 import type { Env } from "../env.js";
 import { ORPHANED_WRITE_GRACE_MS, ORPHANED_WRITE_SWEEP_LIMIT, settleOrphanedWrite } from "./orphaned-writes.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
-import { readChain } from "./attestation.js";
-import { checkOwnChain } from "./chain-self-check.js";
+import { findingsForChain } from "./chain-self-check.js";
 
 /**
  * The real dependencies `recordMergeFromIntent` needs, built once from the same
@@ -261,35 +259,20 @@ export async function tickAllQueues(
       // finding is read and reported, never acted on: the sweep above is what
       // repairs a chain, and this is only the queue looking at what it wrote.
       //
-      // The key set is read here, after `sweepOrphanedWrites`, not once for the
-      // whole tick. `sweepOrphanedWrites` can call `recordMergeFromIntent`,
-      // which signs through `serviceKey()` and inserts a row into
-      // `service_keys` the first time this isolate uses that kid — inside the
-      // same per-queue pass this check runs in. A key set taken before that
-      // insert would check the record the sweep just signed against a key
-      // published after the record was made, and report it as `BAD_SIGNATURE`:
-      // a false alarm on the exact signal this feature exists to make
-      // trustworthy, and one that clears itself on the next tick, which makes
-      // it rarer and harder to diagnose rather than less bad. `verificationKeys`
-      // is a plain D1 select, so reading it once per queue rather than once per
-      // tick costs one extra read on a queue with a chain to check, not one per
-      // link.
-      const publishedKeys: JSONWebKeySet = { keys: await verificationKeys(db) };
-      const verificationKeySet = createLocalJWKSet(publishedKeys);
-      const verifyChainSignature = async (jws: string, bytes: Uint8Array): Promise<boolean> => {
-        try {
-          const { payload } = await compactVerify(jws, verificationKeySet);
-          return new TextDecoder().decode(payload) === new TextDecoder().decode(bytes);
-        } catch {
-          return false;
-        }
-      };
-
-      const chainLinks = await readChain(db, row.repositoryId, row.baseRef);
-      const chainCheck = await checkOwnChain(chainLinks, {
+      // The key set `findingsForChain` reads is read after `sweepOrphanedWrites`
+      // rather than once for the whole tick, and that ordering is why this call
+      // sits here. `sweepOrphanedWrites` can call `recordMergeFromIntent`, which
+      // signs through `serviceKey()` and inserts a row into `service_keys` the
+      // first time this isolate uses that kid, inside the same per-queue pass.
+      // A key set taken before that insert would check the record the sweep just
+      // signed against a key published after the record was made and report it
+      // as `BAD_SIGNATURE`: a false alarm on the exact signal this feature
+      // exists to make trustworthy, and one that clears itself on the next tick,
+      // which makes it rarer and harder to diagnose rather than less bad.
+      const chainCheck = await findingsForChain(db, {
+        repositoryId: row.repositoryId,
+        baseRef: row.baseRef,
         epochStartsAt: row.epochStartsAt,
-        subject: { repositoryId: row.repositoryId, baseRef: row.baseRef },
-        verifySignature: verifyChainSignature,
       });
       chainFindings += chainCheck.length;
       for (const finding of chainCheck) {

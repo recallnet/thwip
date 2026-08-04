@@ -9,6 +9,7 @@ import {
   parentOidsDigest,
   requiredSuitesDigest,
   type AssignmentVerifier,
+  type ExternalObservationCode,
   type GitSubject,
   type IntegrationAssignmentV1,
   type MergeIntentV1,
@@ -449,6 +450,60 @@ export async function buildBaseCorrectionRecord(input: {
       attemptId: input.corrected.attemptId,
       actorPrincipalId: input.actorPrincipalId,
       reason: input.reason,
+    },
+  };
+}
+
+/**
+ * Build the record for a branch movement the queue did not certify.
+ *
+ * This is the weakest of the merge-shaped kinds and it is chosen on purpose.
+ * Where a commit reached the branch and no signed intent pins that tree on
+ * those parents, the queue cannot say it authorized the merge, because it did
+ * not. What it can say is that the branch went from one commit to another and
+ * that the queue was not the cause. That claim rests only on git, which anybody
+ * can re-check, and it fills the hole in the chain without asserting anything
+ * the evidence does not carry.
+ *
+ * Nothing here comes from an operator except `operatorReasonDigest`, which
+ * binds the words they gave for asking. The shas, the tree and the parents are
+ * read from the commit.
+ */
+export async function buildExternalTransitionRecord(input: {
+  readonly repositoryId: string;
+  readonly baseRef: string;
+  readonly queueEpoch: number;
+  readonly transitionSequence: number;
+  readonly previousTransitionDigest: Sha256 | null;
+  readonly before: { readonly baseSha: string; readonly treeOid: string };
+  readonly moved: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
+  readonly observationReasonCode: ExternalObservationCode;
+  readonly operatorReasonDigest: Sha256;
+  readonly observedAt: string;
+}): Promise<Record<string, unknown>> {
+  const parents = input.moved.parentShas;
+  const embedded = parents.slice(0, 16);
+  return {
+    schemaVersion: "1",
+    kind: "external-transition",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    queueEpoch: input.queueEpoch,
+    transitionSequence: input.transitionSequence,
+    previousTransitionDigest: input.previousTransitionDigest,
+    before: input.before,
+    after: {
+      baseSha: input.moved.sha,
+      treeOid: input.moved.treeOid,
+      parentOids: embedded,
+      parentCount: parents.length,
+      parentOidsDigest: await parentOidsDigest(parents),
+      parentsComplete: embedded.length === parents.length,
+    },
+    observedAt: input.observedAt,
+    external: {
+      observationReasonCode: input.observationReasonCode,
+      operatorReasonDigest: input.operatorReasonDigest,
     },
   };
 }
