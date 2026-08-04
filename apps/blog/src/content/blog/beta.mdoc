@@ -364,20 +364,18 @@ checks that each link is the digest of the record before it, then resolves every
 citation each record makes and reports any record carrying a gap where a
 citation belongs.
 
-[`scripts/verify-chain.mjs`](https://github.com/recallnet/thwip/blob/main/scripts/verify-chain.mjs)
-runs it against a live repository. It needs no thwip account:
+The CLI runs it against a live repository, with no thwip account:
 
 ```bash
-git clone https://github.com/recallnet/thwip && cd thwip
-pnpm install && pnpm build
-node scripts/verify-chain.mjs recallnet/thwip
+npm install -g @recallnet/thwip
+thwip verify-chain --repo recallnet/thwip
 ```
 
 A merge that lands without a record leaves the base of one record short of the
 next, which the walk reports as `BASE_DISCONTINUITY` and names the commit the
 chain never accounted for. The queue runs this same verifier against its own
-chain on every tick. If you break our chain, open an issue and paste what the
-script printed, and we will act on it.
+chain on every tick. If you break our chain, open an issue with what it printed
+and we will act on it.
 
 ## Open problems
 
@@ -405,16 +403,9 @@ system that already does this and that we missed.
 
 ## Sources and code
 
-Protocol and verifier:
-[`packages/protocol`](https://github.com/recallnet/thwip/tree/main/packages/protocol),
-[`packages/verifier`](https://github.com/recallnet/thwip/tree/main/packages/verifier),
-[`packages/queue-protocol`](https://github.com/recallnet/thwip/tree/main/packages/queue-protocol).
-Design notes in [`docs/`](https://github.com/recallnet/thwip/tree/main/docs) and
-[`THWIP.md`](https://github.com/recallnet/thwip/blob/main/THWIP.md). Short forms
-for agents: [llms.txt](/llms.txt), [faq.md](/faq.md).
-
-The monorepo is public and it merges through thwip, so a contribution meets the
-evidence bar this note describes.
+The monorepo is [public](https://github.com/recallnet/thwip) and it merges
+through thwip, so a contribution meets the evidence bar this note describes.
+Short forms for agents: [llms.txt](/llms.txt), [faq.md](/faq.md).
 
 {% cta-row %}
 {% cta href="https://github.com/recallnet/thwip" label="Repository" /%}
