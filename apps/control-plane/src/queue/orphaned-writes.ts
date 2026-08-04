@@ -52,6 +52,41 @@ export const MERGED_WITHOUT_RECORD_WINDOW_MS = 24 * 60 * 60 * 1000;
  */
 export const ORPHANED_WRITE_SWEEP_LIMIT = 5;
 
+/**
+ * How long a write waits after the sweep failed to settle it, and the ceiling.
+ *
+ * Fifteen minutes is three ticks, so a row the sweep refused is not read again
+ * on the tick after the one that refused it. That is the whole cost being cut.
+ * Four writes on this repository ran the full three-round backoff every five
+ * minutes, about fourteen subrequests each, and the sweep spent its budget on
+ * them before it reached a write nobody had looked at. On one tick it spent the
+ * invocation's and failed both queues.
+ *
+ * Doubling, because a row refused for the tenth consecutive time for the same
+ * reason is telling you it needs a person rather than another read. The ceiling
+ * is a day, so a write is always asked about again: a pull request GitHub could
+ * not answer for an hour is a different thing from a merge nobody can name, and
+ * the sweep has no way to tell them apart except by asking later.
+ */
+export const ORPHANED_WRITE_REFUSAL_BACKOFF_MS = 15 * 60 * 1000;
+export const ORPHANED_WRITE_REFUSAL_BACKOFF_CAP_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When a write refused `refusalCount` times in a row may be read again.
+ *
+ * Waiting is not forgetting. The row keeps its outcome open, `/explain` reports
+ * it with the reason and the count, and the sweep comes back to it. What stops
+ * is the reading of GitHub on a schedule that never learned anything.
+ */
+export function retryAfter(refusalCount: number, refusedAt: string): string {
+  const doublings = Math.max(0, refusalCount - 1);
+  const wait = Math.min(
+    ORPHANED_WRITE_REFUSAL_BACKOFF_MS * 2 ** Math.min(doublings, 40),
+    ORPHANED_WRITE_REFUSAL_BACKOFF_CAP_MS,
+  );
+  return new Date(Date.parse(refusedAt) + wait).toISOString();
+}
+
 export interface OrphanedWriteReads {
   /**
    * The pull requests GitHub associates with the head commit this write pinned,

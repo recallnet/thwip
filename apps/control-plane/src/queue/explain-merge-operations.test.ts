@@ -6,6 +6,7 @@ import { withQueueState } from "./queue-state.js";
 import { diagnose } from "./queue-operations.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
+import { retryAfter } from "./orphaned-writes.js";
 
 /**
  * Merge writes, in the call that explains the queue.
@@ -73,6 +74,59 @@ describe("what /explain says about merge writes", () => {
 
   it("says the queue has no writes rather than leaving the field out", () => {
     expect(diagnose(SnapshotQueueStore.open(cellOf(), IDENTITY)).mergeOperations).toEqual([]);
+  });
+
+  /**
+   * A write the sweep cannot settle waits between reads rather than costing
+   * GitHub calls every five minutes. Waiting is where a write goes quiet if
+   * nothing says so, and a merge write nobody owns is the failure this sweep
+   * exists to prevent, so the reason and the count are reported here.
+   */
+  it("says why a write the sweep refused is waiting, and how long it has said so", async () => {
+    const store = SnapshotQueueStore.open(cellOf(), IDENTITY);
+    store.beginMergeOperation(write("op-1", "2026-08-02T12:20:00Z"));
+    await store.refuseMergeOperation("op-1", "the merge landed and GitHub named no commit", "2026-08-04T20:00:00Z", retryAfter);
+    await store.refuseMergeOperation("op-1", "the merge landed and GitHub named no commit", "2026-08-04T20:20:00Z", retryAfter);
+
+    const [row] = diagnose(store).mergeOperations;
+
+    expect(row).toMatchObject({
+      operationId: "op-1",
+      outcome: null,
+      refusalReason: "the merge landed and GitHub named no commit",
+      refusalCount: 2,
+      refusedAt: "2026-08-04T20:20:00Z",
+    });
+    expect(row!.retryAfter).not.toBeNull();
+  });
+
+  it("starts the count over when the write starts refusing for a different reason", async () => {
+    // A new sentence is a write whose situation moved, and it earns a fresh
+    // look rather than inheriting the patience the old one had run up.
+    const store = SnapshotQueueStore.open(cellOf(), IDENTITY);
+    store.beginMergeOperation(write("op-1", "2026-08-02T12:20:00Z"));
+    await store.refuseMergeOperation("op-1", "GitHub could not be read", "2026-08-04T20:00:00Z", retryAfter);
+    await store.refuseMergeOperation("op-1", "GitHub could not be read", "2026-08-04T20:20:00Z", retryAfter);
+    await store.refuseMergeOperation("op-1", "the pull request could not be named", "2026-08-04T21:00:00Z", retryAfter);
+
+    expect(diagnose(store).mergeOperations[0]).toMatchObject({
+      refusalReason: "the pull request could not be named",
+      refusalCount: 1,
+    });
+  });
+
+  it("holds a refused write back from the sweep, and gives it back once it has waited", async () => {
+    const store = SnapshotQueueStore.open(cellOf(), IDENTITY);
+    store.beginMergeOperation(write("op-1", "2026-08-02T12:20:00Z"));
+    const refusedAt = "2026-08-04T20:00:00Z";
+    await store.refuseMergeOperation("op-1", "the merge landed and GitHub named no commit", refusedAt, retryAfter);
+
+    // The tick five minutes later reads nothing about it.
+    expect(store.unresolvedMergeOperations("2026-08-04T20:05:00Z", "2026-08-04T20:05:00Z")).toEqual([]);
+    // A day later it is asked about again. Waiting is not forgetting.
+    expect(
+      store.unresolvedMergeOperations("2026-08-05T20:05:00Z", "2026-08-05T20:05:00Z").map((w) => w.operationId),
+    ).toEqual(["op-1"]);
   });
 });
 

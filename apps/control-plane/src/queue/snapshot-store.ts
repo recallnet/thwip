@@ -115,6 +115,18 @@ interface MergeOperationRow {
   writeStartedAt: string;
   outcome: string | null;
   resolvedAt: string | null;
+  /**
+   * What the sweep concluded last time it looked, how many consecutive times it
+   * concluded the same thing, when that was, and when it will look again.
+   *
+   * Absent on every row written before the sweep learned to remember a refusal,
+   * which reads as never refused and is asked about on the next tick, the way it
+   * behaved before.
+   */
+  refusalReason?: string | null;
+  refusalCount?: number;
+  refusedAt?: string | null;
+  retryAfter?: string | null;
 }
 
 export interface EventRow {
@@ -140,6 +152,11 @@ interface Document {
   /** transitionSequence to the time it was first recorded. */
   transitionsRecordedAt: Record<string, string>;
   events: EventRow[];
+}
+
+/** Whether the sweep may read GitHub about this write on a tick at `now`. */
+function due(row: MergeOperationRow, now: string): boolean {
+  return typeof row.retryAfter !== "string" || row.retryAfter <= now;
 }
 
 function emptyDocument(identity: { queueKey: string; repositoryId: string; baseRef: string }): Document {
@@ -479,14 +496,44 @@ export class SnapshotQueueStore {
   }
 
   /**
+   * Write down that the sweep looked at this write and could not settle it.
+   *
+   * The count runs on while the reason holds and starts over when it changes,
+   * because those are two different stories. Ten refusals saying the same
+   * sentence is a write that needs a person; a new sentence is a write whose
+   * situation moved, and it earns a fresh look on the next tick.
+   *
+   * Nothing here closes the row. It stays open, `/explain` reports it with the
+   * reason and the count, and the sweep comes back when `retryAfter` passes. A
+   * write nobody can settle has to stay visible, because a merge write nobody
+   * owns is the failure this whole sweep exists to prevent.
+   */
+  async refuseMergeOperation(
+    operationId: string,
+    reason: string,
+    at: string,
+    retryAt: (count: number, refusedAt: string) => string,
+  ): Promise<{ count: number } | null> {
+    const row = this.doc.mergeOperations.find((o) => o.operationId === operationId);
+    if (row === undefined) return null;
+    const count = row.refusalReason === reason ? (row.refusalCount ?? 0) + 1 : 1;
+    row.refusalReason = reason;
+    row.refusalCount = count;
+    row.refusedAt = at;
+    row.retryAfter = retryAt(count, at);
+    this.flush();
+    return { count };
+  }
+
+  /**
    * Writes that were started and that nobody ever resolved, oldest first. See
    * the note on `BranchQueueStore.unresolvedMergeOperations`: the obligation to
    * settle a write belongs to the write, because the attempt that used to carry
    * it does not survive the failure that needs settling.
    */
-  unresolvedMergeOperations(startedBefore: string): UnresolvedMergeOperation[] {
+  unresolvedMergeOperations(startedBefore: string, now: string): UnresolvedMergeOperation[] {
     return this.doc.mergeOperations
-      .filter((row) => row.outcome === null && row.writeStartedAt < startedBefore)
+      .filter((row) => row.outcome === null && row.writeStartedAt < startedBefore && due(row, now))
       .sort((a, b) =>
         a.writeStartedAt === b.writeStartedAt
           ? a.operationId.localeCompare(b.operationId)
@@ -509,13 +556,14 @@ export class SnapshotQueueStore {
    * `BranchQueueStore.mergedWritesResolvedAfter`: resolved is not finished, and
    * a merge whose record was skipped is invisible to the unresolved sweep.
    */
-  mergedWritesResolvedAfter(resolvedAfter: string): UnresolvedMergeOperation[] {
+  mergedWritesResolvedAfter(resolvedAfter: string, now: string): UnresolvedMergeOperation[] {
     return this.doc.mergeOperations
       .filter(
         (row) =>
           row.outcome === "MERGED" &&
           typeof row.resolvedAt === "string" &&
-          row.resolvedAt >= resolvedAfter,
+          row.resolvedAt >= resolvedAfter &&
+          due(row, now),
       )
       .sort((a, b) =>
         a.writeStartedAt === b.writeStartedAt
