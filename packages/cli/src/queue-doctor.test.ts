@@ -163,7 +163,7 @@ describe("what doctor reports", () => {
         observation({
           section: "app",
           body: {
-            missingPermissions: { issues: "write" },
+            missingPermissions: { pull_requests: "write" },
             canPublishMergeCheck: true,
             canComment: false,
             rulesets: [],

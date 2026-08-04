@@ -14,17 +14,20 @@
  * names the App as the only actor allowed to update a managed branch. The
  * repository_dispatch the queue drives lanes with is Contents: write too.
  *
- * `issues: write` writes the status comment on a queued pull request. GitHub
- * files those comments under issues, so this is the scope that reaches them.
- * Adding it means every installation granted before it has to accept the
- * change, and until an admin does the App keeps merging and says nothing on the
- * page. That is why `queueDoctor` answers `canComment` on its own rather than
- * folding it into `canMerge`.
+ * `issues: write` is deliberately absent, and the reason is worth keeping. The
+ * status comment goes to `/issues/{n}/comments`, which reads as an Issues
+ * endpoint, so this list asked for the scope for one afternoon. Then the App
+ * wrote a status comment on recallnet/thwip pull request 180 while holding no
+ * `issues` scope at all: GitHub counts a pull request's conversation under Pull
+ * requests, whatever the path spells. Keeping the demand would have reported
+ * every installation as broken while every installation commented fine, on the
+ * diagnostic somebody runs when the queue is stuck, which is where a false
+ * alarm costs the most. `canComment` reads off `pull_requests` because that is
+ * what actually carries the comment.
  */
 export const REQUIRED_APP_PERMISSIONS: Readonly<Record<string, string>> = {
   checks: "write",
   contents: "write",
-  issues: "write",
   pull_requests: "write",
   statuses: "write",
 };

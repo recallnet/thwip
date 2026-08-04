@@ -25,7 +25,30 @@ export interface CommentApi {
  * not clear on a retry. An installation granted before `issues: write` existed
  * answers 403 to every one of these forever, and it must keep merging.
  */
-export type CommentWriteOutcome = "unchanged" | "created" | "updated" | "failed" | "forbidden";
+export type CommentWriteOutcome =
+  | "unchanged"
+  | "created"
+  | "updated"
+  | "failed"
+  | "forbidden"
+  | "over-budget";
+
+/**
+ * How many comments one pass over a queue may write.
+ *
+ * A Worker invocation gets fifty subrequests and each comment costs up to two,
+ * against a queue document that keeps every entry it has ever held. On 4 August
+ * the sweep tried fourteen and lost the whole tick to the ceiling, taking the
+ * lane driving and the chain check with it.
+ *
+ * Counted in writes, never in entries. A comment that already says the right
+ * thing costs nothing and is not counted, so this only ever bounds a genuine
+ * backlog, and the backlog drains over a few ticks rather than failing on every
+ * one.
+ */
+export interface CommentBudget {
+  remaining: number;
+}
 
 /**
  * The states that may open a conversation, as opposed to continue one.
@@ -96,6 +119,12 @@ export async function writeStatusComment(
   where: { repositoryId: string; baseRef: string },
   view: CommentView,
   asOf: string,
+  /**
+   * What this pass has left to spend. Optional because a single transition
+   * writes one comment and has a whole invocation to do it in; the sweep is
+   * where the budget matters.
+   */
+  budget?: CommentBudget,
 ): Promise<CommentWriteOutcome> {
   const fingerprint = commentFingerprint(view);
   const record = await stored(db, where, view.pullRequestNumber);
@@ -109,7 +138,13 @@ export async function writeStatusComment(
   // An ending on a page thwip never spoke on. Nothing to close, nobody to tell.
   if (record?.comment_id == null && !MAY_SPEAK_FIRST.has(view.state)) return "unchanged";
 
+  // Checked after the two free answers above, so an unchanged comment never
+  // costs a place in the queue behind it.
+  if (budget !== undefined && budget.remaining <= 0) return "over-budget";
+
   const body = statusCommentBody(view, asOf);
+
+  if (budget !== undefined) budget.remaining -= 1;
 
   try {
     // The id, or the page. A stored id that has gone missing is what produces
