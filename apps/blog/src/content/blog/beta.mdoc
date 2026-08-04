@@ -1,8 +1,7 @@
 ---
 title: "Attesting the fixed point of an agent run"
-description: "Execution-provenance research attests the agent's trace. We attest the tree it produced, and we publish the measurements from a repository where agents wrote 524 commits in seven days, including the night our own chain checker found four merges nobody had recorded."
-pubDate: 2026-08-03T12:00:00.000Z
-updatedDate: 2026-08-04T04:00:00.000Z
+description: "Execution-provenance research attests the agent's trace. thwip signs the git tree an agent leaves behind. We publish measurements from a repository where agents wrote 524 commits in seven days, and the night our own chain checker found four merges nobody had recorded."
+pubDate: 2026-08-04T12:00:00.000Z
 author: thwip
 tags:
   - research
@@ -15,77 +14,78 @@ heroAlt: Local run, signed proof, GitHub verifies
 ---
 
 On the repository that produced this post, the GitHub Actions job that verifies
-an integrated candidate spends 5 seconds starting, 14 seconds installing
-dependencies, and 17 seconds building workspace packages before it can run a
-single check. Those are medians across 18 successful runs. The checks themselves
-take 4.5 seconds at the median on the machine that wrote the code, where the
-install and the build already exist.
+an integrated candidate spends 5 seconds starting up. It spends another 14
+seconds installing dependencies and 17 seconds building workspace packages, and
+only then can it run a single check. Those are medians across 18 successful
+runs. On the machine that wrote the code, where the install and the build are
+already sitting on disk, the checks take 4.5 seconds at the median.
 
-That is a ratio of roughly eight to one, setup against work, and it is the
-economic argument for moving verification to the edge. It leaves us with a
-harder question. What can a merge gate require, once the suites have already run
-somewhere it does not control?
+Setup outweighs work there by about eight to one. That is the economic argument
+for moving verification to the edge, and it raises the question this note is
+about. What can a merge gate require, once the suites have already run somewhere
+it does not control?
 
-We took a position on that, and we measured a corpus we own to see whether it
-held. The corpus is small and young. We say where that limits the claims, and we
-describe the night it caught us out.
+We took a position and then measured a corpus we own, to see whether it held.
+That corpus is small and young. Where that limits the claims we say so, and one
+section covers the night the whole thing caught us out.
 
 ## The workload changed shape
 
 The [Octoverse 2025 report](https://github.blog/news-insights/octoverse/octoverse-a-new-developer-joins-github-every-second-as-ai-leads-typescript-to-1/)
 counts nearly a billion commits pushed to GitHub in 2025, up 25.1% year over
-year. What a merge gate has to do changes with the shape of that traffic rather
-than its size.
+year. Underneath that total, agents now write in overlapping bursts on the same
+repository, and that is what changes the job of a merge gate.
 
 [Xu, Subramanian and Karthik](https://arxiv.org/abs/2607.04697v2) studied 33,596
-agent-authored pull requests across 2,807 repositories and found
-that 79.4% of them overlapped in time with another agent-authored pull request
-on the same repository. Inside a one-week window that rises to 95.0%.
-Cross-agent pull request pairs conflicted textually 41.7% of the time, against
-19.8% for pairs from the same agent, and 84.4% of the conflicted files were
+agent-authored pull requests across 2,807 repositories. They found that 79.4% of
+them overlapped in time with another agent-authored pull request on the same
+repository, and inside a one-week window that rises to 95.0%. When the two pull
+requests came from different agents, 41.7% of the pairs conflicted textually,
+against 19.8% for pairs from one agent. Of the conflicted files, 84.4% were
 source rather than dependency manifests.
 
 So the branch a suite passed on is often a different tree from the one that
-merges. [Sakib, Banik and Jadliwala](https://arxiv.org/html/2607.12428v1) audited
-agent-authored pull requests for security code smells, found at least one in
-38.9% of them, and report that 81.1% of the genuine secret leaks in their corpus
-reached merge undetected. That is why nobody wants to answer the cost problem by
-loosening the gate.
+lands. [Sakib, Banik and Jadliwala](https://arxiv.org/html/2607.12428v1) audited
+agent-authored pull requests for security code smells and found at least one in
+38.9% of them. They also report that 81.1% of the genuine secret leaks in their
+corpus reached merge undetected. Given those numbers, we were never going to
+answer the cost problem by loosening the gate.
 
-Our own repository is an instance of the workload. Agents wrote 524 commits
-across 131 merged pull requests in seven days, between 28 July and 3 August
-2026, over 10 packages and 2 apps carrying 1,928 tests.
+Our own repository sits inside this workload. Between 28 July and 3 August 2026,
+agents wrote 524 commits across 131 merged pull requests, over 10 packages and 2
+apps carrying 1,928 tests.
 
 ## What the literature attests
 
 A 2026 survey led by [Yiqi Wang](https://arxiv.org/abs/2606.04990) defines
 execution provenance as the typed graph of an agent execution, and evidence
 tracing as that graph projected onto evidence-support relations. Trust functions
-apply to the graph. The framing is coherent and it is where most of the field
-is working.
+apply to the graph. That framing is coherent, and most of the field is working
+inside it.
 
 Rashidi's [systematization](https://arxiv.org/abs/2607.05743) collects
 39 papers published between 2023 and 2026 into 17 categories: sandbox
 isolation, capability and access control, policy enforcement, time-of-check to
 time-of-use races, Model Context Protocol threats, identity delegation,
 execution provenance, network egress control, static analysis of agent output.
-Every category watches the agent while it works, or constrains what it may do.
+Every one of them works on the agent itself, watching it run or limiting what it
+can reach.
 
-That paper also reports the number we kept returning to. Policy-enforcement
-studies in its corpus show failure rates between 69% and 98% of real denylists,
-and the isolation literature does not address them. It names four other
-cross-cutting gaps, including that nobody studies policy-authoring errors, and
-that benign out-of-scope agent actions occur in up to 17.1% of cases with no
-coverage in the access-control work.
+One number in that paper stuck with us. Policy-enforcement studies in its corpus
+show failure rates between 69% and 98% of real denylists, and the isolation
+literature does not address them. Rashidi names four other cross-cutting gaps.
+Nobody studies policy-authoring errors, and benign out-of-scope agent actions
+occur in up to 17.1% of cases with no coverage in the access-control work.
 
 ## The position
 
-We attest the fixed point of the execution rather than the execution.
+thwip attests the fixed point of the execution: the tree the run leaves behind.
 
-A trace cannot be falsified at merge time. Nobody can replay an agent session
-to check a claim somebody made about it, so a signed trace is worth exactly the
-integrity of the thing that recorded it. A tree can be falsified by anybody who
-checks it out and runs the suites again.
+A signed trace of an agent session makes a claim nobody can test at merge time.
+You cannot replay the session, so the trace is worth exactly the integrity of
+whatever recorded it. A git tree is a fixed object anybody can pull down and
+re-run the suites against, and the claim attached to it either reproduces or it
+does not.
 
 So thwip throws the trace away. The in-toto subject is a git tree:
 
@@ -103,20 +103,19 @@ const evaluationMode = git["evaluationMode"];
 if (evaluationMode !== "head-tree") return fail("git.evaluationMode invalid");
 ```
 
-Two things follow.
+That puts the agent outside the boundary where pass and fail get decided. An
+agent can drive the CLI, write the commit message and open the pull request. An
+enrolled device key does the signing, and the GitHub App evaluates the result.
+The decision reads none of the agent's runtime behaviour, so constraining that
+behaviour would add nothing to it.
 
-The agent sits outside the boundary that decides pass or fail. It may drive the
-CLI, choose the commit message, and open the pull request. An enrolled device
-key signs, and the GitHub App evaluates. Nothing the agent does at runtime
-enters the decision, so nothing about the agent needs constraining for the
-decision to hold.
+The time-of-check to time-of-use category has no window to attack here, because
+the object under check is an immutable content hash. The whole class of
+state-validation races collapses into one reason code,
+`SUBJECT_TREE_MISMATCH`, which fires when the tree the proof covers differs from
+the tree GitHub is asked to merge.
 
-The time-of-check to time-of-use category has no window here. The object under
-check is an immutable content hash, so the entire class of state-validation
-races collapses into one reason code, `SUBJECT_TREE_MISMATCH`, which fires when
-the tree the proof covers is not the tree GitHub is asked to merge.
-
-{% product-shot src="/blog/fig-trace-vs-tree.svg" alt="An agent execution graph of tool calls and file writes, reduced to a single tree hash" caption="Figure 1. The typed execution graph the survey literature attests, and the single object thwip attests. Everything to the left of the hash is discarded on purpose." /%}
+{% product-shot src="/blog/fig-trace-vs-tree.svg" alt="An agent execution graph of tool calls and file writes, reduced to a single tree hash" caption="Figure 1. The typed execution graph the survey literature attests, reduced to the one object thwip signs. We throw away everything to the left of the hash on purpose." /%}
 
 ## What is implemented
 
@@ -124,45 +123,48 @@ Evidence rides the commit as a git trailer, `thwip-proof: v1.<base64url DSSE
 envelope>`, wrapping an [in-toto](https://in-toto.io/) Statement v1 with
 predicate `urn:thwip:attestation:ci-run:v1`. The envelope is
 [DSSE](https://github.com/secure-systems-lab/dsse), signed by an OpenSSH ed25519
-key that the signer has enrolled on GitHub as a **Signing** key. Authentication
-keys do not count, and registering the device is a human step.
+key that the signer has enrolled on GitHub as a **Signing** key. GitHub's
+Authentication keys do not count for this, and a human has to register the
+device.
 
 The predicate carries the tree OID and its parents, the base ref and base sha,
 a policy digest and version, a pipeline digest and runner, the suite results
 with durations, and the signer's key id and GitHub user id. It also carries
-`networkMode` and `cacheMode`. Those two are declarations of posture rather
-than observations, and the verifier treats them as such. We would rather write
-down that we did not verify them than imply we did.
+`networkMode` and `cacheMode`. Those two are things the signer declares about
+its own posture. Nothing observes them, the verifier treats them as
+declarations, and we write that down here so nobody reads them as verified
+facts.
 
 The thwip GitHub App owns the required `thwip` check and
 [executes no repository code](https://github.com/recallnet/thwip/blob/main/docs/adr/0001-app-native-proof-checks.md).
 It reads GitHub for permission and key enrollment, fetches a signed fact
-bundle, and fails closed across a fixed vocabulary of 29 reason codes, one of
-which says only that the evidence has not settled yet. A handful of the other 28:
-`SUBJECT_TREE_MISMATCH`, `SUBJECT_BASE_MISMATCH`, `SIGNER_KEY_REVOKED`,
-`SIGNER_PERMISSION_INSUFFICIENT`, `PIPELINE_DIGEST_MISMATCH`, `SUITE_NOT_PASSED`,
-`PROOF_EXPIRED`.
+bundle, and fails closed across a fixed vocabulary of 29 reason codes. One of
+those codes says only that the evidence has not settled yet. A handful of the
+other 28: `SUBJECT_TREE_MISMATCH`, `SUBJECT_BASE_MISMATCH`,
+`SIGNER_KEY_REVOKED`, `SIGNER_PERMISSION_INSUFFICIENT`,
+`PIPELINE_DIGEST_MISMATCH`, `SUITE_NOT_PASSED`, `PROOF_EXPIRED`.
 
-Because the concurrency finding above is real, a head proof is not sufficient
-on its own. A merge queue holds the lane and records every transition as a
-signed record. Records come in seven kinds, and they are not interchangeable: a
-merge the queue verified against the integrated candidate cites that verifier's
-result, and a merge accepted on the head's own proof cites none, because none
-ran. `GET /v1/queue/records/:digest` returns the exact bytes that were signed.
+The concurrency finding above is why a head proof cannot stand on its own. A
+merge queue holds the lane and records every transition as a signed record.
+There are seven kinds of record, and each claims something specific. If the
+queue verified an integrated candidate, the record for that merge cites the
+verifier's result. Nothing gets cited when a merge goes through on the head's
+own proof, because no verifier ran. `GET /v1/queue/records/:digest` returns the
+exact bytes that were signed.
 
-{% product-shot src="/blog/fig-toctou.svg" alt="Timeline showing a validation-to-use window in the observe model, and no window when the subject is a content hash" caption="Figure 2. Where the state-validation window sits when the check inspects mutable runtime state, and why binding to a tree hash removes it." /%}
+{% product-shot src="/blog/fig-toctou.svg" alt="Timeline showing a validation-to-use window in the observe model, and no window when the subject is a content hash" caption="Figure 2. Where the state-validation window opens when a check inspects mutable runtime state, and why binding to a tree hash removes it." /%}
 
 ## Measurements
 
 Everything below comes from this repository between 28 July and 3 August 2026.
-The extraction reads the git history, the GitHub API, and the published chain.
-The monorepo is public, so every number here is one you can recompute.
+We pulled the numbers out of the git history, the GitHub API, and the published
+chain. The monorepo is public, so you can recompute every one of them.
 
-**Proof coverage.** 168 commits on `main` carry a `thwip-proof` trailer. All 168
-envelopes decode and parse against the shipped schema, and all 168 declare
-`evaluationMode: head-tree`. 128 of the 132 merges carried a proof on the pull
-request head. The 4 that did not are pull requests #1, #2, #4 and #5, merged
-before the App was enforcing.
+**Proof coverage.** 168 commits on `main` carry a `thwip-proof` trailer. Every
+one of those envelopes decodes and parses against the shipped schema, all 168 of
+them declaring `evaluationMode: head-tree`. Of the 132 merges, 128 carried a
+proof on the pull request head. The 4 without one are pull requests #1, #2, #4
+and #5, which merged before the App was enforcing.
 
 **Suite time at the edge.** 504 suite results, all passing.
 
@@ -177,154 +179,152 @@ before the App was enforcing.
 verifications in Actions, the job spends 5 seconds at the median on runner setup
 and checkout, 14 seconds on install, and 17 seconds building workspace packages.
 That is 36 seconds before any suite starts, and the suites then take 24 seconds
-in that environment. Running the same three suites on a developer machine, with
-dependencies and build outputs already present, takes 12.5 seconds.
+in that environment. The same three suites on a developer machine, with
+dependencies and build outputs already present, take 12.5 seconds.
 
-{% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, cloud re-verification spends most of its time rebuilding a state the edge machine already holds." /%}
+{% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, re-verifying in the cloud spends most of its time rebuilding a state the edge machine already holds." /%}
 
-**A model, labelled as a model.** If this repository had re-run the three suites
-in Actions on every merge, on the branch and again on the merge group, at the 36
-seconds of setup and 24 seconds of suites measured above, 132 merges would have
-consumed about 264 runner-minutes. At GitHub's
+**A model, labelled as a model.** Suppose this repository had re-run the three
+suites in Actions on every merge, once on the branch and again on the merge
+group. At the 36 seconds of setup and 24 seconds of suites measured above, 132
+merges would have consumed about 264 runner-minutes. GitHub's
 [published rate](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
-of $0.006 per minute for a 2-core Linux runner, in force since 1 January 2026,
-that is roughly $1.58.
+for a 2-core Linux runner is $0.006 per minute, in force since 1 January 2026,
+which puts the bill at roughly $1.58.
 
-We cannot put an actual billed figure beside it. GitHub's timing endpoint
-reports zero billable milliseconds for every run on this repository, so the only
-measurement we can produce is run duration: 599 minutes across 3,397 workflow
-runs. That number does not compare with the model. 2,896 of those runs are the
-queue's own merge workflow, which exists here because this repository is where
-thwip gets built.
+We cannot put a billed figure beside that. GitHub's timing endpoint reports zero
+billable milliseconds for every run on this repository, so run duration is all
+we can measure: 599 minutes across 3,397 workflow runs. That number does not
+compare with the model. 2,896 of those runs are the queue's own merge workflow,
+which exists here because this repository is where thwip gets built.
 
-Take the ratio and leave the dollars. At our size the absolute number is
-trivial, and anybody whose repository takes 20 minutes to build can carry the
-arithmetic across.
+At our size the dollar figure is trivial, so the ratio is the number to carry
+across. Anybody whose repository takes 20 minutes to build can run the same
+arithmetic and get something that matters.
 
 **The chain.** `node scripts/verify-chain.mjs 1315419165` walks the published
-merge chain from outside thwip, using no account and no token. As this was written it reported
-57 links, 57 of 57 signatures verified against the service keys at
-`/.well-known/thwip-keys`, and no findings. The records broke down as 47
-`reused-proof-merge`, 5 `candidate-verified-merge`, 4 `external-transition`, and
-1 `base-correction`. Merging this post adds another link, so run it yourself for
-the current count. It reached that state on the evening of 3 August, and it
-had been broken since the morning of 2 August.
+merge chain from outside thwip, with no account and no token. When this was
+written it reported 57 links, 57 of 57 signatures verified against the service
+keys at `/.well-known/thwip-keys`, and no findings. Of those records, 47 are
+`reused-proof-merge`, 5 are `candidate-verified-merge`, 4 are
+`external-transition`, and 1 is a `base-correction`. Merging this post adds
+another link, so run the script yourself for a current count. The chain only
+reached that clean state on the evening of 3 August, after being broken since
+the morning of 2 August.
 
 {% product-shot src="/blog/fig-chain-kinds.svg" alt="Bar chart of 57 chain records by kind: 47 reused-proof merges, 5 candidate-verified merges, 4 external transitions, 1 base correction" caption="Figure 4. Every record on this repository's chain, by what it claims. The four external transitions are the merges of 2 August, described below." /%}
 
 **Posture, published as it is.** Every one of the 168 proofs used the
-`command` runner rather than a content-addressed
+`command` runner instead of a content-addressed
 [Dagger](https://dagger.io/) pipeline, with `networkMode: unrestricted` and
-`cacheMode: read-write`. That is the weakest posture the schema permits. The
-proofs were produced by 2 signers holding 3 device keys, under 3 distinct
+`cacheMode: read-write`, which is the weakest posture the schema permits.
+Behind them were 2 signers holding 3 device keys, working under 3 distinct
 pipeline digests and policy versions 1, 3, and 4.
 
 ## The night the chain failed
 
-This note claims a signed chain is falsifiable by anybody. On 3 August we
-exercised that claim against ourselves and the chain failed.
+We claim a signed chain is falsifiable by anybody, so on 3 August we pointed the
+check at our own chain, and it came back with findings.
 
-We wrote the script above for this post. Pointed at this repository it returned
-three `BASE_DISCONTINUITY` findings, covering four pull requests that had merged
+We wrote the script above for this post. Pointed at this repository, it returned
+three `BASE_DISCONTINUITY` findings covering four pull requests that had merged
 into `main` the day before with no record at all: #114, #117, #119 and #121.
 
 The cause sits in the order of two operations. The queue signs a merge intent
-that pins a candidate tree and the parents that tree hangs from, then it asks
-GitHub to merge. Between those moments the base moved. GitHub merged each head
-onto the branch's real tip, which produced a tree and a first parent
-that no intent had pinned. Pull request 117's intent was signed sixteen seconds
-after its base was already superseded. Of the seventy merge intents in storage,
-zero pin any of the four trees that landed. They were never repairable as
-merges.
+that pins a candidate tree and the parents that tree hangs from, and then it
+asks GitHub to merge. In between, the base moved. GitHub merged each head onto
+the branch's real tip, producing a tree and a first parent that no intent had
+pinned. Pull request 117's intent was signed sixteen seconds after its base had
+already been superseded. Of the seventy merge intents in storage, zero pin any
+of the four trees that landed, so there was no way to repair these as merges.
 
-A second defect kept the queue quiet about it. One of the merge writes came back
-from GitHub as a 405, which GitHub returns transiently while it is still
-computing mergeability. The workflow gave up and the merge landed anyway.
-Settling that write was the responsibility of the attempt, and the attempt was
-terminated and compacted while the write stayed open, so nothing ever read the
-row again.
+A second defect kept the queue quiet about all this. One of the merge writes
+came back from GitHub as a 405, which GitHub returns transiently while it is
+still computing mergeability. The workflow gave up, and the merge landed anyway.
+Settling that write was the attempt's job, and we terminated and compacted the
+attempt while the write was still open, so nothing ever read the row again.
 
-The refusal now sits in three layers. A merge write carries its own obligation,
-so a scheduled sweep finds writes nobody resolved and asks git what became of
-them
-([#142](https://github.com/recallnet/thwip/pull/142)). The authorize route reads
-the base from GitHub inside the guard that signs, and defers the turn with
-`BASE_MOVED` where the attempt has pinned a base the branch has already left
-([#145](https://github.com/recallnet/thwip/pull/145)). And the reducer refuses a
-confirmation whose first parent is not the base the attempt pinned, whatever the
-route decided.
+Three changes stop this now. A merge write carries its own obligation, so a
+scheduled sweep finds writes nobody resolved and asks git what became of them
+([#142](https://github.com/recallnet/thwip/pull/142)). Inside the guard that
+signs, the authorize route reads the base from GitHub and defers the turn with
+`BASE_MOVED` when the attempt has pinned a base the branch has already left
+([#145](https://github.com/recallnet/thwip/pull/145)). Whatever the route
+decides, the reducer refuses a confirmation whose first parent differs from the
+base the attempt pinned.
 
 Two more pull requests came out of the same night.
 [#143](https://github.com/recallnet/thwip/pull/143) stopped spending a queue
-operation on webhooks carrying no work.
+operation on webhooks that carry no work, and
 [#144](https://github.com/recallnet/thwip/pull/144) made a chain finding
 answerable from the project page. A fifth,
-[#146](https://github.com/recallnet/thwip/pull/146), closed the seam next door:
-the merge workflow used to hand the queue the merged commit's tree and parents,
-and the queue signed a record repeating figures its own caller had chosen. That
-endpoint now reads the commit from GitHub and refuses a commit GitHub will not
-describe. All five merged through the queue with signed proofs. The queue also
-runs the chain verifier against its own chain on every tick, so it will report
-the next gap itself.
+[#146](https://github.com/recallnet/thwip/pull/146), closed the seam next door.
+The merge workflow used to hand the queue the merged commit's tree and parents,
+and the queue would sign a record repeating figures its own caller had chosen.
+That endpoint now reads the commit from GitHub and refuses a commit GitHub will
+not describe. All five merged through the queue with signed proofs. The queue
+also runs the chain verifier against its own chain on every tick, so it will
+report the next gap itself.
 
 The chain carries an
 [`external-transition`](https://github.com/recallnet/thwip/blob/main/docs/heal.md)
-for each of the four merges: the base moved from one commit to another and thwip
-did not certify the move. Those records name no pull request and no policy,
-because neither is true of them. A merge record was the stronger claim on the
-table and the evidence did not support it, so the queue wrote down the weaker
-one.
+for each of the four merges, saying that the base moved from one commit to
+another and thwip did not certify the move. Those records name no pull request
+and no policy, because neither would be true of them. A merge record would have
+been the stronger claim available, and the evidence did not support one, so the
+queue wrote down the weaker record instead.
 
 ## What this corpus cannot tell you
 
-Seven days, two signers, one repository, and the system was being designed while
-it ran. The measurements are honest about what happened and they are not
-evidence about anybody else's repository. Nothing here is a controlled
-comparison, and the numbers moved while the policy version moved underneath
-them.
+This corpus covers seven days, two signers and one repository, and we were
+designing the system while it ran. What the measurements describe is what
+happened here. They say nothing about how anybody else's repository would
+behave. None of this is a controlled comparison, and the policy version kept
+moving underneath the numbers while we collected them.
 
 ## What a proof does not buy
 
 **A compromised signing device beats us.** An attacker holding an enrolled
-private key signs a well-formed proof over a tree whose suites never passed,
-and the App accepts it, because the App verifies a signature and a subject
-rather than an execution. This is the direct cost of discarding the trace and
-we are not going to dress it up.
+private key can sign a well-formed proof over a tree whose suites never passed,
+and the App will accept it. The App checks a signature and a subject, and it has
+no view of the execution behind them, which is what discarding the trace costs
+us.
 
-Our answer is reproducibility and a public record, and that answer is weaker
-than runtime observation for any single merge. For one merge, an observer who
-watched the process knows something we do not. Across a sequence the
-positions invert, because every proof binds to a content hash anybody can check
-out and re-run, and a signer whose claims stop reproducing becomes visible in a
-way a private runtime trace never is. The asymmetry needs volume to pay. A
-repository merging 131 times a week accumulates something to compare against.
+What we offer against that is reproducibility and a public record. On any single
+merge that is the weaker instrument, and an observer who watched the process
+knows something we do not. Over a run of merges it starts paying, because every
+proof binds to a content hash anybody can check out and re-run, and a signer
+whose claims stop reproducing shows up in public in a way a private runtime
+trace never would. It needs volume to work. A repository merging 131 times a
+week builds up enough history to compare against.
 
-The honest gap is the first merge after a key compromise, and we do not have a
-mechanism for that without observation. It is listed below.
+The gap we cannot close is the first merge after a key compromise. Without
+observing execution we have no mechanism for it, and it is listed under open
+problems below.
 
 The rest of the bounds:
 
 - thwip never fetches your source. The App and the control plane verify
   metadata, digests, and signatures.
-- A green check says approved suites passed on a tree, signed by an identified
-  key. It is not a security review and it is not a statement about product
-  behaviour.
+- A green check says one thing: approved suites passed on a tree, signed by an
+  identified key. It is not a security review, and it says nothing about how the
+  product behaves.
 - Local and remote environments diverge. Work that needs the cloud as its
   execution environment should run there.
 - Identity is GitHub's. Membership and repository permission come from the
   organisation, and we add no second invite graph.
 - `fresh` and `audited` exist in the schema as names for assignment plus a
-  signed integration receipt. Nothing issues an assignment and nothing signs a
-  receipt, so the CLI and the control plane refuse both by name rather than
-  quietly delivering `remote` under a stronger label. The `run.lease` field is
-  already in the predicate for this.
+  signed integration receipt. Nothing in the system issues an assignment or
+  signs a receipt today, so the CLI and the control plane refuse both by name
+  instead of delivering `remote` under a stronger label. The `run.lease` field
+  is already in the predicate for this.
 
 ## Check our chain
 
 [`packages/queue-protocol`](https://github.com/recallnet/thwip/tree/main/packages/queue-protocol)
 exports `verifyChain` and ships with its tests. Given the published records, it
-checks that each link is the digest of the record before it. It then resolves
-every citation each record makes, and reports any record carrying a gap where a
+checks that each link is the digest of the record before it, then resolves every
+citation each record makes and reports any record carrying a gap where a
 citation belongs.
 
 [`scripts/verify-chain.mjs`](https://github.com/recallnet/thwip/blob/main/scripts/verify-chain.mjs)
@@ -337,8 +337,7 @@ node scripts/verify-chain.mjs recallnet/thwip
 ```
 
 That script caught us, and the section above is its output. If you break our
-chain with it, open an issue and paste what it printed. We will treat that as
-the most useful contribution anybody can make to this note.
+chain with it, open an issue and paste what it printed, and we will act on it.
 
 ## Open problems
 
@@ -347,7 +346,7 @@ Ones we intend to close:
 - Assignment and integration receipts, so `fresh` and `audited` mean something
   distinct from `remote`.
 - Content-addressed pipelines as the default runner, so "same tree, same
-  digests" is a property of the graph rather than a convention.
+  digests" comes out of the graph itself instead of resting on a convention.
 - Hybrid matrices, where part of the suite has to stay remote for platform
   reasons.
 
@@ -361,8 +360,8 @@ Ones we do not know how to close:
   without reintroducing the sandbox literature's failure rates.
 
 If you work on execution provenance and we have placed thwip wrongly in that
-taxonomy, we would like the correction. If we have missed a system that already
-does this, the citation is welcome.
+taxonomy, tell us and we will fix it. We would also like the citation for any
+system that already does this and that we missed.
 
 ## Sources and code
 
