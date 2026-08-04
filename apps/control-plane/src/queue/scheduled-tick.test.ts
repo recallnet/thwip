@@ -1473,3 +1473,35 @@ describe("the status comments the heartbeat keeps in step", () => {
     expect(retired).toEqual([]);
   });
 });
+
+/**
+ * A comment must never cost a queue its tick.
+ *
+ * On 4 August the first sweep after the comments shipped ran the Worker out of
+ * subrequests. The throw came back through the per-queue block and failed both
+ * repositories: no lane driven, no write settled, no chain read, over a
+ * sentence on a web page.
+ */
+describe("what a failing comment publisher costs the heartbeat", () => {
+  it("ticks the queue anyway and says what went wrong", async () => {
+    const e = env();
+    queue("1", 1);
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args));
+
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => Promise.reject(new Error("Too many subrequests")),
+      retireStatusComments: async () => {},
+    });
+
+    vi.restoreAllMocks();
+
+    expect(result.ticked).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(errors.some((args) => String(args[0]).includes("could not refresh the status comments"))).toBe(true);
+  });
+});

@@ -341,7 +341,20 @@ export async function tickAllQueues(
       // `runOnQueue`, which publishes the comment for the state it moved to. A
       // publish standing after that would write the snapshot taken before it
       // and put the old answer back on the page.
-      await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot);
+      //
+      // Held inside its own catch, because a comment must never cost a queue
+      // its tick. On 4 August the first sweep after this shipped ran the
+      // Worker out of subrequests, and the throw came back through here and
+      // failed both repositories: no lane driven, no write settled, no chain
+      // read, over a sentence on a web page.
+      try {
+        await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot);
+      } catch (error) {
+        console.error(
+          `[queue heartbeat] could not refresh the status comments on ${row.repositoryId} ${row.baseRef}: ` +
+            `${String(error)}`,
+        );
+      }
 
       readinessRechecked += await recheckBlockedReadiness(snapshot, row.repositoryId, ports);
 
