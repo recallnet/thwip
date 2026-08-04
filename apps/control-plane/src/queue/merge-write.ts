@@ -73,6 +73,14 @@ export interface MergeWriteGithub {
   readPull(): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
   /** Whether the base branch already contains the head, from git ancestry. */
   baseContainsHead(): Promise<boolean | null>;
+  /**
+   * Whether GitHub reads the App's own required check on this head as
+   * concluded. Null where the check runs could not be read.
+   *
+   * Not optional. A caller that could leave it out would move the branch into
+   * the race this exists to close, and would do it silently.
+   */
+  requiredTurnCheckConcluded(): Promise<boolean | null>;
 }
 
 /** The commit the queue pinned. Every field comes from the queue document. */
@@ -98,6 +106,31 @@ export type MergeWriteOutcome =
 /** GitHub's wording for the refusal that means the base is no longer the base. */
 const NOT_A_FAST_FORWARD = /not a fast forward/i;
 
+/**
+ * GitHub's wording for a required check it has not finished reading.
+ *
+ * The Worker publishes `thwip / turn` green and moves the branch inside one
+ * request, and GitHub's rule evaluation runs behind its own check-run write, so
+ * the ref update is refused with 422 naming a check that just concluded.
+ * `thwip-merge.yml` never met this: it is a second workflow, and by the time it
+ * starts the required check has been concluded for seconds.
+ *
+ * Narrow on purpose. A required check that is genuinely unsatisfied says
+ * "expected" rather than "in progress", takes no retry, and still refuses the
+ * merge.
+ */
+const CHECK_IN_PROGRESS = /required status check.*\bis in progress\b/i;
+
+/** Four moves over seven seconds, which outlasts every lag seen so far. */
+export const REF_UPDATE_ATTEMPTS = 4;
+const REF_UPDATE_DELAYS_MS = [500, 1500, 3000] as const;
+
+/** How long to wait for GitHub to read its own check run as concluded. */
+const CHECK_READ_ATTEMPTS = 4;
+const CHECK_READ_DELAYS_MS = [500, 1000, 2000] as const;
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function performMergeWrite(
   github: MergeWriteGithub,
   intent: MergeIntent,
@@ -115,6 +148,18 @@ export async function performMergeWrite(
     };
   }
 
+  const sleep = options.sleep ?? wait;
+
+  // Let GitHub catch up with its own check run before asking it to apply the
+  // rule that reads it. Unreadable is not a stop: the ref update is the
+  // authority on whether the branch may move, and the retry below covers the
+  // window this read was trying to skip.
+  for (let i = 0; i < CHECK_READ_ATTEMPTS; i += 1) {
+    if (i > 0) await sleep(CHECK_READ_DELAYS_MS[Math.min(i - 1, CHECK_READ_DELAYS_MS.length - 1)] ?? 1000);
+    const concluded = await github.requiredTurnCheckConcluded();
+    if (concluded !== false) break;
+  }
+
   const composed = await github.createCommit({
     message: intent.message,
     tree: intent.treeOid,
@@ -130,8 +175,26 @@ export async function performMergeWrite(
     };
   }
 
-  const landed = await github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+  // The same commit object every time. Composing a fresh one per retry leaves an
+  // orphan on the repository for each attempt that GitHub refused.
+  let landed = await github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+  for (let i = 1; i < REF_UPDATE_ATTEMPTS; i += 1) {
+    if (landed.ok || landed.status !== 422 || !CHECK_IN_PROGRESS.test(landed.message)) break;
+    await sleep(REF_UPDATE_DELAYS_MS[Math.min(i - 1, REF_UPDATE_DELAYS_MS.length - 1)] ?? 1000);
+    landed = await github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+  }
   if (landed.ok) return { kind: "merged", mergeSha: landed.sha };
+
+  // Running out of patience with GitHub concludes nothing. The branch never
+  // moved, and every read here would agree it did not, which is exactly the
+  // shape of answer that would let the queue write down a refusal it has no
+  // business being sure of. The sweep asks again later.
+  if (landed.status === 422 && CHECK_IN_PROGRESS.test(landed.message)) {
+    return {
+      kind: "unknown",
+      detail: `GitHub refused the branch move ${REF_UPDATE_ATTEMPTS} times because a required status check had not concluded (${landed.message})`,
+    };
+  }
 
   if (NOT_A_FAST_FORWARD.test(landed.message)) {
     return {
