@@ -290,7 +290,7 @@ is the machine that runs the suites against it.
 
 {% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, re-verifying in the cloud spends most of its time rebuilding a state the edge machine already holds. `fresh` skips that rebuild." /%}
 
-**The chain.** `node scripts/verify-chain.mjs 1315419165` walks the published
+**The chain.** `thwip verify-chain --repo recallnet/thwip` walks the published
 merge chain from outside thwip, needing no account or token. When this was
 written it reported 57 links, 57 of 57 signatures verified against the service
 keys at `/.well-known/thwip-keys`, and no findings. Of those records, 47 are
