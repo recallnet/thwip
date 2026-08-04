@@ -20,6 +20,6 @@
     "yaml": "^2.9.0"
   },
   "dependencies": {
-    "@thwip/cli": "link:packages/cli"
+    "@thwip/cli": "workspace:*"
   }
 }
