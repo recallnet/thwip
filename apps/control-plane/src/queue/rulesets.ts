@@ -88,9 +88,6 @@ export interface PolicyOptions {
   readonly actionsIntegrationId?: number;
   /** Whether the App publishes `thwip` itself yet. Defaults to observing. */
   readonly proofCheckMode?: ProofCheckMode;
-  readonly mergeMethod: MergeMethod;
-  readonly requiredApprovingReviewCount: number;
-  readonly requireCodeOwnerReview: boolean;
   /** Checks the repository already requires, which must survive generation. */
   readonly existingRequiredChecks?: ReadonlyArray<{ context: string; integration_id?: number }>;
   readonly enforcement?: "active" | "disabled";
@@ -124,8 +121,10 @@ export function managedOwnershipRuleset(input: { baseRef: string; integrationId:
 }
 
 /**
- * The repository policy: review requirements plus the two checks the queue
- * actually publishes.
+ * The repository policy contains only the checks and ref-integrity controls the
+ * queue owns. Review policy belongs to the repository's existing rulesets,
+ * which GitHub layers with this one; setup must not invent approvals, dismissal
+ * behavior, last-push approval, or thread-resolution requirements.
  *
  * `thwip` answers whether the proof is good for this tree. `thwip / turn`
  * answers whose turn it is and is published by the App the moment it offers the
@@ -169,17 +168,6 @@ export function policyRuleset(input: PolicyOptions): Ruleset {
     bypass_actors: [],
     conditions: refCondition(input.baseRef),
     rules: [
-      {
-        type: "pull_request",
-        parameters: {
-          allowed_merge_methods: [input.mergeMethod],
-          required_approving_review_count: input.requiredApprovingReviewCount,
-          dismiss_stale_reviews_on_push: true,
-          require_code_owner_review: input.requireCodeOwnerReview,
-          require_last_push_approval: true,
-          required_review_thread_resolution: true,
-        },
-      },
       {
         type: "required_status_checks",
         parameters: {
@@ -320,8 +308,8 @@ export const BOOTSTRAP_STEPS = [
   "publish-bootstrap-check",
   "attach-integration-id-while-disabled",
   "canary-negative-test",
-  "activate-policy-and-ownership",
   "record-genesis",
+  "activate-policy-and-ownership",
   "pin-proof-check-to-app",
 ] as const;
 
@@ -348,6 +336,7 @@ export function mayActivate(progress: BootstrapProgress): ActivationCheck {
     "publish-bootstrap-check",
     "attach-integration-id-while-disabled",
     "canary-negative-test",
+    "record-genesis",
   ];
   for (const step of required) {
     if (progress[step] !== true) return { ok: false, reason: `${step} has not been completed` };

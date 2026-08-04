@@ -169,32 +169,44 @@ for things only I can do.
 
 5. Start enrolment: the "Set up" tab of this project in the dashboard, or POST
    /v1/queue/<repository id>/bootstrap. It enrols the repository and opens a
-   setup pull request carrying the two workflows and a thwip.yaml, then stops.
-   The proposed configuration must not judge itself, so that pull request merges
-   under the controls this repository already has, before any Thwip check is
-   required.
+   setup pull request carrying the two workflows, then stops. Organization
+   defaults are inherited; select the repository-override option only when this
+   repository intentionally needs its own thwip.yaml. The proposed configuration
+   must not judge itself, so that pull request merges under the controls this
+   repository already has, before any Thwip check is required.
 
 6. Tell me what I have to do myself, because you cannot:
    - merge the setup pull request, which is where enrolment is waiting;
-   - apply each ruleset payload enrolment returns, in the order shown, using my
-     own repository-administrator authority;
-   - confirm every bypass-actor list in GitHub exactly matches the generated
-     payload (for a managed queue, only the Thwip App bypasses ownership).
-   Then start enrolment again after each manual change. It reads the branch
-   rulesets back, requires "thwip" and "thwip / turn", checks that each is pinned
-   to the source that publishes it, and refuses a payload that would drop a rule
-   or required check somebody else added. GitHub hides bypass actors from an App
-   that cannot edit rulesets, so I must verify that one field explicitly. The
-   App does not request the broad "administration: write" permission. The
-   installed App performs authorized merges with repository-scoped contents
-   permission; setup needs no personal access token or repository merge secret.
+   - first apply only the disabled policy payloads enrolment returns, in the order
+     shown, using my own repository-administrator authority;
+   - after the observe proof below, explicitly begin enforcement, then apply the
+     ownership and active-policy payloads;
+   - confirm every bypass-actor list in GitHub exactly matches the expected lists
+     shown at confirmation (for a managed queue, only the Thwip App bypasses
+     ownership).
+   Start enrolment again after each manual change. It reads the branch rulesets
+   back, requires "thwip" and "thwip / turn", checks that each is pinned to the
+   source that publishes it, and refuses a payload that would drop a rule or
+   required check somebody else added. It adds no review policy; GitHub layers
+   the repository's existing review controls alongside the queue rules. GitHub
+   hides bypass actors from an App that cannot edit rulesets, so I must verify
+   that one field explicitly. The App does not request the broad
+   "administration: write" permission. The installed App performs authorized
+   merges with repository-scoped contents permission; setup needs no personal
+   access token or repository merge secret.
 
-7. Prove it before enforcing it. Enrolment asks me to activate only after GitHub
-   has stored both source pins, and leaves the queue observing, so it reports and
-   blocks nothing. Push a pull request and confirm both checks appear and go green
-   on it before I move the queue to enforced. A required check that nothing
-   publishes blocks every merge on the branch, and that is the failure this order
-   exists to avoid.
+7. Prove it before enforcing it. Enrolment enables the queue in observe mode while
+   ownership and policy enforcement remain disabled, so the repository keeps its
+   existing merge controls. Push a real pull request and confirm the proof and
+   queue checks behave correctly. Only then confirm "Begin enforcement". Setup
+   persists a recoverable canary state before the manual ownership handoff and
+   records "enforced" only after it reads both active rulesets back. A required
+   check that nothing publishes blocks every merge on the branch, and that is the
+   failure this order exists to avoid.
+
+8. Enforce the App proof check after its observe check passes, apply the final
+   generated source-repin, and let enrolment verify it. Reconcile the open pull
+   requests before treating setup as complete.
 
 Report: files changed, what enrolment answered, doctor results, the pull request
 I have to merge, and any conflicting auto-merge system you found.`;

@@ -135,31 +135,39 @@ and `canary-negative-test` reads back whichever source the payload used.
 
 Per repository:
 
-1. Merge the setup pull request under the repository's existing controls.
+1. Merge the setup pull request under the repository's existing controls. It
+   contains the two queue workflows and inherits organization defaults; a
+   `thwip.yaml` is included only when the administrator explicitly selects a
+   repository override.
 2. Create the generated disabled, unpinned policy. Thwip reads it back and
    publishes the bootstrap checks, then returns the generated source-pinned
    update. The administrator applies it while enforcement is still disabled.
-3. After Thwip verifies both pins, apply the generated ownership ruleset first
-   and activate the policy second. Confirm the bypass actors match the payload.
-   The App publishes the observe name, the workflow publishes `thwip` from
-   Actions, and the policy pins Actions. The repository merges.
-4. Enforce, which the proof-mode route already gates on a recent observe-mode
-   PASS under the active policy. The App now publishes `thwip` and so does the
-   workflow: two green checks, one name, two apps. The pin has not moved, so
-   nothing about the merge changes. The route queues a proof reconcile, which
-   republishes the App's check on every open pull request.
-5. Apply the generated repin and let Thwip read it back. Every open head already
+3. Thwip verifies both pins, enables the queue in `observe`, and leaves ownership
+   and policy enforcement disabled. A real pull request proves the App proof and
+   queue checks while the repository's existing controls remain authoritative.
+4. The administrator explicitly begins enforcement. Thwip first persists
+   `canary`, which keeps the App able to write during the manual handoff, then
+   returns ownership followed by active-policy payloads. After reading both back
+   and confirming the exact bypass lists, it records `activation_state` as
+   `enforced`. The Thwip policy adds no review requirements; GitHub layers the
+   repository's existing review controls alongside the queue checks.
+5. Enforce the App proof check, which the proof-mode route already gates on a
+   recent observe-mode PASS under the active policy. The App now publishes
+   `thwip` and so does the workflow: two green checks, one name, two apps. The pin
+   has not moved, so nothing about the merge changes. The route queues a proof
+   reconcile, which republishes the App's check on every open pull request.
+6. Apply the generated repin and let Thwip read it back. Every open head already
    carries the App's green `thwip`, so nothing goes unsatisfied for an instant.
 
-Setup's last step, `pin-proof-check-to-app`, is step five. It runs after the
-branch is already protected and merging, waits while the repository observes,
-and returns the exact update an administrator applies. A repository enrolled
-before the step existed has every earlier step recorded, so re-running setup
-reaches this one and nothing else.
+Setup's last step, `pin-proof-check-to-app`, is step six. It runs after the
+branch is already protected and queue-enforced, waits while the App proof check
+observes, and returns the exact update an administrator applies. A repository
+enrolled before the step existed has every earlier step recorded, so re-running
+setup reaches this one and nothing else.
 
 While `thwip` is sourced from Actions the requirement is weaker than this
 decision intended: any workflow in the repository that publishes a green check
-by that name satisfies it, including one a contributor adds. Step three is what
+by that name satisfies it, including one a contributor adds. Step six is what
 closes that.
 
 Rollback first restores and verifies the previous required workflow/ruleset

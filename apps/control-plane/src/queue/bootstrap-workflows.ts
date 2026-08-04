@@ -52,9 +52,11 @@ export const SETUP_PULL_REQUEST_TITLE = "Set up Thwip Queue" as const;
 export const QUEUE_ACTION_REF = "recallnet/thwip@v0.13.6";
 
 /**
- * A default `thwip.yaml`. Committed rather than assumed, because policy is
- * derived from what the repository says about itself and a repository with no
- * file has said nothing.
+ * An explicit repository override for teams that choose one during setup.
+ *
+ * It is deliberately absent by default. Organization defaults are the policy
+ * source for most repositories; silently committing this complete Node-shaped
+ * file would override those defaults everywhere and defeat that model.
  */
 const THWIP_YAML = `# thwip.yaml - thwip settings for this repository
 # docs: https://thwip.recall.net/faq
@@ -774,6 +776,8 @@ export interface SetupPullRequestInput {
   readonly actionRef: string;
   /** Existing adopters may still merge from Actions; fresh enrolments use the App. */
   readonly mergeWriter: "workflow" | "app";
+  /** Add a complete repository override only when the administrator chose one. */
+  readonly includeRepositoryConfig?: boolean;
 }
 
 function render(template: string, input: SetupPullRequestInput): string {
@@ -787,7 +791,7 @@ export function setupPullRequestFiles(input: SetupPullRequestInput): readonly Se
       ? [{ path: ".github/workflows/thwip-merge.yml", content: render(MERGE_WORKFLOW, input) }]
       : []),
     { path: ".github/workflows/thwip-queue-verify.yml", content: render(VERIFY_WORKFLOW, input) },
-    { path: "thwip.yaml", content: THWIP_YAML },
+    ...(input.includeRepositoryConfig === true ? [{ path: "thwip.yaml", content: THWIP_YAML }] : []),
   ];
 }
 
@@ -803,7 +807,9 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
       ? ["- `.github/workflows/thwip-merge.yml` is the compatibility writer for this existing project. It performs the merge under the repository's existing enqueue token until an administrator manually cuts the project over to the App writer."]
       : ["- The installed Thwip App performs the merge with its repository-scoped `contents: write` permission. A repository administrator applies the generated rulesets; the App does not request `administration: write`. No repository merge token is needed."]),
     "- `.github/workflows/thwip-queue-verify.yml` runs the required suites against the integrated candidate when the queue asks for it. The `remote` and `audited` profiles need it; `fast` and `fresh` never dispatch to it.",
-    "- `thwip.yaml` says which suites have to pass. Edit it before merging if these are not the right ones.",
+    ...(input.includeRepositoryConfig === true
+      ? ["- `thwip.yaml` is the repository-specific policy override selected for this setup. Edit it before merging if these are not the right suites."]
+      : ["- No `thwip.yaml` is added. This repository inherits organization defaults; use `thwip init` separately only if it needs an explicit repository override."]),
     "",
     "The queue requires merge commits. It composes the merge on the base it verified and lands it with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. A squash cannot be bound that way: it does not contain the pull request head, so this branch's own required checks refuse it and GitHub cannot tell the pull request was merged. Setup refuses a squash configuration before enrolment.",
     "",

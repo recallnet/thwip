@@ -166,10 +166,10 @@ describe("queueSetupPrompt", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
     expect(prompt).toMatch(/merge the setup pull request/);
     expect(prompt).not.toContain("THWIP_ENQUEUE_TOKEN");
-    expect(prompt).toMatch(/installed App performs authorized merges/);
-    expect(prompt).toMatch(/apply each ruleset payload/);
+    expect(prompt).toMatch(/installed App performs authorized\s+merges/);
+    expect(prompt).toMatch(/apply only the disabled policy payloads/);
     expect(prompt).toMatch(/confirm every bypass-actor list/);
-    expect(prompt).toMatch(/does not request the broad "administration: write" permission/);
+    expect(prompt).toMatch(/does not request the broad\s+"administration: write" permission/);
   });
 
   /**
@@ -179,17 +179,30 @@ describe("queueSetupPrompt", () => {
    */
   it("sends ruleset work to enrolment rather than to the agent", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/apply each ruleset payload enrolment returns/);
-    expect(prompt).toMatch(/start enrolment again after each manual change/);
+    expect(prompt).toMatch(/apply only the disabled policy payloads enrolment returns/);
+    expect(prompt).toMatch(/Start enrolment again after each manual change/);
     // GitHub can only pin a context to its source after that source has
     // published the check, and the prompt says who handles that ordering.
-    expect(prompt).toMatch(/checks that each is pinned\n *to the source that publishes it/);
+    expect(prompt).toMatch(/checks that each is pinned to the\s+source that publishes it/);
   });
 
   it("names the request that enrols the repository", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
     expect(prompt).toContain("/v1/queue/<repository id>/bootstrap");
     expect(prompt).toMatch(/"Set up" tab/);
+  });
+
+  it("inherits organization defaults unless a repository override is explicitly selected", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toMatch(/Organization\n *defaults are inherited/);
+    expect(prompt).toMatch(/only when this\n *repository intentionally needs its own thwip.yaml/);
+  });
+
+  it("observes before explicit enforcement without inventing review policy", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toMatch(/ownership and policy enforcement remain disabled/);
+    expect(prompt).toContain('confirm "Begin enforcement"');
+    expect(prompt).toMatch(/adds no review policy/);
   });
 
   /**
@@ -213,14 +226,12 @@ describe("queueSetupPrompt", () => {
   });
 
   it("asks for proof before the checks are made required", () => {
-    expect(queueSetupPrompt("recallnet/thwip")).toMatch(
-      /required check that nothing\n *publishes blocks every merge/,
-    );
+    expect(queueSetupPrompt("recallnet/thwip")).toMatch(/required\s+check that nothing publishes blocks every merge/);
   });
 
   it("tells the agent to preserve what someone else authored", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/drop a rule\n *or required check somebody else added/);
+    expect(prompt).toMatch(/drop a rule or\s+required check somebody else added/);
     expect(prompt).toMatch(/Do not rewrite instructions\n *someone else authored/);
   });
 });
