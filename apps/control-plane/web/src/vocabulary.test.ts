@@ -3,6 +3,7 @@ import { BLOCKING_REASONS, ENTRY_STATES, TRANSITION_KINDS } from "@thwip/queue-d
 import { REASON_CODES } from "@thwip/protocol";
 import {
   blockedNextAction,
+  blockerFreshness,
   entryStateText,
   findingTitle,
   healActionLabel,
@@ -139,5 +140,37 @@ describe("chain findings", () => {
     expect(healPanelFailure(403)).toBeNull();
     expect(healPanelFailure(500)).toContain("could not check");
     expect(healPanelFailure(undefined)).toContain("could not check");
+  });
+});
+
+/**
+ * A projected blocker is an answer somebody wrote down earlier. The dashboard
+ * told a developer to mark pull request 56 ready for review while GitHub had it
+ * ready, because the projection had kept `PR_DRAFT` since before the change and
+ * the page said it as though it had just looked.
+ */
+describe("how old a projected blocker is", () => {
+  const at = "2026-08-04T12:00:00Z";
+  const minutesLater = (minutes: number) => Date.parse(at) + minutes * 60_000;
+
+  it("says nothing about a snapshot read straight from the queue", () => {
+    expect(blockerFreshness("queue", null, minutesLater(1))).toBeNull();
+  });
+
+  it("dates a fresh projected blocker instead of presenting it as current", () => {
+    const said = blockerFreshness("projection", at, minutesLater(3));
+    expect(said?.confirmed).toBe(true);
+    expect(said?.text).toContain("3m ago");
+  });
+
+  it("stops claiming a blocker once nothing has confirmed it for long enough", () => {
+    const said = blockerFreshness("projection", at, minutesLater(40));
+    expect(said?.confirmed).toBe(false);
+    expect(said?.text).toContain("cannot confirm");
+  });
+
+  it("treats a projection with no timestamp as unconfirmed rather than as current", () => {
+    const said = blockerFreshness("projection", null, minutesLater(1));
+    expect(said?.confirmed).toBe(false);
   });
 });

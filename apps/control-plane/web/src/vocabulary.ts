@@ -111,11 +111,11 @@ export function outcome(code: string): Outcome {
  * this existed and disagreed about whether a stamp without a zone was UTC; the
  * control plane writes UTC, so it is.
  */
-export function whenText(iso: string | null): string {
+export function whenText(iso: string | null, now: number = Date.now()): string {
   if (iso === null) return "not recorded";
   const at = Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
   if (!Number.isFinite(at)) return "not recorded";
-  const minutes = Math.floor((Date.now() - at) / 60_000);
+  const minutes = Math.floor((now - at) / 60_000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
@@ -163,6 +163,55 @@ export function blockedNextAction(reason: string | null): string | null {
   if (reason === null) return null;
   if (isReasonCode(reason)) return nextActionFor(reason, "dashboard");
   return `${humanise(reason)}. Ask an administrator; the place in line is kept.`;
+}
+
+/**
+ * How old the answer behind a blocker is.
+ *
+ * The queue read serves a projection by default, and a projection is what
+ * somebody wrote down the last time a command ran. When the write fails, or
+ * coordination is refusing calls, the row keeps whatever it last held. Pull
+ * request 56 was ready for review on GitHub and the dashboard kept saying
+ * "Mark the pull request ready for review", in the present tense, off a row
+ * that had not moved since before the change.
+ *
+ * So a projected blocker is dated, and past a threshold it stops being stated
+ * at all. `?live=1` reads the authority and answers `source: "queue"`, which
+ * needs no date because it was just read.
+ *
+ * The threshold is three of the five-minute reconciliation ticks. One missed
+ * tick is normal; three means nothing is confirming this and the reader should
+ * not be sent anywhere on it.
+ */
+const UNCONFIRMED_AFTER_MS = 15 * 60_000;
+
+export interface BlockerFreshness {
+  /** False once the reader should stop treating the blocker as current. */
+  readonly confirmed: boolean;
+  readonly text: string;
+}
+
+export function blockerFreshness(
+  source: string | undefined,
+  projectedAt: string | null | undefined,
+  now: number = Date.now(),
+): BlockerFreshness | null {
+  if (source !== "projection") return null;
+  if (projectedAt == null) {
+    return { confirmed: false, text: "Nothing dates this, so we cannot confirm it against GitHub now." };
+  }
+  const at = Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(projectedAt) ? projectedAt : `${projectedAt}Z`);
+  if (!Number.isFinite(at)) {
+    return { confirmed: false, text: "Nothing dates this, so we cannot confirm it against GitHub now." };
+  }
+  const age = now - at;
+  if (age >= UNCONFIRMED_AFTER_MS) {
+    return {
+      confirmed: false,
+      text: `Last projected ${whenText(projectedAt, now)}, so we cannot confirm this against GitHub now. It may already be clear.`,
+    };
+  }
+  return { confirmed: true, text: `As of ${whenText(projectedAt, now)}.` };
 }
 
 /* ---------- owners ---------- */
