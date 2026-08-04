@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { queueRouteDeps } from "../../test/queue-deps.js";
+import { fixturePolicy, queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -67,7 +67,7 @@ function seed(): void {
  */
 function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   return queueRoutes(
-    queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
+    queueRouteDeps({ repositoryId: REPO, baseRef: REF, headShaFor: () => "a".repeat(40) }, {
       activePolicy: async () => null,
       principalFor: async (_e: unknown, githubUserId: string) => (githubUserId === "2" ? "bob" : "alice"),
       pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF, authorIsBot: false, draft: false, headSha: "a".repeat(40) }),
@@ -204,14 +204,10 @@ describe("a pull request that comes back", () => {
  * belonging to somebody who was never going to run the turn.
  */
 describe("whose machine a fresh turn waits for", () => {
-  const FRESH = {
-    policyDigest: "sha256:policy",
-    pipelineDigest: "sha256:pipeline",
-    requiredSuites: ["unit"],
-    securityProfile: "fresh",
-    organizationId: ORG,
-    verifier: null,
-  };
+  // The digests are the ones the fixture's proven head actually binds. A policy
+  // naming a pipeline the head never ran is `POLICY_CHANGED`, which is a real
+  // refusal and not what these two tests are about.
+  const FRESH = fixturePolicy({ securityProfile: "fresh", organizationId: ORG });
 
   /** An entry sponsored by bob, placed the way the webhook places one. */
   async function placedByWebhook(e: QueueRouteEnv): Promise<void> {
