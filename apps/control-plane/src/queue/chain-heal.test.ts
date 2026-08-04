@@ -2,7 +2,7 @@ import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
-import { signReusedIntent } from "./attestation.js";
+import { signReusedIntent, signVerifiedIntent } from "./attestation.js";
 import { applyHeal, type ApplyHealDeps, type HealPlan } from "./chain-heal.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 
@@ -155,6 +155,72 @@ async function seedIntent(merge: {
       pipelineDigest: `sha256:${"3".repeat(64)}` as Sha256,
       requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
       proofCheckRunId: merge.proofCheckRunId ?? "91289436271",
+    },
+    mergeMethod: "merge",
+    createdAt: "2026-08-02T07:00:00.000Z",
+    signer: { sign: async () => "jws-intent" },
+  });
+  if ("error" in signed) throw new Error(signed.error);
+  raw
+    .prepare(
+      `INSERT INTO queue_attestations
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+    )
+    .run(
+      signed.digest,
+      REPO,
+      REF,
+      merge.attemptId,
+      new TextDecoder().decode(signed.bytes),
+      signed.jws,
+      "2026-08-02T07:00:00.000Z",
+    );
+  return signed.digest;
+}
+
+/**
+ * A verified merge's intent, which is signed the same way and cannot be
+ * rebuilt from: its record binds the Actions run that verified the candidate
+ * and the intent never carried one.
+ */
+async function seedVerifiedIntent(merge: {
+  attemptId: string;
+  pullRequestNumber: number;
+  baseSha: string;
+  headSha: string;
+  treeOid: string;
+}): Promise<string> {
+  const signed = await signVerifiedIntent({
+    operationId: `merge_${merge.attemptId}`,
+    attemptId: merge.attemptId,
+    git: {
+      objectFormat: "sha1",
+      repositoryId: REPO,
+      baseRef: REF,
+      baseSha: merge.baseSha,
+      headRepositoryId: REPO,
+      headSha: merge.headSha,
+      candidateSha: "9f".repeat(20),
+      candidateTreeOid: merge.treeOid,
+      candidateParentOids: [merge.baseSha, merge.headSha],
+    },
+    position: { queueEpoch: 0, turnSequence: 1, transitionSequence: 1, previousTransitionDigest: null },
+    pullRequestNumber: merge.pullRequestNumber,
+    evidence: {
+      workReceiptDigest: `sha256:${"1".repeat(64)}` as Sha256,
+      organizationId: "org_acme",
+      policyDigest: `sha256:${"2".repeat(64)}` as Sha256,
+      pipelineDigest: `sha256:${"3".repeat(64)}` as Sha256,
+      requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
+      assignmentDigest: `sha256:${"5".repeat(64)}` as Sha256,
+      integrationEvidenceDigest: `sha256:${"6".repeat(64)}` as Sha256,
+      execution: {
+        ranOn: "github-actions",
+        verifierResultDigest: `sha256:${"7".repeat(64)}` as Sha256,
+        checkRunId: "91289436271",
+        actionRunId: "17364817263",
+      },
     },
     mergeMethod: "merge",
     createdAt: "2026-08-02T07:00:00.000Z",
@@ -383,6 +449,29 @@ describe("GET /v1/queue/:repositoryId/heal", () => {
     expect(found[0]?.steps[0]?.sentence).toContain(second);
   });
 
+  /**
+   * The panel must not offer a control that answers 409. A verified merge's
+   * record binds the Actions run that verified the candidate and an override's
+   * binds an authorization nothing may reissue, so neither can be rebuilt from
+   * the intent, and the write path has always refused both. The plan says so
+   * before an administrator presses anything.
+   */
+  it("offers no button for a merge whose record cannot be rebuilt from its intent", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedVerifiedIntent(AUTHORIZED);
+    await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
+
+    const found = await plans(app, e);
+
+    expect(found[0]?.healable).toBe(false);
+    expect(found[0]?.steps[0]?.action).toBe("ask-a-person");
+    expect(found[0]?.steps[0]?.commitSha).toBe(AUTHORIZED.mergeSha);
+    expect(found[0]?.summary).toContain("verifier result");
+  });
+
   it("is closed to anyone who is not a repository administrator", async () => {
     const e = env();
     seed();
@@ -573,6 +662,40 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     const finding = (await plans(app, e))[0]!.digest;
 
     const response = await heal(app, e, { finding, reason: REASON });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "NOT_HEALABLE" });
+    expect(await records(app, e)).toEqual(before);
+  });
+
+  /**
+   * Steps run oldest first and the first refusal stops the run, so a gap whose
+   * second merge cannot be rebuilt would have written the first record and then
+   * answered 409, leaving an administrator with an error beside a chain that
+   * changed. The plan is unhealable as a whole, so nothing is written.
+   */
+  it("writes nothing where one merge in a gap cannot be rebuilt from its intent", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedIntent(AUTHORIZED);
+    const verified = {
+      attemptId: "att_verified",
+      pullRequestNumber: 93,
+      baseSha: AUTHORIZED.mergeSha,
+      headSha: "f0".repeat(20),
+      mergeSha: "f1".repeat(20),
+      treeOid: "f2".repeat(20),
+    };
+    COMMITS[verified.mergeSha] = { treeOid: verified.treeOid, parentShas: [verified.baseSha, verified.headSha] };
+    await seedVerifiedIntent(verified);
+    await seedRecordPastTheGap(app, e, verified.mergeSha);
+    const before = await records(app, e);
+    const found = (await plans(app, e))[0]!;
+
+    expect(found.steps.map((s) => s.action)).toEqual(["record-merge", "ask-a-person"]);
+    const response = await heal(app, e, { finding: found.digest, reason: REASON });
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "NOT_HEALABLE" });
