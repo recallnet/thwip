@@ -7,6 +7,21 @@
  * about the local machine before anything is sent. The last two are declared
  * here rather than in the CLI, because the sentence for `DISPATCH_FAILED` is
  * read on the dashboard as well as in a terminal.
+ *
+ * Five lists, and six codes sit in two of them at once. MERGE_CONFLICT,
+ * POLICY_CHANGED, MERGE_REJECTED, ADMIN_CANCELLED and INTERNAL_FAILURE are both
+ * a blocking reason and an attempt outcome; MERGE_OUTCOME_UNKNOWN is both a
+ * blocking reason and something the CLI raises about the local machine. Each
+ * one names an event a developer meets from two directions, and the two lists
+ * exist because the queue's state machine and the CLI's exit classes are
+ * answering different questions about it.
+ *
+ * Sharing a code is safe here, and this is why. `NEXT_ACTION` is one `Record`
+ * over the union of all five lists, so a code that appeared twice with two
+ * sentences would be a duplicate key and would not compile. A code carries one
+ * sentence however many lists declare it. The duplication costs a reader an
+ * extra lookup to find which list a code came from, and it has never produced
+ * two accounts of one event.
  */
 
 import { ATTEMPT_OUTCOMES, BLOCKING_REASONS } from "@thwip/queue-domain";
