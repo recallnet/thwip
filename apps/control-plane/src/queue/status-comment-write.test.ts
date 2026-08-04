@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1, type TestD1 } from "../../test/d1.js";
 import { COMMENT_MARKER, type CommentView } from "./status-comment.js";
-import { writeStatusComment, type CommentApi } from "./status-comment-write.js";
+import { writeStatusComment, type CommentApi, type CommentWriteOutcome } from "./status-comment-write.js";
 
 /**
  * The half of the feature that touches GitHub.
@@ -42,20 +42,27 @@ function view(over: Partial<CommentView> = {}): CommentView {
   };
 }
 
-/** A GitHub that remembers what it was told, starting from whatever it is given. */
+/**
+ * A GitHub that remembers what it was told, starting from whatever it is given.
+ *
+ * Comments are filed under the pull request they were written on, because
+ * GitHub files them that way. A double that returned every comment to every
+ * caller would let one pull request adopt another's, which is the exact bug the
+ * marker exists to prevent, and it would report the marker as working.
+ */
 function github(existing: Array<{ id: number; body: string }> = []) {
-  const comments = [...existing];
+  const comments = existing.map((comment) => ({ ...comment, pullRequestNumber: 184 }));
   const calls: string[] = [];
   let next = 500;
   const api: CommentApi = {
-    async list() {
+    async list(pullRequestNumber) {
       calls.push("list");
-      return comments;
+      return comments.filter((comment) => comment.pullRequestNumber === pullRequestNumber);
     },
-    async create(_pullRequestNumber, body) {
+    async create(pullRequestNumber, body) {
       calls.push("create");
       const id = next++;
-      comments.push({ id, body });
+      comments.push({ id, body, pullRequestNumber });
       return id;
     },
     async update(commentId, body) {
@@ -233,5 +240,42 @@ describe("which states may say the first word", () => {
 
     expect(await writeStatusComment(t.db, gh.api, WHERE, view({ state: "cancelled" }), NOW)).toBe("unchanged");
     expect(gh.comments).toEqual([]);
+  });
+});
+
+/**
+ * What one pass over a queue may spend.
+ *
+ * A Worker invocation gets fifty subrequests, and each comment costs up to two.
+ * The queue document keeps every entry it has ever held, so a repository with
+ * any history has more entries than one invocation can pay for. On 4 August the
+ * sweep hit that ceiling and lost the whole tick to it.
+ *
+ * Unchanged comments are free and are not counted. The cap is on writes, so a
+ * backlog drains over a few ticks instead of failing on every one.
+ */
+describe("the budget one sweep works to", () => {
+  it("stops writing once it has spent its budget, and says how much it spent", async () => {
+    const t = db();
+    const gh = github();
+    const budget = { remaining: 2 };
+
+    const spent: CommentWriteOutcome[] = [];
+    for (const pullRequestNumber of [1, 2, 3, 4]) {
+      spent.push(await writeStatusComment(t.db, gh.api, WHERE, view({ pullRequestNumber }), NOW, budget));
+    }
+
+    expect(spent).toEqual(["created", "created", "over-budget", "over-budget"]);
+    expect(gh.comments).toHaveLength(2);
+  });
+
+  it("spends nothing on a comment that already says the right thing", async () => {
+    const t = db();
+    const gh = github();
+    await writeStatusComment(t.db, gh.api, WHERE, view(), NOW);
+    const budget = { remaining: 1 };
+
+    await writeStatusComment(t.db, gh.api, WHERE, view(), NOW, budget);
+    expect(budget.remaining).toBe(1);
   });
 });

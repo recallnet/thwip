@@ -230,7 +230,11 @@ export function statusCommentBody(view: CommentView, asOf: string): string {
     const record =
       view.record === null
         ? "**thwip** · merged"
-        : `**thwip** · merged as record ${view.record.sequence}, \`${view.record.digest.slice(0, 16)}\``;
+        : // The digest carries its algorithm, and slicing the whole string
+          // spent eleven of sixteen characters spelling "sha256:". Live on pull
+          // request 180 it read `sha256:39966989f`, which names the hash and
+          // four bytes of the record.
+          `**thwip** · merged as record ${view.record.sequence}, \`${view.record.digest.replace(/^[a-z0-9]+:/, "").slice(0, 16)}\``;
     return `${COMMENT_MARKER}\n${record}\n`;
   }
 

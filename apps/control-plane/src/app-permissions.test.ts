@@ -34,14 +34,15 @@ describe("what the App asks for against what it needs", () => {
   });
 
   /**
-   * The status comment on a pull request is written through the Issues API,
-   * because GitHub files pull request comments under issues. Without this the
-   * App can merge and can publish checks and can say nothing at all on the page
-   * the developer is looking at.
+   * Demonstrated on recallnet/thwip on 4 August. The App holds no `issues`
+   * scope of any kind, and it wrote a status comment on pull request 180. So
+   * `pull_requests: write` reaches a pull request's conversation, and demanding
+   * `issues: write` here would report every installation as broken while every
+   * installation was commenting fine.
    */
-  it("asks for the write on issues the status comment needs", () => {
-    expect(REQUIRED_APP_PERMISSIONS["issues"]).toBe("write");
-    expect(APP_MANIFEST_PERMISSIONS["issues"]).toBe("write");
+  it("does not demand a scope the App comments without", () => {
+    expect(REQUIRED_APP_PERMISSIONS["issues"]).toBeUndefined();
+    expect(APP_MANIFEST_PERMISSIONS["issues"]).toBeUndefined();
   });
 
   it("widens nothing beyond what the doctor requires", () => {
