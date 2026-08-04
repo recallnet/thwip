@@ -195,7 +195,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       kind: "verified",
       transitionSequence: 1,
       priorDigest: null,
-      digest: "sha256:tr1",
+      digest: `sha256:${"a".repeat(64)}`,
       baseSha: "m".repeat(40),
       attemptId,
       witnessPrincipalIds: ["alice"],
