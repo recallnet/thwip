@@ -1,7 +1,7 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
 import { CompactSign } from "jose";
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
-import { commandsFor, buildSnapshot } from "./queue-operations.js";
+import { commandsFor, buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
 import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
@@ -90,6 +90,36 @@ export interface TickPorts {
    * nobody wires is a repair that silently never runs.
    */
   reconsiderHead(repositoryId: string, headSha: string): Promise<number>;
+  /**
+   * Bring the status comment on every pull request in one queue back in step
+   * with the queue.
+   *
+   * Comments are written on transition, which is what keeps them cheap, and a
+   * transition whose write GitHub refused leaves the page behind the queue with
+   * nothing that owns coming back for it. That is the defect family this
+   * repository keeps producing, arriving through a surface rather than through
+   * the queue, and this sweep is what closes it.
+   *
+   * Costing nothing is the publisher's job, not this one's. Each comment
+   * carries a fingerprint of what it says, so a queue where nothing moved is
+   * one D1 read per entry and no GitHub call.
+   *
+   * Required rather than optional, for the reason every other port here is: an
+   * optional port nobody wires is a repair that silently never runs.
+   */
+  publishStatusComments(repositoryId: string, baseRef: string, snapshot: QueueSnapshot): Promise<void>;
+  /**
+   * Say, on the pull requests thwip commented on, that it has stopped managing
+   * this branch.
+   *
+   * Only reached for a branch the sweep below has already found no enabled
+   * queue for, so it writes only where it has written before.
+   */
+  retireStatusComments(
+    repositoryId: string,
+    baseRef: string,
+    pullRequestNumbers: readonly number[],
+  ): Promise<void>;
 }
 
 /**
@@ -134,6 +164,7 @@ export async function tickAllQueues(
   settledWrites: number;
   readinessRechecked: number;
   chainFindings: number;
+  retiredComments: number;
 }> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
@@ -300,6 +331,18 @@ export async function tickAllQueues(
       // This does. It re-reads the head and runs the same derivation the
       // delivery runs, through `reconsiderHead`, so there is one answer to what
       // readiness means and this is not a second opinion about it.
+      // The comment on each pull request, held against the queue this tick just
+      // advanced. Comments are written on transition and a write GitHub refused
+      // leaves the page behind the queue with nothing that owns coming back for
+      // it, which is this repository's recurring defect wearing a new hat.
+      //
+      // Ahead of `recheckBlockedReadiness`, and the order is the whole point. A
+      // re-read that clears `PR_DRAFT` moves the entry, and it moves it through
+      // `runOnQueue`, which publishes the comment for the state it moved to. A
+      // publish standing after that would write the snapshot taken before it
+      // and put the old answer back on the page.
+      await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot);
+
       readinessRechecked += await recheckBlockedReadiness(snapshot, row.repositoryId, ports);
 
       // The queue reads its own chain here, once per queue per tick, the same
@@ -349,7 +392,66 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed, reconciled, settledWrites, readinessRechecked, chainFindings };
+  const retiredComments = await retireAbandonedComments(db, ports);
+  return { ticked, driven, failed, reconciled, settledWrites, readinessRechecked, chainFindings, retiredComments };
+}
+
+/**
+ * Close the comments on branches the queue has stopped managing, and say how
+ * many were closed.
+ *
+ * Outside the loop above, because the loop reads `enabled = 1` and these rows
+ * are precisely the ones no longer on that list. A project somebody disabled
+ * would otherwise leave a comment frozen on the last state that was true,
+ * telling its author they are third in a line nothing tracks any more. Turning
+ * the queue off has to leave the page honest, which is a different thing from
+ * leaving it alone.
+ *
+ * The row is dropped whichever way the write went. Keeping it would sweep the
+ * same disabled project on every tick forever, and the comment it leaves behind
+ * says thwip is not managing this branch, which stays true.
+ */
+async function retireAbandonedComments(db: D1Like, ports: TickPorts): Promise<number> {
+  const abandoned = await db
+    .prepare(
+      "SELECT c.github_repository_id AS repositoryId, c.base_ref AS baseRef, c.pull_request_number AS pullRequestNumber " +
+        "FROM queue_status_comments c LEFT JOIN queue_projects q " +
+        "ON q.github_repository_id = c.github_repository_id AND q.base_ref = c.base_ref AND q.enabled = 1 " +
+        "WHERE q.id IS NULL",
+    )
+    .bind()
+    .all<{ repositoryId: string; baseRef: string; pullRequestNumber: number }>();
+  if (abandoned.results.length === 0) return 0;
+
+  const byBranch = new Map<string, { repositoryId: string; baseRef: string; numbers: number[] }>();
+  for (const row of abandoned.results) {
+    const key = `${row.repositoryId} ${row.baseRef}`;
+    const branch = byBranch.get(key) ?? { repositoryId: row.repositoryId, baseRef: row.baseRef, numbers: [] };
+    branch.numbers.push(row.pullRequestNumber);
+    byBranch.set(key, branch);
+  }
+
+  let retired = 0;
+  for (const branch of byBranch.values()) {
+    try {
+      await ports.retireStatusComments(branch.repositoryId, branch.baseRef, branch.numbers);
+    } catch (error) {
+      console.error(
+        `[queue heartbeat] could not retire the status comments on ${branch.repositoryId} ${branch.baseRef}: ` +
+          `${String(error)}`,
+      );
+    }
+    await db
+      .prepare("DELETE FROM queue_status_comments WHERE github_repository_id = ? AND base_ref = ?")
+      .bind(branch.repositoryId, branch.baseRef)
+      .run();
+    retired += branch.numbers.length;
+    console.log(
+      `[queue heartbeat] retired ${branch.numbers.length} status comment(s) on ${branch.repositoryId} ` +
+        `${branch.baseRef}, which the queue no longer manages`,
+    );
+  }
+  return retired;
 }
 
 /**

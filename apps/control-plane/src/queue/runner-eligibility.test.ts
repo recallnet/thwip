@@ -193,7 +193,7 @@ describe("scheduler eligibility, under a device-only profile", () => {
       driveTurn: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
-      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
     });
     const afterTick = entryFor(await snapshotEntries(e), 59);
     expect(afterTick?.schedulerEligible).toBe(false);

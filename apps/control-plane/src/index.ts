@@ -1872,6 +1872,64 @@ async function publishStatusCommentsFor(
 ): Promise<void> {
   const project = await commentingProject(env, repositoryId, baseRef);
   if (project === null) return;
+  const api = await commentApi(env, project);
+
+  const now = new Date().toISOString();
+  for (const view of commentViews(snapshot, { observing: project.observing, now })) {
+    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now);
+  }
+}
+
+/**
+ * Say on each of these pull requests that thwip has stopped managing the branch.
+ *
+ * Reached only from the tick's sweep, for a branch that has no enabled queue
+ * left and a comment thwip wrote sitting on it. So the enabled gate is
+ * deliberately absent here: the App is finishing something it started, on pages
+ * it already wrote to, and refusing would leave those comments frozen on a
+ * place in a line nothing tracks any more.
+ */
+async function retireStatusCommentsFor(
+  env: Env,
+  repositoryId: string,
+  baseRef: string,
+  pullRequestNumbers: readonly number[],
+): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT p.github_name AS name, o.installation_id AS installationId FROM projects p " +
+      "JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+  )
+    .bind(repositoryId)
+    .first<{ name: string; installationId: string | null }>();
+  if (row === null || row.installationId === null) return;
+  const api = await commentApi(env, { name: row.name, installationId: row.installationId });
+
+  const now = new Date().toISOString();
+  for (const pullRequestNumber of pullRequestNumbers) {
+    await writeStatusComment(
+      env.DB as unknown as D1Like,
+      api,
+      { repositoryId, baseRef },
+      {
+        entryId: "",
+        pullRequestNumber,
+        state: "untracked",
+        position: null,
+        queued: 0,
+        ahead: [],
+        reason: null,
+        cooldownUntil: null,
+        haltReason: null,
+        record: null,
+        observing: false,
+      },
+      now,
+    );
+  }
+}
+
+/** The three calls the comment needs, against one repository, as the App. */
+async function commentApi(env: Env, project: { name: string; installationId: string }): Promise<CommentApi> {
   const token = await installationToken(env, project.installationId);
   const call = (path: string, init?: RequestInit) =>
     fetch(`https://api.github.com/repos/${project.name}${path}`, {
@@ -1893,7 +1951,7 @@ async function publishStatusCommentsFor(
       status: response.status,
     });
   };
-  const api: CommentApi = {
+  return {
     async list(pullRequestNumber) {
       const response = await call(`/issues/${pullRequestNumber}/comments?per_page=100`);
       if (!response.ok) return refuse(response, "listing comments");
@@ -1915,11 +1973,6 @@ async function publishStatusCommentsFor(
       if (!response.ok) return refuse(response, "editing the comment");
     },
   };
-
-  const now = new Date().toISOString();
-  for (const view of commentViews(snapshot, { observing: project.observing, now })) {
-    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now);
-  }
 }
 
 async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnCheckUpdate): Promise<void> {
@@ -2839,6 +2892,13 @@ export default {
         // write gets asked again, and one derivation answers all three.
         reconsiderHead: (repositoryId, headSha) =>
           reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
+        // The comments on every pull request in the queue, held against the
+        // queue this tick just advanced. A write GitHub refused on a transition
+        // leaves the page behind with nothing that owns coming back for it.
+        publishStatusComments: (repositoryId, baseRef, snapshot) =>
+          publishStatusCommentsFor(env, repositoryId, baseRef, snapshot),
+        retireStatusComments: (repositoryId, baseRef, pullRequestNumbers) =>
+          retireStatusCommentsFor(env, repositoryId, baseRef, pullRequestNumbers),
         onQueueTicked: () => {},
         onQueueFailed: (repositoryId, error) => {
           // wrangler tail is how this account observes the Worker. A heartbeat
@@ -2849,7 +2909,8 @@ export default {
       console.log(
         `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed} ` +
           `reconciled=${result.reconciled} settledWrites=${result.settledWrites} ` +
-          `readinessRechecked=${result.readinessRechecked} chainFindings=${result.chainFindings}`,
+          `readinessRechecked=${result.readinessRechecked} chainFindings=${result.chainFindings} ` +
+          `retiredComments=${result.retiredComments}`,
       );
       return;
     }
