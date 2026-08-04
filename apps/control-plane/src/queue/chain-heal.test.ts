@@ -712,10 +712,11 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
    * A button gets pressed twice. The chain is append-only, so a second write
    * for one finding is a second permanent claim about the same movement, and
    * nothing about the request tells the second POST that the first happened.
-   * Three things keep it to one record and this holds all three: the plan is
-   * recomputed from a fresh verification so the answered finding is gone, the
-   * movement carries a key unique to its commit so the index refuses a second
-   * row, and the chain is read back to prove it.
+   * This test holds every guard that keeps it to one record. The plan is
+   * recomputed from a fresh verification, so the answered finding is gone by
+   * the second call. The movement carries a key unique to its commit, so the
+   * index refuses a second row even if the plan were stale. The chain is
+   * read back afterward to prove both held.
    */
   it("writes one record for one finding however many times it is pressed", async () => {
     const e = env();
