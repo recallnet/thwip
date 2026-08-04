@@ -4,7 +4,24 @@ The queue verifies its own chain on every tick and reports what it finds. This
 page says what each finding means, what thwip does about it, and what is left
 for a person. You should never need to read `mergeOperations` or open D1.
 
-## The two calls
+## Where to click
+
+Open the project page. When the branch's record has a finding, a panel sits
+above the queue titled **This branch's record**. Each finding shows what it
+means, the verifier's own sentence, what recording it would write, and one line
+per commit naming the tree and the parents involved. Where thwip can carry the
+remedy out there is one button. The reason field starts filled with the
+finding, so press it as it stands or say something better first.
+
+Where thwip cannot answer a finding from evidence it holds there is no button,
+and the panel says what is left for a person instead.
+
+The panel is for repository admins. Everyone else does not see it.
+
+## The two calls behind it
+
+The panel is these two calls. Reach for them directly when you want the plan in
+a terminal.
 
 `GET /v1/queue/:repositoryId/heal?ref=refs/heads/main` verifies the chain and
 returns every finding with the remedy thwip computed for it. It writes nothing.
