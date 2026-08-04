@@ -206,9 +206,10 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
             The thwip GitHub App evaluates the exact pull-request head or merge-group members and publishes the{" "}
             <code>thwip</code> check directly. Projects start with a distinct{" "}
             <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. A branch running
-            Thwip Queue also requires <code>thwip</code> from GitHub Actions, satisfied by the{" "}
-            <code>thwip-required.yml</code> the setup pull request adds, so both checks appear on the commit and the
-            Actions one is what the branch waits on. Every evaluation has a service-signed, immutable audit record.
+            Thwip Queue requires <code>thwip</code> from whoever publishes it. While the repository observes that is
+            GitHub Actions, satisfied by the <code>thwip-required.yml</code> the setup pull request adds. Once you
+            enforce the App's proof check, setup moves the requirement to the App and one publisher satisfies it.
+            Every evaluation has a service-signed, immutable audit record.
           </dd>
           <dt>What data does the control plane hold?</dt>
           <dd>
