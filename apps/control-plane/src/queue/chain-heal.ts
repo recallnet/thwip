@@ -91,7 +91,7 @@ export interface HealPlan {
  * far more than any gap this has seen; the largest was two. A gap longer than
  * this is reported as needing a person, which is true.
  */
-export const HEAL_WALK_LIMIT = 20;
+const HEAL_WALK_LIMIT = 20;
 
 /** The gap the finding names, or nothing, because only some kinds have one. */
 function gapOf(finding: SelfCheckFinding): { from: string; to: string } | null {

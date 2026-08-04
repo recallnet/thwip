@@ -3620,18 +3620,27 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    const body = (await c.req.json().catch(() => ({}))) as { finding?: string; reason?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { finding?: string; code?: string; reason?: string };
     if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
       return c.json({ error: "a reason of at least 8 characters is required" }, 400);
     }
     if (typeof body.finding !== "string" || !/^sha256:[0-9a-f]{64}$/.test(body.finding)) {
       return c.json({ error: "finding required: the digest the finding was reported at" }, 400);
     }
+    // The digest names the record the finding was reported at, and one record
+    // can be reported at for more than one reason: a link can name the wrong
+    // predecessor and begin somewhere the record before it did not end. So the
+    // digest alone does not name a finding, and picking by it could carry out
+    // the remedy for the other one against a chain that keeps whatever it is
+    // given.
+    if (typeof body.code !== "string" || body.code.length === 0) {
+      return c.json({ error: "code required: the finding's code, because one record can carry two" }, 400);
+    }
     const reason = body.reason.trim();
 
     const plans = await healPlans(c.env, deps, repositoryId, baseRef);
     if ("error" in plans) return c.json({ error: plans.error }, 404);
-    const plan = plans.plans.find((p) => p.digest === body.finding);
+    const plan = plans.plans.find((p) => p.digest === body.finding && p.code === body.code);
     if (plan === undefined) {
       return c.json({ error: "this branch's chain has no such finding", code: "NO_SUCH_FINDING" }, 404);
     }

@@ -29,9 +29,11 @@ Each finding carries a `summary`, which is the sentence describing what the
 button does, and `steps`, which name each commit and what would be recorded for
 it.
 
-`POST /v1/queue/:repositoryId/heal?ref=refs/heads/main` takes `{ finding,
-reason }`. `finding` is the digest from the GET. Both calls need repository
-admin.
+`POST /v1/queue/:repositoryId/heal?ref=refs/heads/main` takes `{ finding, code,
+reason }`. `finding` is the digest from the GET and `code` is that finding's
+code. Both are needed because one record can be reported at for two reasons, so
+the digest by itself does not say which finding you are answering. Both calls
+need repository admin.
 
 You do not supply a tree, a parent list or a commit sha. Those come from GitHub.
 An operator who could name a commit could name the throwaway merge GitHub
@@ -66,6 +68,17 @@ and the tree it produced is one the queue never pinned.
 **Two attempts pin it.** Nothing is written and both attempts are named. thwip
 will not choose, because choosing would be a guess wearing a signature. Work out
 which attempt merged the commit and call `/repair` with `attemptId` set.
+
+**One attempt's intents disagree.** A merge run that restarts re-signs its
+intent, so a commit can carry two intents that both pin it and differ over
+something a record repeats. Both digests are named and nothing is written. Read
+the two documents, decide which authorization the merge ran under, and record it
+by hand.
+
+**The intent is a verified or an override merge.** A verified merge's record
+binds the Actions run that verified the candidate and an override's binds an
+authorization nothing may reissue, and neither survives in the intent. There is
+no button. Close it from the verifier result or the override.
 
 ### MISSING_PREFIX, BAD_SIGNATURE, MISSING_RECORD, DIGEST_MISMATCH, BROKEN_LINK, WRONG_SUBJECT
 
