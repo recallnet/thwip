@@ -1072,6 +1072,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       baseSha: string;
       candidateSha: string;
       candidateTreeOid: string;
+      /** The suites the activated policy requires, which the verifier runs. */
+      requiredSuites: readonly string[];
     },
   ): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
   /** Queue configuration for a branch, or null when the branch has no queue. */
@@ -2942,6 +2944,11 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
                   baseSha: cand.baseSha,
                   candidateSha: cand.candidateSha,
                   candidateTreeOid: cand.candidateTreeOid,
+                  // Named here rather than typed into the verifier workflow. A
+                  // verdict that covers a different set of suites than the
+                  // policy requires is refused as CANDIDATE_SUITES_INCOMPLETE,
+                  // and the workflow has no way to know what the policy says.
+                  requiredSuites: policy.requiredSuites,
                 })
               : ({ ok: true } as const);
             if (!dispatched.ok) {
