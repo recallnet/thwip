@@ -604,11 +604,24 @@ export async function transitionRecordFor(
  * commit already sitting in the chain, and leave the row open to be read from
  * GitHub again on the next tick, forever.
  *
- * Only this epoch counts. `attested_from_sequence` says where the chain a
- * verifier reads begins, and links before it belong to a chain the branch no
- * longer keeps. A record from back there would settle a merge write against
- * something nobody checks, and the merge would read as recorded while the live
- * chain never mentions it.
+ * Epoch scoping applies to a merge record but not to a movement record, and
+ * the two have to be told apart here because this function answers for both
+ * kinds. `attested_from_sequence` says where the chain a verifier trusts
+ * begins, and a merge record from before it cites a policy, an evidence
+ * digest and an intent digest a verifier no longer checks. Settling a write
+ * against it would report a merge as recorded while the live chain never
+ * mentions it, the failure epoch scoping exists to prevent.
+ *
+ * A movement record (`kind = 'external-transition'`, `attempt_id =
+ * 'movement:<sha>'`) carries none of that. Its whole claim is "the branch
+ * reached this commit and no signed intent pins it," a claim that holds
+ * regardless of which epoch was current when the queue wrote it down: it
+ * reads exactly as true from any epoch behind it. Scoping it away strands
+ * the record. `authorizationFor` still finds nothing pins the commit, so the
+ * sweep calls the repair path again, which calls this function, which now
+ * misses the record it already wrote, and the sweep refuses and re-reads the
+ * same commit from GitHub on every tick forever. Excluding this one kind
+ * from the epoch filter is what keeps a settled movement settled.
  */
 export async function recordCoveringCommit(
   db: D1Like,
@@ -621,9 +634,13 @@ export async function recordCoveringCommit(
       `SELECT digest, attempt_id AS attemptId FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
           AND json_extract(bytes, '$.after.baseSha') = ?
-          AND transition_sequence >= (
-            SELECT attested_from_sequence FROM queue_projects
-             WHERE github_repository_id = ? AND base_ref = ?
+          AND (
+            kind = 'external-transition'
+            OR transition_sequence >= COALESCE(
+              (SELECT attested_from_sequence FROM queue_projects
+                WHERE github_repository_id = ? AND base_ref = ?),
+              0
+            )
           )
         ORDER BY transition_sequence ASC
         LIMIT 1`,
