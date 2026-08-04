@@ -1071,6 +1071,10 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
     canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    // Reported on its own, because losing it costs the status comment and
+    // nothing else. An installation granted before the scope existed goes on
+    // merging, and an operator reading a bare scope name has to guess that.
+    canComment: missing.every(([scope]) => scope !== "issues"),
     subscribedEvents: events.subscribed,
     handledEvents: events.handled,
     deadHandlers: events.deadHandlers,
