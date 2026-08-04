@@ -263,6 +263,27 @@ export async function planHeal<TEnv extends QueueRouteEnv>(
       });
       continue;
     }
+    // The write path rebuilds a record from the intent, and only two kinds
+    // survive that. A verified merge's record binds the Actions run that
+    // verified the candidate, which the intent never carried, and an override's
+    // binds an authorization nothing may reissue. Offering a button here would
+    // put a control on the page whose only answer is a refusal, and across a
+    // gap of several commits it would refuse after the earlier records had
+    // already been written.
+    const kind = authorization.intent.kind;
+    if (kind !== "reused" && kind !== "candidate-verified") {
+      steps.push({
+        action: "ask-a-person",
+        commitSha: commit.sha,
+        attemptIds: [authorization.intent.attemptId],
+        reason: "NOT_REBUILDABLE",
+        sentence:
+          `pull request ${authorization.intent.pullRequestNumber} merged as ${commit.sha} under ` +
+          `${authorization.intent.attemptId}, and a ${kind} merge's record repeats evidence its intent ` +
+          `never carried, so thwip cannot rebuild it`,
+      });
+      continue;
+    }
     steps.push({
       action: "record-merge",
       commitSha: commit.sha,
