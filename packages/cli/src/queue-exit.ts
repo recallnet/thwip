@@ -145,6 +145,9 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   VERIFICATION_REJECTED: EXIT.humanRequired,
   PR_DRAFT: EXIT.humanRequired,
   PR_CLOSED: EXIT.humanRequired,
+  // Ship could not open one and cannot invent one. Retrying the same gh call
+  // fails the same way, so this sends the developer to open it themselves.
+  PR_NOT_OPENED: EXIT.humanRequired,
   QUEUE_PAUSED: EXIT.humanRequired,
   REBASELINE_REQUIRED: EXIT.humanRequired,
   MERGE_REJECTED: EXIT.humanRequired,

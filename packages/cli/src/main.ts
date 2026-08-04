@@ -35,6 +35,7 @@ import { acquireRunLease, httpLeasePorts } from "./run-lease.js";
 import { type CommandInvocation } from "./cli-args.js";
 import { classifyFailure, failureDetail, runCliProcess } from "./cli-failure.js";
 import { forceArgs, planPush } from "./push-plan.js";
+import { openPullRequestNumber } from "./pull-request.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
@@ -521,9 +522,20 @@ async function cmdShip(argv: string[]): Promise<number> {
     async openOrUpdatePullRequest() {
       // gh handles the difference between opening and updating, and is already a
       // prerequisite of this workflow.
-      await run("gh", ["pr", "create", "--fill"], cwd).catch(() => "");
+      //
+      // Its failure used to be discarded. gh writes what it refused on stderr,
+      // and that sentence is the only thing that tells a developer whether they
+      // are missing a token, a base branch, or a commit — so it is reported.
+      const created = await run("gh", ["pr", "create", "--fill"], cwd).then(
+        () => null,
+        (error: unknown) => failureDetail(error),
+      );
       prNumber = await currentPrNumber(cwd);
-      return { pullRequestNumber: prNumber ?? 0 };
+      if (prNumber === null) {
+        process.stderr.write(`[thwip] gh pr create opened nothing: ${created ?? "no error reported"}\n`);
+        return { pullRequestNumber: null, reasonCode: "PR_NOT_OPENED" };
+      }
+      return { pullRequestNumber: prNumber };
     },
     async joinQueue() {
       if (prNumber === null) return { reasonCode: "INTERNAL_FAILURE" };
@@ -770,11 +782,10 @@ async function defaultBranch(cwd: string): Promise<string> {
   return "main";
 }
 
+/** The open pull request for this branch, or nothing. See pull-request.ts. */
 async function currentPrNumber(cwd: string): Promise<number | null> {
   try {
-    const out = await run("gh", ["pr", "view", "--json", "number", "-q", ".number"], cwd);
-    const n = Number(out.trim());
-    return Number.isSafeInteger(n) && n > 0 ? n : null;
+    return openPullRequestNumber(await run("gh", ["pr", "view", "--json", "number,state"], cwd));
   } catch {
     return null;
   }

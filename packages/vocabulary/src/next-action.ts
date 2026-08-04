@@ -80,6 +80,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The remote branch holds a commit this machine does not have, so nothing was pushed. Fetch and rebase onto it, then run thwip ship again.",
   LOCAL_FAILURE:
     "Thwip stopped on a failure it has no reason code for. The line above is what failed; if it repeats, send it to whoever runs the queue.",
+  PR_NOT_OPENED:
+    "Your branch is pushed and no open pull request names it. Open one with gh pr create, then run thwip ship again.",
 
   /* The work itself failed. */
   SUITE_FAILED: "A required suite failed on your machine. Fix it and run thwip ship again.",
