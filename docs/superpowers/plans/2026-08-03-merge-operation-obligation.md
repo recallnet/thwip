@@ -898,11 +898,12 @@ Note that the four repaired records sit at the chain's current head rather than 
 - [ ] **Step 4: Confirm no operation is still open**
 
 ```bash
-cd apps/control-plane
-pnpm exec wrangler d1 execute thwip-staging-wnam --remote --json --command \
-  "select count(*) as open from queue_state, json_each(json_extract(queue_state.document,'\$.mergeOperations')) where json_extract(value,'\$.outcome') is null"
+curl -s -H "authorization: Bearer $THWIP_TOKEN" \
+  "https://thwip.recall.net/v1/queue/1315419165/explain?ref=refs%2Fheads%2Fmain" \
+  | jq '[.mergeOperations[] | select(.outcome == null)] | length'
 ```
-Expected: `open` is 0.
+Expected: 0. This used to be a remote SQL statement against the live database;
+`/explain` reports the merge writes now. See `docs/production-access.md`.
 
 ---
 
