@@ -1,5 +1,5 @@
 import { recordDigest, type Sha256 } from "@thwip/queue-protocol";
-import { authorizationFor, storeAttestation, transitionRecordFor } from "./attestation.js";
+import { authorizationFor, storeAttestation } from "./attestation.js";
 import { buildExternalTransitionRecord, signTransitionRecord } from "./evidence.js";
 import type { D1Like } from "./projection.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
@@ -396,6 +396,29 @@ function refusalOf(code: string): HealRefusal {
 }
 
 /**
+ * The movement record this commit already has, and where it sits.
+ *
+ * Both callers report a sequence back to an operator who will go looking for
+ * that link, so the answer has to be the position in the chain rather than the
+ * position this run was aiming at.
+ */
+async function movementAlreadyInChain(
+  db: D1Like,
+  movementKey: string,
+): Promise<{ sequence: number; digest: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT digest, transition_sequence AS sequence FROM queue_attestations
+        WHERE attempt_id = ? AND transition_sequence IS NOT NULL
+        ORDER BY created_at ASC
+        LIMIT 1`,
+    )
+    .bind(movementKey)
+    .first<{ digest: string; sequence: number }>();
+  return row === null ? null : { sequence: row.sequence, digest: row.digest };
+}
+
+/**
  * Write the record that says the branch moved and the queue did not cause it.
  *
  * Both gates the repair path uses are here too, and for the same reasons. The
@@ -464,8 +487,8 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
   // attempt id to put here and inventing one that looked real would be a lie
   // about where the record came from.
   const movementKey = `movement:${commitSha}`;
-  const already = await transitionRecordFor(db, movementKey);
-  if (already !== null) return { sequence: 0, digest: already };
+  const already = await movementAlreadyInChain(db, movementKey);
+  if (already !== null) return already;
 
   const { snapshot } = await readQueue(env, repositoryId, baseRef);
   const head = snapshot.transitions.at(-1);
@@ -531,7 +554,13 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
               .then(() => undefined),
         }),
   });
-  if (!stored.stored) return { sequence: transitionSequence, digest: stored.digest };
+  if (!stored.stored) {
+    // Another writer got there first. The position this run computed is the one
+    // it lost the race for, so reporting it would name a link the caller cannot
+    // find. What the caller wants is where the record that won actually sits.
+    const winner = await movementAlreadyInChain(db, movementKey);
+    return winner ?? { sequence: transitionSequence, digest: stored.digest };
+  }
 
   const { result } = await deps.onQueue(env, repositoryId, baseRef, ({ commands, store }) => {
     const tail = store.state().transitions.at(-1);
