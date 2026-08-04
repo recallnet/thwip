@@ -21,6 +21,7 @@ import {
 import { transitionRecordFor } from "./attestation.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { findingsForChain } from "./chain-self-check.js";
+import type { CommentBudget } from "./status-comment-write.js";
 
 /**
  * The real dependencies `recordMergeFromIntent` needs, built once from the same
@@ -107,7 +108,12 @@ export interface TickPorts {
    * Required rather than optional, for the reason every other port here is: an
    * optional port nobody wires is a repair that silently never runs.
    */
-  publishStatusComments(repositoryId: string, baseRef: string, snapshot: QueueSnapshot): Promise<void>;
+  publishStatusComments(
+    repositoryId: string,
+    baseRef: string,
+    snapshot: QueueSnapshot,
+    budget: CommentBudget,
+  ): Promise<void>;
   /**
    * Say, on the pull requests thwip commented on, that it has stopped managing
    * this branch.
@@ -140,6 +146,14 @@ const READINESS_FROM_GITHUB = ["PR_DRAFT", "PR_CLOSED"] as const;
  * queue in one pass and a stuck one within a quarter of an hour.
  */
 const READINESS_RECHECK_LIMIT = 3;
+
+/**
+ * How many status comments the whole sweep may write, across every queue.
+ *
+ * Four, because each costs up to two subrequests and the invocation's fifty are
+ * shared with everything else the tick does.
+ */
+const COMMENT_WRITES_PER_TICK = 4;
 
 export async function tickAllQueues(
   env: QueueRouteEnv,
@@ -185,6 +199,19 @@ export async function tickAllQueues(
   // Same shape, same reason: the security profile is a repository setting, so
   // it is looked up once per repository per tick, not once per queue row.
   const deviceOnlyByRepo = new Map<string, boolean>();
+
+  // One budget for the whole sweep, not one per queue.
+  //
+  // A Worker invocation gets fifty subrequests and this sweep shares them with
+  // every merge write it settles, every lane it drives and every installation
+  // token it mints, across the whole fleet. A per-queue allowance multiplied by
+  // the fleet: eight writes each over two queues, on top of four settled
+  // writes, ran the invocation out on 4 August and failed both queues.
+  //
+  // Small on purpose. A comment that has not changed costs nothing and is not
+  // counted, so this only ever bounds a genuine backlog, and a backlog drains
+  // over a handful of ticks rather than costing every one of them.
+  const commentBudget: CommentBudget = { remaining: COMMENT_WRITES_PER_TICK };
 
   let ticked = 0;
   let driven = 0;
@@ -348,7 +375,7 @@ export async function tickAllQueues(
       // failed both repositories: no lane driven, no write settled, no chain
       // read, over a sentence on a web page.
       try {
-        await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot);
+        await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot, commentBudget);
       } catch (error) {
         console.error(
           `[queue heartbeat] could not refresh the status comments on ${row.repositoryId} ${row.baseRef}: ` +
@@ -438,7 +465,7 @@ async function retireAbandonedComments(db: D1Like, ports: TickPorts): Promise<nu
 
   const byBranch = new Map<string, { repositoryId: string; baseRef: string; numbers: number[] }>();
   for (const row of abandoned.results) {
-    const key = `${row.repositoryId} ${row.baseRef}`;
+    const key = `${row.repositoryId} ${row.baseRef}`;
     const branch = byBranch.get(key) ?? { repositoryId: row.repositoryId, baseRef: row.baseRef, numbers: [] };
     branch.numbers.push(row.pullRequestNumber);
     byBranch.set(key, branch);
