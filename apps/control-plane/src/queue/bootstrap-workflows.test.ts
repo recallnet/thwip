@@ -20,12 +20,40 @@ function file(path: string): string {
 }
 
 describe("setupPullRequestFiles", () => {
-  it("offers the two workflows and the policy a new repository has none of", () => {
+  it("offers the workflows and the policy a new repository has none of", () => {
     expect(files.map((f) => f.path).sort()).toEqual([
       ".github/workflows/thwip-merge.yml",
+      ".github/workflows/thwip-queue-verify.yml",
       ".github/workflows/thwip-required.yml",
       "thwip.yaml",
     ]);
+  });
+
+  /**
+   * `remote` and `audited` claim the integrated candidate was run, and the run
+   * happens in a workflow the control plane dispatches by
+   * `repository_dispatch: thwip-queue-verify`. The template emitted no such
+   * file, so every repository enrolled through the product got a dispatch
+   * nothing listened to.
+   */
+  it("answers the candidate dispatch the control plane sends", () => {
+    const verify = parse(file(".github/workflows/thwip-queue-verify.yml")) as {
+      name: string;
+      on: { repository_dispatch: { types: string[] } };
+    };
+    expect(verify.name).toBe("thwip-queue-verify");
+    expect(verify.on.repository_dispatch.types).toEqual(["thwip-queue-verify"]);
+  });
+
+  /**
+   * Which suites the verdict has to cover comes from the activated policy, which
+   * only the control plane holds. Reading it out of the candidate checkout would
+   * let a pull request shrink its own suite list.
+   */
+  it("runs the suites the dispatch named, not a list baked into the file", () => {
+    const verify = file(".github/workflows/thwip-queue-verify.yml");
+    expect(verify).toContain("github.event.client_payload.requiredSuites");
+    expect(verify).not.toMatch(/for suite in lint typecheck test/);
   });
 
   it("publishes the proof check GitHub Actions is the source of", () => {
@@ -157,12 +185,15 @@ describe("drift against this repository's own workflows", () => {
    * was. So the checked-in file is now what the template renders, byte for byte,
    * and a change to either is a change to both.
    */
-  it("is what .github/workflows/thwip-merge.yml is written from", () => {
-    const live = readFileSync(join(repoRoot, ".github/workflows/thwip-merge.yml"), "utf8");
-    expect(live).toBe(
-      setupPullRequestFiles({ endpoint: PRODUCTION_ENDPOINT, actionRef: "recallnet/thwip@v1" }).find(
-        (f) => f.path === ".github/workflows/thwip-merge.yml",
-      )?.content,
-    );
-  });
+  it.each([".github/workflows/thwip-merge.yml", ".github/workflows/thwip-queue-verify.yml"])(
+    "is what %s is written from",
+    (path) => {
+      const live = readFileSync(join(repoRoot, path), "utf8");
+      expect(live).toBe(
+        setupPullRequestFiles({ endpoint: PRODUCTION_ENDPOINT, actionRef: "recallnet/thwip@v1" }).find(
+          (f) => f.path === path,
+        )?.content,
+      );
+    },
+  );
 });
