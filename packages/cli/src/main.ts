@@ -24,7 +24,7 @@ import {
 } from "./git.js";
 import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
-import { loadProjectConfigAtHead } from "./config.js";
+import { loadProjectConfigAtHead, loadProjectConfigForRun } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
 import { developerSetupPrompt, queueInstructions, queueSetupPrompt, withQueuePointer } from "@thwip/prompts";
 import { planQueueCommand } from "./queue-commands.js";
@@ -166,7 +166,7 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   await requireCleanTree(cwd);
   const subject = await freezeSubject(cwd, baseRef);
-  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
+  const project = await loadProjectConfigForRun(cwd, endpoint, await apiAuthHeader());
   const { policy, policyDigest } = project;
   const def = project.pipeline;
   const pDigest = project.pipelineDigest;
