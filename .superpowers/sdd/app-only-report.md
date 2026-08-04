@@ -263,3 +263,63 @@ predict nor fix. The suite names come from the dispatch now, composed by the
 control plane from the activated policy. Reading them from the candidate checkout
 was the obvious alternative and is wrong: a pull request could shrink its own
 suite list.
+
+## The merge write
+
+`merge-write.ts` composes the commit and moves the branch. The guard the brief
+called load-bearing is now three things rather than one:
+
+- `RefUpdate.force` is typed to the literal `false`, so a forcing caller cannot
+  be written at all;
+- `refUpdateRequestBody` refuses one at the boundary where a parsed JSON object
+  has made the type meaningless, and a test passes `force: true` through a cast
+  and expects the throw;
+- `performMergeWrite` refuses an intent whose first parent is not the pinned
+  base *before* it writes anything, so an unbindable commit object is never even
+  composed. That is also what refuses a squash.
+
+Everything the shell in `thwip-merge.yml` had to handle is handled from the same
+reads. A 422 naming a fast-forward is a base that moved and the lane is handed
+back rather than reached for. Every other refusal goes through
+`confirmMergeAbsence`, because the status code says what our own call did and not
+what became of the pull request. Unknown is never reported as a refusal.
+
+`queue_projects.merge_writer` decides who writes, per repository, defaulting to
+`workflow`. That is not caution for its own sake: two writers racing for one turn
+is exactly how a merge that landed gets reported as a base that moved, which is
+the failure family the chain exists to catch. A repository still running the
+workflow is answered with the merge pins; one that has flipped is answered with
+none, so an old workflow that survived the flip errors loudly instead of merging.
+
+`/merged` and `/not-merged` now share their bodies with the Worker path, so the
+confirmation, the signed record and the freed lane cannot differ depending on who
+wrote the branch. `verifyChain` is unchanged and still sees an unauthorized
+branch move, because the record binds the tree GitHub says landed rather than
+anything the writer reported.
+
+## What is left, and the order it has to go in
+
+1. **Enrolment on the `pull_request` webhook.** Two of the three gaps are small
+   and self-contained: reading the real verdict out of `proof_verifications`
+   instead of trusting `proofAccepted` from CI, and calling `admit` plus
+   `driveLane` the way `/authorize` does. The third is not. The GitHub reads on
+   the walk to a merge live inside the `/authorize` handler, which is about 960
+   lines, and the webhook cannot reach them without that handler being extracted
+   into something both callers share. That extraction is the real remaining work.
+
+   One rule for the proof verdict when it lands: whoever publishes the required
+   check is whose verdict counts. Absence is not a pass — a project whose App
+   verification has not landed reads `missing` and blocks, rather than falling
+   through to the caller's assertion.
+
+2. **Flip `merge_writer` to `app`,** per repository, only after that repository
+   has stopped running `thwip-merge.yml`. Never before.
+
+3. **Stop generating `thwip-merge.yml`,** once step 2 is the default, and
+   **stop generating job one of `thwip-required.yml`,** once step 1 means nothing
+   calls `/authorize` from CI and the pin is on the App. Both are the same shape
+   of change as the pin: the thing that replaces them has to be running first.
+
+Under `fast`, after all of that, an adopter maintains no workflow files. Under
+`remote` and `audited` they keep `thwip-queue-verify.yml` and their own CI, which
+they were always going to have.
