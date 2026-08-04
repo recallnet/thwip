@@ -33,6 +33,17 @@ describe("what the App asks for against what it needs", () => {
     expect(REQUIRED_APP_PERMISSIONS["pull_requests"]).toBe("write");
   });
 
+  /**
+   * The status comment on a pull request is written through the Issues API,
+   * because GitHub files pull request comments under issues. Without this the
+   * App can merge and can publish checks and can say nothing at all on the page
+   * the developer is looking at.
+   */
+  it("asks for the write on issues the status comment needs", () => {
+    expect(REQUIRED_APP_PERMISSIONS["issues"]).toBe("write");
+    expect(APP_MANIFEST_PERMISSIONS["issues"]).toBe("write");
+  });
+
   it("widens nothing beyond what the doctor requires", () => {
     const extra = Object.entries(APP_MANIFEST_PERMISSIONS).filter(
       ([scope, level]) => REQUIRED_APP_PERMISSIONS[scope] !== level,
@@ -44,5 +55,14 @@ describe("what the App asks for against what it needs", () => {
     expect(source("index.ts")).toContain("default_permissions: APP_MANIFEST_PERMISSIONS");
     expect(source("index.ts")).not.toMatch(/default_permissions:\s*\{/);
     expect(source("index.ts")).toContain("requiredPermissions: REQUIRED_APP_PERMISSIONS");
+  });
+
+  /**
+   * An installation predating the permission keeps merging and stops
+   * commenting, so the doctor has to name that one consequence rather than
+   * leaving an operator to read a scope name and infer it.
+   */
+  it("reports whether the App may write the status comment", () => {
+    expect(source("index.ts")).toContain("canComment:");
   });
 });
