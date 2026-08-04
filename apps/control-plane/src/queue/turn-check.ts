@@ -125,8 +125,13 @@ export function nextAction(reason: string | null): string | null {
 /**
  * A title that names the problem, so the check list on a pull request is
  * readable without opening anything.
+ *
+ * Exported because the status comment's heading needs the same clause and
+ * writing it a second table was how the check, the CLI and the dashboard came
+ * apart over the reason sentences. One reason, one short name for it, wherever
+ * a person meets it.
  */
-function titleFor(reason: string): string {
+export function blockedTitle(reason: string): string {
   switch (reason) {
     case "AGENT_OFFLINE":
     case "NO_COMPATIBLE_RUNNER":
@@ -255,7 +260,7 @@ export function turnCheckRun(update: TurnCheckUpdate): TurnCheckRun {
       return {
         status: "in_progress",
         conclusion: null,
-        title: titleFor(update.primaryReason!),
+        title: blockedTitle(update.primaryReason!),
         summary: [
           action,
           `Thwip Queue merges one pull request at a time onto this branch, with ${others} waiting. That order changes as reviews and checks change.`,
