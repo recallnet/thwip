@@ -8,7 +8,6 @@ import {
   type D1Like,
   type ProjectionMessage,
 } from "./projection.js";
-import { adoptChain, readProjectedChain } from "./adopt-chain.js";
 import {
   admit,
   buildSnapshot,
@@ -64,15 +63,9 @@ import {
 } from "./attestation.js";
 import { applyHeal, planHeal, type HealPlan } from "./chain-heal.js";
 import { findingsForChain } from "./chain-self-check.js";
-import {
-  DEFAULT_MERGE_METHOD,
-  mergeCommitMessage,
-  mergeCommitTitle,
-  mergeOperationId,
-  type MergeMethod,
-} from "./merge-commit.js";
-import { confirmMergeAbsence, type AbsenceVerdict } from "./merge-absence.js";
-import type { MergeIntent, MergeWriteOutcome, MergeWriter } from "./merge-write.js";
+import { mergeOperationId } from "./merge-commit.js";
+import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
+import { driveQueue } from "./drive-queue.js";
 import {
   parseQueueDecision,
   parseTransitionRecord,
@@ -110,19 +103,13 @@ import {
 import { verifySshSigEd25519 } from "../sshsig-verify.js";
 import { DEFAULT_TIMINGS } from "./commands.js";
 import type { CandidateSuite } from "./store.js";
-import {
-  candidateVerdict as readCandidateVerdict,
-  claimCandidateDispatch,
-  recordCandidateVerdict,
-} from "./candidate-store.js";
+import { claimCandidateDispatch, recordCandidateVerdict } from "./candidate-store.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { authorizationResponse, authorizeTurn } from "./authorize-turn.js";
 import {
-  driveLane,
   mergeLaneFor,
   recordMergedTransition,
   storeEvidence,
-  type DriveLaneOutcome,
 } from "./merge-lane.js";
 
 /**
@@ -323,68 +310,6 @@ export function projectionMessageFrom(
       observedAt: t.recordedAt,
     })),
   };
-}
-
-
-/** What a caller may read to settle whether a merge landed. */
-export interface MergeAbsenceDeps {
-  /**
-   * What GitHub says the pull request is now, or null when it could not be read.
-   * Null is not a negative.
-   */
-  pullRequestMergeState?(
-    env: QueueRouteEnv,
-    repositoryId: string,
-    pullRequestNumber: number,
-  ): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
-  /** Whether the base branch already contains a commit, from git ancestry. */
-  baseContainsSha?(
-    env: QueueRouteEnv,
-    repositoryId: string,
-    baseRef: string,
-    sha: string,
-  ): Promise<boolean | null>;
-  /** The backoff between reads. Overridden in tests so they do not wait it out. */
-  sleep?(ms: number): Promise<void>;
-}
-
-/**
- * Confirm, from GitHub, that an attempt's merge really did not happen.
- *
- * Unknown whenever the queue has no way to read: a service that cannot check
- * must not certify a negative on somebody else's single read, which is the whole
- * reason the chain lost pull requests 96, 97 and 105.
- */
-async function confirmAbsenceFor(
-  env: QueueRouteEnv,
-  deps: MergeAbsenceDeps,
-  repositoryId: string,
-  baseRef: string,
-  attemptId: string,
-): Promise<AbsenceVerdict> {
-  const readPullState = deps.pullRequestMergeState;
-  const containsSha = deps.baseContainsSha;
-  if (readPullState === undefined || containsSha === undefined) {
-    return { kind: "unknown", reason: "this deployment cannot read GitHub to confirm a merge did not happen" };
-  }
-
-  const { store } = await readQueue(env, repositoryId, baseRef);
-  const state = store.state();
-  const attempt = state.attempts.get(attemptId);
-  const entry = attempt === undefined ? undefined : state.entries.get(attempt.entryId);
-  if (attempt?.headSha === undefined || attempt.headSha === null || entry === undefined) {
-    return { kind: "unknown", reason: "no pinned attempt to read a merge outcome for" };
-  }
-  const headSha = attempt.headSha;
-  const pullRequestNumber = entry.pullRequestNumber;
-
-  return confirmMergeAbsence(
-    {
-      readPull: () => readPullState(env, repositoryId, pullRequestNumber),
-      baseContainsHead: () => containsSha(env, repositoryId, baseRef, headSha),
-    },
-    deps.sleep === undefined ? {} : { sleep: deps.sleep },
-  );
 }
 
 
@@ -590,13 +515,8 @@ const REPOSITORY_ACCESS: Readonly<Record<string, Requirement>> = {
   // to no organization, so asking it for one would refuse it outright.
   authorize: { token: "only" },
   "candidate-result": { token: "only" },
-  merged: { token: "only" },
-  "not-merged": { token: "only" },
-  // Either identity. The merge workflow polls these with the token it
-  // authorizes with; a person or the CLI arrives with a session, and that half
-  // still has to hold the repository. `nudge` had no authentication of any
-  // kind, and it drives GitHub Actions on the repository it names.
-  candidate: { token: "or", need: "read" },
+  // Either identity. A person or the CLI arrives with a session; a workflow
+  // carries an OIDC token scoped to this repository.
   nudge: { token: "or", need: "write" },
   // The route decides, because the answer turns on a `chain_public` row and the
   // order of its refusals is what stops a caller walking the numeric repository
@@ -728,15 +648,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string; mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
+  ): Promise<{ activationState: string } | null>;
   /**
    * Perform the merge the queue just authorized, from the Worker.
    *
-   * Optional, because a deployment that cannot reach GitHub with the App's own
-   * credential has no way to do it and must go on letting the workflow write.
-   * Absent is the same answer as `merge_writer = 'workflow'`.
    */
-  mergeWrite?(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
+  mergeWrite(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /**
@@ -763,8 +680,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     /** The head the pull request is on now, which no caller may assert. */
     headSha: string;
   } | null>;
-  /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
-  driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /**
    * Publish whose turn it is, as a check GitHub can require.
    *
@@ -876,7 +791,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    *
    * Reviews, code owners, approval after the last push, conversation
    * resolution and mergeability. GitHub enforces every one of them at the ref
-   * update the merge workflow performs, and nothing here read any of them: the
+   * update the App performs, and nothing here read any of them: the
    * four review facts had no writer at all, so a pull request with no approval
    * was called ready, took the lane ahead of everyone waiting, ran the whole
    * pipeline, and collected a signed merge intent for a merge GitHub was never
@@ -962,7 +877,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         : deps.publishTurnCheck(env, repositoryId, update),
     );
 
-  const { recordLandedMerge, resolveNotMerged, performMergeFromWorker } = mergeLaneFor(deps, onQueue);
+  const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
 
   // One place where a thrown error becomes a named one.
   app.onError((error, c) => {
@@ -1146,7 +1061,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Ejecting frees the lane, and a freed lane is offered to somebody else. That
     // offer expires in ninety seconds, so telling nobody about it wastes a turn
     // and, on a quiet queue, stalls it entirely.
-    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+    await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
     return c.json({ result }, result.status === "rejected" ? 409 : 200);
   });
 
@@ -1163,7 +1078,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const { result, snapshot } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.tick({ idempotencyKey: key }),
     );
-    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+    await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
     return c.json({ result });
   });
 
@@ -1242,7 +1157,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
             }
           }
         });
-        await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+        await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
         if (snapshot.entries.some((e) => e.sponsorPrincipalId === who.principalId && e.state === "Offered")) {
           holdsOffer = true;
         }
@@ -1432,8 +1347,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         headSha: candidate.headSha,
         candidateSha: candidate.candidateSha,
         candidateTreeOid: candidate.candidateTreeOid,
-        candidateParentOids:
-          project.mergeMethod === "squash" ? [candidate.baseSha] : [candidate.baseSha, candidate.headSha],
+        candidateParentOids: [candidate.baseSha, candidate.headSha],
       },
       queue: {
         queueEpoch: snapshot.queueEpoch,
@@ -1695,10 +1609,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     });
     if (!submitted.ok) return c.json({ error: "RECEIPT_NOT_RECORDED", detail: submitted.detail }, 409);
 
-    // The run is over and the merge still has to be written, which happens in
-    // Actions. Under this profile nothing else asks for it: the lane was never
-    // driven while the device held the turn, on purpose.
-    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+    // The run is over and the App still has to write the merge. Under this
+    // profile the lane was deliberately not driven while the device held the
+    // turn, so the receipt wakes it now.
+    await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
 
     return c.json({ accepted: true });
   });
@@ -1841,7 +1755,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // eject or a reconcile that gives up on one. An accepted verdict leaves the
     // attempt live in MergeGuard, still holding the lane, so there is nothing to
     // drive there — only the rejection path needs this.
-    if (!verdict.accepted) await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+    if (!verdict.accepted) await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
     return c.json({ result: result.applied }, result.applied.status === "rejected" ? 409 : 202);
   });
 
@@ -1984,103 +1898,25 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       }
     }
 
-    // Call the merge back. This is the other half of not polling: the verdict
-    // has landed, the queue knows whose turn it is, so it tells that pull request
-    // rather than leaving it to ask. Only on acceptance, and only when this is the
-    // first time we have recorded it, so a retried report does not re-drive.
-    //
-    // Through `driveLane`, not `driveTurn` directly: this candidate verdict is a
-    // claim about the integrated tree, established by a pinned verifier that runs
-    // on Actions under every profile that requires one — `fresh` and `audited`
-    // included, since a developer's own machine cannot attest to the merge tree
-    // for it. The lane it unblocks can still be device-only, and only `driveLane`
-    // knows not to spend an Actions run telling a connected device something it
-    // already claimed over its heartbeat.
+    // The App owns the write, so an accepted first verdict wakes the holder
+    // directly. A retried report does not re-drive.
     if (body.accepted === true && stored.status === "applied") {
-      const { snapshot: forDrive } = await readQueue(c.env, repositoryId, baseRef);
-      await driveLane(c.env, deps, repositoryId, baseRef, forDrive);
+      await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
     }
 
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
   });
 
   /**
-   * Has this candidate been verified yet?
-   *
-   * The merge workflow waits here rather than on the authorization endpoint. It
-   * used to poll authorization every twenty seconds, and each poll woke the
-   * Durable Object, which is the one resource with a hard daily cap. This reads a
-   * single D1 row and touches no object at all, so waiting is free and the object
-   * is only involved when there is something to decide.
-   */
-  app.get("/v1/queue/:repositoryId/candidate", async (c) => {
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    const baseRef = branchRef(c.req.query("ref"));
-    const tree = c.req.query("tree");
-    if (repositoryId === null || baseRef === null) return c.json({ error: "invalid queue key" }, 400);
-    if (typeof tree !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tree)) {
-      return c.json({ error: "tree must be a lowercase hex object id" }, 400);
-    }
-    const verdict = await readCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, tree);
-    if (verdict === null) return c.json({ verified: false, candidateTreeOid: tree });
-    return c.json({
-      verified: true,
-      accepted: verdict.accepted,
-      candidateTreeOid: tree,
-      resultDigest: verdict.resultDigest,
-      reasonCodes: verdict.reasonCodes,
-      suites: verdict.suites,
-      observedAt: verdict.observedAt,
-    });
-  });
-
-  /**
-   * Push whoever currently holds the lane, reading only the projection.
-   *
-   * A turn offered by the object's alarm cannot be pushed from inside the object:
-   * it has no installation token and no way to reach GitHub. So the lane sat idle
-   * until some unrelated request happened to move it.
-   *
-   * This closes that from the outside, and costs nothing to call: it reads D1 and
-   * wakes no object. The drain calls it on a schedule, so a lane offered by an
-   * alarm is picked up within the half hour even if nothing else happens at all.
+   * Ask the App to continue whichever pull request currently holds the lane.
    */
   app.post("/v1/queue/:repositoryId/nudge", async (c) => {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
 
-    // From the queue, not the projection.
-    //
-    // This picked whose turn to drive out of a read model that lags, so it could
-    // dispatch for a pull request whose turn had already ended. Harmless, because
-    // the merge workflow asks the queue itself and does nothing if the answer is
-    // no — but it is a wasted run and the same habit that wedged the lane once
-    // already. Reading the queue costs one row.
-    //
-    // Through `driveLane`, not `deps.driveTurn` directly, so a lane held under a
-    // device-only profile is not pushed through Actions: the connected device
-    // already claimed it over its heartbeat, and dispatching anyway spends a
-    // whole run to be told there is nothing for it to do.
-    // `driveLane` says who holds the lane, and this route reports what it said.
-    //
-    // The route used to decide that for itself, and looked only for `Offered`
-    // or `Active`. An attempt that has returned its receipt is `Verifying`, so
-    // the one lane in flight read as no lane at all: `LANE_IDLE` was answered
-    // and `driveLane` — which does understand `Verifying` — was never reached.
-    // Under `fresh` that is the whole window in which a merge still has to be
-    // written, so the one operator tool for an unmerged attempt refused to look
-    // at the only state it is ever stuck in. Two predicates for one question is
-    // how that happened, so there is one now.
-    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-    const outcome = await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
-    if (!outcome.dispatched) {
-      return outcome.reason === "LANE_IDLE"
-        ? c.json({ nudged: false, reason: outcome.reason })
-        : c.json({ nudged: false, reason: outcome.reason, pullRequestNumber: outcome.pullRequestNumber });
-    }
-    const holder = snapshot.entries.find((e) => e.pullRequestNumber === outcome.pullRequestNumber);
-    return c.json({ nudged: true, pullRequestNumber: outcome.pullRequestNumber, state: holder?.state ?? null });
+    const driven = await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
+    return c.json({ nudged: driven === 1, reason: driven === 1 ? "APP_DRIVEN" : "LANE_IDLE" });
   });
 
   /**
@@ -2113,7 +1949,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       authorGithubUserId?: string;
       draft?: boolean;
       workReceiptDigest?: string;
-      prepare?: boolean;
     };
     const baseRef = branchRef(body.baseRef);
     if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
@@ -2134,39 +1969,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       headSha: body.headSha,
       authorGithubUserId: String(body.authorGithubUserId ?? ""),
       draft: body.draft === true,
-      prepare: body.prepare === true,
     });
-    return c.json(authorizationResponse(result));
-  });
-
-  /**
-   * Carry the recorded transition chain into the queue document.
-   *
-   * Needed once per queue, when the authority moved from the Durable Object to
-   * D1 with the object unreachable. Entries rebuild themselves because every
-   * pull request asks the gate again; the chain cannot, and a queue that started
-   * a fresh one would record its next merge as the first link ever.
-   *
-   * Idempotent by refusal: it will not adopt on top of a chain that already has
-   * links, and it stops at the first break rather than leaving a hole.
-   */
-  app.post("/v1/queue/:repositoryId/adopt-chain", async (c) => {
-    const selected = requestedQueue(c);
-    if ("error" in selected) return c.json({ error: selected.error }, 400);
-    const { repositoryId, baseRef } = selected;
-
-    const who = c.get("caller");
-    // The administrator of the organization that owns this repository, because
-    // the gate has already established that this caller belongs to it. Read
-    // before membership, `isAdmin` was a claim about whichever organization the
-    // session had selected.
-    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
-
-    const chain = await readProjectedChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
-    const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands, store }) =>
-      adoptChain(commands, store, chain),
-    );
-    return c.json({ ...result, available: chain.length }, result.adopted === 0 && chain.length > 0 ? 409 : 200);
+    // Capture the check answer before waking the writer. This verifier call is
+    // often the first event after proof and CI become ready; without the wake a
+    // ready pull request waits for the five-minute heartbeat. The response
+    // remains a pure statement of authorization and exposes no merge inputs or
+    // write outcome.
+    const answer = authorizationResponse(result);
+    await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef }).catch(() => undefined);
+    return c.json(answer);
   });
 
   /**
@@ -2218,7 +2029,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       // Confirmed first, then the signed record, exactly as the merge callback
       // does it. An operator resolving by hand produces the same link as the
-      // workflow would have; the digest used to be the merge sha padded out, so
+      // normal App path would have; the digest used to be the merge sha padded out, so
       // reconciliation wrote a link that attested to nothing.
       const { result: confirmation, snapshot: afterConfirm } = await onQueue(
         c.env,
@@ -2256,7 +2067,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       // Confirming ends the attempt and frees the lane; the offer that follows
       // expires unclaimed in ninety seconds unless something drives it.
-      await driveLane(c.env, deps, repositoryId, baseRef, recorded.snapshot ?? afterConfirm);
+      await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
 
       return c.json({
         resolved: confirmation.confirmed.status,
@@ -2317,7 +2128,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
       // Ending the attempt frees the lane; the next offer expires unclaimed in
       // ninety seconds unless something drives it.
-      await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
+      await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
 
       return c.json({
         resolved: "external",
@@ -2347,7 +2158,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     // Confirming not-merged frees the lane; the next offer expires unclaimed in
     // ninety seconds unless something drives it.
-    await driveLane(c.env, deps, repositoryId, baseRef, afterNotMerged);
+    await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
 
     return c.json({
       resolved: resolved.status,
@@ -2816,143 +2627,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * Report that an authorized merge did not happen.
-   *
-   * Without this the lane stays held: the operation was persisted before the write,
-   * the write was refused, and the queue is left reconciling until an operator
-   * intervenes.
-   *
-   * The caller's word is not enough on its own. A merge run reports what one read
-   * of GitHub told it, and GitHub's reads lag GitHub's own writes: pull request
-   * 105 merged at 16:41:38 and read back as unmerged at 16:41:39, which is how a
-   * merge that is on main came to be recorded as CONFIRMED_NOT_MERGED with no
-   * transition record behind it. So the queue confirms the negative itself,
-   * across several reads and against git ancestry, before writing it down.
-   * Anything it cannot confirm is unknown, and unknown reconciles.
-   */
-  app.post("/v1/queue/:repositoryId/not-merged", async (c) => {
-    const claims = await deps.verifyOidc(c, c.env);
-    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
-    if (String(claims["repository_id"] ?? "") !== repositoryId) {
-      return c.json({ error: "token is for another repository" }, 403);
-    }
-    const body = (await c.req.json().catch(() => ({}))) as {
-      baseRef?: string;
-      attemptId?: string;
-      operationId?: string;
-      detail?: string;
-    };
-    const baseRef = branchRef(body.baseRef);
-    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
-    if (typeof body.attemptId !== "string" || typeof body.operationId !== "string") {
-      return c.json({ error: "attemptId and operationId required" }, 400);
-    }
-
-    const attemptId = body.attemptId;
-    const operationId = body.operationId;
-
-    const evidence = await confirmAbsenceFor(c.env, deps, repositoryId, baseRef, attemptId);
-    if (evidence.kind !== "not-merged") {
-      // Not a refusal the queue can stand behind. The attempt goes to
-      // reconciliation, which reads rather than writes and can still end in a
-      // confirmed merge with a record behind it.
-      const { snapshot: reconciling } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
-        commands.mergeOutcomeUnknown({ idempotencyKey: `not-merged:unknown:${attemptId}`, attemptId }),
-      );
-      await driveLane(c.env, deps, repositoryId, baseRef, reconciling);
-      return c.json({
-        resolved: "reconciling",
-        reason: evidence.reason,
-        detail: body.detail ?? null,
-        note: "the queue could not confirm that this merge did not happen",
-      });
-    }
-
-    const resolution = await resolveNotMerged(c.env, { repositoryId, baseRef, attemptId, operationId });
-    const resolved = { status: resolution.status };
-    const snapshot = resolution.snapshot;
-
-    // This is the path a losing merge run takes when GitHub refuses the merge.
-    // Confirming not-merged frees the lane, and the next offer expires unclaimed
-    // in ninety seconds unless something drives it — this is how the lane was
-    // freed without being driven in production.
-    await driveLane(c.env, deps, repositoryId, baseRef, snapshot);
-
-    return c.json({ resolved: resolved.status, detail: body.detail ?? null });
-  });
-
-  /**
-   * Report the merge the queue authorized. The write happens in CI because the App
-   * cannot yet merge, so the queue must be told which commit landed, and it refuses
-   * anything that is not the candidate it authorized. That refusal is the guard that
-   * makes delegating the write safe.
-   *
-   * A commit id is the whole report. The tree and the parents come from GitHub
-   * here, so the caller names the commit and the queue reads it.
-   */
-  app.post("/v1/queue/:repositoryId/merged", async (c) => {
-    const claims = await deps.verifyOidc(c, c.env);
-    if (claims === null) return c.json({ error: "oidc verification failed" }, 401);
-    const repositoryId = decimal(c.req.param("repositoryId"));
-    if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
-    if (String(claims["repository_id"] ?? "") !== repositoryId) {
-      return c.json({ error: "token is for another repository" }, 403);
-    }
-
-    const body = (await c.req.json().catch(() => ({}))) as {
-      baseRef?: string;
-      attemptId?: string;
-      operationId?: string;
-      mergeSha?: string;
-      sponsorPrincipalId?: string;
-    };
-    const baseRef = branchRef(body.baseRef);
-    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
-    for (const [name, value] of [
-      ["attemptId", body.attemptId],
-      ["operationId", body.operationId],
-      ["mergeSha", body.mergeSha],
-    ] as const) {
-      if (typeof value !== "string" || value.length === 0) return c.json({ error: `${name} required` }, 400);
-    }
-
-    const attemptId = body.attemptId!;
-    const mergeSha = body.mergeSha!;
-
-    const outcome = await recordLandedMerge(c.env, {
-      repositoryId,
-      baseRef,
-      attemptId,
-      operationId: body.operationId!,
-      mergeSha,
-      witnessPrincipalIds: body.sponsorPrincipalId === undefined ? [] : [body.sponsorPrincipalId],
-    });
-    if (!outcome.ok) {
-      // A merge the queue cannot describe is not recorded. Falling back to what
-      // the caller said would put the trust back where this took it from, and
-      // the attempt stays open for reconciliation to settle from its own reads.
-      return c.json(
-        { error: outcome.detail, code: outcome.code },
-        outcome.code === "MERGE_UNREADABLE" ? 404 : 409,
-      );
-    }
-
-    await driveLane(c.env, deps, repositoryId, baseRef, outcome.snapshot);
-    return c.json({
-      merged: true,
-      confirmed: outcome.confirmed,
-      transition: outcome.transition,
-      sequence: outcome.sequence,
-      transitionDigest: outcome.digest,
-      // Said plainly when a link could not be built, because a chain short by
-      // one is something an operator has to be able to see.
-      detail: outcome.detail,
-    });
-  });
-
-  /**
    * A signed record, by the digest that names it.
    *
    * The chain reports digests; this is what makes them checkable. Without it a
@@ -3104,4 +2778,3 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   return app;
 }
-

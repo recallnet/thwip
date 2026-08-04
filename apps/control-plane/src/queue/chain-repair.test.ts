@@ -164,10 +164,9 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
       verifier: null,
     }),
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async () => null,
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
     // Every commit these tests name is on main, which is what makes them
     // repairs. The one that is not has a test of its own.

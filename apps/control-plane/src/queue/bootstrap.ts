@@ -3,25 +3,21 @@ import { setupPullRequestFiles, type SetupFile } from "./bootstrap-workflows.js"
 import {
   bootstrapCheckRuns,
   BOOTSTRAP_STEPS,
-  checkRulesetForBackend,
+  checkAppRuleset,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
-  managedOwnershipRuleset,
+  appOwnershipRuleset,
   mayActivate,
-  nativeMergeQueueRuleset,
   nextBootstrapStep,
   policyRuleset,
   POLICY_RULESET_NAME,
   proofIntegrationFor,
   type ProofCheckMode,
-  type Backend,
   type BootstrapProgress,
   type BootstrapStep,
-  type MergeMethod,
   type Ruleset,
 } from "./rulesets.js";
 import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
-import { mergeWriterOf, type MergeWriter } from "./merge-write.js";
 
 /**
  * Enrolling a repository, through the product.
@@ -47,17 +43,11 @@ import { mergeWriterOf, type MergeWriter } from "./merge-write.js";
  * and a refusal stops the run where it is with the policy still disabled.
  */
 
-/** Longer than the longest turn plus verifier and reconciliation allowance. */
-const NATIVE_CHECK_RESPONSE_TIMEOUT_MINUTES = 60;
-
 export interface QueueProject {
   readonly id: string;
   readonly organizationId: string;
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend: Backend;
-  readonly mergeMethod: MergeMethod;
-  readonly mergeWriter: MergeWriter;
   readonly enabled: boolean;
   readonly activationState: string;
   readonly progress: BootstrapProgress;
@@ -165,9 +155,6 @@ interface ProjectRow {
   organization_id: string;
   github_repository_id: string;
   base_ref: string;
-  backend: string;
-  merge_method: string;
-  merge_writer: string | null;
   enabled: number;
   activation_state: string;
   bootstrap_progress_json: string;
@@ -190,9 +177,6 @@ function toProject(row: ProjectRow): QueueProject {
     organizationId: row.organization_id,
     repositoryId: row.github_repository_id,
     baseRef: row.base_ref,
-    backend: row.backend === "native" ? "native" : "managed",
-    mergeMethod: row.merge_method === "merge" ? "merge" : "squash",
-    mergeWriter: mergeWriterOf(row.merge_writer),
     enabled: row.enabled === 1,
     activationState: row.activation_state,
     progress,
@@ -206,7 +190,7 @@ export async function readQueueProject(
 ): Promise<QueueProject | null> {
   const row = await db
     .prepare(
-      `SELECT id, organization_id, github_repository_id, base_ref, backend, merge_method, merge_writer,
+      `SELECT id, organization_id, github_repository_id, base_ref,
               enabled, activation_state, bootstrap_progress_json
          FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ?`,
@@ -219,8 +203,6 @@ export async function readQueueProject(
 export interface EnrollmentRequest {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend?: Backend;
-  readonly mergeMethod?: MergeMethod;
 }
 
 export type Enrollment =
@@ -290,9 +272,9 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
   await db
     .prepare(
       `INSERT INTO queue_projects
-         (id, organization_id, github_repository_id, base_ref, backend, merge_method,
-          merge_writer, enabled, activation_state, bootstrap_progress_json, verifier_json)
-       VALUES (?, ?, ?, ?, ?, ?, 'app', 0, 'configured', '{}', ?)
+         (id, organization_id, github_repository_id, base_ref,
+          enabled, activation_state, bootstrap_progress_json, verifier_json)
+       VALUES (?, ?, ?, ?, 0, 'configured', '{}', ?)
        ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
     )
     .bind(
@@ -300,8 +282,6 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       installed.organizationId,
       request.repositoryId,
       request.baseRef,
-      request.backend ?? "managed",
-      request.mergeMethod ?? "merge",
       JSON.stringify(
         pinnedVerifierFor({
           repositoryId: request.repositoryId,
@@ -383,7 +363,6 @@ export async function enforceQueueProject(db: D1Like, project: QueueProject): Pr
 export interface BootstrapStatus {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend: Backend;
   readonly enabled: boolean;
   readonly activationState: string;
   readonly progress: BootstrapProgress;
@@ -397,7 +376,6 @@ export function bootstrapStatus(project: QueueProject): BootstrapStatus {
   return {
     repositoryId: project.repositoryId,
     baseRef: project.baseRef,
-    backend: project.backend,
     enabled: project.enabled,
     activationState: project.activationState,
     progress: project.progress,
@@ -559,8 +537,8 @@ async function verifyPolicy(
     proofCheckMode: options.proofCheckMode ?? (await proofCheckMode(deps, project)),
   });
 
-  const backend = checkRulesetForBackend(next, project.backend);
-  if (!backend.ok) return { kind: "refused", step, detail: backend.reason };
+  const compatible = checkAppRuleset(next);
+  if (!compatible.ok) return { kind: "refused", step, detail: compatible.reason };
 
   const diff = diffRuleset(existing?.ruleset ?? null, next);
   if (!diff.safe) return { kind: "refused", step, detail: diff.warnings.join("; ") };
@@ -610,7 +588,6 @@ async function performStep(
           files: setupPullRequestFiles({
             endpoint: deps.endpoint,
             actionRef: deps.actionRef,
-            mergeWriter: project.mergeWriter,
             ...(deps.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
           }),
           baseSha,
@@ -732,25 +709,14 @@ async function performStep(
         pinCheckSource: true,
         proofCheckMode: await proofCheckMode(deps, project),
       });
-      const policyBackend = checkRulesetForBackend(policy, project.backend);
-      if (!policyBackend.ok) return { kind: "refused", step, detail: policyBackend.reason };
+      const policyCompatibility = checkAppRuleset(policy);
+      if (!policyCompatibility.ok) return { kind: "refused", step, detail: policyCompatibility.reason };
       const policyDiff = diffRuleset(existingPolicy?.ruleset ?? null, policy);
       if (!policyDiff.safe) return { kind: "refused", step, detail: policyDiff.warnings.join("; ") };
 
-      // Managed branches are written by the App, native ones by GitHub's queue.
-      // Sending either backend's rule to the other hands the branch to the wrong
-      // writer, which `checkRulesetForBackend` refuses.
-      const second =
-        project.backend === "managed"
-          ? managedOwnershipRuleset({ baseRef: project.baseRef, integrationId: deps.integrationId })
-          : nativeMergeQueueRuleset({
-              baseRef: project.baseRef,
-              integrationId: deps.integrationId,
-              mergeMethod: project.mergeMethod,
-              checkResponseTimeoutMinutes: NATIVE_CHECK_RESPONSE_TIMEOUT_MINUTES,
-            });
-      const backend = checkRulesetForBackend(second, project.backend);
-      if (!backend.ok) return { kind: "refused", step, detail: backend.reason };
+      const second = appOwnershipRuleset({ baseRef: project.baseRef, integrationId: deps.integrationId });
+      const compatibility = checkAppRuleset(second);
+      if (!compatibility.ok) return { kind: "refused", step, detail: compatibility.reason };
 
       const existingSecond = await deps.github.rulesetNamed(second.name);
       const secondDiff = diffRuleset(existingSecond?.ruleset ?? null, second);
@@ -928,8 +894,6 @@ export async function runBootstrap(
 export interface BootstrapRequest extends BootstrapDeps {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend?: Backend;
-  readonly mergeMethod?: MergeMethod;
 }
 
 export interface BootstrapResponse {
@@ -950,8 +914,6 @@ export async function handleBootstrapRequest(request: BootstrapRequest): Promise
   const enrolled = await enrollQueueProject(request.db, {
     repositoryId: request.repositoryId,
     baseRef: request.baseRef,
-    ...(request.backend === undefined ? {} : { backend: request.backend }),
-    ...(request.mergeMethod === undefined ? {} : { mergeMethod: request.mergeMethod }),
   });
   if (!enrolled.ok) return { status: 404, body: { error: enrolled.reason } };
 

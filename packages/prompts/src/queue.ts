@@ -13,7 +13,6 @@ import { SITE } from "./index.js";
 export interface QueueInstructionFacts {
   readonly repositoryName: string;
   readonly baseRef: string;
-  readonly backend: "managed" | "native";
   readonly activationState: "configured" | "observe" | "canary" | "enforced";
   readonly hasDaggerModule: boolean;
 }
@@ -182,7 +181,7 @@ for things only I can do.
    - after the observe proof below, explicitly begin enforcement, then apply the
      ownership and active-policy payloads;
    - confirm every bypass-actor list in GitHub exactly matches the expected lists
-     shown at confirmation (for a managed queue, only the Thwip App bypasses
+     shown at confirmation (only the Thwip App bypasses
      ownership).
    Start enrolment again after each manual change. It reads the branch rulesets
    back, requires "thwip" and "thwip / turn", checks that each is pinned to the

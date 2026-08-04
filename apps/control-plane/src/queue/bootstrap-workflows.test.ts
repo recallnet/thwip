@@ -11,31 +11,17 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const files = setupPullRequestFiles({
   endpoint: "https://thwip.example.test",
   actionRef: "recallnet/thwip@v1.2.3",
-  mergeWriter: "app",
-});
-
-const legacyFiles = setupPullRequestFiles({
-  endpoint: "https://thwip.example.test",
-  actionRef: "recallnet/thwip@v1.2.3",
-  mergeWriter: "workflow",
 });
 
 const overrideFiles = setupPullRequestFiles({
   endpoint: "https://thwip.example.test",
   actionRef: "recallnet/thwip@v1.2.3",
-  mergeWriter: "app",
   includeRepositoryConfig: true,
 });
 
 function file(path: string): string {
   const found = files.find((f) => f.path === path);
   if (found === undefined) throw new Error(`no generated file at ${path}`);
-  return found.content;
-}
-
-function legacyFile(path: string): string {
-  const found = legacyFiles.find((f) => f.path === path);
-  if (found === undefined) throw new Error(`no legacy generated file at ${path}`);
   return found.content;
 }
 
@@ -109,7 +95,6 @@ describe("setupPullRequestFiles", () => {
     const body = setupPullRequestBody({
       endpoint: "https://thwip.example.test",
       actionRef: "recallnet/thwip@v1.2.3",
-      mergeWriter: "app",
     });
     expect(body).toMatch(/does not request `administration: write`/);
     expect(body).toMatch(/No repository merge token is needed/);
@@ -133,10 +118,8 @@ describe("setupPullRequestFiles", () => {
  * The template is a workflow, so the rules workflows are held to apply to it.
  *
  * `scripts/lint.mjs` reads `.github/workflows`, and the template is TypeScript
- * that emits YAML, so lint never saw it. This repository's merge workflow was
- * fixed to bind the base and the template was not, and every adopted repository
- * went on merging onto whatever the branch happened to be. Same rules, same
- * messages, applied to what the template emits.
+ * that emits YAML, so lint does not see it. Apply the same workflow validation
+ * to the generated setup files.
  */
 const { validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint.mjs"))) as {
   validateWorkflow: (filename: string, source: string) => void;
@@ -152,36 +135,6 @@ describe("the generated workflows under the workflow lint", () => {
       expect(() => validateWorkflow(generated.path, generated.content)).not.toThrow();
     });
   }
-});
-
-/**
- * A squash commit has one parent and does not contain the pull request head, so
- * the branch's own required checks refuse the ref update and GitHub cannot see
- * that the pull request was merged. There is no other primitive to bind it with.
- * Refusing costs a squash repository its merges; merging anyway costs everyone
- * the one claim this queue makes.
- */
-describe("a merge method the queue cannot bind", () => {
-  const merge = legacyFile(".github/workflows/thwip-merge.yml");
-
-  it("refuses it by name instead of performing it", () => {
-    expect(merge).toContain('if [ "$method" != "merge" ]; then');
-    expect(merge).toMatch(/::error::this repository merges by \$method/);
-  });
-
-  it("hands the lane back rather than holding it until a deadline", () => {
-    const refusal = merge.slice(merge.indexOf('if [ "$method" != "merge" ]'));
-    expect(refusal.slice(0, refusal.indexOf("exit 1"))).toContain("/not-merged");
-  });
-
-  it("says so in the pull request a repository reviews before enabling the queue", () => {
-    const body = setupPullRequestBody({
-      endpoint: "https://thwip.example.test",
-      actionRef: "recallnet/thwip@v1.2.3",
-      mergeWriter: "workflow",
-    });
-    expect(body).toMatch(/squash/i);
-  });
 });
 
 describe("drift against this repository's own workflows", () => {
@@ -205,17 +158,7 @@ describe("drift against this repository's own workflows", () => {
     expect(generated.jobs[PROOF_CHECK]?.name).toBe(live.jobs[PROOF_CHECK]?.name);
   });
 
-  /**
-   * The merge is not compared any more, because there is one of it.
-   *
-   * Comparing was what this test used to do, and it compared the triggers and
-   * the concurrency group while the two copies disagreed about the thing that
-   * mattered: this repository composed its merge on the base the queue pinned
-   * and every adopted repository asked GitHub to merge onto whatever the branch
-   * was. So the checked-in file is now what the template renders, byte for byte,
-   * and a change to either is a change to both.
-   */
-  it.each([".github/workflows/thwip-merge.yml", ".github/workflows/thwip-queue-verify.yml"])(
+  it.each([".github/workflows/thwip-queue-verify.yml"])(
     "is what %s is written from",
     (path) => {
       const live = readFileSync(join(repoRoot, path), "utf8");
@@ -223,7 +166,6 @@ describe("drift against this repository's own workflows", () => {
         setupPullRequestFiles({
           endpoint: PRODUCTION_ENDPOINT,
           actionRef: "recallnet/thwip@v1",
-          mergeWriter: path.endsWith("thwip-merge.yml") ? "workflow" : "app",
         }).find(
           (f) => f.path === path,
         )?.content,

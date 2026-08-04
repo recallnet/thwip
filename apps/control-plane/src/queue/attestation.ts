@@ -1,5 +1,5 @@
 import { parseMergeIntent } from "@thwip/queue-protocol";
-import type { GitSubject, MergeIntentV1, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
+import type { GitSubject, MergeIntentV1, MergeMethod, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
   buildReusedProofRecord,
@@ -11,7 +11,6 @@ import {
 import { proofShortfall, type ProofBinding } from "./work-receipt.js";
 import type { Signer, SignedRecord } from "./evidence.js";
 import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
-import type { MergeMethod } from "./merge-commit.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -158,7 +157,7 @@ export async function signReusedIntent(input: {
     mergeMethod: input.mergeMethod,
     policyDigest: input.evidence.policyDigest,
     previousTransitionDigest: input.position.previousTransitionDigest,
-    // What the workflow is told to write, so the intent specifies the commit
+    // What the App writer is told to write, so the intent specifies the commit
     // rather than describing one after the fact.
     commitTitle: mergeCommitTitle(input.pullRequestNumber),
     commitMessage: mergeCommitMessage(input.operationId),
@@ -332,7 +331,7 @@ export async function signVerifiedIntent(input: {
     mergeMethod: input.mergeMethod,
     policyDigest: input.evidence.policyDigest,
     previousTransitionDigest: input.position.previousTransitionDigest,
-    // What the workflow is told to write, so the intent specifies the commit
+    // What the App writer is told to write, so the intent specifies the commit
     // rather than describing one after the fact.
     commitTitle: mergeCommitTitle(input.pullRequestNumber),
     commitMessage: mergeCommitMessage(input.operationId),

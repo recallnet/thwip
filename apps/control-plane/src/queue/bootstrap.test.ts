@@ -214,9 +214,10 @@ describe("enrollQueueProject", () => {
     expect(row.enabled).toBe(0);
     expect(row.activation_state).toBe("configured");
     expect(row.bootstrap_progress_json).toBe("{}");
-    expect(row.backend).toBe("managed");
-    expect(row.merge_method).toBe("merge");
-    expect(row.merge_writer).toBe("app");
+    const columns = d1.raw.prepare("PRAGMA table_info(queue_projects)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).not.toContain("backend");
+    expect(columns.map((column) => column.name)).not.toContain("merge_method");
+    expect(columns.map((column) => column.name)).not.toContain("merge_writer");
   });
 
   it("refuses a repository the App is not installed on", async () => {
@@ -401,7 +402,7 @@ describe("runBootstrap", () => {
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
   });
 
-  it("gives the App the branch, on a managed backend", async () => {
+  it("gives the installed App ownership of the branch", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     await enrolled();
     await runAsRepositoryAdministrator(github);

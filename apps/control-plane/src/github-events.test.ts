@@ -98,9 +98,9 @@ describe("the events the code handles", () => {
 
   /**
    * The manifest is the one place a fresh registration gets its subscription
-   * from, so it must use the managed path's required list rather than a copy.
+   * from, so it must use the App path's required list rather than a copy.
    */
-  it("registers a new App for exactly the events the managed path requires", () => {
+  it("registers a new App for exactly the events the App path requires", () => {
     expect(APP_MANIFEST_EVENTS).toEqual([...REQUIRED_WEBHOOK_EVENTS]);
     expect(source("index.ts")).toContain("default_events: APP_MANIFEST_EVENTS");
     expect(source("index.ts")).not.toMatch(/default_events:\s*\[/);
@@ -121,7 +121,7 @@ describe("comparing an installation against the code", () => {
     expect(drift.healthy).toBe(false);
   });
 
-  it("reports healthy when the App delivers everything the managed path requires", () => {
+  it("reports healthy when the App delivers everything the App path requires", () => {
     const drift = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS]);
     expect(drift.deadHandlers).toEqual([]);
     expect(drift.healthy).toBe(true);

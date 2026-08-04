@@ -69,7 +69,7 @@ afterEach(() => {
  * Wraps a real D1Like so that any statement bound with `repositoryId` among its
  * parameters rejects, while every other statement runs against the real
  * database untouched. Used to make one repository's work fail for real, rather
- * than stubbing `driveTurn` in a way the code under test never reaches.
+ * than stubbing the queue driver in a way the code under test never reaches.
  */
 function withFailingRepository(db: D1Like, repositoryId: string): D1Like {
   return {
@@ -132,7 +132,7 @@ describe("the queue heartbeat", () => {
     queue("2", 1);
     const visited: string[] = [];
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: (repositoryId) => visited.push(repositoryId),
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -145,7 +145,7 @@ describe("the queue heartbeat", () => {
     const e = env();
     queue("1", 0);
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -153,13 +153,13 @@ describe("the queue heartbeat", () => {
     expect(result.ticked).toBe(0);
   });
 
-  /** A lane nobody holds needs no dispatch, and dispatching costs a CI run. */
+  /** A lane nobody holds needs no App continuation. */
   it("drives nobody when no lane is held", async () => {
     const e = env();
     queue("1", 1);
     let drives = 0;
     await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -178,12 +178,12 @@ describe("the queue heartbeat", () => {
     queue("2", 1);
     // Repository "1" is unreachable at the database, not merely undriven: this
     // is the seam that actually throws inside the per-queue try block, unlike
-    // stubbing driveTurn, which is never called when no lane is held.
+    // stubbing the queue driver, which is never called when no lane is held.
     const failingEnv = { ...e, DB: withFailingRepository(e.DB as unknown as D1Like, "1") } as unknown as QueueRouteEnv;
     const failures: Array<{ repositoryId: string; error: unknown }> = [];
     const ticked: string[] = [];
     const result = await tickAllQueues(failingEnv, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: (repositoryId) => ticked.push(repositoryId),
       onQueueFailed: (repositoryId, error) => failures.push({ repositoryId, error }),
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -356,7 +356,7 @@ describe("readiness nothing else came back to fix", () => {
 
     const asked: Array<{ repositoryId: string; headSha: string }> = [];
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async (repositoryId, headSha) => {
@@ -377,7 +377,7 @@ describe("readiness nothing else came back to fix", () => {
     await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "PR_CLOSED");
     let asked = 0;
     await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => {
@@ -399,7 +399,7 @@ describe("readiness nothing else came back to fix", () => {
     await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "REVIEW_REQUIRED");
     let asked = 0;
     await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => {
@@ -418,7 +418,7 @@ describe("readiness nothing else came back to fix", () => {
     await readyEntry(e.DB as unknown as D1Like, "1", "entry_a", "alice", 41);
     let asked = 0;
     await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => {
@@ -440,7 +440,7 @@ describe("readiness nothing else came back to fix", () => {
     }
     let asked = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => {
@@ -461,7 +461,7 @@ describe("readiness nothing else came back to fix", () => {
     await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "PR_DRAFT");
     const ticked: string[] = [];
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: (repositoryId) => ticked.push(repositoryId),
       onQueueFailed: () => {},
       reconsiderHead: async () => {
@@ -489,7 +489,7 @@ describe("stale-runner retirement on the tick", () => {
     await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
     ageHeartbeats(raw);
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
+    await tickAllQueues(e, { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     const entry = entryFrom(after, "entry_a");
@@ -517,7 +517,7 @@ describe("stale-runner retirement on the tick", () => {
     // tick's own doc comment); that happens on whatever next touches the
     // queue, exactly as it already does for every other route. Simulate that
     // next touch directly rather than adding a second way to offer a turn.
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
+    await tickAllQueues(e, { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
 
     const after = await withQueueState(db, "1", REF, async (store) => {
       const commands = commandsFor(store);
@@ -538,7 +538,7 @@ describe("stale-runner retirement on the tick", () => {
     await readyEntry(db, "1", "entry_a", "alice", 41);
     await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
+    await tickAllQueues(e, { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(entryFrom(after, "entry_a")?.schedulerEligible).toBe(true);
@@ -546,12 +546,7 @@ describe("stale-runner retirement on the tick", () => {
 });
 
 describe("driving a held lane against the active profile", () => {
-  // A `fresh` or `audited` lane has no fallback to GitHub Actions at all
-  // (plan.md §5.0): the connected device claims the offer itself, over the
-  // heartbeat response. Dispatching Actions for it spends a whole run to be
-  // told there is nothing to do — which is exactly what a previous change
-  // made reachable by letting a connected runner clear `AGENT_OFFLINE`.
-  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
+  it("asks the App to re-evaluate a device-only offer without changing its state", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
     queue("1", 1);
@@ -560,7 +555,7 @@ describe("driving a held lane against the active profile", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -568,11 +563,11 @@ describe("driving a held lane against the active profile", () => {
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(entryFrom(after, "entry_a")?.state).toBe("Offered");
-    expect(drives).toBe(0);
-    expect(result.driven).toBe(0);
+    expect(drives).toBe(1);
+    expect(result.driven).toBe(1);
   });
 
-  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
+  it("asks the App to continue a server-executable lane", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
     queue("1", 1);
@@ -581,7 +576,7 @@ describe("driving a held lane against the active profile", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -591,17 +586,7 @@ describe("driving a held lane against the active profile", () => {
     expect(result.driven).toBe(1);
   });
 
-  /**
-   * The device has finished, and the merge write is still Actions' job.
-   *
-   * Under `fresh` the receipt route dispatches once, fires and forgets. Nothing
-   * else ever asked: this sweep skipped every device-only repository outright,
-   * so a dispatch GitHub dropped, a run that lost a race, or a refusal that
-   * later stopped being true left the attempt sitting in `RECEIPT_SUBMITTED`
-   * until its execution deadline, with the lane held and everything behind it
-   * waiting. A device-only lane past the run is this sweep's to drive.
-   */
-  it("dispatches Actions for a device-only lane whose run is already answered for", async () => {
+  it("asks the App to merge after a device-only run is answered", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
     queue("1", 1);
@@ -610,7 +595,7 @@ describe("driving a held lane against the active profile", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -760,7 +745,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -784,7 +769,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -810,7 +795,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     let drives = 0;
     const result = await tickAllQueues(e, {
-      driveTurn: async () => void drives++,
+      driveQueue: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -834,7 +819,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     expect(row()).toBeUndefined();
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
+    await tickAllQueues(e, { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
 
     // `withQueueState` only saves on a real change (queue-state.ts). An empty
     // queue has nothing for `runAlarm()` or the settling `tick()` to change, so
@@ -922,6 +907,8 @@ async function seedIntent(shape: OrphanShape = ORPHAN): Promise<void> {
     },
     position: { queueEpoch: 0, turnSequence: 1, transitionSequence: 1, previousTransitionDigest: null },
     pullRequestNumber: shape.pullRequestNumber,
+    // Signed-record schema compatibility; the runtime path always writes merge commits.
+    mergeMethod: "merge",
     evidence: {
       workReceiptDigest: `sha256:${"1".repeat(64)}` as Sha256,
       organizationId: "org_acme",
@@ -930,7 +917,6 @@ async function seedIntent(shape: OrphanShape = ORPHAN): Promise<void> {
       requiredSuitesDigest: `sha256:${"4".repeat(64)}` as Sha256,
       proofCheckRunId: "91289436271",
     },
-    mergeMethod: "merge",
     createdAt: "2026-08-02T07:50:00.000Z",
     signer: { sign: async () => "jws-intent" },
   });
@@ -1016,8 +1002,8 @@ function readsThatSayMerged(): ReconciliationReads {
   };
 }
 
-describe("settling a write the workflow walked away from", () => {
-  it("settles a merge write left unresolved by a workflow that exited", async () => {
+describe("settling a merge write whose response was lost", () => {
+  it("settles a merge write left unresolved by an interrupted request", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
     queue("1", 1);
@@ -1027,7 +1013,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       readsThatSayMerged(),
       recordDeps,
     );
@@ -1066,7 +1052,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       reads,
       recordDepsThatRecord(),
     );
@@ -1102,7 +1088,14 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      {
+        driveQueue: async () => {},
+        onQueueTicked: () => {},
+        onQueueFailed: () => {},
+        reconsiderHead: async () => 0,
+        publishStatusComments: async () => {},
+        retireStatusComments: async () => {},
+      },
       readsThatSayMerged(),
       recordDepsThatRecord(),
     );
@@ -1119,7 +1112,14 @@ describe("settling a write the workflow walked away from", () => {
     await seedIntent();
     await beginWrite(db, ORPHAN.pullRequestNumber);
 
-    const ports = { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} };
+    const ports = {
+      driveQueue: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
+    };
     await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
     const again = await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
 
@@ -1136,7 +1136,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       { ...readsThatSayMerged(), pullRequestMergeState: async () => null, baseContainsSha: async () => null },
       recordDepsThatRecord(),
     );
@@ -1163,7 +1163,7 @@ describe("settling a write the workflow walked away from", () => {
     const asked = new Set<number>();
     await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       {
         ...readsThatSayMerged(),
         pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
@@ -1195,7 +1195,7 @@ describe("settling a write the workflow walked away from", () => {
     const result = await tickAllQueues(
       e,
       {
-        driveTurn: async () => void drives++,
+        driveQueue: async () => void drives++,
         onQueueTicked: () => {},
         onQueueFailed: (repositoryId) => failures.push(repositoryId),
         reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
@@ -1237,7 +1237,7 @@ describe("the chain check reads the keys the sweep just minted", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       readsThatSayMerged(),
       recordDepsThatSignForReal(),
     );
@@ -1294,7 +1294,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       reads,
       recordDeps,
     );
@@ -1319,7 +1319,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       readsThatSayMerged(),
       recordDepsThatSignForReal(),
     );
@@ -1348,7 +1348,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
+      { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, },
       readsThatSayMerged(),
       recordDepsThatRecord(),
     );
@@ -1375,10 +1375,10 @@ describe("tickAllQueues reads the queue's own chain", () => {
 describe("the status comments the heartbeat keeps in step", () => {
   function tickPorts(over: Partial<Parameters<typeof tickAllQueues>[1]> = {}) {
     return {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
-      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
+      reconsiderHead: async () => 0,
       publishStatusComments: async () => {},
       retireStatusComments: async () => {},
       ...over,
@@ -1490,7 +1490,7 @@ describe("what a failing comment publisher costs the heartbeat", () => {
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args));
 
     const result = await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
       reconsiderHead: async () => 0,

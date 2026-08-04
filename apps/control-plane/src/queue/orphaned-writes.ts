@@ -20,7 +20,7 @@ import { confirmMergeAbsence, type PullMergeState } from "./merge-absence.js";
  * nobody could complete is how the original failure worked.
  */
 
-/** Ten minutes. Longer than any merge workflow run observed on this repository. */
+/** Ten minutes. Longer than any merge write observed on this repository. */
 export const ORPHANED_WRITE_GRACE_MS = 10 * 60 * 1000;
 
 /**
@@ -112,10 +112,9 @@ export async function settleOrphanedWrite(
     // A merge with no sha is the ancestry-only arm: the base contains the head,
     // which says a merge landed and says nothing about what landed. Offering the
     // head commit here is what `merge-absence.ts` refuses to do and for the same
-    // reason. On a squash queue the squash tree equals the head tree while the
-    // branch sits on base, so a head commit parented on base passes every gate
-    // and the chain would claim main became the pull request's own commit. The
-    // row stays open and the next tick asks again.
+    // reason. Substituting the head would let the chain claim the branch became
+    // the pull request's own commit without GitHub ever naming that commit as
+    // the merge. The row stays open and the next tick asks again.
     if (verdict.mergeSha === null) {
       return unknown("the merge landed and GitHub named no commit");
     }

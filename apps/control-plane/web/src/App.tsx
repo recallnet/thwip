@@ -192,8 +192,8 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <dt>What happens on a rebase or squash?</dt>
           <dd>
             The proof binds the exact tree and ancestry, so a rebase, squash, or cherry-pick needs a new{" "}
-            <code>thwip run</code>. The merge queue is configured with the MERGE method so the trailer survives into
-            the merge group, where every member PR's head proof is verified again.
+            <code>thwip run</code>. Thwip Queue itself always writes a merge commit on the exact base and tree it
+            verified; setup exposes no merge-method choice.
           </dd>
           <dt>Where do project settings live?</dt>
           <dd>
@@ -203,7 +203,7 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           </dd>
           <dt>Who publishes the required proof check?</dt>
           <dd>
-            The thwip GitHub App evaluates the exact pull-request head or merge-group members and publishes the{" "}
+            The thwip GitHub App evaluates the exact pull-request head and publishes the{" "}
             <code>thwip</code> check directly. Projects start with a distinct{" "}
             <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. A branch running
             Thwip Queue requires <code>thwip</code> from whoever publishes it. While the repository observes that is
@@ -1421,8 +1421,8 @@ function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
       >
         <p>
           The agent installs the CLI, signs you in, resolves organization defaults, proposes only the repository
-          overrides this project needs, proves the App-owned check in observe mode, and guides a no-gap ruleset
-          cutover before proposing which GitHub Actions jobs to retire. Re-running it is safe.
+          overrides this project needs, proves the App-owned check in observe mode, and guides the staged ruleset
+          activation. Re-running it is safe.
         </p>
         <button
           className="gp-btn gp-btn--sm"

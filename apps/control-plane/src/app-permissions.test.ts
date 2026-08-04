@@ -25,7 +25,7 @@ describe("what the App asks for against what it needs", () => {
   /**
    * Writing the merge commit and moving the branch ref are both Contents, and
    * the ownership ruleset already names the App as the only actor that may
-   * update a managed branch.
+   * update the queued branch.
    */
   it("asks for the write on contents the merge needs", () => {
     expect(REQUIRED_APP_PERMISSIONS["contents"]).toBe("write");
