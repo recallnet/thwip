@@ -8,6 +8,8 @@ import {
   readQueueProject,
   runBootstrap,
   type BootstrapGitHub,
+  type BootstrapRun,
+  type ManualRulesetChange,
   type SetupPullRequestState,
   type StoredRuleset,
 } from "./bootstrap.js";
@@ -52,6 +54,7 @@ class FakeGitHub implements BootstrapGitHub {
   openedFiles: string[] = [];
   publishedChecks: Array<{ name: string; headSha: string; conclusion: string }> = [];
   appId = APP_INTEGRATION_ID;
+  hideBypassActors = false;
   private nextId = 100;
 
   constructor(private readonly options: { mergesSetupPr?: boolean } = {}) {}
@@ -78,7 +81,10 @@ class FakeGitHub implements BootstrapGitHub {
   }
 
   async rulesetNamed(name: string): Promise<StoredRuleset | null> {
-    return this.rulesets.get(name) ?? null;
+    const stored = this.rulesets.get(name) ?? null;
+    if (stored === null || !this.hideBypassActors) return stored;
+    const { bypass_actors: _hidden, ...ruleset } = stored.ruleset;
+    return { id: stored.id, ruleset: ruleset as Ruleset };
   }
 
   async createRuleset(ruleset: Ruleset): Promise<StoredRuleset> {
@@ -113,7 +119,7 @@ class FakeGitHub implements BootstrapGitHub {
   }
 }
 
-function deps(github: BootstrapGitHub) {
+function deps(github: BootstrapGitHub, confirmRulesetBypassActors = false) {
   return {
     db: d1.db,
     github,
@@ -121,7 +127,61 @@ function deps(github: BootstrapGitHub) {
     endpoint: "https://thwip.example.test",
     actionRef: "recallnet/thwip@v1",
     review: { requiredApprovingReviewCount: 1, requireCodeOwnerReview: false },
+    ...(confirmRulesetBypassActors ? { confirmRulesetBypassActors: true } : {}),
   };
+}
+
+async function applyManualRulesets(
+  github: FakeGitHub,
+  changes: readonly ManualRulesetChange[],
+): Promise<void> {
+  for (const change of changes) {
+    if (change.operation === "create") await github.createRuleset(change.ruleset);
+    else await github.replaceRuleset(change.rulesetId, change.ruleset);
+  }
+}
+
+/** Simulate the repository administrator applying each payload setup returns. */
+async function runAsRepositoryAdministrator(
+  github: FakeGitHub,
+  confirmRulesetBypassActors = true,
+): Promise<BootstrapRun> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const project = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    if (project === null) throw new Error("enrolment did not persist");
+    const run = await runBootstrap(deps(github, confirmRulesetBypassActors), project);
+    const last = run.outcomes.at(-1);
+    if (last?.kind === "waiting" && last.manualRulesets !== undefined) {
+      await applyManualRulesets(github, last.manualRulesets);
+      continue;
+    }
+    if (last?.kind === "waiting" && last.step === "merge-setup-pr" && github.pull?.merged === true) {
+      continue;
+    }
+    return run;
+  }
+  throw new Error("manual bootstrap did not converge");
+}
+
+async function handleAsRepositoryAdministrator(github: FakeGitHub) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const response = await handleBootstrapRequest({
+      ...deps(github, true),
+      repositoryId: REPOSITORY_ID,
+      baseRef: BASE_REF,
+    });
+    const body = response.body as { outcomes?: BootstrapRun["outcomes"] };
+    const last = body.outcomes?.at(-1);
+    if (last?.kind === "waiting" && last.manualRulesets !== undefined) {
+      await applyManualRulesets(github, last.manualRulesets);
+      continue;
+    }
+    if (last?.kind === "waiting" && last.step === "merge-setup-pr" && github.pull?.merged === true) {
+      continue;
+    }
+    return response;
+  }
+  throw new Error("manual bootstrap request did not converge");
 }
 
 beforeEach(() => {
@@ -146,6 +206,9 @@ describe("enrollQueueProject", () => {
     expect(row.enabled).toBe(0);
     expect(row.activation_state).toBe("configured");
     expect(row.bootstrap_progress_json).toBe("{}");
+    expect(row.backend).toBe("managed");
+    expect(row.merge_method).toBe("merge");
+    expect(row.merge_writer).toBe("app");
   });
 
   it("refuses a repository the App is not installed on", async () => {
@@ -209,7 +272,7 @@ describe("advanceBootstrap", () => {
 
     expect(outcome).toMatchObject({ kind: "waiting", step: "merge-setup-pr" });
     expect(github.openedFiles).toContain(".github/workflows/thwip-required.yml");
-    expect(github.openedFiles).toContain(".github/workflows/thwip-merge.yml");
+    expect(github.openedFiles).not.toContain(".github/workflows/thwip-merge.yml");
     expect(github.openedFiles).toContain("thwip.yaml");
 
     const after = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
@@ -233,11 +296,22 @@ describe("advanceBootstrap", () => {
     expect(after?.progress["merge-setup-pr"]).toBe(true);
   });
 
-  it("creates the policy disabled and unpinned, because GitHub will not pin a new context", async () => {
+  it("asks an administrator for a disabled unpinned policy, then verifies it", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     const state = await project();
     await advanceBootstrap(deps(github), state);
     await advanceBootstrap(deps(github), await project());
+    const requested = await advanceBootstrap(deps(github), await project());
+    expect(requested).toMatchObject({
+      kind: "waiting",
+      step: "create-disabled-policy-without-source",
+      manualRulesets: [{ operation: "create" }],
+    });
+    if (requested.kind === "waiting") {
+      await applyManualRulesets(github, requested.manualRulesets ?? []);
+    }
+    const verified = await advanceBootstrap(deps(github), await project());
+    expect(verified).toMatchObject({ kind: "advanced", step: "create-disabled-policy-without-source" });
     await advanceBootstrap(deps(github), await project());
 
     const policy = github.rulesets.get(POLICY_RULESET_NAME);
@@ -284,8 +358,8 @@ describe("runBootstrap", () => {
     // The App has to be the one publishing `thwip` before setup can pin the
     // context to it, so a repository that has enforced finishes in one go.
     enforceAppProofCheck();
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    const run = await runAsRepositoryAdministrator(github);
 
     expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
     expect(run.enabled).toBe(true);
@@ -307,8 +381,8 @@ describe("runBootstrap", () => {
 
   it("leaves the repository requiring exactly the checks something publishes", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
 
     // Still Actions: this repository has not enforced the App's proof check, so
     // the App does not publish `thwip` and a pin on it would block the branch.
@@ -321,8 +395,8 @@ describe("runBootstrap", () => {
 
   it("gives the App the branch, on a managed backend", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
 
     const ownership = github.rulesets.get(OWNERSHIP_RULESET_NAME);
     expect(ownership?.ruleset.bypass_actors).toEqual([
@@ -330,19 +404,57 @@ describe("runBootstrap", () => {
     ]);
   });
 
+  it("requires a human confirmation when read-only ruleset access hides bypass actors", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    github.hideBypassActors = true;
+    await enrolled();
+
+    const waiting = await runAsRepositoryAdministrator(github, false);
+    expect(waiting.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "activate-policy-and-ownership",
+      confirmationRequired: "ruleset-bypass-actors",
+    });
+    expect(waiting.enabled).toBe(false);
+
+    const continued = await runBootstrap(
+      deps(github, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    expect(continued.enabled).toBe(true);
+    expect(continued.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+  });
+
   it("refuses to pin an integration the check did not come from", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     github.appId = 111;
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    const run = await runAsRepositoryAdministrator(github);
 
     expect(run.outcomes.at(-1)).toMatchObject({ kind: "refused", step: "publish-bootstrap-check" });
     expect(run.enabled).toBe(false);
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
   });
 
-  it("refuses to activate when GitHub did not store the source pin it was sent", async () => {
+  it("keeps waiting when the administrator's source-pin update was not stored", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
+    await enrolled();
+    await runBootstrap(deps(github), (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!);
+    const create = await runBootstrap(
+      deps(github),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    const createChanges = create.outcomes.at(-1);
+    if (createChanges?.kind !== "waiting") throw new Error("expected the initial manual ruleset");
+    await applyManualRulesets(github, createChanges.manualRulesets ?? []);
+
+    const attach = await runBootstrap(
+      deps(github),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    const attachChanges = attach.outcomes.at(-1);
+    if (attachChanges?.kind !== "waiting") throw new Error("expected the source-pin update");
+
     const replace = github.replaceRuleset.bind(github);
     github.replaceRuleset = async (id, ruleset) => {
       // GitHub accepting the payload and dropping the pin is the failure that
@@ -366,10 +478,17 @@ describe("runBootstrap", () => {
       return replace(id, stripped);
     };
 
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await applyManualRulesets(github, attachChanges.manualRulesets ?? []);
+    const run = await runBootstrap(
+      deps(github),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
 
-    expect(run.outcomes.at(-1)).toMatchObject({ kind: "refused", step: "canary-negative-test" });
+    expect(run.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "attach-integration-id-while-disabled",
+      manualRulesets: [{ operation: "update" }],
+    });
     expect(run.enabled).toBe(false);
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
   });
@@ -377,9 +496,9 @@ describe("runBootstrap", () => {
   it("is safe to run again after it has finished", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     enforceAppProofCheck();
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
-    const again = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
+    const again = await runAsRepositoryAdministrator(github);
     expect(again.outcomes).toEqual([{ kind: "complete" }]);
     expect(again.enabled).toBe(true);
   });
@@ -409,8 +528,8 @@ describe("the required proof check moving to the App", () => {
 
   it("leaves the pin with Actions while the App is still only observing", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    const run = await runAsRepositoryAdministrator(github);
 
     expect(github.requiredChecks()).toContainEqual({
       context: PROOF_CHECK,
@@ -423,8 +542,8 @@ describe("the required proof check moving to the App", () => {
 
   it("says what an administrator has to do before the pin can move", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    const run = await runAsRepositoryAdministrator(github);
     const waiting = run.outcomes.at(-1);
     expect(waiting?.kind).toBe("waiting");
     if (waiting?.kind === "waiting") expect(waiting.detail).toMatch(/enforce/i);
@@ -432,11 +551,11 @@ describe("the required proof check moving to the App", () => {
 
   it("moves the pin to the App once the App is the one publishing the check", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
 
     enforceAppProofCheck();
-    const run = await runBootstrap(deps(github), await enrolled());
+    const run = await runAsRepositoryAdministrator(github);
 
     expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
     expect(github.requiredChecks()).toEqual([
@@ -446,18 +565,50 @@ describe("the required proof check moving to the App", () => {
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
   });
 
+  it("returns a corrective payload when visible bypass actors drift", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
+    enforceAppProofCheck();
+
+    const policy = github.rulesets.get(POLICY_RULESET_NAME)!;
+    github.rulesets.set(POLICY_RULESET_NAME, {
+      ...policy,
+      ruleset: {
+        ...policy.ruleset,
+        bypass_actors: [{ actor_id: 99, actor_type: "RepositoryRole", bypass_mode: "always" }],
+      },
+    });
+
+    const run = await runBootstrap(
+      deps(github, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    expect(run.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "pin-proof-check-to-app",
+      manualRulesets: [{ operation: "update", ruleset: { bypass_actors: [] } }],
+    });
+  });
+
   /**
    * The same failure `canary-negative-test` exists for, at the pin that now
    * carries the weight. A ruleset that accepted the payload and dropped the
    * source leaves `thwip` satisfiable by any workflow in the repository, which
    * is the thing this change removes.
    */
-  it("refuses when GitHub drops the pin it was sent", async () => {
+  it("keeps waiting when GitHub drops the proof-check pin", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
 
     enforceAppProofCheck();
+    const requested = await runBootstrap(
+      deps(github, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    const change = requested.outcomes.at(-1);
+    if (change?.kind !== "waiting") throw new Error("expected the proof-pin update");
     const replace = github.replaceRuleset.bind(github);
     github.replaceRuleset = async (id, ruleset) =>
       replace(id, {
@@ -477,8 +628,16 @@ describe("the required proof check moving to the App", () => {
         ),
       });
 
-    const run = await runBootstrap(deps(github), await enrolled());
-    expect(run.outcomes.at(-1)).toMatchObject({ kind: "refused", step: "pin-proof-check-to-app" });
+    await applyManualRulesets(github, change.manualRulesets ?? []);
+    const run = await runBootstrap(
+      deps(github, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    expect(run.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "pin-proof-check-to-app",
+      manualRulesets: [{ operation: "update" }],
+    });
   });
 
   /**
@@ -488,8 +647,8 @@ describe("the required proof check moving to the App", () => {
    */
   it("reaches a repository that finished setup before the step existed", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
     d1.raw
       .prepare("UPDATE queue_projects SET bootstrap_progress_json = ? WHERE github_repository_id = ?")
       .run(
@@ -506,7 +665,7 @@ describe("the required proof check moving to the App", () => {
       );
 
     enforceAppProofCheck();
-    const run = await runBootstrap(deps(github), await enrolled());
+    const run = await runAsRepositoryAdministrator(github);
     expect(run.outcomes.map((o) => ("step" in o ? o.step : "complete"))).toEqual([
       "pin-proof-check-to-app",
       "complete",
@@ -524,8 +683,8 @@ describe("the required proof check moving to the App", () => {
    */
   it("publishes the proof context from the App so GitHub will offer it as a source", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    await runAsRepositoryAdministrator(github);
 
     expect(github.publishedChecks).toEqual([
       { name: TURN_CHECK, headSha: BASE_SHA, conclusion: "neutral" },
@@ -536,8 +695,8 @@ describe("the required proof check moving to the App", () => {
   it("pins the App from the start where the App was already enforcing", async () => {
     enforceAppProofCheck();
     const github = new FakeGitHub({ mergesSetupPr: true });
-    await runBootstrap(deps(github), await enrolled());
-    const run = await runBootstrap(deps(github), await enrolled());
+    await enrolled();
+    const run = await runAsRepositoryAdministrator(github);
 
     expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
     expect(github.requiredChecks()).toEqual([
@@ -569,11 +728,7 @@ describe("handleBootstrapRequest", () => {
     });
     expect(first.status).toBe(202);
 
-    const second = await handleBootstrapRequest({
-      ...deps(github),
-      repositoryId: REPOSITORY_ID,
-      baseRef: BASE_REF,
-    });
+    const second = await handleAsRepositoryAdministrator(github);
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ enabled: true, complete: true });
   });
@@ -592,11 +747,7 @@ describe("handleBootstrapRequest", () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     github.appId = 111;
     await handleBootstrapRequest({ ...deps(github), repositoryId: REPOSITORY_ID, baseRef: BASE_REF });
-    const response = await handleBootstrapRequest({
-      ...deps(github),
-      repositoryId: REPOSITORY_ID,
-      baseRef: BASE_REF,
-    });
+    const response = await handleAsRepositoryAdministrator(github);
     expect(response.status).toBe(409);
   });
 });

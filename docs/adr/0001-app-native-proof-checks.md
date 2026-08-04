@@ -34,14 +34,25 @@ events.
 Thwip Queue, which arrived after this decision, asks for more. `driveTurnFor`
 fires a `repository_dispatch`, enrolment opens the setup pull request, and both
 are Contents. `queueDoctor` requires `contents:write`, `pull_requests:write`,
-`checks:write`, and `statuses:write`, and the readiness derivation refuses to
-call a pull request mergeable unless the first three are granted. So a queue
-repository grants `contents:write`.
+`checks:write`, and `statuses:write`. Ruleset reads use the App's existing
+`metadata:read` permission. Ruleset writes remain a repository-administrator
+operation because GitHub gates them behind the coarse `administration:write`
+App permission, which also grants unrelated repository-management authority.
+The readiness derivation refuses to call a pull request mergeable unless its
+runtime permissions are granted.
 
 The manifest asked for `contents:read` and `pull_requests:read` and left
 `statuses` out, which is the pre-queue set. An App registered from it failed the
 diagnostic written beside it. There is one list now, `REQUIRED_APP_PERMISSIONS`
 in `app-permissions.ts`, read by the manifest and by the doctor.
+
+Enrolment still owns the ordering and the payload. At each ruleset phase it
+returns an exact create or update command, waits for a repository administrator
+to apply it, and reads the visible configuration back before advancing. GitHub
+does not expose bypass actors to a caller that cannot edit the ruleset, so setup
+requires an explicit human confirmation that those actors match the generated
+payload before it activates. This is the one field the least-privilege App
+cannot independently verify.
 
 The Worker uses that write. The merge was shell in the adopter's
 `thwip-merge.yml` under a `THWIP_ENQUEUE_TOKEN` they created, which put a
@@ -54,8 +65,10 @@ typed to the literal `false`, so a forcing caller cannot be written.
 The cost is stated plainly: a compromised control plane can move the default
 branch of every adopting repository, and revocation means uninstalling the App.
 What it buys is one branch-write credential removed from every adopter's Actions
-secrets, and a guard this repository tests. `queue_projects.merge_writer` decides
-which of the two writes, per repository, and it defaults to the workflow.
+secrets, and a guard this repository tests. `queue_projects.merge_writer`
+decides which of the two writes, per repository. Product enrolment writes
+`app`; the database default remains `workflow` so an older or manually-created
+row cannot silently acquire a second writer.
 
 One thing stands between that default and deleting the column. Moving this
 repository to the App was tried on 4 August 2026 and GitHub refused the ref
@@ -64,9 +77,20 @@ publishes that check green and then writes the branch inside the same request,
 and GitHub's rule evaluation has not caught up by the time the write arrives.
 The workflow never met this, because it ran in a second workflow that started
 only once the required check had concluded — which is what the comment at the
-top of `thwip-merge.yml` is about. So the Worker has to wait for the check it
-just published to be readable before it moves the branch, and until it does, the
-column stays and the default stays.
+top of `thwip-merge.yml` is about. The Worker now retries only that exact 422,
+with bounded backoff and the same non-forcing ref update each time. The column
+and its workflow default remain for existing projects so deploying this change
+cannot silently give one queue two writers; fresh product enrolments choose the
+App explicitly.
+
+We could instead request `administration:write`. That would make setup one-click,
+let the App create and update every staged ruleset, and let it verify bypass
+actors without human attestation. It would also make permission upgrades and
+large fleets easier to operate. We do not choose it by default because the
+permission is permanent installation authority broader than queue operation,
+including sensitive repository settings. Teams that value automated fleet
+provisioning over that larger trust boundary could revisit the decision or use a
+separate, short-lived setup integration.
 
 ## Rationale
 
@@ -111,21 +135,27 @@ and `canary-negative-test` reads back whichever source the payload used.
 
 Per repository:
 
-1. Observe. The App publishes the observe name, the workflow publishes `thwip`
-   from Actions, the ruleset pins Actions. The repository merges.
-2. Enforce, which the proof-mode route already gates on a recent observe-mode
+1. Merge the setup pull request under the repository's existing controls.
+2. Create the generated disabled, unpinned policy. Thwip reads it back and
+   publishes the bootstrap checks, then returns the generated source-pinned
+   update. The administrator applies it while enforcement is still disabled.
+3. After Thwip verifies both pins, apply the generated ownership ruleset first
+   and activate the policy second. Confirm the bypass actors match the payload.
+   The App publishes the observe name, the workflow publishes `thwip` from
+   Actions, and the policy pins Actions. The repository merges.
+4. Enforce, which the proof-mode route already gates on a recent observe-mode
    PASS under the active policy. The App now publishes `thwip` and so does the
    workflow: two green checks, one name, two apps. The pin has not moved, so
    nothing about the merge changes. The route queues a proof reconcile, which
    republishes the App's check on every open pull request.
-3. Repin, and read it back. Every open head already carries the App's green
-   `thwip`, so nothing goes unsatisfied for an instant.
+5. Apply the generated repin and let Thwip read it back. Every open head already
+   carries the App's green `thwip`, so nothing goes unsatisfied for an instant.
 
-Setup's last step, `pin-proof-check-to-app`, is step three. It runs after the
-branch is already protected and merging, waits while the repository observes, and
-says what an administrator has to do. A repository enrolled before the step
-existed has every earlier step recorded, so re-running setup reaches this one and
-nothing else.
+Setup's last step, `pin-proof-check-to-app`, is step five. It runs after the
+branch is already protected and merging, waits while the repository observes,
+and returns the exact update an administrator applies. A repository enrolled
+before the step existed has every earlier step recorded, so re-running setup
+reaches this one and nothing else.
 
 While `thwip` is sourced from Actions the requirement is weaker than this
 decision intended: any workflow in the repository that publishes a green check

@@ -39,6 +39,9 @@ export function generatedWorkflows() {
   const files = setupPullRequestFiles({
     endpoint: PRODUCTION_ENDPOINT,
     actionRef: QUEUE_ACTION_REF,
+    // This repository has not completed its one-time manual writer cutover yet.
+    // Keep rendering the compatibility workflow until that follow-up lands.
+    mergeWriter: "workflow",
   });
   return Object.fromEntries(
     files.filter((f) => f.path.startsWith(".github/workflows/")).map((f) => [f.path, f.content]),
