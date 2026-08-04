@@ -278,7 +278,12 @@ async function stateNow(db: D1Like) {
   };
 }
 
-const PORTS = { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} };
+const PORTS = {
+  driveTurn: async () => {},
+  onQueueTicked: () => {},
+  onQueueFailed: () => {},
+  reconsiderHead: async () => 0,
+};
 
 /** Every read agrees the merge did not happen, which is what was true on the day. */
 const NOT_MERGED: ReconciliationReads = {
