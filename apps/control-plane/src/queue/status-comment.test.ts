@@ -151,7 +151,10 @@ describe("which of the six a reader is looking at", () => {
     const view = only(
       snapshot({
         chainHead: { sequence: 42, digest: `sha256:${"c".repeat(64)}` },
-        entries: [entry({ state: "Merged" })],
+        transitions: [
+          { transitionSequence: 42, kind: "merge", priorDigest: null, digest: `sha256:${"c".repeat(64)}`, baseSha: "b".repeat(40), attemptId: "att1", witnessPrincipalIds: [], recordedAt: null },
+        ],
+        entries: [entry({ state: "Merged", lastAttemptId: "att1" })],
       }),
     );
     expect(view.state).toBe("merged");
@@ -165,6 +168,48 @@ describe("which of the six a reader is looking at", () => {
     // One line and the marker. A merged pull request has nowhere left to go and
     // a paragraph about it is somebody's unread notification.
     expect(body.split("\n").filter((line) => line.trim().length > 0 && !line.includes(COMMENT_MARKER))).toHaveLength(1);
+  });
+
+  /**
+   * Live on 4 August: pull requests 194, 197 and 198 all merged, and all three
+   * comments named record 142. The chain head is the head of the whole chain,
+   * so every merged entry claimed whichever merge happened last. Three
+   * different merges, one digest, and it looks right.
+   */
+  it("names the record this entry merged as, not whatever merged last", () => {
+    const views = commentViews(
+      snapshot({
+        chainHead: { sequence: 43, digest: `sha256:${"d".repeat(64)}` },
+        transitions: [
+          { transitionSequence: 42, kind: "merge", priorDigest: null, digest: `sha256:${"c".repeat(64)}`, baseSha: "b".repeat(40), attemptId: "att_a", witnessPrincipalIds: [], recordedAt: null },
+          { transitionSequence: 43, kind: "merge", priorDigest: null, digest: `sha256:${"d".repeat(64)}`, baseSha: "b".repeat(40), attemptId: "att_b", witnessPrincipalIds: [], recordedAt: null },
+        ],
+        entries: [
+          entry({ entryId: "a", pullRequestNumber: 194, state: "Merged", lastAttemptId: "att_a" }),
+          entry({ entryId: "b", pullRequestNumber: 197, state: "Merged", lastAttemptId: "att_b" }),
+        ],
+      }),
+      { observing: false, now: NOW },
+    );
+    expect(views[0]!.record).toEqual({ sequence: 42, digest: `sha256:${"c".repeat(64)}` });
+    expect(views[1]!.record).toEqual({ sequence: 43, digest: `sha256:${"d".repeat(64)}` });
+  });
+
+  /**
+   * The chain keeps only the recent transitions, so an old merge has no link to
+   * point at. Naming the head instead would be a wrong answer that looks right,
+   * which is worse than saying merged and stopping.
+   */
+  it("says merged and nothing more when it cannot find the entry's own record", () => {
+    const view = only(
+      snapshot({
+        chainHead: { sequence: 43, digest: `sha256:${"d".repeat(64)}` },
+        transitions: [],
+        entries: [entry({ state: "Merged", lastAttemptId: "att_gone" })],
+      }),
+    );
+    expect(view.record).toBeNull();
+    expect(statusCommentBody(view, NOW)).not.toContain("record");
   });
 
   it("says a cancelled entry is out of the queue", () => {
