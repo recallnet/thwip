@@ -140,7 +140,11 @@ describe("which of the six a reader is looking at", () => {
       }),
     );
     expect(view.state).toBe("blocked");
-    expect(statusCommentBody(view, NOW)).toContain("Ask for a review.");
+    const body = statusCommentBody(view, NOW);
+    // The heading names the problem, in the same words the check names it. A
+    // reader scanning the notification list should not have to open anything.
+    expect(body).toContain("blocked · Waiting for review");
+    expect(body).toContain("Ask for a review.");
   });
 
   it("collapses to the chain record on merge", () => {
