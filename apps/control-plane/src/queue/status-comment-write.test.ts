@@ -180,3 +180,58 @@ describe("a comment that cannot be written", () => {
     expect(logged.mock.calls.flat().join(" ")).toContain("issues: write");
   });
 });
+
+/**
+ * What the App may open a conversation about.
+ *
+ * Found live on 4 August. The queue document keeps every entry it has ever
+ * held, so the first tick after this shipped walked fourteen pull requests that
+ * merged weeks ago and tried to write a comment on each. It spent the Worker's
+ * whole subrequest budget and took the tick down with it, and had it succeeded
+ * it would have mailed fourteen closed pull requests.
+ *
+ * A merged pull request is worth a line only where thwip was already talking.
+ */
+describe("which states may say the first word", () => {
+  it("says nothing on a pull request that merged before thwip ever commented", async () => {
+    const t = db();
+    const gh = github();
+
+    expect(await writeStatusComment(t.db, gh.api, WHERE, view({ state: "merged" }), NOW)).toBe("unchanged");
+    expect(gh.calls).toEqual([]);
+    expect(gh.comments).toEqual([]);
+  });
+
+  it("still collapses the comment it had been keeping, once that entry merges", async () => {
+    const t = db();
+    const gh = github();
+    await writeStatusComment(t.db, gh.api, WHERE, view(), NOW);
+
+    expect(
+      await writeStatusComment(
+        t.db,
+        gh.api,
+        WHERE,
+        view({ state: "merged", record: { sequence: 42, digest: "c".repeat(64) } }),
+        NOW,
+      ),
+    ).toBe("updated");
+    expect(gh.comments[0]!.body).toContain("42");
+  });
+
+  it("opens no conversation to announce a branch it never managed out loud", async () => {
+    const t = db();
+    const gh = github();
+
+    expect(await writeStatusComment(t.db, gh.api, WHERE, view({ state: "untracked" }), NOW)).toBe("unchanged");
+    expect(gh.comments).toEqual([]);
+  });
+
+  it("says nothing on an entry that was cancelled without ever being commented on", async () => {
+    const t = db();
+    const gh = github();
+
+    expect(await writeStatusComment(t.db, gh.api, WHERE, view({ state: "cancelled" }), NOW)).toBe("unchanged");
+    expect(gh.comments).toEqual([]);
+  });
+});
