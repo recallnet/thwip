@@ -12,7 +12,8 @@ export type CliCommand =
   | "setup"
   | "run"
   | "policy-digest"
-  | "version";
+  | "version"
+  | "doctor";
 
 export interface CommandInvocation {
   readonly command: CliCommand;
@@ -55,6 +56,7 @@ COMMANDS
   keys status               Show the signing key and GitHub registration.
   setup                     Print the machine setup prompt.
   run                       Run approved suites and attach a proof.
+  doctor                    Check this project can produce and verify a proof.
   verify                    Parse and print the proof on HEAD.
   verify-chain              Fetch and verify a branch's merge chain.
   policy digest             Print policy and pipeline digests.
@@ -95,6 +97,17 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Print the version this build carries, the commit it was built from, and the\n` +
     `file that is running. Use it when a thwip on your PATH may belong to another\n` +
     `checkout than the one you are standing in.\n`,
+  doctor:
+    `Usage: thwip doctor [--repo OWNER/NAME] [--branch BRANCH] [--allow-unread] [--json]\n\n` +
+    `Check the whole chain in one read-only pass: your session, the key that\n` +
+    `would sign, the policy in force, whether thwip is installed on this\n` +
+    `repository, what the queue is doing, and what the GitHub App is granted.\n` +
+    `Changes nothing.\n\n` +
+    `Every check passes, fails, or goes unread, and the exit status is zero only\n` +
+    `when every one of them passed. Reading App permissions needs repository\n` +
+    `admin, so pass --allow-unread when you are not an admin and want the checks\n` +
+    `you can read to stand on their own. --json emits one object per check with\n` +
+    `its status, its reason code and the non-secret facts it read.\n`,
 };
 
 const QUEUE_SUBCOMMANDS = [
@@ -300,6 +313,11 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
       return simpleCommand("version", rest);
     case "run":
       return simpleCommand("run", rest, { value: ["--base"] });
+    case "doctor":
+      return simpleCommand("doctor", rest, {
+        boolean: ["--allow-unread", "--json"],
+        value: ["--repo", "--branch"],
+      });
     case "policy": {
       if (rest.length === 0) return error("thwip policy <digest>");
       if (wantsHelp(rest)) return { kind: "help", text: SIMPLE_HELP["policy-digest"] };
