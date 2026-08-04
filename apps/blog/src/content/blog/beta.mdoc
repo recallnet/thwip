@@ -182,52 +182,38 @@ names the same tree, so the queue can accept a run it never saw.
 
 ## What a CI minute costs
 
-A standard 2-core x64 runner is
-[priced](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
-at $0.006 per minute on Linux and $0.010 on Windows, and a 3-core or 4-core
-macOS runner is $0.062. A macOS minute costs roughly ten Linux minutes. GitHub
-rounds every job up to the nearest whole minute, so a job lasting 61 seconds
-bills two.
+| Source | What it measures | Figure |
+| --- | --- | --- |
+| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | Linux, 2-core x64 | $0.006 per minute |
+| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | Windows, 2-core x64 | $0.010 per minute |
+| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | macOS, 3 or 4-core | $0.062 per minute |
+| [Bouzenia and Pradel, ICSE 2024](https://software-lab.org/publications/icse2024_workflows.pdf) | Mean VM time per job | 6.3 minutes |
+| Bouzenia and Pradel | Share of resources on test and build | 91.2% |
+| Bouzenia and Pradel | Paid-tier repository, per year | $504 mean, $282 IQR |
+| Bouzenia and Pradel | Paid-tier pull request | $0.36 mean |
+| Bouzenia and Pradel | Repositories using caching | 32.9%, saving 3.4% |
+| [CircleCI 2026](https://circleci.com/blog/five-takeaways-2026-software-delivery-report/) | Workflow duration, median and mean | 2.2 and 9.9 minutes |
+| [CircleCI 2025](https://circleci.com/landing-pages/assets/2025-state-of-software-delivery-report.pdf) | Workflow duration spread | 2m43s p50, 8m7s p75, 25m+ p95 |
 
-The best published measurement of what a repository consumes is Bouzenia and
-Pradel's
-[study of GitHub Actions](https://software-lab.org/publications/icse2024_workflows.pdf),
-presented at ICSE 2024. They mined 1.3 million workflow runs across 952
-repositories over 30 months, 23.7 million minutes of virtual machine time
-altogether. Mean VM time per job came to 6.3 minutes, testing and building
-together took 91.2% of all resources consumed, and a paid-tier repository ran to
-a mean of $504 a year with an inter-quartile range of $282. One paid-tier pull
-request cost 36 cents on average. Their arithmetic used the $0.008 Linux rate in
-force in March 2023, so those dollar figures sit high against today's $0.006.
+Bouzenia and Pradel mined 1.3 million workflow runs across 952 repositories over
+30 months. Their dollar figures use the $0.008 Linux rate from March 2023, so
+they sit high against today's $0.006. CircleCI's spread comes from more than 14
+million workflows, and it is skewed enough that a budget built on the median
+comes in low. GitHub rounds each job up to the whole minute, so 61 seconds bills
+two.
 
-Duration is skewed, so a budget built on the median will come in low. CircleCI's
-[2026 report](https://circleci.com/blog/five-takeaways-2026-software-delivery-report/)
-puts the median workflow at 2.2 minutes and the mean at 9.9. Its
-[2025 edition](https://circleci.com/landing-pages/assets/2025-state-of-software-delivery-report.pdf)
-published the spread across more than 14 million workflows: 2m 43s at p50, 8m 7s
-at p75, and more than 25 minutes at the 95th percentile.
-
-Four inputs decide the bill: how often you merge, how many runs each merge
-triggers, how long a run takes, and which runner class it lands on. Take a team
-merging 100 times a week whose slowest matrix runs twenty minutes, between that
-p75 and that p95, and run the suites twice per merge, once on the branch and
-once on the integrated candidate. That is 4,000 runner-minutes a week. On Linux
-the bill is $24 a week, near enough $1,250 a year. Move the same 4,000 minutes
-onto macOS and they cost $248 a week, or about $12,900 a year.
-
-A suite pinned to macOS for platform reasons spends ten Linux minutes for every
-minute it runs, which is why hybrid matrices sit on the open problems list
-below.
+Four inputs decide the bill: merge frequency, runs per merge, run duration and
+runner class. Take a team merging 100 times a week, a slowest matrix leg of
+twenty minutes, and two runs per merge, once on the branch and once on the
+integrated candidate. That is 4,000 runner-minutes a week: $24 on Linux, near
+enough $1,250 a year. The same minutes on macOS cost $248 a week, about $12,900
+a year, which is why hybrid matrices sit on the open problems list below.
 
 The second input is where agents change the arithmetic.
 [Xu, Subramanian and Karthik](https://arxiv.org/abs/2607.04697v2) found that
 79.4% of agent-authored pull requests overlap in time with another one on the
 same repository, and a merge queue answers that overlap by re-verifying the
 integrated candidate, so the run on the branch is rarely the last run.
-
-Caching is the standard answer to rebuilding the environment. The same ICSE
-study found it in 32.9% of paid-tier repositories, cutting execution time by a
-mean of 3.4%.
 
 ## Measurements
 
