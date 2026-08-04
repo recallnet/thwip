@@ -169,6 +169,14 @@ describe("recordMergeFromIntent", () => {
    * chain this branch no longer keeps. A record from back there naming the
    * commit would settle a write against a chain nobody verifies, so the merge
    * would read as recorded while the live chain never mentions it.
+   *
+   * The same attempt id is used on both sides of the epoch bump, because that
+   * is the common case: an operator raises `attested_from_sequence` and the
+   * attempt whose old record fell behind it is the same attempt asking to be
+   * recorded again. `recordCoveringCommit` already excludes the dead-epoch
+   * row by its digest; `transitionRecordFor` has to exclude it by attempt id
+   * scoped the same way, or it hands back that row's digest as though it
+   * still sat in the live chain.
    */
   it("does not let a record from a previous epoch stand in for one in this chain", async () => {
     const e = env();
@@ -187,7 +195,7 @@ describe("recordMergeFromIntent", () => {
         `sha256:${"c".repeat(64)}`,
         REPO,
         REF,
-        "att_previous_epoch",
+        FIRST.attemptId,
         JSON.stringify({ after: { baseSha: FIRST.mergeSha } }),
         "jws-old",
       );
