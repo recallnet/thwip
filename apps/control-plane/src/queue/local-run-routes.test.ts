@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { signSsh } from "@thwip/sshsig";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import {
   integrationReceiptBytes,
@@ -204,6 +205,7 @@ function heartbeat(routes: Routes, e: QueueRouteEnv, device = deviceKeyId): Prom
 }
 
 function authorize(routes: Routes, e: QueueRouteEnv, over: Record<string, unknown> = {}): Promise<Response> {
+  acceptProof(raw, REPO, (over["headSha"] as string | undefined) ?? HEAD);
   return routes.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -214,7 +216,6 @@ function authorize(routes: Routes, e: QueueRouteEnv, over: Record<string, unknow
         headSha: HEAD,
         baseRef: REF,
         authorGithubUserId: "1",
-        proofAccepted: true,
         draft: false,
         ...over,
       }),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
@@ -196,6 +197,7 @@ interface Verdict {
 type App = ReturnType<typeof routes>;
 
 async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<string, unknown> = {}) {
+  acceptProof(raw, REPO, (over["headSha"] as string | undefined) ?? String(pr).padStart(40, "a"));
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -206,7 +208,6 @@ async function authorize(app: App, e: QueueRouteEnv, pr: number, over: Record<st
         headSha: String(pr).padStart(40, "a"),
         baseRef: REF,
         authorGithubUserId: String(pr),
-        proofAccepted: true,
         draft: false,
         ...over,
       }),
