@@ -499,6 +499,23 @@ describe("reducer", () => {
       });
       expect(() => applyEvent(state, wrongTree)).toThrow(/candidate tree/i);
     });
+
+    it("refuses to confirm a merge whose first parent is not the base the attempt pinned", () => {
+      // What happened to four pull requests on 2 August 2026. The base moved
+      // between the pin and the merge, GitHub merged the head onto the tip the
+      // branch actually had, and the commit that landed hangs off a parent no
+      // intent names. A record cites the exact parents, so confirming that
+      // commit as this attempt's merge writes a state no chain can follow.
+      const state = applyEvents(base(), happyPath().slice(0, 12));
+      const movedBase = ev({
+        type: "MergeConfirmed",
+        attemptId: "a1",
+        mergeSha: "m".repeat(40),
+        mergeTree: "t".repeat(40),
+        parentShas: ["d".repeat(40), "h".repeat(40)],
+      });
+      expect(() => applyEvent(state, movedBase)).toThrow(/first parent/i);
+    });
   });
 
   describe("transition chain (§6.2 invariant 19, 20)", () => {
