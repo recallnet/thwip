@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-label="Two timelines. In the first, a policy check validates mutable runtime state and a window opens before the state is used. In the second, the subject is a tree hash, so the check and the use bind to the same immutable object.">
+  <rect width="1200" height="480" fill="#ffffff"/>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+
+    <text x="64" y="50" font-size="20" font-weight="700" fill="#1b1b1b">Where the state-validation window sits</text>
+
+    <!-- ROW 1 -->
+    <text x="64" y="98" font-size="15" font-weight="700" fill="#1b1b1b">Checking mutable runtime state</text>
+    <text x="64" y="120" font-size="14" fill="#565c65">sandbox posture, tool permission, working-tree contents</text>
+
+    <line x1="64" y1="176" x2="1136" y2="176" stroke="#dfe1e2" stroke-width="2"/>
+
+    <rect x="230" y="150" width="560" height="52" fill="#fbeaea"/>
+    <line x1="230" y1="150" x2="230" y2="202" stroke="#b50909" stroke-width="2"/>
+    <line x1="790" y1="150" x2="790" y2="202" stroke="#b50909" stroke-width="2"/>
+    <text x="510" y="182" font-size="14" font-weight="600" fill="#b50909" text-anchor="middle">state may change here</text>
+
+    <g font-size="13">
+      <circle cx="230" cy="176" r="7" fill="#005ea2"/>
+      <text x="230" y="228" fill="#1b1b1b" text-anchor="middle">check passes</text>
+      <circle cx="790" cy="176" r="7" fill="#005ea2"/>
+      <text x="790" y="228" fill="#1b1b1b" text-anchor="middle">result used to permit the merge</text>
+    </g>
+
+    <!-- ROW 2 -->
+    <text x="64" y="308" font-size="15" font-weight="700" fill="#1b1b1b">Checking a content hash</text>
+    <text x="64" y="330" font-size="14" fill="#565c65">the subject is a git tree, so the object cannot change under the check</text>
+
+    <line x1="64" y1="386" x2="1136" y2="386" stroke="#dfe1e2" stroke-width="2"/>
+
+    <g font-size="13">
+      <circle cx="230" cy="386" r="7" fill="#005ea2"/>
+      <text x="230" y="438" fill="#1b1b1b" text-anchor="middle">proof signed over tree T</text>
+      <circle cx="790" cy="386" r="7" fill="#005ea2"/>
+      <text x="790" y="438" fill="#1b1b1b" text-anchor="middle">App evaluates the merge subject</text>
+    </g>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+      <rect x="352" y="360" width="316" height="52" fill="#ffffff" stroke="#00a91c" stroke-width="2"/>
+      <text x="510" y="391" fill="#1b1b1b" text-anchor="middle">subject == T   →   evaluate</text>
+      <rect x="852" y="360" width="284" height="52" fill="#ffffff" stroke="#b50909" stroke-width="2"/>
+      <text x="994" y="391" fill="#b50909" text-anchor="middle">subject != T   →   refuse</text>
+    </g>
+    <text x="994" y="438" font-size="13" fill="#565c65" text-anchor="middle">SUBJECT_TREE_MISMATCH</text>
+  </g>
+</svg>
