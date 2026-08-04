@@ -55,6 +55,19 @@ export function blockingMigrations(migrations, unapplied) {
     .map((migration) => migration.name);
 }
 
+/**
+ * Migrations this tree carries that the database has not recorded.
+ *
+ * The database now says what it has rather than wrangler saying what is
+ * missing, so the subtraction happens here. A name the database has and this
+ * tree does not is somebody else's branch and not a blocker; reporting it would
+ * refuse a deploy that is fine.
+ */
+export function unappliedAgainst(migrations, applied) {
+  const have = new Set(applied);
+  return migrations.filter((migration) => !have.has(migration.name)).map((migration) => migration.name);
+}
+
 export function formatSchemaRefusal(blockers, env) {
   return [
     `Refusing: ${blockers.length} migration(s) the code needs are not in the ${env} database.`,
@@ -63,19 +76,9 @@ export function formatSchemaRefusal(blockers, env) {
     "Deploying now puts a Worker live that reads tables which do not exist, and every",
     "request on that path answers 500. Apply them, then deploy:",
     "",
-    `  wrangler d1 migrations apply <database> --env ${env} --remote`,
+    `  pnpm --filter @thwip/control-plane run migrate:${env}`,
+    "",
+    "That command is the one place a person administers this database, and it needs a",
+    "credential a deploy does not. See docs/production-access.md.",
   ].join("\n");
-}
-
-/**
- * What `wrangler d1 migrations list` says is still pending.
- *
- * Returns null when the output says neither "these are pending" nor "nothing
- * is". Reading that as an empty list is how a guard reports success while
- * having checked nothing, which is the failure mode this whole file exists for.
- */
-export function parseUnappliedMigrations(output) {
-  if (/no migrations to apply/i.test(output)) return [];
-  const names = [...new Set([...output.matchAll(/\b(\d{4}_[A-Za-z0-9_]+\.sql)\b/g)].map((m) => m[1]))];
-  return names.length > 0 ? names : null;
 }
