@@ -36,23 +36,22 @@ assertion everywhere else.
 
 ## Which security profiles can I pick?
 
-Two.
+Four.
 
 - **fast**: a signed local proof with no pre-run contact with the control
   plane. Works fully offline before push.
 - **remote**: the pipeline runs in GitHub for every required check
   (conventional remote CI).
+- **fresh**: the required suites run on your own machine. The queue signs an
+  assignment naming the candidate tree and the suites to run, your machine
+  runs them and signs a receipt naming what ran and against what tree, and the
+  control plane checks the receipt against the assignment before it merges.
+- **audited**: fresh plus a second, independent run of the same suites in
+  GitHub Actions. The merge waits on both the local receipt and that remote
+  verdict.
 
 Pick organization defaults in the dashboard; use `thwip.yaml` only where a
 repository needs to override them.
-
-## The schema mentions fresh and audited. Can I use them?
-
-No, and the CLI refuses them by name rather than quietly delivering something
-else. Both are defined as issuing an assignment and requiring an integration
-receipt signed where the suites ran. Nothing issues one and nothing signs one
-yet, so a repository that asked for either would get what remote gives under a
-name claiming more than happened.
 
 ## What does a proof actually prove?
 

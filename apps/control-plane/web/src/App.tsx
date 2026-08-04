@@ -153,17 +153,14 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           </dd>
           <dt>Which security profiles can I pick?</dt>
           <dd>
-            Two. <b>Fast</b> is a signed local proof with no pre-run contact with the control plane, so it works
+            Four. <b>Fast</b> is a signed local proof with no pre-run contact with the control plane, so it works
             offline before push. <b>Remote</b> runs the pipeline in GitHub for every required check, which is
-            conventional remote CI. Pick organization defaults in the dashboard, and use <code>thwip.yaml</code>{" "}
+            conventional remote CI. <b>Fresh</b> runs the required suites on your own machine: the queue signs an
+            assignment naming the candidate tree and the suites to run, your machine runs them and signs a receipt
+            naming what ran and against what tree, and the control plane checks the receipt against the assignment
+            before it merges. <b>Audited</b> is fresh plus that same run repeated in GitHub Actions, and the merge
+            waits on both verdicts. Pick organization defaults in the dashboard, and use <code>thwip.yaml</code>{" "}
             only where a repository needs to override them.
-          </dd>
-          <dt>The schema mentions fresh and audited. Can I use them?</dt>
-          <dd>
-            No, and the CLI refuses them by name rather than quietly delivering something else. Both are defined as
-            issuing an assignment and requiring an integration receipt signed where the suites ran. Nothing issues
-            one and nothing signs one yet, so a repository that asked for either would get what remote gives under
-            a name claiming more than happened.
           </dd>
           <dt>What does a proof actually prove?</dt>
           <dd>
