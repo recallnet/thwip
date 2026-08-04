@@ -1,0 +1,19 @@
+-- DEPLOY ORDER: before-worker
+--
+-- Who performs the merge for a queue branch.
+--
+-- The merge was shell in every adopter's thwip-merge.yml, behind a
+-- THWIP_ENQUEUE_TOKEN the adopter minted and pasted into Actions. That put a
+-- branch-write credential in the most exposed surface in the design and left
+-- the fast-forward guard as untested shell in somebody else's repository. The
+-- App already requires contents:write, so the write can move into the Worker.
+--
+-- It moves one repository at a time, and never before the repository has
+-- stopped running the workflow. Two writers racing for one turn is the failure
+-- this column exists to prevent: one lands the merge, the other is told 422 and
+-- reports a base that moved, and the queue takes back a turn that has already
+-- merged. So the default is what every enrolled repository is doing today, and
+-- the flip is a decision somebody makes per repository.
+--
+-- 'workflow' | 'app'
+ALTER TABLE queue_projects ADD COLUMN merge_writer TEXT NOT NULL DEFAULT 'workflow';
