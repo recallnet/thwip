@@ -110,8 +110,24 @@ const PROVEN = provenCommit();
 
 const published: TurnCheckUpdate[] = [];
 
+/**
+ * The commits GitHub holds, for the routes that read one.
+ *
+ * A merge report names a commit and says nothing else about it: the tree and
+ * the parents come from GitHub. So a test that reports a merge says here what
+ * GitHub answers for that commit. Every other sha is a pull request head, and
+ * the default below describes those as carrying a proof.
+ */
+const commits = new Map<string, { treeOid: string; parentShas: string[] }>();
+
+/** What GitHub holds for the commit a test is about to report as merged. */
+function landed(sha: string, treeOid: string, parentShas: readonly string[]): void {
+  commits.set(sha, { treeOid, parentShas: [...parentShas] });
+}
+
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   published.length = 0;
+  commits.clear();
   return queueRoutes({
     publishTurnCheck: async (_e, _r, update) => {
       published.push(update);
@@ -137,7 +153,8 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     driveTurn: async () => {},
-    commitFacts: async () => ({ treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN }),
+    commitFacts: async (_e, _r, sha) =>
+      commits.get(sha) ?? { treeOid: TREE, parentShas: ["b".repeat(40), "6".repeat(40)], message: PROVEN },
     // The candidate GitHub has integrated, which is where the queue reads the
     // base it pins. Head shas in this file are a pull request number padded
     // with "a", so this answers about whichever one is asking.
@@ -909,6 +926,9 @@ describe("a merge that is not the one the queue authorized", () => {
     });
     const attemptId = holder.operationId!.replace("merge_", "");
 
+    // What GitHub holds for the commit this run reports: not the tree the queue
+    // pinned for this turn, so something other than the candidate landed.
+    landed("9".repeat(40), "0".repeat(40), ["b".repeat(40), "6".repeat(40)]);
     const response = await app.request(
       `/v1/queue/${REPO}/merged`,
       {
@@ -919,9 +939,6 @@ describe("a merge that is not the one the queue authorized", () => {
           attemptId,
           operationId: holder.operationId,
           mergeSha: "9".repeat(40),
-          // Not the tree the queue pinned for this turn.
-          mergeTree: "0".repeat(40),
-          parentShas: ["b".repeat(40), "6".repeat(40)],
         }),
       },
       e,
@@ -944,13 +961,12 @@ describe("a merge that is not the one the queue authorized", () => {
       },
     });
     const attemptId = holder.operationId!.replace("merge_", "");
+    landed("9".repeat(40), TREE, ["b".repeat(40), String(59).padStart(40, "a")]);
     const body = JSON.stringify({
       baseRef: REF,
       attemptId,
       operationId: holder.operationId,
       mergeSha: "9".repeat(40),
-      mergeTree: TREE,
-      parentShas: ["b".repeat(40), String(59).padStart(40, "a")],
     });
     const post = () =>
       app.request(
@@ -992,6 +1008,90 @@ describe("a merge that is not the one the queue authorized", () => {
 });
 
 /**
+ * Who describes the commit that landed.
+ *
+ * The merge workflow runs in Actions and used to hand the queue the merged
+ * commit's tree and its parents, and those numbers went straight into a signed
+ * record. GitHub holds the commit, so GitHub answers for it, and a report the
+ * queue cannot check against GitHub is refused instead of written down.
+ */
+describe("the merge report", () => {
+  const BASE = "b".repeat(40);
+  const MERGE = "9".repeat(40);
+  const HEAD59 = String(59).padStart(40, "a");
+
+  /** GitHub's answer for the merge commit; anything else keeps the default. */
+  function facts(over: { merged: { treeOid: string; parentShas: string[] } | null }) {
+    return async (_e: unknown, _r: string, sha: string) =>
+      sha === MERGE ? over.merged : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN };
+  }
+
+  async function report(app: App, e: QueueRouteEnv, body: Record<string, unknown>) {
+    const holder = await authorize(app, e, 59, {
+      prepare: true,
+      candidate: {
+        baseSha: BASE,
+        candidateSha: "c".repeat(40),
+        candidateTreeOid: TREE,
+        parentShas: [BASE, "6".repeat(40)],
+      },
+    });
+    return app.request(
+      `/v1/queue/${REPO}/merged`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseRef: REF,
+          attemptId: holder.operationId!.replace("merge_", ""),
+          operationId: holder.operationId,
+          mergeSha: MERGE,
+          ...body,
+        }),
+      },
+      e,
+    );
+  }
+
+  it("records the tree and parents GitHub gives, not the ones its caller sent", async () => {
+    const e = env();
+    const app = routes({ commitFacts: facts({ merged: { treeOid: TREE, parentShas: [BASE, HEAD59] } }) });
+
+    const response = await report(app, e, {
+      // A caller inventing both halves of what the record will certify.
+      mergeTree: "0".repeat(40),
+      parentShas: ["f".repeat(40), "e".repeat(40)],
+    });
+    expect(response.status).toBe(200);
+    const merged = (await response.json()) as { transition: string; transitionDigest: string | null };
+    expect(merged.transition).toBe("applied");
+
+    const stored = await app.request(`/v1/queue/records/${merged.transitionDigest}`, {}, e);
+    const found = (await stored.json()) as {
+      record: { after: { treeOid: string; parentOids: string[] } };
+    };
+    expect(found.record.after.treeOid).toBe(TREE);
+    expect(found.record.after.parentOids).toEqual([BASE, HEAD59]);
+  });
+
+  it("refuses a merge GitHub will not describe", async () => {
+    const e = env();
+    const app = routes({ commitFacts: facts({ merged: null }) });
+
+    const response = await report(app, e, {
+      mergeTree: TREE,
+      parentShas: [BASE, HEAD59],
+    });
+    expect(response.status).toBe(404);
+    expect(stateOf(await liveState(app, e), 59)).not.toBe("Merged");
+    const links = raw
+      .prepare("SELECT COUNT(*) AS c FROM queue_transitions_index WHERE github_repository_id = ?")
+      .get(REPO) as { c: number };
+    expect(links.c).toBe(0);
+  });
+});
+
+/**
  * What a chain link actually is now.
  *
  * A link used to be the merge commit id padded out to sixty-four characters: a
@@ -1010,6 +1110,7 @@ describe("the record behind a merge", () => {
         parentShas: ["b".repeat(40), "6".repeat(40)],
       },
     });
+    landed("9".repeat(40), TREE, ["b".repeat(40), String(pr).padStart(40, "a")]);
     const response = await app.request(
       `/v1/queue/${REPO}/merged`,
       {
@@ -1020,8 +1121,6 @@ describe("the record behind a merge", () => {
           attemptId: holder.operationId!.replace("merge_", ""),
           operationId: holder.operationId,
           mergeSha: "9".repeat(40),
-          mergeTree: TREE,
-          parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
         }),
       },
       e,
@@ -1203,6 +1302,7 @@ describe("the record behind a merge", () => {
         parentShas: [...parentShas],
       },
     });
+    landed("9".repeat(40), TREE, parentShas);
     const response = await app.request(
       `/v1/queue/${REPO}/merged`,
       {
@@ -1213,8 +1313,6 @@ describe("the record behind a merge", () => {
           attemptId: holder.operationId!.replace("merge_", ""),
           operationId: holder.operationId,
           mergeSha: "9".repeat(40),
-          mergeTree: TREE,
-          parentShas: [...parentShas],
         }),
       },
       e,
@@ -1288,6 +1386,7 @@ describe("the record behind a merge", () => {
         parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
       },
     });
+    landed("9".repeat(40), TREE, parentShas);
     const response = await app.request(
       `/v1/queue/${REPO}/merged`,
       {
@@ -1298,8 +1397,6 @@ describe("the record behind a merge", () => {
           attemptId: holder.operationId!.replace("merge_", ""),
           operationId: holder.operationId,
           mergeSha: "9".repeat(40),
-          mergeTree: TREE,
-          parentShas: [...parentShas],
         }),
       },
       e,
@@ -1464,6 +1561,10 @@ describe("the queue keeps its footing over a long run", () => {
     for (let pr = 100; pr < 140; pr += 1) {
       const holder = await authorize(app, e, pr, { prepare: true });
       if (holder.operationId === null) continue;
+      landed(String(pr).padStart(40, "9"), String(pr).padStart(40, "7"), [
+        "b".repeat(40),
+        String(pr).padStart(40, "a"),
+      ]);
       await app.request(
         `/v1/queue/${REPO}/merged`,
         {
@@ -1474,8 +1575,6 @@ describe("the queue keeps its footing over a long run", () => {
             attemptId: holder.operationId.replace("merge_", ""),
             operationId: holder.operationId,
             mergeSha: String(pr).padStart(40, "9"),
-            mergeTree: String(pr).padStart(40, "7"),
-            parentShas: ["b".repeat(40), String(pr).padStart(40, "a")],
           }),
         },
         e,
@@ -1870,6 +1969,16 @@ describe("the sha a record says the base branch became", () => {
     candidateTreeOid: MERGED_TREE,
   });
 
+  /**
+   * The head carries the proof; the two merge commits carry the merged tree
+   * over the base and the head. Both commits describe identically, which is the
+   * whole difficulty: only the branch tells them apart.
+   */
+  const facts = async (_e: QueueRouteEnv, _r: string, sha: string) =>
+    sha === LANDED || sha === CANDIDATE
+      ? { treeOid: MERGED_TREE, parentShas: [BASE, HEAD] }
+      : { treeOid: TREE, parentShas: [], message: PROVEN };
+
   async function report(app: App, e: QueueRouteEnv, mergeSha: string) {
     const holder = await authorize(app, e, 107, { headSha: HEAD, prepare: true });
     const response = await app.request(
@@ -1882,8 +1991,6 @@ describe("the sha a record says the base branch became", () => {
           attemptId: holder.operationId!.replace("merge_", ""),
           operationId: holder.operationId,
           mergeSha,
-          mergeTree: MERGED_TREE,
-          parentShas: [BASE, HEAD],
         }),
       },
       e,
@@ -1904,7 +2011,7 @@ describe("the sha a record says the base branch became", () => {
     const app = routes({
       baseContainsSha: onMain,
       integratedCandidate: integrated,
-      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+      commitFacts: facts,
     });
 
     const reported = await report(app, e, CANDIDATE);
@@ -1919,7 +2026,7 @@ describe("the sha a record says the base branch became", () => {
     const app = routes({
       baseContainsSha: onMain,
       integratedCandidate: integrated,
-      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+      commitFacts: facts,
     });
 
     const reported = await report(app, e, LANDED);
@@ -1934,7 +2041,7 @@ describe("the sha a record says the base branch became", () => {
     const app = routes({
       baseContainsSha: async () => null,
       integratedCandidate: integrated,
-      commitFacts: async () => ({ treeOid: TREE, parentShas: [], message: PROVEN }),
+      commitFacts: facts,
     });
 
     const reported = await report(app, e, LANDED);
