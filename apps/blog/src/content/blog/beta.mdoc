@@ -182,25 +182,37 @@ names the same tree, so the queue can accept a run it never saw.
 
 ## What a CI minute costs
 
-| Source | What it measures | Figure |
-| --- | --- | --- |
-| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | Linux, 2-core x64 | $0.006 per minute |
-| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | Windows, 2-core x64 | $0.010 per minute |
-| [GitHub rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers) | macOS, 3 or 4-core | $0.062 per minute |
-| [Bouzenia and Pradel, ICSE 2024](https://software-lab.org/publications/icse2024_workflows.pdf) | Mean VM time per job | 6.3 minutes |
-| Bouzenia and Pradel | Share of resources on test and build | 91.2% |
-| Bouzenia and Pradel | Paid-tier repository, per year | $504 mean, $282 IQR |
-| Bouzenia and Pradel | Paid-tier pull request | $0.36 mean |
-| Bouzenia and Pradel | Repositories using caching | 32.9%, saving 3.4% |
-| [CircleCI 2026](https://circleci.com/blog/five-takeaways-2026-software-delivery-report/) | Workflow duration, median and mean | 2.2 and 9.9 minutes |
-| [CircleCI 2025](https://circleci.com/landing-pages/assets/2025-state-of-software-delivery-report.pdf) | Workflow duration spread | 2m43s p50, 8m7s p75, 25m+ p95 |
+GitHub [publishes its rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
+per runner minute, and rounds each job up to the whole minute, so 61 seconds
+bills two.
 
-Bouzenia and Pradel mined 1.3 million workflow runs across 952 repositories over
-30 months. Their dollar figures use the $0.008 Linux rate from March 2023, so
-they sit high against today's $0.006. CircleCI's spread comes from more than 14
-million workflows, and it is skewed enough that a budget built on the median
-comes in low. GitHub rounds each job up to the whole minute, so 61 seconds bills
-two.
+| Runner | Rate | Against Linux |
+| --- | --- | --- |
+| Linux, 2-core x64 | $0.006 | 1x |
+| Windows, 2-core x64 | $0.010 | 1.7x |
+| macOS, 3 or 4-core | $0.062 | 10.3x |
+
+What a repository then spends comes from Bouzenia and Pradel's
+[study of GitHub Actions](https://software-lab.org/publications/icse2024_workflows.pdf)
+at ICSE 2024, which mined 1.3 million workflow runs across 952 repositories over
+30 months. Their dollars use the $0.008 Linux rate from March 2023, so they sit
+high against today's $0.006.
+
+| Measured | Figure |
+| --- | --- |
+| Mean VM time per job | 6.3 minutes |
+| Share of resources on test and build | 91.2% |
+| Paid-tier repository, per year | $504 mean, $282 IQR |
+| Paid-tier pull request | $0.36 mean |
+| Repositories using caching | 32.9%, saving 3.4% |
+
+Run duration is skewed hard enough that a budget built on the median comes in
+low. CircleCI's
+[2026 report](https://circleci.com/blog/five-takeaways-2026-software-delivery-report/)
+puts the median workflow at 2.2 minutes against a mean of 9.9. Its
+[2025 edition](https://circleci.com/landing-pages/assets/2025-state-of-software-delivery-report.pdf)
+gives the spread across more than 14 million workflows: 2m 43s at p50, 8m 7s at
+p75, and past 25 minutes at p95.
 
 Four inputs decide the bill: merge frequency, runs per merge, run duration and
 runner class. Take a team merging 100 times a week, a slowest matrix leg of
