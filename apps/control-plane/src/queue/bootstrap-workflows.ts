@@ -158,7 +158,7 @@ jobs:
           body=$(jq -nc \\
             --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \\
             --arg author "$AUTHOR_ID" --argjson draft "\${DRAFT:-false}" \\
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true}')
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft}')
 
           # A refusal and an outage are different answers. The queue saying "not
           # your turn" is about this pull request. The queue being unreachable is
@@ -328,7 +328,7 @@ jobs:
           # them, so nothing about the commit is sent from here.
           body=$(jq -nc --argjson pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_REF" \\
             --arg author "$AUTHOR_ID" --argjson draft "$DRAFT" \\
-            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, proofAccepted:true, prepare:true}')
+            '{pullRequestNumber:$pr, headSha:$head, baseRef:$base, authorGithubUserId:$author, draft:$draft, prepare:true}')
 
           # Ask once. That call starts the candidate verification if nothing has
           # run this tree yet.

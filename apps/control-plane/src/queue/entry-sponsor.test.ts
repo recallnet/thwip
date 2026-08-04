@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { buildSnapshot, commandsFor } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
@@ -180,6 +181,7 @@ describe("a pull request that comes back", () => {
     await join(routes, e);
     await cancel(routes, e);
 
+    acceptProof(raw, REPO, "a".repeat(40));
     const response = await routes.request(
       `/v1/queue/${REPO}/authorize`,
       {
@@ -190,7 +192,6 @@ describe("a pull request that comes back", () => {
           headSha: "a".repeat(40),
           baseRef: REF,
           authorGithubUserId: "2",
-          proofAccepted: true,
         }),
       },
       e,
@@ -245,6 +246,7 @@ describe("whose machine a fresh turn waits for", () => {
    * one the scheduler offers it to.
    */
   async function authorize(routes: ReturnType<typeof app>, e: QueueRouteEnv) {
+    acceptProof(raw, REPO, "a".repeat(40));
     const response = await routes.request(
       `/v1/queue/${REPO}/authorize`,
       {
@@ -255,7 +257,6 @@ describe("whose machine a fresh turn waits for", () => {
           headSha: "a".repeat(40),
           baseRef: REF,
           authorGithubUserId: "1",
-          proofAccepted: true,
         }),
       },
       e,

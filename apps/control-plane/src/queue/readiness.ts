@@ -35,7 +35,6 @@ export type Unread = "unread";
 
 export interface ReadinessFacts {
   /* Pull request */
-  readonly pullRequestState: "open" | "closed" | Unread;
   readonly draft: boolean;
 
   /* Authorization */
@@ -107,7 +106,11 @@ function collect(facts: ReadinessFacts): BlockingReason[] {
 
   const reasons: BlockingReason[] = [];
 
-  if (facts.pullRequestState === "closed") reasons.push("PR_CLOSED");
+  // A closed pull request is not a readiness fact. The `pull_request` webhook
+  // cancels its entry outright, which frees the lane rather than leaving a
+  // blocked entry holding it, and the walk to a merge hears `PR_CLOSED` from
+  // GitHub's own answer about the candidate. The field that used to sit here
+  // had exactly one writer, and that writer now returns before it is read.
   if (facts.draft) reasons.push("PR_DRAFT");
   if (!ownerAuthorized) reasons.push("OWNER_UNAUTHORIZED");
   // A bot pull request cannot consume a fairness share without a human behind

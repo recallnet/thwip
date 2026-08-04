@@ -19,7 +19,6 @@ import { nextAction } from "./turn-check.js";
  */
 function facts(over: Partial<ReadinessFacts> = {}): ReadinessFacts {
   return {
-    pullRequestState: "open",
     draft: false,
     ownerAuthorized: true,
     authorIsBot: false,
@@ -52,7 +51,6 @@ describe("deriveReadiness", () => {
 
   describe("each fact blocks with the reason a developer can act on", () => {
     const cases: Array<[Partial<ReadinessFacts>, string]> = [
-      [{ pullRequestState: "closed" }, "PR_CLOSED"],
       [{ draft: true }, "PR_DRAFT"],
       [{ ownerAuthorized: false }, "OWNER_UNAUTHORIZED"],
       [{ authorIsBot: true, sponsorPrincipalId: null }, "SPONSOR_REQUIRED"],
@@ -87,14 +85,13 @@ describe("deriveReadiness", () => {
      * thirteen of these were unreachable while the callers spread a permissive
      * constant, so a reason quietly leaving the list is the regression.
      */
-    it("can produce sixteen reasons, and no reason has been quietly lost", () => {
-      expect(cases).toHaveLength(16);
+    it("can produce fifteen reasons, and no reason has been quietly lost", () => {
+      expect(cases).toHaveLength(15);
     });
   });
 
   describe("a fact nobody read objects to nothing", () => {
     const unread: ReadinessFacts = {
-      pullRequestState: "unread",
       draft: false,
       ownerAuthorized: "unread",
       authorIsBot: "unread",
