@@ -702,6 +702,47 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     expect(await records(app, e)).toEqual(before);
   });
 
+  /**
+   * A button gets pressed twice. The chain is append-only, so a second write
+   * for one finding is a second permanent claim about the same movement, and
+   * nothing about the request tells the second POST that the first happened.
+   * Three things keep it to one record and this holds all three: the plan is
+   * recomputed from a fresh verification so the answered finding is gone, the
+   * movement carries a key unique to its commit so the index refuses a second
+   * row, and the chain is read back to prove it.
+   */
+  it("writes one record for one finding however many times it is pressed", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    await seedIntent({
+      attemptId: UNAUTHORIZED.attemptId,
+      pullRequestNumber: UNAUTHORIZED.pullRequestNumber,
+      baseSha: UNAUTHORIZED.staleBaseSha,
+      headSha: UNAUTHORIZED.headSha,
+      treeOid: UNAUTHORIZED.pinnedTreeOid,
+    });
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+    };
+    await seedRecordPastTheGap(app, e, UNAUTHORIZED.mergeSha);
+    const finding = (await plans(app, e))[0]!.digest;
+
+    const first = await heal(app, e, { finding, reason: REASON });
+    const second = await heal(app, e, { finding, reason: REASON });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(404);
+    expect((await records(app, e)).filter((r) => r.kind === "external-transition")).toHaveLength(1);
+
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+    };
+  });
+
   it("refuses a finding this branch's chain does not report", async () => {
     const e = env();
     seed();
@@ -756,6 +797,59 @@ describe("applyHeal", () => {
       onQueue: (e, repositoryId, baseRef, decide) => runOnQueue(e, repositoryId, baseRef, decide),
     };
   }
+
+  /**
+   * A repeat says where the record is, not where it would have gone.
+   *
+   * The second run finds the movement already in the chain and answers without
+   * writing. It used to answer `sequence: 0`, a position no record holds, and
+   * an operator reading it back would go looking at the start of a chain for a
+   * record sitting at the end.
+   */
+  it("reports the position the record actually holds when it is already there", async () => {
+    const e = env();
+    seed();
+    const app = routes();
+    await seedRecordedMerge(app, e);
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+    };
+    const plan: HealPlan = {
+      code: "BASE_DISCONTINUITY",
+      sequence: 1,
+      digest: `sha256:${"a".repeat(64)}`,
+      detail: "the branch moved and no record accounts for it",
+      summary: "recording this writes one movement",
+      steps: [
+        {
+          action: "record-movement",
+          commitSha: UNAUTHORIZED.mergeSha,
+          sentence: "no signed intent pins this commit",
+        },
+      ],
+      healable: true,
+    };
+    const input = {
+      repositoryId: REPO,
+      baseRef: REF,
+      plan,
+      actorPrincipalId: "prn_acme",
+      reason: REASON,
+    };
+
+    const first = await applyHeal(e, applyDeps(), input);
+    const again = await applyHeal(e, applyDeps(), input);
+
+    expect(first).toMatchObject({ status: "healed" });
+    expect(again).toEqual(first);
+    expect((await records(app, e)).filter((r) => r.kind === "external-transition")).toHaveLength(1);
+
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+    };
+  });
 
   it("refuses to record a movement for a commit a signed intent pins", async () => {
     const e = env();
