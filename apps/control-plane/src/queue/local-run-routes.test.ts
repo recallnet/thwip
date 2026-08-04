@@ -508,13 +508,24 @@ describe("the receipt the machine signs", () => {
 
   it("refuses the merge of a tree the accepted receipt is not about", async () => {
     const e = env();
-    const routes = app();
+    // GitHub is now integrating a different tree from the one the device ran
+    // and signed for. The queue reads the candidate itself, so this is where
+    // that disagreement arrives.
+    let tree = TREE;
+    const routes = app({
+      integratedCandidate: async () => ({
+        baseSha: BASE,
+        headSha: HEAD,
+        candidateSha: CANDIDATE,
+        candidateTreeOid: tree,
+      }),
+    });
     const claimed = await claim(routes, e);
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
 
-    const verdict = (await (
-      await authorize(routes, e, { prepare: true, candidate: { ...candidate, candidateTreeOid: OTHER_TREE } })
-    ).json()) as Verdict;
+    // GitHub is integrating something else by the time the merge is asked for.
+    tree = OTHER_TREE;
+    const verdict = (await (await authorize(routes, e, { prepare: true })).json()) as Verdict;
     expect(verdict).toMatchObject({ authorized: false, reason: "INTEGRATION_RECEIPT_TREE_MISMATCH" });
   });
 
