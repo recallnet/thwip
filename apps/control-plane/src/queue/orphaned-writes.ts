@@ -24,6 +24,16 @@ import { confirmMergeAbsence, type PullMergeState } from "./merge-absence.js";
 export const ORPHANED_WRITE_GRACE_MS = 10 * 60 * 1000;
 
 /**
+ * How far back a tick looks for a merge that landed and was never recorded.
+ *
+ * A day, which covers every tick outage this deployment has had and stops well
+ * short of re-examining history. A row older than this is either recorded or is
+ * a chain finding for a person to answer, and a sweep quietly writing records
+ * for last week's merges is not a repair anybody asked for.
+ */
+export const MERGED_WITHOUT_RECORD_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
  * How many stranded writes one queue settles per tick.
  *
  * Settling one write costs a pull request read and a base comparison per

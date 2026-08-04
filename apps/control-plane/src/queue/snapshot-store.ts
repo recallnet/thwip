@@ -505,6 +505,36 @@ export class SnapshotQueueStore {
   }
 
   /**
+   * Merge writes resolved MERGED since a moment, oldest first. See the note on
+   * `BranchQueueStore.mergedWritesResolvedAfter`: resolved is not finished, and
+   * a merge whose record was skipped is invisible to the unresolved sweep.
+   */
+  mergedWritesResolvedAfter(resolvedAfter: string): UnresolvedMergeOperation[] {
+    return this.doc.mergeOperations
+      .filter(
+        (row) =>
+          row.outcome === "MERGED" &&
+          typeof row.resolvedAt === "string" &&
+          row.resolvedAt >= resolvedAfter,
+      )
+      .sort((a, b) =>
+        a.writeStartedAt === b.writeStartedAt
+          ? a.operationId.localeCompare(b.operationId)
+          : a.writeStartedAt.localeCompare(b.writeStartedAt),
+      )
+      .map((row) => ({
+        operationId: row.operationId,
+        attemptId: row.attemptId,
+        attemptRevision: row.attemptRevision,
+        expectedBaseSha: row.expectedBaseSha,
+        expectedHeadSha: row.expectedHeadSha,
+        expectedTreeOid: row.expectedTreeOid,
+        pullRequestNumber: row.pullRequestNumber ?? null,
+        writeStartedAt: row.writeStartedAt,
+      }));
+  }
+
+  /**
    * Every merge write this queue has started, oldest first.
    *
    * `unresolvedMergeOperations` answers the sweep's question and hides the

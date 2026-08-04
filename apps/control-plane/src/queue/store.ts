@@ -164,6 +164,7 @@ export type QueueStateStore = Pick<
   | "resolveMergeOperation"
   | "mergeOperation"
   | "unresolvedMergeOperations"
+  | "mergedWritesResolvedAfter"
   | "classifyCallback"
 >;
 
@@ -801,6 +802,52 @@ export class BranchQueueStore {
           WHERE outcome IS NULL AND write_started_at < ?
           ORDER BY write_started_at, operation_id`,
         startedBefore,
+      )
+      .toArray()
+      .map((row) => ({
+        operationId: row.operation_id,
+        attemptId: row.attempt_id,
+        attemptRevision: row.attempt_revision,
+        expectedBaseSha: row.expected_base_sha,
+        expectedHeadSha: row.expected_head_sha,
+        expectedTreeOid: row.expected_tree_oid,
+        pullRequestNumber: row.pull_request_number ?? null,
+        writeStartedAt: row.write_started_at,
+      }));
+  }
+
+  /**
+   * Merge writes this queue resolved as MERGED since a moment, oldest first.
+   *
+   * Resolved is not finished. A write is finished when the chain has a record
+   * for it, and the two came apart on 4 August 2026: pull request 183 merged
+   * under the App's own write, the record was skipped on a read that had not
+   * caught up, and the row was resolved MERGED all the same. `unresolvedMergeOperations`
+   * cannot see it, so nothing owned it. The caller asks the record store which
+   * of these have a link and finishes the ones that do not.
+   *
+   * Bounded by time rather than by all history, because every row the caller
+   * examines costs a lookup and the ones from last week are either recorded or
+   * long past anything a sweep should quietly repair.
+   */
+  mergedWritesResolvedAfter(resolvedAfter: string): UnresolvedMergeOperation[] {
+    return this.sql
+      .exec<{
+        operation_id: string;
+        attempt_id: string;
+        attempt_revision: number;
+        expected_base_sha: string;
+        expected_head_sha: string;
+        expected_tree_oid: string;
+        pull_request_number: number | null;
+        write_started_at: string;
+      }>(
+        `SELECT operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
+                expected_tree_oid, pull_request_number, write_started_at
+           FROM merge_operations
+          WHERE outcome = 'MERGED' AND resolved_at IS NOT NULL AND resolved_at >= ?
+          ORDER BY write_started_at, operation_id`,
+        resolvedAfter,
       )
       .toArray()
       .map((row) => ({

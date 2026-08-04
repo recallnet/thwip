@@ -174,6 +174,40 @@ describe("the Worker performing the merge", () => {
     expect(w.intents).toEqual([]);
   });
 
+  /**
+   * The record asks GitHub whether the branch contains the commit before it
+   * will sign, and this is the second read that races the App's own write. On
+   * 4 August pull request 183 merged, the queue confirmed it, and no record was
+   * written: the write had landed a second earlier and the comparison had not
+   * caught up. The merge operation was resolved, so nothing revisited it.
+   */
+  it("waits for the ancestry read to catch up with its own write before giving up", async () => {
+    const e = env();
+    const w = writer({ kind: "merged", mergeSha: LANDED });
+    let asked = 0;
+    const answer = await authorize(
+      routes({
+        mergeWrite: w.port,
+        baseContainsSha: async () => {
+          asked += 1;
+          return asked > 2;
+        },
+      }),
+      e,
+    );
+    expect(asked).toBeGreaterThan(2);
+    expect(answer["recorded"]).toBe(true);
+    expect(answer["transitionDigest"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  /** A read that never agrees records nothing. The sweep asks again. */
+  it("records nothing when the branch never says it contains the commit", async () => {
+    const e = env();
+    const w = writer({ kind: "merged", mergeSha: LANDED });
+    const answer = await authorize(routes({ mergeWrite: w.port, baseContainsSha: async () => false }), e);
+    expect(answer["recorded"]).toBe(false);
+  });
+
   it("writes a signed record for the merge it performed", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
