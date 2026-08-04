@@ -317,9 +317,13 @@ shipped schema, 128 of 132 merges carried a proof on the head, and 57 of 57
 chain signatures verify against the published keys under a script anybody can
 run without an account.
 
-`fresh` and `audited` landed during the week these numbers cover, which is why
-the chain holds 5 candidate-verified merges against 47 that reused the head's
-proof, with the dial sitting on `fast` for the rest of the week.
+No merge on this repository has run under `fresh` or `audited`. Both sign a
+`verified-merge` record and the chain holds none. Every policy version this
+repository has activated sets `fast`, and the only device assignments the queue
+has issued sit on a separate test repository. The 5 candidate-verified merges
+all landed on 31 July, before the queue checked that a verifier's verdict was
+about the integrated candidate, and each cites a check run whose head commit is
+the pull request head.
 
 ## What a proof does not buy
 
