@@ -34,6 +34,13 @@ import { loadQueueState } from "./queue/queue-state.js";
 import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
+import {
+  mergeWriterOf,
+  performMergeWrite,
+  refUpdateRequestBody,
+  type MergeIntent,
+  type MergeWriteOutcome,
+} from "./queue/merge-write.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { requestTurn } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
@@ -1912,17 +1919,21 @@ app.route(
     },
     async queueProject(env: Env, repositoryId: string, baseRef: string) {
       const row = await env.DB.prepare(
-        "SELECT activation_state, merge_method FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+        "SELECT activation_state, merge_method, merge_writer FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
       )
         .bind(repositoryId, baseRef)
-        .first<{ activation_state: string; merge_method: string }>();
+        .first<{ activation_state: string; merge_method: string; merge_writer: string | null }>();
       if (row === null) return null;
       // The column is a free-text default in the schema; a record must never
       // bind a value the protocol does not recognize.
       const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
         ? row.merge_method
         : DEFAULT_MERGE_METHOD;
-      return { activationState: row.activation_state, mergeMethod };
+      return {
+        activationState: row.activation_state,
+        mergeMethod,
+        mergeWriter: mergeWriterOf(row.merge_writer),
+      };
     },
     async principalFor(env: Env, githubUserId: string) {
       if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
@@ -2095,6 +2106,93 @@ app.route(
      * happen. Null when it cannot be read, which the caller treats as unknown
      * rather than as a negative.
      */
+    /**
+     * Perform the merge, with the App's own installation token.
+     *
+     * `contents: write` is what this needs and all it needs: writing a commit
+     * object and moving a branch ref are both Contents, and the ownership
+     * ruleset already names the App as the only actor that may update a managed
+     * branch. Nothing here decides anything about the merge — the base, the
+     * tree and the parents come from the queue document, and the ref update
+     * does not force, which is what makes GitHub refuse a base that moved.
+     */
+    async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
+      const project = await env.DB.prepare(
+        "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      )
+        .bind(repositoryId)
+        .first<{ github_name: string; installation_id: string | null }>();
+      if (project === null || project.installation_id === null) {
+        return { kind: "unknown", detail: "no installation for this repository" };
+      }
+      const token = await installationToken(env, project.installation_id);
+      const api = `https://api.github.com/repos/${project.github_name}`;
+      const headers = {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "thwip-control-plane",
+      };
+      const refused = async (res: Response) => ({
+        status: res.status,
+        message: ((await res.json().catch(() => ({}))) as { message?: string }).message ?? "no message",
+      });
+
+      return performMergeWrite(
+        {
+          async createCommit(input) {
+            const res = await fetch(`${api}/git/commits`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ message: input.message, tree: input.tree, parents: input.parents }),
+            });
+            if (!res.ok) return { ok: false as const, ...(await refused(res)) };
+            const body = (await res.json()) as { sha?: string };
+            return typeof body.sha === "string"
+              ? { ok: true as const, sha: body.sha }
+              : { ok: false as const, status: res.status, message: "GitHub wrote the commit and named no sha" };
+          },
+          async updateRef(ref, update) {
+            const res = await fetch(`${api}/git/${ref}`, {
+              method: "PATCH",
+              headers,
+              // Built in one place, which is where force is held to false.
+              body: refUpdateRequestBody(update),
+            });
+            if (!res.ok) return { ok: false as const, ...(await refused(res)) };
+            const body = (await res.json()) as { object?: { sha?: string } };
+            return typeof body.object?.sha === "string"
+              ? { ok: true as const, sha: body.object.sha }
+              : { ok: false as const, status: res.status, message: "GitHub moved the ref and named no sha" };
+          },
+          // The same two reads `/not-merged` resolves an absence from. GitHub's
+          // reads lag its own writes, so one negative answer is not a negative.
+          async readPull() {
+            const res = await fetch(`${api}/pulls/${intent.pullRequestNumber}`, { headers });
+            if (!res.ok) return null;
+            const pull = (await res.json()) as { merged?: boolean; merge_commit_sha?: string | null };
+            return {
+              merged: pull.merged === true,
+              mergeCommitSha: typeof pull.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
+            };
+          },
+          async baseContainsHead() {
+            const branch = intent.baseRef.replace(/^refs\/heads\//, "");
+            const res = await fetch(
+              `${api}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(intent.headSha)}`,
+              { headers },
+            );
+            if (!res.ok) return null;
+            const compared = (await res.json()) as { status?: string };
+            if (typeof compared.status !== "string") return null;
+            // `behind` means the head is behind the base branch, which is to say
+            // the base already contains it.
+            return compared.status === "behind" || compared.status === "identical";
+          },
+        },
+        intent,
+      );
+    },
     async pullRequestMergeState(env: Env, repositoryId: string, pullRequestNumber: number) {
       const project = await env.DB.prepare(
         "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
