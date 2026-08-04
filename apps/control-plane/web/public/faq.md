@@ -119,10 +119,11 @@ members and publishes the `thwip` check directly. New and migrated projects
 start with a distinct `thwip / proof (observe)` check, and an administrator
 enforces it once that check has passed.
 
-A branch running Thwip Queue also requires `thwip` from GitHub Actions, which
-the `thwip-required.yml` workflow the setup pull request adds is what satisfies.
-Both checks appear on the commit and both run the same verifier. The Actions one
-is what the branch waits on.
+A branch running Thwip Queue requires `thwip` from whoever publishes it. While
+the repository is observing that is GitHub Actions, satisfied by the
+`thwip-required.yml` the setup pull request adds, and both checks appear on the
+commit running the same verifier. Once an administrator enforces the App's proof
+check, setup moves the requirement to the App and one publisher satisfies it.
 
 Every evaluation produces a service-signed audit record containing the exact
 subject, base, policy, verifier version, signer outcomes, and GitHub check-run

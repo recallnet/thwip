@@ -36,16 +36,26 @@ fires a `repository_dispatch`, enrolment opens the setup pull request, and both
 are Contents. `queueDoctor` requires `contents:write`, `pull_requests:write`,
 `checks:write`, and `statuses:write`, and the readiness derivation refuses to
 call a pull request mergeable unless the first three are granted. So a queue
-repository grants `contents:write` today. The App manifest still requests
-`contents:read` and `pull_requests:read`, which is the pre-queue set and is now
-wrong: an App registered from that manifest cannot drive a turn or open the
-setup pull request.
+repository grants `contents:write`.
 
-Holding `contents:write` is not the same as using it to move a branch. Nothing
-in the Worker writes a ref. The merge is performed by the repository's
-`thwip-merge.yml` under a `THWIP_ENQUEUE_TOKEN` the adopter creates, so the one
-credential that can move the branch belongs to the adopter and is revoked
-without touching thwip.
+The manifest asked for `contents:read` and `pull_requests:read` and left
+`statuses` out, which is the pre-queue set. An App registered from it failed the
+diagnostic written beside it. There is one list now, `REQUIRED_APP_PERMISSIONS`
+in `app-permissions.ts`, read by the manifest and by the doctor.
+
+The Worker uses that write. The merge was shell in the adopter's
+`thwip-merge.yml` under a `THWIP_ENQUEUE_TOKEN` they created, which put a
+branch-write credential in the most exposed surface in the design and left the
+guard the scheme rests on as untested shell in somebody else's repository. The
+Worker composes the merge commit on the base the queue pinned and moves the ref
+without force, which is what makes GitHub refuse a base that moved. `force` is
+typed to the literal `false`, so a forcing caller cannot be written.
+
+The cost is stated plainly: a compromised control plane can move the default
+branch of every adopting repository, and revocation means uninstalling the App.
+What it buys is one branch-write credential removed from every adopter's Actions
+secrets, and a guard this repository tests. `queue_projects.merge_writer` decides
+which of the two writes, per repository, and it defaults to the workflow.
 
 ## Rationale
 
@@ -78,29 +88,38 @@ Projects begin in `observe` mode and receive a distinct
 `thwip / proof (observe)` check. Enforcement cannot be enabled until a recent
 observe-mode PASS exists, which the proof-mode route checks before it writes.
 
-The cutover this section originally described has not happened, and the
-paragraph that described it read as though it had. What is true instead:
+The required `thwip` context moves from GitHub Actions to the App, and the order
+is the whole problem.
 
-`policyRuleset` pins the required `thwip` context to the GitHub Actions
-integration, and the `canary-negative-test` bootstrap step refuses to advance
-unless GitHub confirms it stored that pin. The workflow the setup pull request
-adds, `thwip-required.yml`, is what satisfies it. The App publishes a check run
-of the same name on the same commit, so every enrolled repository carries two:
-GitHub's, which the branch waits on, and the App's, which is advisory.
+The App publishes `thwip` only where `proof_check_mode` is `enforced`; in
+`observe` it publishes `thwip / proof (observe)` and never the enforced name. A
+pin on the App while a project observes leaves the branch requiring a check
+nothing posts, and every open pull request stuck behind it. So the pin follows
+the publisher: `policyRuleset` reads the source from the project's proof mode,
+and `canary-negative-test` reads back whichever source the payload used.
 
-Both run the same verifier over the same subject, so the duplication costs
-Actions minutes rather than correctness. It also leaves the requirement weaker
-than this decision intended: a context pinned to GitHub Actions is satisfied by
-any workflow in the repository that publishes a green check named `thwip`,
-including one a contributor adds.
+Per repository:
 
-Moving the requirement to the App takes three changes together, and none of them
-is safe alone. `policyRuleset` and `canary-negative-test` have to pin `thwip` to
-the App's integration id. Enrolment has to carry the project from `observe` to
-`enforced` before that pin has a publisher, because the App names its check
-`thwip / proof (observe)` until then. Every enrolled repository needs its
-ruleset rewritten. Until all three land, `thwip-required.yml` stays generated and
-stays required.
+1. Observe. The App publishes the observe name, the workflow publishes `thwip`
+   from Actions, the ruleset pins Actions. The repository merges.
+2. Enforce, which the proof-mode route already gates on a recent observe-mode
+   PASS under the active policy. The App now publishes `thwip` and so does the
+   workflow: two green checks, one name, two apps. The pin has not moved, so
+   nothing about the merge changes. The route queues a proof reconcile, which
+   republishes the App's check on every open pull request.
+3. Repin, and read it back. Every open head already carries the App's green
+   `thwip`, so nothing goes unsatisfied for an instant.
+
+Setup's last step, `pin-proof-check-to-app`, is step three. It runs after the
+branch is already protected and merging, waits while the repository observes, and
+says what an administrator has to do. A repository enrolled before the step
+existed has every earlier step recorded, so re-running setup reaches this one and
+nothing else.
+
+While `thwip` is sourced from Actions the requirement is weaker than this
+decision intended: any workflow in the repository that publishes a green check
+by that name satisfies it, including one a contributor adds. Step three is what
+closes that.
 
 Rollback first restores and verifies the previous required workflow/ruleset
 source, then switches the project back to observe mode. Audit records and

@@ -77,10 +77,13 @@ execute against the merge commit GitHub produced for the pull request, and the
 verdict is stored against that commit's tree. A verdict for a different tree is
 about different code and is never reused.
 
-The verification runs from the default branch's copy of the workflow, in the base
-branch's context, so a pull request cannot edit the thing that judges it. Only
-the code under test comes from the candidate. The verdict's digest is computed
-from its own content, so a result edited after the fact no longer matches it.
+The verification runs from the default branch's copy of
+`.github/workflows/thwip-queue-verify.yml`, which the setup pull request adds and
+which the control plane dispatches. A pull request cannot edit the thing that
+judges it: only the code under test comes from the candidate, and the suite names
+come from the activated policy in the dispatch rather than from the checkout. The
+verdict's digest is computed from its own content, so a result edited after the
+fact no longer matches it.
 
 The queue verifies the integrated candidate before it certifies a merge.
 
