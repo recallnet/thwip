@@ -3,6 +3,7 @@ import { api, ApiError, useFetch } from "./api.js";
 import { ConfirmAction, Panel } from "./ui.js";
 import {
   blockedNextAction,
+  blockerFreshness,
   entryStateText,
   entryStateTone,
   findingTitle,
@@ -55,6 +56,14 @@ export interface QueueTransitionView {
 }
 
 export interface QueueSnapshot {
+  /**
+   * Where this answer came from. `"projection"` is the default read: a row the
+   * last command wrote, which keeps whatever it last held when that write
+   * fails. `"queue"` is the authority, read with `?live=1`.
+   */
+  readonly source?: "projection" | "queue";
+  /** When the projection was last written. Absent on a live read. */
+  readonly projectedAt?: string | null;
   readonly generation: number;
   readonly attemptRevision: number;
   readonly paused: boolean;
@@ -71,6 +80,38 @@ export interface QueueSnapshot {
 function EntryState({ entry }: { entry: QueueEntryView }) {
   const tone = entryStateTone(entry.state, entry.primaryReason !== null);
   return <span className={tone}>{entryStateText(entry.state)}</span>;
+}
+
+/**
+ * What clears an entry, and how old that answer is.
+ *
+ * The reason comes from the projection, which is a row somebody wrote the last
+ * time a command ran. Pull request 56 was ready for review on GitHub while this
+ * column said "Mark the pull request ready for review", because the write that
+ * would have cleared it never landed and the page stated the row in the present
+ * tense. So the row is dated, and past the threshold `blockerFreshness` holds,
+ * the instruction is withdrawn rather than repeated at somebody who has already
+ * done it.
+ */
+function Blocker({
+  reason,
+  source,
+  projectedAt,
+}: {
+  reason: string | null;
+  source: QueueSnapshot["source"];
+  projectedAt: QueueSnapshot["projectedAt"];
+}) {
+  const said = blockedNextAction(reason);
+  if (said === null) return <span>Waiting for the scheduler.</span>;
+  const freshness = blockerFreshness(source, projectedAt);
+  if (freshness === null) return <span>{said}</span>;
+  return (
+    <>
+      {freshness.confirmed && <span>{said} </span>}
+      <span className="gp-panel__meta">{freshness.text}</span>
+    </>
+  );
 }
 
 /**
@@ -416,7 +457,13 @@ export function QueuePanel({
                     <td>
                       <EntryState entry={entry} />
                     </td>
-                    <td>{blockedNextAction(entry.primaryReason) ?? "Waiting for the scheduler."}</td>
+                    <td>
+                      <Blocker
+                        reason={entry.primaryReason}
+                        source={snapshot.source}
+                        projectedAt={snapshot.projectedAt}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
