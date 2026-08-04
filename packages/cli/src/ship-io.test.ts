@@ -195,6 +195,46 @@ describe("runShip", () => {
     expect(report).toMatchObject({ exitCode: EXIT.suiteFailed, reasonCode: "SUITE_FAILED" });
   });
 
+  it("fails when the pull-request step leaves no pull request behind", async () => {
+    // Observed: ship pushed, printed ship.queue_requested, and no pull request
+    // existed. `gh pr create` failed, its error was thrown away, and the step
+    // reported success on the strength of having been called.
+    const { ports, calls } = scripted([state({ pullRequestNumber: null })], {
+      openOrUpdatePullRequest: async () => ({ pullRequestNumber: null }),
+    });
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: false, maxTurns: 4 });
+    expect(report.exitCode).not.toBe(EXIT.ok);
+    expect(report.reasonCode).toBe("PR_NOT_OPENED");
+    expect(calls).not.toContain("joinQueue");
+    expect(out.lines.some((l) => l.includes("PR_NOT_OPENED"))).toBe(true);
+  });
+
+  it("carries the reason the pull-request step gives rather than inventing one", async () => {
+    const { ports } = scripted([state({ pullRequestNumber: null })], {
+      openOrUpdatePullRequest: async () => ({ pullRequestNumber: null, reasonCode: "RATE_LIMITED" }),
+    });
+    const report = await runShip(ports, collect().emit, { jsonEvents: false, maxTurns: 4 });
+    expect(report).toMatchObject({ exitCode: EXIT.rateLimited, reasonCode: "RATE_LIMITED" });
+  });
+
+  it("never reports a queue turn it requested for a pull request that was never opened", async () => {
+    // The whole defect in one assertion. The states say the pull request is
+    // missing and then say the queue holds an entry, which is exactly what a
+    // stale number from a merged pull request produced.
+    const { ports } = scripted(
+      [
+        state({ pullRequestNumber: null, options: { wait: false, queue: true, jsonEvents: false } }),
+        state({ pullRequestNumber: 167, options: { wait: false, queue: true, jsonEvents: false } }),
+      ],
+      { openOrUpdatePullRequest: async () => ({ pullRequestNumber: null }) },
+    );
+    const out = collect();
+    const report = await runShip(ports, out.emit, { jsonEvents: false, maxTurns: 4 });
+    expect(report.outcome).toBeUndefined();
+    expect(out.lines.some((l) => l.includes("queue_requested"))).toBe(false);
+  });
+
   it("stops rather than waiting when --wait was not given", async () => {
     const { ports } = scripted([
       state({ turn: "none", options: { wait: false, queue: true, jsonEvents: true } }),

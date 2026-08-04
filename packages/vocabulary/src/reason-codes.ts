@@ -70,6 +70,10 @@ export const LOCAL_REASONS = [
   // remote diverges from it. Ship replaces the tip it rewrote itself; this is
   // the case where the remote holds a commit ship never had.
   "PUSH_REJECTED",
+  // Ship pushed and then had no open pull request to queue. It used to carry on
+  // to the queue anyway, so a run that opened nothing still printed
+  // QUEUE_REQUESTED.
+  "PR_NOT_OPENED",
   // Whatever threw before anything classified it. It exists so the process has
   // a code and a sentence to exit through instead of a stack trace.
   "LOCAL_FAILURE",
