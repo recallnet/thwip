@@ -1,6 +1,12 @@
 import type { QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
-import { admit, buildSnapshot, walkToMergeReady, type QueueSnapshot } from "./queue-operations.js";
+import {
+  admit,
+  buildSnapshot,
+  isAnsweredWalkRefusal,
+  walkToMergeReady,
+  type QueueSnapshot,
+} from "./queue-operations.js";
 import { loadQueueState } from "./queue-state.js";
 import { capabilityFor, requiresDeviceOnly } from "./runners.js";
 import {
@@ -39,6 +45,7 @@ import {
   type OnQueue,
 } from "./merge-lane.js";
 import type { BlockingReason } from "@thwip/queue-domain";
+import type { ReasonCode } from "@thwip/vocabulary";
 
 /**
  * How long a dispatched verifier may stay silent before another is asked for. A
@@ -164,7 +171,16 @@ export type TurnAuthorization =
   | {
       readonly outcome: "refused";
       readonly activationState: string;
-      readonly reason: string;
+      /**
+       * The closed union, not a string.
+       *
+       * This field is what a caller reads to decide what to do, and it went out
+       * as `string` for long enough that `REQUIRED_CHECK_MISSING` shipped in no
+       * vocabulary at all. Whoever read it got no sentence, no exit class and a
+       * raw code on the dashboard. A code that is in no list now fails the
+       * build here, where it is written.
+       */
+      readonly reason: ReasonCode;
       /** Null where the reason carries its own next action and needs no sentence. */
       readonly detail: string | null;
       readonly entryId: string;
@@ -195,7 +211,7 @@ export type TurnAuthorization =
       readonly mergeMethod: MergeMethod;
       readonly mergeWriter: MergeWriter;
       readonly merge: MergePins | null;
-      readonly reason: string;
+      readonly reason: ReasonCode;
       readonly entryId: string;
       readonly operationId: string | null;
       readonly queuePosition: number;
@@ -1082,11 +1098,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
       // evidence refusals are answered here: a walk stopped by a pause or a
       // moved base already has a better answer below, from the snapshot.
       const refusal = walked.refusal;
-      if (
-        walked.operationId === null &&
-        refusal !== undefined &&
-        (refusal.startsWith("INTEGRATION_") || refusal === "CANDIDATE_CHANGED")
-      ) {
+      if (walked.operationId === null && refusal !== undefined && isAnsweredWalkRefusal(refusal)) {
         return {
           outcome: "refused",
           activationState: project.activationState,

@@ -142,6 +142,10 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   CONVERSATION_UNRESOLVED: EXIT.humanRequired,
   REQUIRED_CHECK_PENDING: EXIT.humanRequired,
   REQUIRED_CHECK_FAILED: EXIT.humanRequired,
+  // Nothing published the check on this commit, so retrying the merge asks
+  // GitHub the same question and gets the same refusal. Somebody has to publish
+  // it or change the branch rules.
+  REQUIRED_CHECK_MISSING: EXIT.humanRequired,
   VERIFICATION_REJECTED: EXIT.humanRequired,
   PR_DRAFT: EXIT.humanRequired,
   PR_CLOSED: EXIT.humanRequired,
@@ -175,6 +179,14 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   // Waiting is the whole answer here, which is why this is a lost turn and
   // BASE_MOVED, which invalidates the developer's own proof, is not.
   CANDIDATE_BASE_MOVED: EXIT.turnLost,
+  // The device never claimed the offer, or is still running. Both end with the
+  // place in line intact and the next offer on its way, which is what every
+  // other lost turn means.
+  INTEGRATION_ASSIGNMENT_MISSING: EXIT.turnLost,
+  INTEGRATION_RECEIPT_MISSING: EXIT.turnLost,
+  // The turn is held elsewhere, so this machine's receipt answers nothing. The
+  // machine holding it can still finish.
+  INTEGRATION_RECEIPT_DEVICE_MISMATCH: EXIT.turnLost,
 
   /* The thing we were integrating is no longer what is there. */
   HEAD_MOVED: EXIT.sourceChanged,
@@ -189,6 +201,13 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   PUSH_REJECTED: EXIT.sourceChanged,
   PERMISSION_REVOKED: EXIT.sourceChanged,
   CANDIDATE_TREE_MISMATCH: EXIT.sourceChanged,
+  // GitHub is integrating a different tree than the one this machine ran and
+  // signed for, which is the same event CANDIDATE_TREE_MISMATCH names from the
+  // verifier's side.
+  INTEGRATION_RECEIPT_TREE_MISMATCH: EXIT.sourceChanged,
+  // GitHub rebuilt the merge commit under the turn. The branch is fine and the
+  // next turn runs against the new one.
+  CANDIDATE_CHANGED: EXIT.sourceChanged,
   CANDIDATE_POLICY_MISMATCH: EXIT.sourceChanged,
 
   /* Transient. */
@@ -223,6 +242,10 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   // right for the same reason it is right for INTERNAL_FAILURE: a person has to
   // read it, and no caller should retry on it.
   LOCAL_FAILURE: EXIT.invariant,
+  // Two accounts of one turn disagree, which is the queue contradicting itself.
+  // No retry resolves it and a person has to read it.
+  INTEGRATION_ASSIGNMENT_MISMATCH: EXIT.invariant,
+  INTEGRATION_RECEIPT_MISMATCH: EXIT.invariant,
   MERGE_EVIDENCE_INCOMPLETE: EXIT.invariant,
   MERGE_INTENT_INVALID: EXIT.invariant,
   CANDIDATE_DIGEST_MISMATCH: EXIT.invariant,
