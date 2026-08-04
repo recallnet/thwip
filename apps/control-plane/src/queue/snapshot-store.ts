@@ -504,6 +504,25 @@ export class SnapshotQueueStore {
       }));
   }
 
+  /**
+   * Every merge write this queue has started, oldest first.
+   *
+   * `unresolvedMergeOperations` answers the sweep's question and hides the
+   * settled ones, which is right for a sweep and wrong for a person. Diagnosing
+   * the four stranded writes meant seeing the settled rows next to the open ones
+   * to tell which pull requests the queue believed it had finished with, and
+   * without this the only way to see them was SQL against the live database.
+   */
+  mergeOperations(): Array<MergeOperationRow & { pullRequestNumber: number | null }> {
+    return [...this.doc.mergeOperations]
+      .sort((a, b) =>
+        a.writeStartedAt === b.writeStartedAt
+          ? a.operationId.localeCompare(b.operationId)
+          : a.writeStartedAt.localeCompare(b.writeStartedAt),
+      )
+      .map((row) => ({ ...row, pullRequestNumber: row.pullRequestNumber ?? null }));
+  }
+
   mergeOperation(
     operationId: string,
   ): { attemptId: string; attemptRevision: number; outcome: string | null } | null {
