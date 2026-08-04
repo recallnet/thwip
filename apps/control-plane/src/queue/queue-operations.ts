@@ -2,7 +2,7 @@ import { QueueCommands, type CommandResult, type DecisionRecorder, type QueueTim
 import type { MergeEvidence } from "./local-run-gate.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore, TransitionRow } from "./store.js";
-import type { BlockingReason } from "@thwip/queue-domain";
+import type { BlockingReason, TransitionKind } from "@thwip/queue-domain";
 import type { ReasonCode } from "@thwip/vocabulary";
 
 /**
@@ -667,7 +667,7 @@ export function recordOnly(
   store: QueueStateStore,
   input: {
     attemptId: string;
-    kind: "verified" | "reused";
+    kind: TransitionKind;
     digest: string;
     baseSha: string;
     witnessPrincipalIds: readonly string[];
