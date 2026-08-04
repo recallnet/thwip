@@ -254,18 +254,29 @@ export async function planHeal<TEnv extends QueueRouteEnv>(
         });
         continue;
       }
-      steps.push({
-        action: "record-movement",
-        commitSha: commit.sha,
-        // Said with the comparison in it, because the comparison is the whole
-        // answer to "why not a merge record". A reader who can see the tree
-        // and the parents the queue never pinned does not have to take this on
-        // trust or go looking in D1 for it.
-        sentence:
-          `no signed intent pins tree ${commit.treeOid} on ${commit.parentShas.join(" and ")}, ` +
-          `so thwip can only record that ${baseRef} moved to ${commit.sha} without the queue certifying it`,
-      });
-      continue;
+      if (authorization.code === "NO_INTENT") {
+        steps.push({
+          action: "record-movement",
+          commitSha: commit.sha,
+          // Said with the comparison in it, because the comparison is the whole
+          // answer to "why not a merge record". A reader who can see the tree
+          // and the parents the queue never pinned does not have to take this on
+          // trust or go looking in D1 for it.
+          sentence:
+            `no signed intent pins tree ${commit.treeOid} on ${commit.parentShas.join(" and ")}, ` +
+            `so thwip can only record that ${baseRef} moved to ${commit.sha} without the queue certifying it`,
+        });
+        continue;
+      }
+      // `authorizationFor` refuses with exactly three codes, each matched by
+      // name above so it gets its own sentence. A movement record claims
+      // that no intent pins the commit, a claim only `NO_INTENT` supports.
+      // The line below turns a fourth code, whatever it says, into a build
+      // failure the day `AuthorizationRefusal` grows one, instead of a
+      // silent fall-through that would plan a movement record for a reason
+      // this function has never read.
+      const unreachable: never = authorization.code;
+      throw new Error(`chain-heal received an authorization refusal it does not handle: ${String(unreachable)}`);
     }
     // The write path rebuilds a record from the intent, and only two kinds
     // survive that. A verified merge's record binds the Actions run that
