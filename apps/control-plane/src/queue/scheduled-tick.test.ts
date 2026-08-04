@@ -135,6 +135,8 @@ describe("the queue heartbeat", () => {
       driveTurn: async () => {},
       onQueueTicked: (repositoryId) => visited.push(repositoryId),
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
     expect(visited.sort()).toEqual(["1", "2"]);
     expect(result.ticked).toBe(2);
@@ -147,6 +149,8 @@ describe("the queue heartbeat", () => {
       driveTurn: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
     expect(result.ticked).toBe(0);
   });
@@ -160,6 +164,8 @@ describe("the queue heartbeat", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
     expect(drives).toBe(0);
   });
@@ -183,6 +189,7 @@ describe("the queue heartbeat", () => {
       driveTurn: async () => {},
       onQueueTicked: (repositoryId) => ticked.push(repositoryId),
       onQueueFailed: (repositoryId, error) => failures.push({ repositoryId, error }),
+      reconsiderHead: async () => 0,
     });
     expect(result.ticked).toBe(1);
     expect(result.failed).toBe(1);
@@ -305,6 +312,160 @@ function ageHeartbeats(raw: import("better-sqlite3").Database): void {
   raw.prepare("UPDATE queue_runners SET last_heartbeat_at = '2000-01-01T00:00:00.000Z'").run();
 }
 
+/** An entry the queue is holding back for a reason GitHub told it. */
+async function blockedEntry(
+  db: D1Like,
+  repositoryId: string,
+  entryId: string,
+  pr: number,
+  reason: string,
+  headSha = "h".repeat(40),
+): Promise<void> {
+  await withQueueState(db, repositoryId, REF, async (store) => {
+    const commands = commandsFor(store);
+    commands.requestQueue({
+      idempotencyKey: `req-${entryId}`,
+      entryId,
+      pullRequestNumber: pr,
+      sponsorPrincipalId: "alice",
+      sponsorGithubUserId: pr.toString(),
+      headSha,
+    });
+    commands.evaluateReadiness({
+      idempotencyKey: `blocked-${entryId}`,
+      entryId,
+      ready: false,
+      schedulerEligible: false,
+      primaryReason: reason as never,
+    });
+  });
+}
+
+/**
+ * Readiness that stopped being true and nothing noticed.
+ *
+ * The projection write after a command is best-effort, so a failed write leaves
+ * the row holding whatever it last held. Pull request 56 was marked ready for
+ * review on GitHub and the queue kept `PR_DRAFT`, so the dashboard told its
+ * author to do the thing they had already done. The webhook is the fast path
+ * and nothing owned the slow one.
+ */
+describe("readiness nothing else came back to fix", () => {
+  it("re-reads the pull request behind an entry blocked on what GitHub said", async () => {
+    const e = env();
+    queue("1", 1);
+    const db = e.DB as unknown as D1Like;
+    await blockedEntry(db, "1", "entry_a", 56, "PR_DRAFT");
+
+    const asked: Array<{ repositoryId: string; headSha: string }> = [];
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async (repositoryId, headSha) => {
+        asked.push({ repositoryId, headSha });
+        return 1;
+      },
+    });
+
+    expect(asked).toEqual([{ repositoryId: "1", headSha: "h".repeat(40) }]);
+    expect(result.readinessRechecked).toBe(1);
+  });
+
+  it("re-reads an entry blocked on a pull request GitHub said was closed", async () => {
+    const e = env();
+    queue("1", 1);
+    await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "PR_CLOSED");
+    let asked = 0;
+    await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => {
+        asked += 1;
+        return 1;
+      },
+    });
+    expect(asked).toBe(1);
+  });
+
+  it("spends no GitHub read on a reason GitHub is not the source of", async () => {
+    // A review nobody has given is not a fact a re-read of the pull request
+    // can change, and this account has a daily quota it has already exhausted
+    // once.
+    const e = env();
+    queue("1", 1);
+    await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "REVIEW_REQUIRED");
+    let asked = 0;
+    await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => {
+        asked += 1;
+        return 1;
+      },
+    });
+    expect(asked).toBe(0);
+  });
+
+  it("spends no GitHub read on a queue with nothing blocked", async () => {
+    const e = env();
+    queue("1", 1);
+    await readyEntry(e.DB as unknown as D1Like, "1", "entry_a", "alice", 41);
+    let asked = 0;
+    await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => {
+        asked += 1;
+        return 1;
+      },
+    });
+    expect(asked).toBe(0);
+  });
+
+  it("re-reads at most three entries on one queue in one tick", async () => {
+    const e = env();
+    queue("1", 1);
+    const db = e.DB as unknown as D1Like;
+    for (const n of [1, 2, 3, 4, 5]) {
+      await blockedEntry(db, "1", `entry_${n}`, n, "PR_DRAFT", String(n).repeat(40).slice(0, 40));
+    }
+    let asked = 0;
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => {
+        asked += 1;
+        return 1;
+      },
+    });
+    expect(asked).toBe(3);
+    expect(result.readinessRechecked).toBe(3);
+  });
+
+  it("keeps ticking the rest of the fleet when one re-read throws", async () => {
+    const e = env();
+    queue("1", 1);
+    queue("2", 1);
+    await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "PR_DRAFT");
+    const ticked: string[] = [];
+    const result = await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: (repositoryId) => ticked.push(repositoryId),
+      onQueueFailed: () => {},
+      reconsiderHead: async () => {
+        throw new Error("GitHub is unreachable");
+      },
+    });
+    expect(ticked.sort()).toEqual(["1", "2"]);
+    expect(result.readinessRechecked).toBe(0);
+  });
+});
+
 describe("stale-runner retirement on the tick", () => {
   it("retires a runner that stopped heartbeating, makes its entries ineligible, and keeps their fairness ordinal", async () => {
     const e = env();
@@ -319,7 +480,7 @@ describe("stale-runner retirement on the tick", () => {
     await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
     ageHeartbeats(raw);
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     const entry = entryFrom(after, "entry_a");
@@ -347,7 +508,7 @@ describe("stale-runner retirement on the tick", () => {
     // tick's own doc comment); that happens on whatever next touches the
     // queue, exactly as it already does for every other route. Simulate that
     // next touch directly rather than adding a second way to offer a turn.
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 });
 
     const after = await withQueueState(db, "1", REF, async (store) => {
       const commands = commandsFor(store);
@@ -368,7 +529,7 @@ describe("stale-runner retirement on the tick", () => {
     await readyEntry(db, "1", "entry_a", "alice", 41);
     await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
     expect(entryFrom(after, "entry_a")?.schedulerEligible).toBe(true);
@@ -393,6 +554,8 @@ describe("driving a held lane against the active profile", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
@@ -413,6 +576,8 @@ describe("driving a held lane against the active profile", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     expect(drives).toBe(1);
@@ -441,6 +606,8 @@ describe("driving a held lane against the active profile", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
@@ -590,6 +757,8 @@ describe("the tick offers a turn, not just advances the clock", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
@@ -613,6 +782,8 @@ describe("the tick offers a turn, not just advances the clock", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
@@ -638,6 +809,8 @@ describe("the tick offers a turn, not just advances the clock", () => {
       driveTurn: async () => void drives++,
       onQueueTicked: () => {},
       onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      reconsiderHead: async () => 0,
     });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
@@ -658,7 +831,7 @@ describe("the tick offers a turn, not just advances the clock", () => {
 
     expect(row()).toBeUndefined();
 
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 });
 
     // `withQueueState` only saves on a real change (queue-state.ts). An empty
     // queue has nothing for `runAlarm()` or the settling `tick()` to change, so
@@ -851,7 +1024,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       readsThatSayMerged(),
       recordDeps,
     );
@@ -890,7 +1063,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       reads,
       recordDepsThatRecord(),
     );
@@ -960,7 +1133,7 @@ describe("settling a write the workflow walked away from", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       { ...readsThatSayMerged(), pullRequestMergeState: async () => null, baseContainsSha: async () => null },
       recordDepsThatRecord(),
     );
@@ -987,7 +1160,7 @@ describe("settling a write the workflow walked away from", () => {
     const asked = new Set<number>();
     await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       {
         ...readsThatSayMerged(),
         pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
@@ -1022,6 +1195,7 @@ describe("settling a write the workflow walked away from", () => {
         driveTurn: async () => void drives++,
         onQueueTicked: () => {},
         onQueueFailed: (repositoryId) => failures.push(repositoryId),
+        reconsiderHead: async () => 0,
       },
       {
         ...readsThatSayMerged(),
@@ -1060,7 +1234,7 @@ describe("the chain check reads the keys the sweep just minted", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       readsThatSayMerged(),
       recordDepsThatSignForReal(),
     );
@@ -1117,7 +1291,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       reads,
       recordDeps,
     );
@@ -1142,7 +1316,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       readsThatSayMerged(),
       recordDepsThatSignForReal(),
     );
@@ -1171,7 +1345,7 @@ describe("tickAllQueues reads the queue's own chain", () => {
 
     const result = await tickAllQueues(
       e,
-      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} },
+      { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0 },
       readsThatSayMerged(),
       recordDepsThatRecord(),
     );

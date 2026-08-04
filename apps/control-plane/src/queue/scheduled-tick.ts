@@ -77,7 +77,39 @@ export interface TickPorts {
   driveTurn(repositoryId: string, pullRequestNumber: number): Promise<void>;
   onQueueTicked(repositoryId: string): void;
   onQueueFailed(repositoryId: string, error: unknown): void;
+  /**
+   * Re-read a head from GitHub and run the readiness derivation again, which is
+   * `reconsiderHead` — the same walk the `pull_request` delivery makes and the
+   * same one the App calls when it finishes verifying a proof. Answers how many
+   * pull requests it walked.
+   *
+   * A port rather than a default, because the walk needs the installation token
+   * and the whole `AuthorizeTurnDeps` object the Worker builds, and importing
+   * that here would close a cycle. Required rather than optional for the reason
+   * every other required field in this file is required: an optional port
+   * nobody wires is a repair that silently never runs.
+   */
+  reconsiderHead(repositoryId: string, headSha: string): Promise<number>;
 }
+
+/**
+ * Blocking reasons GitHub is the source of, so a re-read of the pull request
+ * can change the answer.
+ *
+ * A review nobody has given is not on this list. Re-reading the pull request
+ * tells the queue nothing it does not already hold about that, and every read
+ * on this sweep is spent against a daily quota this account has exhausted once.
+ */
+const READINESS_FROM_GITHUB = ["PR_DRAFT", "PR_CLOSED"] as const;
+
+/**
+ * How many blocked entries one queue may have re-read on one tick.
+ *
+ * The cron fires every five minutes for every enabled queue, so an unbounded
+ * count here would multiply the fleet by its backlog. Three clears a normal
+ * queue in one pass and a stuck one within a quarter of an hour.
+ */
+const READINESS_RECHECK_LIMIT = 3;
 
 export async function tickAllQueues(
   env: QueueRouteEnv,
@@ -100,6 +132,7 @@ export async function tickAllQueues(
   failed: number;
   reconciled: number;
   settledWrites: number;
+  readinessRechecked: number;
   chainFindings: number;
 }> {
   const db = env.DB as unknown as D1Like;
@@ -127,6 +160,7 @@ export async function tickAllQueues(
   let failed = 0;
   let reconciled = 0;
   let settledWrites = 0;
+  let readinessRechecked = 0;
   let chainFindings = 0;
   for (const row of rows.results) {
     try {
@@ -254,6 +288,20 @@ export async function tickAllQueues(
       // one the sweep repairs.
       settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
 
+      // Readiness the webhook was supposed to refresh and did not.
+      //
+      // The projection write after every command is best-effort and its failure
+      // is swallowed, so a delivery that could not land its write leaves the row
+      // holding the reason it last held. Pull request 56 was marked ready for
+      // review on GitHub while the queue kept `PR_DRAFT`, and the dashboard told
+      // its author, in the present tense, to do the thing they had already done.
+      // Nothing owned coming back for it.
+      //
+      // This does. It re-reads the head and runs the same derivation the
+      // delivery runs, through `reconsiderHead`, so there is one answer to what
+      // readiness means and this is not a second opinion about it.
+      readinessRechecked += await recheckBlockedReadiness(snapshot, row.repositoryId, ports);
+
       // The queue reads its own chain here, once per queue per tick, the same
       // way `/v1/queue/:repositoryId/chain` reads it for an outside verifier
       // and the way `thwip verify-chain` checks it from off the network. This
@@ -301,7 +349,40 @@ export async function tickAllQueues(
       ports.onQueueFailed(row.repositoryId, error);
     }
   }
-  return { ticked, driven, failed, reconciled, settledWrites, chainFindings };
+  return { ticked, driven, failed, reconciled, settledWrites, readinessRechecked, chainFindings };
+}
+
+/**
+ * Ask GitHub again about the entries this queue is holding back on something
+ * GitHub said, and say how many were actually re-read.
+ *
+ * Bounded twice over: only the reasons a pull-request read can answer, and only
+ * `READINESS_RECHECK_LIMIT` of them per queue per tick.
+ */
+async function recheckBlockedReadiness(
+  snapshot: { entries: readonly { state: string; primaryReason: string | null; headSha: string | null }[] },
+  repositoryId: string,
+  ports: TickPorts,
+): Promise<number> {
+  const stale = snapshot.entries
+    .filter((entry) => !TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number]))
+    .filter((entry) => READINESS_FROM_GITHUB.includes(entry.primaryReason as (typeof READINESS_FROM_GITHUB)[number]))
+    .filter((entry): entry is typeof entry & { headSha: string } => entry.headSha !== null);
+
+  // One read per head, not per entry: two entries on one commit ask GitHub the
+  // same question and `reconsiderHead` already walks every pull request the
+  // commit is the head of.
+  const heads = [...new Set(stale.map((entry) => entry.headSha))].slice(0, READINESS_RECHECK_LIMIT);
+
+  let rechecked = 0;
+  for (const headSha of heads) {
+    await ports.reconsiderHead(repositoryId, headSha);
+    rechecked += 1;
+    console.log(
+      `[queue heartbeat] re-read readiness for repository ${repositoryId} at ${headSha.slice(0, 12)}`,
+    );
+  }
+  return rechecked;
 }
 
 /**

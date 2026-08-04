@@ -189,7 +189,12 @@ describe("scheduler eligibility, under a device-only profile", () => {
     // retires the stale runner and writes AGENT_OFFLINE back onto the entry,
     // exactly as `scheduled-tick.ts` does every five minutes.
     raw.prepare("UPDATE queue_runners SET last_heartbeat_at = '2000-01-01T00:00:00.000Z'").run();
-    await tickAllQueues(e, { driveTurn: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {} });
+    await tickAllQueues(e, {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+    });
     const afterTick = entryFor(await snapshotEntries(e), 59);
     expect(afterTick?.schedulerEligible).toBe(false);
     expect(afterTick?.primaryReason).toBe("AGENT_OFFLINE");
