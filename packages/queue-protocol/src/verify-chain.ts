@@ -58,6 +58,18 @@ export interface ChainFinding {
   readonly sequence: number | null;
   readonly digest: string;
   readonly detail: string;
+  /**
+   * Both ends of the stretch of branch history no record accounts for, on a
+   * `BASE_DISCONTINUITY`. `from` is the sha the chain stops at and `to` is the
+   * sha the next record begins at, so the merges in between are whatever a
+   * first-parent walk from `to` passes through before it reaches `from`.
+   *
+   * The sentence carries the same two shas and a reader can see them there. A
+   * program cannot, and the program that heals this gap has to name both ends
+   * of it. Reading them back out of English is how a repair tool starts
+   * disagreeing with the verifier it takes its instructions from.
+   */
+  readonly gap?: { readonly from: string; readonly to: string };
 }
 
 export interface ChainVerifierPorts {
@@ -429,6 +441,7 @@ function walk(edges: readonly Edge[], unreadable: number): { findings: ChainFind
         code: "BASE_DISCONTINUITY",
         sequence: start.sequence,
         digest: start.digest,
+        ...(start.before === null ? {} : { gap: { from: last.after, to: start.before } }),
         detail:
           `the base stops at ${last.after}: no record moves it from there, and record ` +
           `${start.sequence ?? "?"} begins further on at ${start.before ?? "no base at all"}; ` +

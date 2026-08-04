@@ -5,6 +5,7 @@ import { testD1 } from "../../test/d1.js";
 import {
   readAttestation,
   readChain,
+  recordCoveringCommit,
   signReusedIntent,
   signReusedRecord,
   signVerifiedIntent,
@@ -709,5 +710,99 @@ describe("keeping the signed bytes", () => {
       },
     });
     expect(await readAttestation(store, signed.digest)).not.toBeNull();
+  });
+});
+
+/**
+ * A movement record proves the branch reached a commit no signed intent
+ * pins. Nothing about that proof depends on which epoch was current when the
+ * queue wrote it down, because the record carries no intent to have fallen
+ * behind an epoch bump in the first place — `attested_from_sequence` says
+ * where the chain a verifier trusts begins, and a movement record's only
+ * claim is "the branch got here," which is exactly as true from any epoch it
+ * happens to sit behind.
+ *
+ * Scoping `recordCoveringCommit` to the epoch for every kind, the way a merge
+ * record has to be, strands a movement record the moment an epoch bump
+ * passes it: `authorizationFor` still finds nothing pins the commit, so the
+ * sweep calls the repair path again, which calls this function, which now
+ * misses the record it already wrote and refuses with `MERGE_NOT_AUTHORIZED`
+ * — forever, on every tick, for a commit the queue already recorded moving
+ * to. That is the exact harm `recordCoveringCommit`'s own docblock says it
+ * exists to prevent.
+ */
+describe("recordCoveringCommit and a movement record across an epoch bump", () => {
+  const open: Array<{ close(): void }> = [];
+  afterEach(() => {
+    while (open.length > 0) open.pop()!.close();
+  });
+
+  function seeded(): { db: D1Like; raw: import("better-sqlite3").Database } {
+    const t = testD1();
+    open.push(t);
+    t.raw
+      .prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
+      .run("org_acme", "10", "acme");
+    t.raw
+      .prepare(
+        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, attested_from_sequence)
+         VALUES (?, ?, ?, ?, 1, 'enforced', 1, 1)`,
+      )
+      .run("qp_acme", "org_acme", "1315419165", "refs/heads/main");
+    return { db: t.db as unknown as D1Like, raw: t.raw };
+  }
+
+  it("still finds a movement record once the epoch is bumped past it", async () => {
+    const { db, raw } = seeded();
+    const commitSha = "d1".repeat(20);
+    raw
+      .prepare(
+        `INSERT INTO queue_attestations
+           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, 'external-transition', ?, ?, 2, ?, ?, ?)`,
+      )
+      .run(
+        `sha256:${"m".repeat(64)}`,
+        "1315419165",
+        "refs/heads/main",
+        `movement:${commitSha}`,
+        JSON.stringify({ after: { baseSha: commitSha } }),
+        "jws-movement",
+      );
+
+    raw
+      .prepare("UPDATE queue_projects SET attested_from_sequence = 5 WHERE github_repository_id = ?")
+      .run("1315419165");
+
+    const covering = await recordCoveringCommit(db, "1315419165", "refs/heads/main", commitSha);
+
+    expect(covering).toMatchObject({ digest: `sha256:${"m".repeat(64)}`, attemptId: `movement:${commitSha}` });
+  });
+
+  it("still scopes a merge record to the current epoch", async () => {
+    const { db, raw } = seeded();
+    const commitSha = "c1".repeat(20);
+    raw
+      .prepare(
+        `INSERT INTO queue_attestations
+           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, 'reused-proof-merge', ?, ?, 2, ?, ?, ?)`,
+      )
+      .run(
+        `sha256:${"n".repeat(64)}`,
+        "1315419165",
+        "refs/heads/main",
+        "att_dead_epoch",
+        JSON.stringify({ after: { baseSha: commitSha } }),
+        "jws-merge",
+      );
+
+    raw
+      .prepare("UPDATE queue_projects SET attested_from_sequence = 5 WHERE github_repository_id = ?")
+      .run("1315419165");
+
+    const covering = await recordCoveringCommit(db, "1315419165", "refs/heads/main", commitSha);
+
+    expect(covering).toBeNull();
   });
 });

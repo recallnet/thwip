@@ -4,6 +4,9 @@ import { REASON_CODES } from "@thwip/protocol";
 import {
   blockedNextAction,
   entryStateText,
+  findingTitle,
+  healActionLabel,
+  healPanelFailure,
   ownerGithubUrl,
   ownerName,
   outcome,
@@ -103,5 +106,38 @@ describe("owners", () => {
   it("never shows the database key when the login is not projected yet", () => {
     expect(ownerName("prn_gh_999", logins)).toBe("GitHub user 999");
     expect(ownerGithubUrl("prn_gh_999", logins)).toBeNull();
+  });
+});
+
+/**
+ * A finding on the project page has to say what went wrong and what the button
+ * does, and it has to say the second thing differently when there is no button.
+ * A page that offers "Record them" for a bad signature is offering a remedy
+ * that does not exist, which is worse than saying nothing.
+ */
+describe("chain findings", () => {
+  it("titles a finding without repeating its code at the reader", () => {
+    expect(findingTitle("BASE_DISCONTINUITY")).toBe("A merge is missing from this branch's record");
+    expect(findingTitle("BAD_SIGNATURE")).not.toContain("BAD_SIGNATURE");
+  });
+
+  it("offers a button only where thwip can carry the remedy out", () => {
+    expect(healActionLabel({ healable: true, steps: [{ action: "record-merge" }] })).toBe("Record it");
+    expect(healActionLabel({ healable: true, steps: [{ action: "record-merge" }, { action: "record-movement" }] })).toBe(
+      "Record them",
+    );
+    expect(healActionLabel({ healable: false, steps: [] })).toBeNull();
+  });
+
+  /**
+   * The panel used to vanish on any refused read, so a 500 looked exactly like
+   * a reader who is not an administrator: a clean page with no findings on it.
+   * The one person who could act on a broken check was the one it was hidden
+   * from.
+   */
+  it("hides the panel from a reader it does not belong to and says so when thwip fails", () => {
+    expect(healPanelFailure(403)).toBeNull();
+    expect(healPanelFailure(500)).toContain("could not check");
+    expect(healPanelFailure(undefined)).toContain("could not check");
   });
 });

@@ -494,3 +494,50 @@ select.gp-btn:hover {
   opacity: 1;
   transform: rotate(-1.6deg);
 }
+
+/* ---------- a finding on the branch's record ---------- */
+
+/* Each finding is its own block with a rule above it, because two of them
+   running together read as one long complaint and the reader has to work out
+   where the second starts. */
+.thwip-finding + .thwip-finding {
+  border-top: 1px solid var(--rule);
+  margin-top: var(--s4);
+  padding-top: var(--s4);
+}
+.thwip-finding__title {
+  font-weight: 600;
+  margin: 0 0 var(--s1);
+}
+.thwip-finding p { max-width: 68ch; }
+.thwip-finding__steps {
+  font-size: 13px;
+  color: var(--ink);
+  margin: var(--s2) 0 var(--s3);
+  padding-left: var(--s4);
+}
+.thwip-finding__steps li { margin-bottom: var(--s1); max-width: 68ch; }
+.thwip-finding__reason {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--s3);
+}
+.thwip-finding__reason input {
+  display: block;
+  width: 100%;
+  max-width: 68ch;
+  margin-top: var(--s1);
+  font: inherit;
+  font-family: var(--sans);
+  font-size: 14px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink);
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}

@@ -256,3 +256,66 @@ export function transitionKindText(kind: string): string {
       return humanise(kind);
   }
 }
+
+/**
+ * What a chain finding means, before any code reaches the reader.
+ *
+ * The verifier's detail sentence is precise and it is written for somebody who
+ * already knows what a base sha is. This is the line above it, so an
+ * administrator can tell at a glance whether the branch is missing a merge or
+ * whether the store has a problem.
+ */
+export function findingTitle(code: string): string {
+  switch (code) {
+    case "BASE_DISCONTINUITY":
+      return "A merge is missing from this branch's record";
+    case "CHAIN_BEHIND_HEAD":
+      return "The branch has moved past the last record";
+    case "MISSING_PREFIX":
+      return "The start of this chain was not served";
+    case "MISSING_RECORD":
+      return "A record that belongs in this chain is gone";
+    case "BAD_SIGNATURE":
+      return "A record's signature does not check out";
+    case "DIGEST_MISMATCH":
+      return "A record's digest does not name its own bytes";
+    case "BROKEN_LINK":
+      return "A record names the wrong record before it";
+    case "SEQUENCE_GAP":
+      return "A record's number is missing from this chain";
+    case "FORKED_BASE":
+      return "Two records claim the branch left the same commit";
+    case "WRONG_SUBJECT":
+      return "A record names a different repository or branch";
+    case "NOTHING_CHECKED":
+      return "This chain was read and no signature was verified";
+    default:
+      return humanise(code);
+  }
+}
+
+/**
+ * What the button says, or nothing where there is no button.
+ *
+ * A finding thwip cannot answer from evidence it holds gets no control at all.
+ * Offering "Record them" beside a bad signature would offer a remedy that does
+ * not exist, and a reader who pressed it and got a refusal would trust the next
+ * thing this page says a little less.
+ */
+export function healActionLabel(plan: { healable: boolean; steps: readonly unknown[] }): string | null {
+  if (!plan.healable || plan.steps.length === 0) return null;
+  return plan.steps.length === 1 ? "Record it" : "Record them";
+}
+
+/**
+ * What a refused read of the plans means for the panel.
+ *
+ * A reader who is not an administrator gets 403, and the panel is simply not
+ * theirs: nothing goes on their screen. Anything else is thwip failing, and
+ * hiding that shows an administrator a page identical to a clean chain at the
+ * moment the check they rely on has stopped working.
+ */
+export function healPanelFailure(status: number | undefined): string | null {
+  if (status === 403) return null;
+  return "thwip could not check this branch's record. The check itself failed, so read it again before trusting the rest of this page.";
+}

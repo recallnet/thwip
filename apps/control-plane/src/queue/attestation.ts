@@ -463,11 +463,51 @@ export async function storeAttestation(
       return { stored: true };
     } catch (error) {
       if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
-      const winner = await transitionRecordFor(db, row.attemptId);
-      // The constraint only fires because a row for this attempt already holds a
-      // position, so the record that won the race is there to be read back.
-      if (winner === null) throw error;
-      return { stored: false, digest: winner };
+      const winner = await transitionRecordFor(db, row.repositoryId, row.baseRef, row.attemptId);
+      // The constraint fires because a row for this attempt already holds a
+      // position. When that row sits in this epoch, `transitionRecordFor`
+      // finds it and this is the record that won the race.
+      //
+      // An epoch bump like migration 0016's produces the other case: the
+      // attempt's old record sits exactly where it was, still holding the
+      // partial index's one slot for that attempt id, while
+      // `transitionRecordFor` now correctly stops seeing it because the
+      // chain a verifier reads starts somewhere past it. That old row's
+      // slot is freed the same way a losing race's row is freed elsewhere
+      // in this file: the position is cleared, the bytes and signature
+      // stay for anyone auditing what happened, and the insert this
+      // attempt actually asked for is retried into the now-open slot.
+      if (winner !== null) return { stored: false, digest: winner };
+      const stale = await db
+        .prepare(
+          `SELECT digest FROM queue_attestations WHERE attempt_id = ? AND transition_sequence IS NOT NULL LIMIT 1`,
+        )
+        .bind(row.attemptId)
+        .first<{ digest: string }>();
+      if (stale === null) throw error;
+      await db
+        .prepare(`UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?`)
+        .bind(stale.digest)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO queue_attestations
+             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(digest) DO NOTHING`,
+        )
+        .bind(
+          row.digest,
+          row.kind,
+          row.repositoryId,
+          row.baseRef,
+          row.transitionSequence,
+          row.attemptId,
+          new TextDecoder().decode(row.bytes),
+          row.jws,
+        )
+        .run();
+      return { stored: true };
     }
   })();
 
@@ -521,18 +561,93 @@ export async function storeAttestation(
  * signed records both claiming the same position in the chain. Checking here
  * first, before anything is built or signed, is what makes the second report
  * of a merge an idempotent no-op rather than a second link.
+ *
+ * Scoped to this epoch, the same way `recordCoveringCommit` is and for the
+ * same reason. An operator can raise `attested_from_sequence` past a record
+ * this same attempt already produced, the way migration `0016` did: the row
+ * does not stop existing, it stops being part of the chain a verifier reads.
+ * Answering from it here would report the merge as already recorded while
+ * the live chain never mentions it, and the repair that would have fixed
+ * that never runs because this said there was nothing to do.
  */
-export async function transitionRecordFor(db: D1Like, attemptId: string): Promise<string | null> {
+export async function transitionRecordFor(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  attemptId: string,
+): Promise<string | null> {
   const row = await db
     .prepare(
       `SELECT digest FROM queue_attestations
-        WHERE attempt_id = ? AND transition_sequence IS NOT NULL
+        WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ? AND transition_sequence IS NOT NULL
+          AND transition_sequence >= COALESCE(
+            (SELECT attested_from_sequence FROM queue_projects
+              WHERE github_repository_id = ? AND base_ref = ?),
+            0
+          )
         ORDER BY created_at ASC
         LIMIT 1`,
     )
-    .bind(attemptId)
+    .bind(repositoryId, baseRef, attemptId, repositoryId, baseRef)
     .first<{ digest: string }>();
   return row === null ? null : row.digest;
+}
+
+/**
+ * The record this branch's chain already has for a commit, whatever wrote it.
+ *
+ * `transitionRecordFor` answers the same question keyed on the attempt, which
+ * covers the merge that reported itself twice. It cannot cover a commit the
+ * chain reached by another road: a movement record carries no attempt, because
+ * the absence of one is the finding it answers. Without this, the sweep that
+ * settles stranded merge writes would call the repair path, be refused for a
+ * commit already sitting in the chain, and leave the row open to be read from
+ * GitHub again on the next tick, forever.
+ *
+ * Epoch scoping applies to a merge record but not to a movement record, and
+ * the two have to be told apart here because this function answers for both
+ * kinds. `attested_from_sequence` says where the chain a verifier trusts
+ * begins, and a merge record from before it cites a policy, an evidence
+ * digest and an intent digest a verifier no longer checks. Settling a write
+ * against it would report a merge as recorded while the live chain never
+ * mentions it, the failure epoch scoping exists to prevent.
+ *
+ * A movement record (`kind = 'external-transition'`, `attempt_id =
+ * 'movement:<sha>'`) carries none of that. Its whole claim is "the branch
+ * reached this commit and no signed intent pins it," a claim that holds
+ * regardless of which epoch was current when the queue wrote it down: it
+ * reads exactly as true from any epoch behind it. Scoping it away strands
+ * the record. `authorizationFor` still finds nothing pins the commit, so the
+ * sweep calls the repair path again, which calls this function, which now
+ * misses the record it already wrote, and the sweep refuses and re-reads the
+ * same commit from GitHub on every tick forever. Excluding this one kind
+ * from the epoch filter is what keeps a settled movement settled.
+ */
+export async function recordCoveringCommit(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  sha: string,
+): Promise<{ digest: string; attemptId: string | null } | null> {
+  const row = await db
+    .prepare(
+      `SELECT digest, attempt_id AS attemptId FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+          AND json_extract(bytes, '$.after.baseSha') = ?
+          AND (
+            kind = 'external-transition'
+            OR transition_sequence >= COALESCE(
+              (SELECT attested_from_sequence FROM queue_projects
+                WHERE github_repository_id = ? AND base_ref = ?),
+              0
+            )
+          )
+        ORDER BY transition_sequence ASC
+        LIMIT 1`,
+    )
+    .bind(repositoryId, baseRef, sha, repositoryId, baseRef)
+    .first<{ digest: string; attemptId: string | null }>();
+  return row === null ? null : { digest: row.digest, attemptId: row.attemptId };
 }
 
 /**
@@ -563,6 +678,32 @@ export interface AuthorizedMerge {
   readonly intent: MergeIntentV1;
 }
 
+/**
+ * Why no single intent came back, in a form something other than a person can
+ * act on.
+ *
+ * `refused` is the sentence, and it stays because it is what an operator reads.
+ * Beside it is the reason as a code, because the three reasons want three
+ * different remedies: nothing authorized this commit at all, two attempts
+ * authorized it and one must be named, or two intents for one attempt disagree.
+ * A caller that had to tell those apart by matching on the sentence would drift
+ * away from this function the first time the wording improved.
+ */
+export interface AuthorizationRefusal {
+  readonly refused: string;
+  readonly code: "NO_INTENT" | "AMBIGUOUS_ATTEMPT" | "INTENTS_DISAGREE";
+  /** The attempts that authorized this commit, where more than one did. */
+  readonly attemptIds: readonly string[];
+  /**
+   * Every intent that pins this commit's tree on this commit's parents.
+   *
+   * Empty where nothing pinned it. Where two intents disagree the disagreement
+   * is between these two documents and nothing else identifies them, so a
+   * person asked to settle it has to be handed both digests to read.
+   */
+  readonly intentDigests: readonly string[];
+}
+
 export async function authorizationFor(
   db: D1Like,
   input: {
@@ -572,7 +713,7 @@ export async function authorizationFor(
     readonly parentShas: readonly string[];
     readonly attemptId?: string;
   },
-): Promise<AuthorizedMerge | { refused: string }> {
+): Promise<AuthorizedMerge | AuthorizationRefusal> {
   const rows = await db
     .prepare(
       `SELECT digest, bytes FROM queue_attestations
@@ -605,11 +746,20 @@ export async function authorizationFor(
     return {
       refused:
         "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
+      code: "NO_INTENT",
+      attemptIds: [],
+      intentDigests: [],
     };
   }
+  const digests = matched.map((m) => m.intentDigest);
   const attempts = [...new Set(matched.map((m) => m.intent.attemptId))];
   if (attempts.length > 1) {
-    return { refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}` };
+    return {
+      refused: `more than one attempt authorizes this commit; name one of ${attempts.join(", ")}`,
+      code: "AMBIGUOUS_ATTEMPT",
+      attemptIds: attempts,
+      intentDigests: digests,
+    };
   }
 
   // One attempt can sign its intent more than once: a merge run that restarts
@@ -623,7 +773,12 @@ export async function authorizationFor(
   // force when the merge was asked for.
   const first = matched[0]!;
   if (matched.some((m) => cited(m.intent) !== cited(first.intent))) {
-    return { refused: "this commit's merge intents disagree about what they authorized" };
+    return {
+      refused: "this commit's merge intents disagree about what they authorized",
+      code: "INTENTS_DISAGREE",
+      attemptIds: attempts,
+      intentDigests: digests,
+    };
   }
   return first;
 }
