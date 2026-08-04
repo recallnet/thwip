@@ -13,10 +13,18 @@
  * moving the branch ref are both Contents, and `managedOwnershipRuleset` already
  * names the App as the only actor allowed to update a managed branch. The
  * repository_dispatch the queue drives lanes with is Contents: write too.
+ *
+ * `issues: write` writes the status comment on a queued pull request. GitHub
+ * files those comments under issues, so this is the scope that reaches them.
+ * Adding it means every installation granted before it has to accept the
+ * change, and until an admin does the App keeps merging and says nothing on the
+ * page. That is why `queueDoctor` answers `canComment` on its own rather than
+ * folding it into `canMerge`.
  */
 export const REQUIRED_APP_PERMISSIONS: Readonly<Record<string, string>> = {
   checks: "write",
   contents: "write",
+  issues: "write",
   pull_requests: "write",
   statuses: "write",
 };

@@ -150,6 +150,32 @@ describe("what doctor reports", () => {
     expect(report.lines.join("\n")).toContain("checks");
   });
 
+  /**
+   * An installation from before `issues: write` existed goes on merging and
+   * stops writing the status comment. Reading a scope name alone, an operator
+   * has to guess which of those it lost.
+   */
+  it("says what is lost when the App cannot write the status comment", () => {
+    const report = reportDoctor(
+      [
+        installed,
+        running,
+        observation({
+          section: "app",
+          body: {
+            missingPermissions: { issues: "write" },
+            canPublishMergeCheck: true,
+            canComment: false,
+            rulesets: [],
+          },
+        }),
+      ],
+      { repo: REPO, ref: REF, allowUnread: true },
+    );
+    expect(report.lines.join("\n")).toContain("status comment");
+    expect(report.lines.join("\n")).not.toContain("nothing will ever merge");
+  });
+
   it("fails on a section it could not read, and passes only when asked to allow that", () => {
     const refused: DoctorObservation[] = [installed, running, observation({ section: "app", status: 403, body: {} })];
     expect(reportDoctor(refused, { repo: REPO, ref: REF, allowUnread: false }).exitCode).toBe(EXIT.permission);
