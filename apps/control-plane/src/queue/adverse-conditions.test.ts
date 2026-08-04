@@ -142,6 +142,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     // base it pins. Head shas in this file are a pull request number padded
     // with "a", so this answers about whichever one is asking.
     integratedCandidate: async (_e, _r, _ref, pr) => ({
+      status: "pinned",
       baseSha: "b".repeat(40),
       headSha: String(pr).padStart(40, "a"),
       candidateSha: "c".repeat(40),
@@ -1452,6 +1453,7 @@ describe("the queue keeps its footing over a long run", () => {
     // A candidate per pull request, so each merge lands its own tree.
     const app = routes({
       integratedCandidate: async (_e, _r, _ref, pr) => ({
+        status: "pinned",
         baseSha: "b".repeat(40),
         headSha: String(pr).padStart(40, "a"),
         candidateSha: String(pr).padStart(40, "c"),
@@ -1861,6 +1863,7 @@ describe("the sha a record says the base branch became", () => {
 
   /** What GitHub reports for this pull request, which is what the queue pins. */
   const integrated = async () => ({
+    status: "pinned" as const,
     baseSha: BASE,
     headSha: HEAD,
     candidateSha: CANDIDATE,

@@ -37,6 +37,7 @@ import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { requestTurn } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
+import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues } from "./queue/scheduled-tick.js";
 import {
   CANDIDATE_CHECK,
@@ -2065,9 +2066,11 @@ app.route(
      *
      * What a device is handed to run under `fresh`. It comes from GitHub, never
      * from the machine asking for work, so a runner cannot choose the tree it
-     * will be credited with having tested. Null while GitHub is still computing
-     * mergeability, and null for a pull request that cannot be integrated at
-     * all: neither is a tree anybody should be asked to run.
+     * will be credited with having tested. When there is no candidate, the state
+     * GitHub is in travels with the answer: a conflict ends the turn and
+     * mergeability GitHub has not finished computing does not, and the caller
+     * cannot tell them apart from a bare null. Null is kept for the repository
+     * itself being unreadable.
      */
     async integratedCandidate(env: Env, repositoryId: string, baseRef: string, pullRequestNumber: number) {
       const project = await env.DB.prepare(
@@ -2084,13 +2087,7 @@ app.route(
         { owner, repo, repositoryId, baseRef },
         pullRequestNumber,
       );
-      if (pinned.status !== "pinned") return null;
-      return {
-        baseSha: pinned.subject.baseSha,
-        headSha: pinned.subject.headSha,
-        candidateSha: pinned.subject.candidateSha,
-        candidateTreeOid: pinned.subject.candidateTreeOid,
-      };
+      return integratedCandidateFrom(pinned);
     },
     async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
       const { key, kid } = await serviceKey(env);

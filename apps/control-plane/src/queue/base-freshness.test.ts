@@ -84,6 +84,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN }),
     integratedCandidate: async () => ({
+      status: "pinned",
       baseSha: BASE,
       headSha: HEAD,
       candidateSha: CANDIDATE,
@@ -181,12 +182,23 @@ async function pinCandidateWhilePaused(app: ReturnType<typeof routes>, e: QueueR
   expect(resumed.status).toBe(200);
 }
 
-async function entryState(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<string | undefined> {
+async function lane(
+  app: ReturnType<typeof routes>,
+  e: QueueRouteEnv,
+): Promise<{ state: string | undefined; activeAttemptId: string | null }> {
   const response = await app.request(`/v1/queue/${REPO}?ref=${encodeURIComponent(REF)}&live=1`, {}, e);
   const state = (await response.json()) as {
+    activeAttemptId: string | null;
     entries: Array<{ pullRequestNumber: number; state: string }>;
   };
-  return state.entries.find((entry) => entry.pullRequestNumber === 117)?.state;
+  return {
+    state: state.entries.find((entry) => entry.pullRequestNumber === 117)?.state,
+    activeAttemptId: state.activeAttemptId,
+  };
+}
+
+async function entryState(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<string | undefined> {
+  return (await lane(app, e)).state;
 }
 
 describe("the base a merge intent pins", () => {
@@ -195,6 +207,7 @@ describe("the base a merge intent pins", () => {
     let base = BASE;
     const app = routes({
       integratedCandidate: async () => ({
+        status: "pinned",
         baseSha: base,
         headSha: HEAD,
         candidateSha: CANDIDATE,
@@ -203,6 +216,10 @@ describe("the base a merge intent pins", () => {
     });
     await pinCandidateWhilePaused(app, e);
     const signedSoFar = intents();
+    // The two assertions below both hold over an empty list, so this pins that
+    // there is something for them to be about. A test that cannot fail was
+    // shipped here before.
+    expect(signedSoFar.length).toBeGreaterThan(0);
 
     base = MOVED;
     const verdict = await prepareMerge(app, e);
@@ -222,6 +239,7 @@ describe("the base a merge intent pins", () => {
     let base = BASE;
     const app = routes({
       integratedCandidate: async () => ({
+        status: "pinned",
         baseSha: base,
         headSha: HEAD,
         candidateSha: CANDIDATE,
@@ -248,6 +266,100 @@ describe("the base a merge intent pins", () => {
     expect(verdict.reason).toBe("BASE_UNREADABLE");
     expect(verdict.operationId).toBeNull();
     expect(intents()).toEqual([]);
+  });
+
+  /**
+   * Eight states reached the operator as one sentence about GitHub being
+   * unreadable. A pull request that developed a conflict after it was offered
+   * the turn was told the base could not be read, the workflow printed that and
+   * exited 0, and the attempt held the lane until the execution deadline reaped
+   * it. A conflict is a blocked ending, and the queue knows it the moment it
+   * reads the pull request.
+   */
+  it("ends the turn on a conflict instead of holding the lane", async () => {
+    const e = env();
+    const app = routes({
+      integratedCandidate: async () => ({ status: "blocked", reason: "MERGE_CONFLICT" }),
+    });
+
+    const verdict = await prepareMerge(app, e);
+
+    expect(verdict.authorized).toBe(false);
+    expect(verdict.reason).toBe("MERGE_CONFLICT");
+    expect(verdict.operationId).toBeNull();
+    expect(intents()).toEqual([]);
+    // The lane is free and the entry says what the developer has to fix.
+    const after = await lane(app, e);
+    expect(after.state).toBe("Blocked");
+    expect(after.activeAttemptId).toBeNull();
+  });
+
+  it("ends the turn on a closed pull request instead of holding the lane", async () => {
+    const e = env();
+    const app = routes({
+      integratedCandidate: async () => ({ status: "blocked", reason: "PR_CLOSED" }),
+    });
+
+    const verdict = await prepareMerge(app, e);
+
+    expect(verdict.reason).toBe("PR_CLOSED");
+    const after = await lane(app, e);
+    expect(after.state).toBe("Cancelled");
+    expect(after.activeAttemptId).toBeNull();
+  });
+
+  it("names the state GitHub is still computing rather than calling the base unreadable", async () => {
+    const e = env();
+    const app = routes({
+      integratedCandidate: async () => ({ status: "pending", reason: "MERGEABILITY_UNKNOWN" }),
+    });
+
+    const verdict = await prepareMerge(app, e);
+
+    expect(verdict.reason).toBe("MERGEABILITY_UNKNOWN");
+    // Transient, so the place in line and the turn are both kept.
+    expect(await entryState(app, e)).toBe("Active");
+  });
+
+  /**
+   * A merge run is dispatched about a second after the one ahead of it lands,
+   * and GitHub has invalidated mergeability for every open pull request without
+   * having recomputed it. The refusal spends the run. Nothing re-drove the lane,
+   * so the next attempt waited for the five-minute cron, and merges dropped to
+   * one per five minutes whenever the recompute outran the backoff.
+   */
+  it("re-drives the lane when it cannot read a base", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      integratedCandidate: async () => null,
+      driveTurn: async (_env, _repositoryId, pullRequestNumber) => {
+        driven.push(pullRequestNumber);
+      },
+    });
+
+    expect((await prepareMerge(app, e)).reason).toBe("BASE_UNREADABLE");
+    expect(driven).toEqual([117]);
+  });
+
+  it("re-drives the lane when the head moved under it", async () => {
+    const e = env();
+    const driven: number[] = [];
+    const app = routes({
+      integratedCandidate: async () => ({
+        status: "pinned",
+        baseSha: BASE,
+        headSha: "a".repeat(40),
+        candidateSha: CANDIDATE,
+        candidateTreeOid: TREE,
+      }),
+      driveTurn: async (_env, _repositoryId, pullRequestNumber) => {
+        driven.push(pullRequestNumber);
+      },
+    });
+
+    expect((await prepareMerge(app, e)).reason).toBe("HEAD_MOVED");
+    expect(driven).toEqual([117]);
   });
 
   it("pins what GitHub says the candidate is, not what the caller sent", async () => {
