@@ -13,11 +13,20 @@
  * A file overrides what its own subject is about and inherits the rest.
  */
 
+import { provenCommit } from "./proven-commit.js";
+
 const forty = (c: string): string => c.repeat(40);
 
-/** Shas a file that does not care about them can take as given. */
+/**
+ * Shas a file that does not care about them can take as given.
+ *
+ * Hex, because they are object ids and the statement parser that reads a
+ * proof's subject refuses anything that is not one. A tree of forty `t`s reads
+ * as a head carrying no proof at all, which is a refusal three gates further on
+ * that says nothing about the letter that caused it.
+ */
 export const FIXTURE_BASE = forty("b");
-export const FIXTURE_TREE = forty("t");
+export const FIXTURE_TREE = forty("7");
 export const FIXTURE_CANDIDATE = forty("c");
 
 export interface QueueDepsPins {
@@ -90,7 +99,14 @@ export function queueRouteDeps(
     }),
     driveTurn: async () => {},
     publishTurnCheck: async () => {},
-    commitFacts: async () => ({ treeOid, parentShas: [baseSha] }),
+    // A head that carries a readable proof, because the walk to a merge reads
+    // the trailer to cite it and a head without one refuses with
+    // WORK_RECEIPT_UNREADABLE. That is the normal case, so it is the default.
+    commitFacts: async () => ({
+      treeOid,
+      parentShas: [baseSha],
+      message: provenCommit({ repositoryId: pins.repositoryId, baseRef, treeOid, baseSha }),
+    }),
     // The candidate GitHub has integrated, which is where the walk to a merge
     // reads the base it pins. Absent, this answers null and every turn in the
     // file refuses, which is why it belongs in the shared defaults.
