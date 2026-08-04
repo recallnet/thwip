@@ -78,3 +78,28 @@ export function externalPushFromWebhook(event: string, payload: PushPayload): Ex
 
   return { repositoryId: String(repositoryId), baseRef, observedBaseSha };
 }
+
+/**
+ * A push to the branch a queue guards, whoever made it.
+ *
+ * `externalPushFromWebhook` answers a narrower question and refuses the queue's
+ * own merges, which is right for pausing and wrong for waking: the merge the
+ * queue just wrote is exactly the event that frees the lane for whoever is
+ * next. So this names the branch and says nothing about who moved it.
+ */
+export function pushedQueueBranch(
+  event: string,
+  payload: PushPayload,
+): { repositoryId: string; baseRef: string } | null {
+  if (event !== "push") return null;
+  if (payload.deleted === true) return null;
+
+  const repositoryId = payload.repository?.id;
+  const defaultBranch = payload.repository?.default_branch;
+  if (typeof repositoryId !== "number" && typeof repositoryId !== "string") return null;
+  if (typeof defaultBranch !== "string" || defaultBranch.length === 0) return null;
+
+  const baseRef = `refs/heads/${defaultBranch}`;
+  if (payload.ref !== baseRef) return null;
+  return { repositoryId: String(repositoryId), baseRef };
+}
