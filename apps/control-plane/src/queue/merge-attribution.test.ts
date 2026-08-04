@@ -51,6 +51,7 @@ describe("the message the merge workflow writes", () => {
   const merge = setupPullRequestFiles({
     endpoint: "https://thwip.example.test",
     actionRef: "recallnet/thwip@v1",
+    mergeWriter: "workflow",
   }).find((f) => f.path === ".github/workflows/thwip-merge.yml")!.content;
 
   /** The workflow's own lines, run as the workflow runs them. */

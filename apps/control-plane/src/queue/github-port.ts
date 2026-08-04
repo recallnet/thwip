@@ -1,10 +1,11 @@
+import { GithubApiError } from "../github-error.js";
 import { pinCandidate, type CommitFacts, type PullRequestFacts } from "./candidate.js";
 
 /**
- * The real GitHub side of an integration turn.
+ * The shared GitHub HTTP boundary for queue reads and bootstrap writes.
  *
- * Reads only. The merge write lives in Actions, and every call here throws on a
- * non-2xx response, which is what a read should do.
+ * Every non-2xx response keeps its path, status, and bounded body so callers can
+ * distinguish a permission refusal from an outage without parsing prose.
  */
 
 const API = "https://api.github.com";
@@ -27,7 +28,7 @@ export function githubHttp(token: string, fetchImpl: typeof fetch = fetch): GitH
   return {
     async json<T>(path: string, init?: RequestInit): Promise<T> {
       const res = await fetchImpl(`${API}${path}`, { ...init, headers: headers(init?.headers) });
-      if (!res.ok) throw new Error(`GitHub ${path} -> ${res.status}: ${await res.text()}`);
+      if (!res.ok) throw new GithubApiError(path, res.status, await res.text());
       return (await res.json()) as T;
     },
   };

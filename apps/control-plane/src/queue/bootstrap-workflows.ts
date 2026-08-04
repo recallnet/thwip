@@ -772,6 +772,8 @@ export interface SetupPullRequestInput {
   readonly endpoint: string;
   /** The published action, `owner/repo@ref`. Never a local path. */
   readonly actionRef: string;
+  /** Existing adopters may still merge from Actions; fresh enrolments use the App. */
+  readonly mergeWriter: "workflow" | "app";
 }
 
 function render(template: string, input: SetupPullRequestInput): string {
@@ -781,7 +783,9 @@ function render(template: string, input: SetupPullRequestInput): string {
 export function setupPullRequestFiles(input: SetupPullRequestInput): readonly SetupFile[] {
   return [
     { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) },
-    { path: ".github/workflows/thwip-merge.yml", content: render(MERGE_WORKFLOW, input) },
+    ...(input.mergeWriter === "workflow"
+      ? [{ path: ".github/workflows/thwip-merge.yml", content: render(MERGE_WORKFLOW, input) }]
+      : []),
     { path: ".github/workflows/thwip-queue-verify.yml", content: render(VERIFY_WORKFLOW, input) },
     { path: "thwip.yaml", content: THWIP_YAML },
   ];
@@ -795,14 +799,16 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
     "This pull request adds what the queue needs and nothing else:",
     "",
     "- `.github/workflows/thwip-required.yml` publishes the `thwip` check, which says whether the proof is good for the tree, and places the pull request in the queue.",
-    "- `.github/workflows/thwip-merge.yml` performs the merge the queue authorizes. It needs a `THWIP_ENQUEUE_TOKEN` repository secret; without one it declines and leaves the merge to a maintainer.",
+    ...(input.mergeWriter === "workflow"
+      ? ["- `.github/workflows/thwip-merge.yml` is the compatibility writer for this existing project. It performs the merge under the repository's existing enqueue token until an administrator manually cuts the project over to the App writer."]
+      : ["- The installed Thwip App performs the merge with its repository-scoped `contents: write` permission. A repository administrator applies the generated rulesets; the App does not request `administration: write`. No repository merge token is needed."]),
     "- `.github/workflows/thwip-queue-verify.yml` runs the required suites against the integrated candidate when the queue asks for it. The `remote` and `audited` profiles need it; `fast` and `fresh` never dispatch to it.",
     "- `thwip.yaml` says which suites have to pass. Edit it before merging if these are not the right ones.",
     "",
-    "The merge is a merge commit, composed on the base the queue verified against and landed with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. A squash cannot be bound that way: it does not contain the pull request head, so this branch's own required checks refuse it and GitHub cannot tell the pull request was merged. If this repository squashes, the workflow says so, merges nothing, and hands the lane back. Set the queue to merge commits before enabling it.",
+    "The queue requires merge commits. It composes the merge on the base it verified and lands it with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. A squash cannot be bound that way: it does not contain the pull request head, so this branch's own required checks refuse it and GitHub cannot tell the pull request was merged. Setup refuses a squash configuration before enrolment.",
     "",
-    `Both workflows talk to ${input.endpoint}.`,
+    `The workflows talk to ${input.endpoint}.`,
     "",
-    "Merge this under the controls this repository already has. Thwip creates no branch ruleset until it has merged, so nothing here can block the branch.",
+    "Merge this under the controls this repository already has. Thwip changes no branch ruleset itself. After this merges, Continue setup returns the exact ruleset payloads for a repository administrator to apply, then verifies them before enabling the queue.",
   ].join("\n");
 }

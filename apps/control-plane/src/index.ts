@@ -1070,7 +1070,7 @@ app.post("/admin/sync", async (c) => {
 
 /**
  * Queue doctor (plan.md §30.4). Reports what the App is actually granted and what
- * the branch actually requires, because setup must never assume that creating a
+ * the branch actually requires, because setup must never assume that applying a
  * ruleset produced effective enforcement, nor that the App can publish the check
  * the branch will require.
  */
@@ -1128,6 +1128,8 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     // Read off `pull_requests` rather than `issues`: the App wrote a comment on
     // pull request 180 holding no `issues` scope, so that is what carries it.
     canComment: missing.every(([scope]) => scope !== "pull_requests"),
+    canInspectRulesets: Array.isArray(rulesets),
+    canConfigureRulesets: false,
     subscribedEvents: events.subscribed,
     handledEvents: events.handled,
     deadHandlers: events.deadHandlers,
@@ -1161,10 +1163,10 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
 /**
  * Setup, as a request.
  *
- * Enrolling `recallnet/thwip-test` took a hand-written D1 row, two workflows
- * copied in, a secret set by hand, and a ruleset built with `gh api`. The code
- * that does all of it has been here and tested since; what was missing was this.
- * Same administrator as the doctor, because this writes what the doctor reads.
+ * Enrolling `recallnet/thwip-test` took a hand-written D1 row, workflows copied
+ * in, a secret set by hand, and a ruleset built with `gh api`. This route owns
+ * the repeatable sequence now, while returning ruleset writes to the repository
+ * administrator instead of granting the runtime App repository Administration.
  */
 app.post("/v1/queue/:repositoryId/bootstrap", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);

@@ -1,4 +1,5 @@
 import { installationToken } from "../github-app.js";
+import { githubStatusOf } from "../github-error.js";
 import {
   bootstrapGitHub,
   bootstrapStatus,
@@ -38,6 +39,7 @@ import type { Env } from "../env.js";
 export interface BootstrapRouteBody {
   readonly backend?: Backend;
   readonly mergeMethod?: MergeMethod;
+  readonly confirmRulesetBypassActors?: boolean;
 }
 
 /** Only the fields the route reads, so a test does not build a whole Worker env. */
@@ -100,7 +102,11 @@ const githubPort: BootstrapPort = async (env, repo) => {
     {
       branch: SETUP_BRANCH,
       title: SETUP_PULL_REQUEST_TITLE,
-      body: setupPullRequestBody({ endpoint: env.PUBLIC_ORIGIN, actionRef: QUEUE_ACTION_REF }),
+      body: setupPullRequestBody({
+        endpoint: env.PUBLIC_ORIGIN,
+        actionRef: QUEUE_ACTION_REF,
+        mergeWriter: "app",
+      }),
     },
   );
 };
@@ -109,13 +115,33 @@ const UNAUTHORIZED: BootstrapResponse = { status: 401, body: { error: "unauthori
 const FORBIDDEN: BootstrapResponse = { status: 403, body: { error: "repository admin required" } };
 const UNKNOWN: BootstrapResponse = { status: 404, body: { error: "unknown repository" } };
 
+function failureDetail(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+}
+
+/** Turn GitHub's setup refusal into an instruction instead of a bare 500. */
+function githubSetupFailure(error: unknown): BootstrapResponse | null {
+  if (githubStatusOf(error) !== null) {
+    return {
+      status: 502,
+      body: {
+        error: "GitHub refused repository setup",
+        code: "GITHUB_SETUP_FAILED",
+        detail: failureDetail(error),
+      },
+    };
+  }
+  return null;
+}
+
 /**
  * Run setup for one repository.
  *
- * The same role the doctor route asks for, because this writes what the doctor
- * reads: a branch ruleset, two workflows, and a check run on the base tip.
- * Everything it does is idempotent, so a caller who retries a 202 gets the same
- * answer rather than a second pull request.
+ * The same role the doctor route asks for. This opens the setup pull request,
+ * publishes bootstrap checks, and returns ruleset payloads for that repository
+ * administrator to apply; the App only reads rulesets back. Everything it does
+ * is idempotent, so a caller who retries a 202 gets the same answer rather than
+ * a second pull request.
  */
 export async function bootstrapRouteResponse(
   env: BootstrapRouteEnv,
@@ -129,22 +155,35 @@ export async function bootstrapRouteResponse(
   if (!/^[0-9]{1,32}$/.test(repositoryId)) {
     return { status: 400, body: { error: "invalid repository id" } };
   }
+  if (body.mergeMethod !== undefined && body.mergeMethod !== "merge") {
+    return {
+      status: 400,
+      body: { error: "Thwip Queue setup requires merge commits", code: "MERGE_COMMITS_REQUIRED" },
+    };
+  }
 
   const repo = await repositoryFor(env, repositoryId);
   if (repo === null) return UNKNOWN;
 
-  return handleBootstrapRequest({
-    db: env.DB as unknown as D1Like,
-    github: await port(env, repo),
-    integrationId: Number(env.GITHUB_APP_ID),
-    endpoint: env.PUBLIC_ORIGIN,
-    actionRef: QUEUE_ACTION_REF,
-    review: { requiredApprovingReviewCount: 1, requireCodeOwnerReview: false },
-    repositoryId,
-    baseRef: repo.baseRef,
-    ...(body.backend === undefined ? {} : { backend: body.backend }),
-    ...(body.mergeMethod === undefined ? {} : { mergeMethod: body.mergeMethod }),
-  });
+  try {
+    return await handleBootstrapRequest({
+      db: env.DB as unknown as D1Like,
+      github: await port(env, repo),
+      integrationId: Number(env.GITHUB_APP_ID),
+      endpoint: env.PUBLIC_ORIGIN,
+      actionRef: QUEUE_ACTION_REF,
+      review: { requiredApprovingReviewCount: 1, requireCodeOwnerReview: false },
+      repositoryId,
+      baseRef: repo.baseRef,
+      ...(body.backend === undefined ? {} : { backend: body.backend }),
+      ...(body.mergeMethod === undefined ? {} : { mergeMethod: body.mergeMethod }),
+      ...(body.confirmRulesetBypassActors === true ? { confirmRulesetBypassActors: true } : {}),
+    });
+  } catch (error) {
+    const failure = githubSetupFailure(error);
+    if (failure !== null) return failure;
+    throw error;
+  }
 }
 
 /**

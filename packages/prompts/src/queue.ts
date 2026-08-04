@@ -176,20 +176,25 @@ for things only I can do.
 
 6. Tell me what I have to do myself, because you cannot:
    - merge the setup pull request, which is where enrolment is waiting;
-   - add the THWIP_ENQUEUE_TOKEN repository secret the merge workflow reads;
-   - grant the thwip App "checks: write", which raises a consent prompt.
-   Then start enrolment again. It builds the branch ruleset itself: it requires
-   "thwip" and "thwip / turn", pins each to the source that publishes it, which
-   GitHub allows only after that source has published the check, and refuses a
-   payload that would drop a rule or a required check somebody else added. Do
-   not edit that ruleset by hand.
+   - apply each ruleset payload enrolment returns, in the order shown, using my
+     own repository-administrator authority;
+   - confirm every bypass-actor list in GitHub exactly matches the generated
+     payload (for a managed queue, only the Thwip App bypasses ownership).
+   Then start enrolment again after each manual change. It reads the branch
+   rulesets back, requires "thwip" and "thwip / turn", checks that each is pinned
+   to the source that publishes it, and refuses a payload that would drop a rule
+   or required check somebody else added. GitHub hides bypass actors from an App
+   that cannot edit rulesets, so I must verify that one field explicitly. The
+   App does not request the broad "administration: write" permission. The
+   installed App performs authorized merges with repository-scoped contents
+   permission; setup needs no personal access token or repository merge secret.
 
-7. Prove it before enforcing it. Enrolment activates the ruleset only after
-   GitHub has stored both source pins, and leaves the queue observing, so it
-   reports and blocks nothing. Push a pull request and confirm both checks appear
-   and go green on it before I move the queue to enforced. A required check that
-   nothing publishes blocks every merge on the branch, and that is the failure
-   this order exists to avoid.
+7. Prove it before enforcing it. Enrolment asks me to activate only after GitHub
+   has stored both source pins, and leaves the queue observing, so it reports and
+   blocks nothing. Push a pull request and confirm both checks appear and go green
+   on it before I move the queue to enforced. A required check that nothing
+   publishes blocks every merge on the branch, and that is the failure this order
+   exists to avoid.
 
 Report: files changed, what enrolment answered, doctor results, the pull request
 I have to merge, and any conflicting auto-merge system you found.`;
