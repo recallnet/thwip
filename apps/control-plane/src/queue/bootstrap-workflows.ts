@@ -564,13 +564,16 @@ jobs:
           if [ -z "$landed" ]; then
             echo "::error::merged, but GitHub named no commit; leaving it to reconciliation"; exit 1
           fi
-          commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$landed" --jq '{tree:.tree.sha, parents:[.parents[].sha]}')
+          # The commit id, and nothing else about the commit. This run used to
+          # read the tree and the parents here and send them along, and the
+          # queue signed a record over them: numbers this workflow chose,
+          # certified by the queue as its own observation. The queue reads them
+          # from GitHub now.
           report=$(curl -sS -w '\\n%{http_code}' -X POST -H "authorization: Bearer $(oidc)" \\
             -H "content-type: application/json" \\
             -d "$(jq -nc --arg base "$BASE_REF" --arg attempt "\${op#merge_}" --arg op "$op" \\
-                  --arg sha "$landed" --arg tree "$(printf '%s' "$commit" | jq -r .tree)" \\
-                  --argjson parents "$(printf '%s' "$commit" | jq -c .parents)" \\
-                  '{baseRef:$base, attemptId:$attempt, operationId:$op, mergeSha:$sha, mergeTree:$tree, parentShas:$parents}')" \\
+                  --arg sha "$landed" \\
+                  '{baseRef:$base, attemptId:$attempt, operationId:$op, mergeSha:$sha}')" \\
             "$THWIP_ENDPOINT/v1/queue/$REPO_ID/merged" || true)
           echo "queue record: http $(printf '%s' "$report" | tail -n1)"
           printf '%s' "$report" | sed '$d'

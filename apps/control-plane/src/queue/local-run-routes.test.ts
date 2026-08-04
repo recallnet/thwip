@@ -160,11 +160,17 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId 
     driveTurn: async (_e, _r, pullRequestNumber) => {
       driven.push(pullRequestNumber);
     },
-    commitFacts: async () => ({
-      treeOid: TREE,
-      parentShas: [BASE],
-      message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
-    }),
+    // The merged endpoint reads the commit it is told about, so the merge
+    // commit answers with the base and the head under it. Anything else here is
+    // the pull request head, carrying its proof.
+    commitFacts: async (_e, _r, sha) =>
+      sha === MERGE_SHA
+        ? { treeOid: TREE, parentShas: [BASE, HEAD] }
+        : {
+            treeOid: TREE,
+            parentShas: [BASE],
+            message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
+          },
     integratedCandidate: async () => ({
       status: "pinned",
       baseSha: BASE,
@@ -237,8 +243,6 @@ async function mergeAsActionsWould(routes: Routes, e: QueueRouteEnv): Promise<vo
         attemptId: id,
         operationId: verdict.operationId,
         mergeSha: MERGE_SHA,
-        mergeTree: TREE,
-        parentShas: [BASE, HEAD],
       }),
     },
     e,
@@ -554,8 +558,6 @@ describe("the receipt the machine signs", () => {
             attemptId: id,
             operationId: verdict.operationId,
             mergeSha: MERGE_SHA,
-            mergeTree: TREE,
-            parentShas: [BASE, HEAD],
           }),
         },
         e,
@@ -889,8 +891,6 @@ describe("the receipt the machine signs", () => {
           attemptId: held,
           operationId: verdict.operationId,
           mergeSha: MERGE_SHA,
-          mergeTree: TREE,
-          parentShas: [BASE, HEAD],
         }),
       },
       e,
