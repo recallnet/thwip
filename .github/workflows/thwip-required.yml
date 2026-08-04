@@ -57,8 +57,8 @@ jobs:
         if: github.event_name == 'pull_request'
         # Nothing this step does decides this check. If the queue is unreachable,
         # the pull request is not enrolled and `thwip / turn` never goes green, so
-        # the merge is blocked by the check that is actually about the turn —
-        # visibly, and without claiming the proof was bad.
+        # the merge is blocked by the check that is actually about the turn. The
+        # block is visible, and nothing claims the proof was bad.
         continue-on-error: true
         env:
           THWIP_ENDPOINT: https://thwip.recall.net
