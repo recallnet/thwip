@@ -1,17 +1,13 @@
 /**
- * Ruleset generation for the managed and native backends (plan.md §44).
+ * Ruleset generation for the App-owned queue.
  *
  * Two rules govern everything here. Unrelated controls are merged, never
  * replaced: a generated payload that dropped someone's existing protection would
- * be a security regression delivered by a setup tool. And a managed ownership
- * rule must never reach a native branch, nor a native merge-queue rule a managed
- * one, because each would hand the branch to the wrong writer.
+ * be a security regression delivered by a setup tool. The App is the only
+ * supported writer, so a merge-queue rule is always a conflicting control.
  */
 
 import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
-
-export type Backend = "managed" | "native";
-export type MergeMethod = "merge" | "squash";
 
 /*
  * `Thwip / Merge` is gone.
@@ -100,10 +96,10 @@ function refCondition(baseRef: string): Ruleset["conditions"] {
 }
 
 /**
- * Only the Thwip App may update a managed branch, because the App performs the
+ * Only the Thwip App may update the queued branch, because the App performs the
  * merge. Deletion and force-push stay blocked for everyone.
  */
-export function managedOwnershipRuleset(input: { baseRef: string; integrationId: number }): Ruleset {
+export function appOwnershipRuleset(input: { baseRef: string; integrationId: number }): Ruleset {
   return {
     name: OWNERSHIP_RULESET_NAME,
     target: "branch",
@@ -182,56 +178,13 @@ export function policyRuleset(input: PolicyOptions): Ruleset {
   };
 }
 
-export interface NativeQueueOptions {
-  readonly baseRef: string;
-  readonly integrationId: number;
-  readonly mergeMethod: MergeMethod;
-  /** Must exceed the longest turn plus verifier and reconciliation allowance. */
-  readonly checkResponseTimeoutMinutes: number;
-}
+/** Guard against mixing GitHub's merge queue with the App-owned branch. */
+export type AppRulesetCheck = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
-/**
- * The native adapter keeps GitHub's queue as the writer, so it must not carry
- * the managed ownership rule. Group size is one: Thwip admits exactly one
- * selection at a time, and speculative batching is not in v1.
- */
-export function nativeMergeQueueRuleset(input: NativeQueueOptions): Ruleset {
-  return {
-    name: "Thwip Native Merge Queue",
-    target: "branch",
-    enforcement: "active",
-    bypass_actors: [],
-    conditions: refCondition(input.baseRef),
-    rules: [
-      {
-        type: "merge_queue",
-        parameters: {
-          check_response_timeout_minutes: input.checkResponseTimeoutMinutes,
-          grouping_strategy: "ALLGREEN",
-          max_entries_to_build: 1,
-          max_entries_to_merge: 1,
-          merge_method: input.mergeMethod.toUpperCase(),
-          min_entries_to_merge: 1,
-          min_entries_to_merge_wait_minutes: 0,
-        },
-      },
-      { type: "deletion" },
-      { type: "non_fast_forward" },
-    ],
-  };
-}
-
-/** Guard against sending a backend's rules to the wrong kind of branch (§44.2). */
-export type BackendCheck = { readonly ok: true } | { readonly ok: false; readonly reason: string };
-
-export function checkRulesetForBackend(ruleset: Ruleset, backend: Backend): BackendCheck {
+export function checkAppRuleset(ruleset: Ruleset): AppRulesetCheck {
   const types = new Set(ruleset.rules.map((rule) => rule.type));
-  if (backend === "native") {
-    if (ruleset.name === OWNERSHIP_RULESET_NAME || types.has("update")) {
-      return { ok: false, reason: "a native branch is updated by GitHub's queue, not by the Thwip App" };
-    }
-  } else if (types.has("merge_queue")) {
-    return { ok: false, reason: "a managed branch must not carry GitHub's merge_queue rule" };
+  if (types.has("merge_queue")) {
+    return { ok: false, reason: "an App-owned branch must not carry GitHub's merge_queue rule" };
   }
   return { ok: true };
 }

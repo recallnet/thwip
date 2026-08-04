@@ -25,7 +25,6 @@ import {
 } from "@thwip/queue-protocol";
 import { buildSnapshot, commandsFor } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
-import { tickAllQueues } from "./scheduled-tick.js";
 import type { D1Like } from "./projection.js";
 
 /**
@@ -146,20 +145,13 @@ const policy = {
   daggerEngineDigest: null,
 };
 
-const driven: number[] = [];
-
 function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId = "alice", githubUserId = "1") {
-  driven.length = 0;
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD, principalId, githubUserId, isAdmin: false }, {
       activePolicy: async () => policy,
       principalFor: async () => "alice",
-      driveTurn: async (_e: unknown, _r: string, pullRequestNumber: number) => {
-        driven.push(pullRequestNumber);
-      },
-      // The merged endpoint reads the commit it is told about, so the merge
-      // commit answers with the base and the head under it. Anything else here is
-      // the pull request head, carrying its proof.
+      // The App reads the landed commit before recording it. Anything else here
+      // is the pull request head, carrying its proof.
       commitFacts: async (_e: unknown, _r: string, sha: string) =>
         sha === MERGE_SHA
           ? { treeOid: TREE, parentShas: [BASE, HEAD] }
@@ -214,32 +206,6 @@ function authorize(routes: Routes, e: QueueRouteEnv, over: Record<string, unknow
   );
 }
 
-/**
- * What `thwip-merge.yml` does when the queue drives the lane: ask `authorize`
- * with the candidate GitHub integrated, and report back what landed. Written out
- * here rather than stubbed, because a stub would let the merge succeed without
- * the gate the whole profile is.
- */
-async function mergeAsActionsWould(routes: Routes, e: QueueRouteEnv): Promise<void> {
-  const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-  if (verdict.operationId === null) return;
-  const id = await attemptId(e);
-  await routes.request(
-    `/v1/queue/${REPO}/merged`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        baseRef: REF,
-        attemptId: id,
-        operationId: verdict.operationId,
-        mergeSha: MERGE_SHA,
-      }),
-    },
-    e,
-  );
-}
-
 async function attemptId(e: QueueRouteEnv): Promise<string> {
   const snapshot = await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => buildSnapshot(store));
   if (snapshot.activeAttemptId === null) throw new Error("no attempt holds the lane");
@@ -265,20 +231,7 @@ async function signedReceipt(
   return { ...receipt, suites: [...receipt.suites], signature };
 }
 
-/** What the merge workflow tells the queue GitHub integrated for this turn. */
-const candidate = {
-  baseSha: BASE,
-  candidateSha: CANDIDATE,
-  candidateTreeOid: TREE,
-  parentShas: [BASE, HEAD],
-};
-
-interface Verdict {
-  authorized: boolean;
-  reason: string;
-  operationId: string | null;
-}
-
+/** What GitHub reports as integrated for this turn. */
 interface Claimed {
   assignmentId: string;
   assignmentDigest: string;
@@ -292,7 +245,7 @@ interface Claimed {
 describe("claiming the turn as the machine that will run it", () => {
   it("hands back the signed assignment, the candidate and the suites", async () => {
     const e = env();
-    const routes = app();
+    const routes = app({ mergeWrite: async () => ({ kind: "merged" as const, mergeSha: MERGE_SHA }) });
     const attempt = await offered(routes, e);
 
     const response = await post(routes, e, "claim", { attemptId: attempt, deviceKeyId });
@@ -473,57 +426,37 @@ describe("the receipt the machine signs", () => {
     expect((await second.json()) as { error: string }).toMatchObject({ error: "RECEIPT_ALREADY_ACCEPTED" });
   });
 
-  it("refuses the merge outright when no device ever took the turn", async () => {
+  it("does not ask the App writer to merge before a device receipt exists", async () => {
     const e = env();
-    const routes = app();
-    await offered(routes, e);
-
-    // The head carries an accepted proof and the entry holds the lane, which is
-    // everything a `fast` merge needs. Under `fresh` it is not enough, and this
-    // is the refusal that says so: the server cannot merge on work done before
-    // the branch was integrated.
-    const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-    expect(verdict).toMatchObject({ authorized: false, reason: "INTEGRATION_ASSIGNMENT_MISSING" });
-    expect(verdict.operationId).toBeNull();
-  });
-
-  it("authorizes the merge once, and only once, the receipt is in", async () => {
-    const e = env();
-    const routes = app();
-    const claimed = await claim(routes, e);
-
-    const before = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-    expect(before).toMatchObject({ authorized: false, reason: "INTEGRATION_RECEIPT_MISSING" });
-
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-
-    const after = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-    expect(after).toMatchObject({ authorized: true, reason: "HOLDS_TURN" });
-    expect(after.operationId).not.toBeNull();
-  });
-
-  it("refuses the merge of a tree the accepted receipt is not about", async () => {
-    const e = env();
-    // GitHub is now integrating a different tree from the one the device ran
-    // and signed for. The queue reads the candidate itself, so this is where
-    // that disagreement arrives.
-    let tree = TREE;
+    let writes = 0;
     const routes = app({
-      integratedCandidate: async () => ({
-        status: "pinned",
-        baseSha: BASE,
-        headSha: HEAD,
-        candidateSha: CANDIDATE,
-        candidateTreeOid: tree,
-      }),
+      mergeWrite: async () => {
+        writes += 1;
+        return { kind: "merged" as const, mergeSha: MERGE_SHA };
+      },
+    });
+    await offered(routes, e);
+    await post(routes, e, "nudge", {});
+    expect(writes).toBe(0);
+  });
+
+  it("asks the installed App to merge when the signed receipt arrives", async () => {
+    const e = env();
+    let writes = 0;
+    const routes = app({
+      mergeWrite: async () => {
+        writes += 1;
+        return { kind: "merged" as const, mergeSha: MERGE_SHA };
+      },
     });
     const claimed = await claim(routes, e);
+    expect(writes).toBe(0);
+
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
 
-    // GitHub is integrating something else by the time the merge is asked for.
-    tree = OTHER_TREE;
-    const verdict = (await (await authorize(routes, e, { prepare: true })).json()) as Verdict;
-    expect(verdict).toMatchObject({ authorized: false, reason: "INTEGRATION_RECEIPT_TREE_MISMATCH" });
+    expect(writes).toBe(1);
+    const snapshot = await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => buildSnapshot(store));
+    expect(snapshot.entries[0]).toMatchObject({ state: "Merged" });
   });
 
   /**
@@ -533,28 +466,9 @@ describe("the receipt the machine signs", () => {
    * as a merge that reused the proof already on the head.
    */
   describe("what the chain records for a merge under fresh", () => {
-    async function merged(routes: Routes, e: QueueRouteEnv): Promise<{ attemptId: string; operationId: string }> {
+    async function merged(routes: Routes, e: QueueRouteEnv): Promise<void> {
       const claimed = await claim(routes, e);
       await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-      const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-      if (verdict.operationId === null) throw new Error(`not authorized: ${verdict.reason}`);
-      const id = await attemptId(e);
-      const reported = await routes.request(
-        `/v1/queue/${REPO}/merged`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            baseRef: REF,
-            attemptId: id,
-            operationId: verdict.operationId,
-            mergeSha: MERGE_SHA,
-          }),
-        },
-        e,
-      );
-      if (reported.status !== 200) throw new Error(`merged returned ${reported.status}: ${await reported.text()}`);
-      return { attemptId: id, operationId: verdict.operationId };
     }
 
     function stored(kind: string): Array<{ digest: string; bytes: string }> {
@@ -565,12 +479,10 @@ describe("the receipt the machine signs", () => {
 
     it("signs a verified merge intent, naming the assignment and the receipt", async () => {
       const e = env();
-      const routes = app();
+      const routes = app({ mergeWrite: async () => ({ kind: "unknown" as const, detail: "test intent only" }) });
       const claimed = await claim(routes, e);
       const submitted = receipt(claimed);
       await post(routes, e, "receipt", await signedReceipt(submitted));
-      await authorize(routes, e, { prepare: true, candidate });
-
       const rows = stored("merge-intent");
       expect(rows).toHaveLength(1);
       const parsed = parseMergeIntent(JSON.parse(rows[0]!.bytes) as unknown);
@@ -583,7 +495,7 @@ describe("the receipt the machine signs", () => {
 
     it("records a verified merge, citing the assignment and the receipt behind it", async () => {
       const e = env();
-      const routes = app();
+      const routes = app({ mergeWrite: async () => ({ kind: "merged" as const, mergeSha: MERGE_SHA }) });
       await merged(routes, e);
 
       const rows = stored("verified-merge");
@@ -604,7 +516,7 @@ describe("the receipt the machine signs", () => {
 
     it("puts that record on the chain, and the intent it cites is readable", async () => {
       const e = env();
-      const routes = app();
+      const routes = app({ mergeWrite: async () => ({ kind: "merged" as const, mergeSha: MERGE_SHA }) });
       await merged(routes, e);
 
       const link = raw
@@ -623,106 +535,6 @@ describe("the receipt the machine signs", () => {
         .get(record.value.verifiedMerge.mergeIntentDigest) as { bytes: string } | undefined;
       expect(intent).toBeDefined();
     });
-  });
-
-  it("asks for the merge to be written once the run is answered for", async () => {
-    const e = env();
-    const routes = app();
-    const claimed = await claim(routes, e);
-    expect(driven).toEqual([]);
-
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-    expect(driven).toEqual([PR]);
-  });
-
-  /**
-   * The whole point, with the one dispatch thrown away.
-   *
-   * Everything up to the receipt worked in production and nothing after it ever
-   * did: the receipt route dispatched once, fired and forgot, and no other
-   * caller in the system would drive a device-only lane. So a single lost
-   * dispatch was the difference between a merge and an attempt sitting in
-   * `RECEIPT_SUBMITTED` until its deadline. The merge Actions performs is stood
-   * up here for real — the same `authorize` with `prepare` and the same
-   * `/merged` report the workflow makes — and the only thing asking for it is
-   * the five-minute sweep.
-   */
-  it("reaches a merge and a verified-merge record when the first dispatch is lost", async () => {
-    const e = env();
-    const db = e.DB as unknown as D1Like;
-    // The dispatch the receipt route makes goes nowhere, as it did in production.
-    const routes = app({ driveTurn: async () => {} });
-    const claimed = await claim(routes, e);
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-
-    const held = await attemptId(e);
-    expect(
-      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
-    ).toMatchObject({ n: 0 });
-
-    await tickAllQueues(e, {
-      driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
-      onQueueTicked: () => {},
-      onQueueFailed: () => {},
-      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
-    });
-
-    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
-    expect(after.entries[0]).toMatchObject({ state: "Merged" });
-    const rows = raw
-      .prepare("SELECT bytes FROM queue_attestations WHERE kind = 'verified-merge'")
-      .all() as Array<{ bytes: string }>;
-    expect(rows).toHaveLength(1);
-    const parsed = parseTransitionRecord(JSON.parse(rows[0]!.bytes) as unknown);
-    if (!parsed.ok || parsed.value.kind !== "verified-merge") throw new Error("wrong kind");
-    expect(parsed.value.verifiedMerge.assignmentDigest).toBe(claimed.assignmentDigest);
-    expect(parsed.value.verifiedMerge.attemptId).toBe(held);
-  });
-
-  /**
-   * And the gate the profile exists for, over the same recovered path. A sweep
-   * that drives a lane the device never answered for merges nothing: `fresh`
-   * without a receipt is a refusal, and no amount of asking again changes it.
-   */
-  it("merges nothing on that path when no receipt was ever accepted", async () => {
-    const e = env();
-    const db = e.DB as unknown as D1Like;
-    const routes = app({ driveTurn: async () => {} });
-    await claim(routes, e);
-
-    await tickAllQueues(e, {
-      driveTurn: async () => void (await mergeAsActionsWould(routes, e)),
-      onQueueTicked: () => {},
-      onQueueFailed: () => {},
-      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
-    });
-
-    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
-    expect(after.entries[0]?.state).not.toBe("Merged");
-    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE transition_sequence IS NOT NULL").get())
-      .toMatchObject({ n: 0 });
-  });
-
-  /**
-   * The operator's way back in, for the one state it could not see.
-   *
-   * `/nudge` picked the holder itself, and only ever looked for `Offered` or
-   * `Active`. An attempt that had returned its receipt is `Verifying`, so the
-   * one lane in flight read as no lane at all: the route answered `LANE_IDLE`
-   * and returned before `driveLane` — which does understand `Verifying` — was
-   * ever called. Every operator tool reported an idle queue while an attempt
-   * held the lane, which is how the merge that never happened stayed invisible.
-   */
-  it("nudges a lane held by an attempt whose receipt is already in", async () => {
-    const e = env();
-    const routes = app();
-    const claimed = await claim(routes, e);
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-    driven.length = 0;
-
-    const response = await post(routes, e, "nudge", {});
-    expect(await response.json()).toMatchObject({ nudged: true, pullRequestNumber: PR, state: "Verifying" });
-    expect(driven).toEqual([PR]);
   });
 
   /**
@@ -791,7 +603,7 @@ describe("the receipt the machine signs", () => {
   it("hands a device its turn after the branch moved outside the queue", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
-    const routes = app();
+    const routes = app({ mergeWrite: async () => ({ kind: "merged" as const, mergeSha: MERGE_SHA }) });
     const moved = "a".repeat(40);
     await withQueueState(db, REPO, REF, (store) => {
       const commands = commandsFor(store);
@@ -807,7 +619,6 @@ describe("the receipt the machine signs", () => {
     // intent: a chain that starts with something nothing signed cannot be
     // extended by anything either.
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-    await mergeAsActionsWould(routes, e);
 
     const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
     expect(after.entries[0]).toMatchObject({ state: "Merged" });
@@ -817,7 +628,7 @@ describe("the receipt the machine signs", () => {
   });
 
   /**
-   * The receipt route's own dispatch, all the way to the record.
+   * The receipt route's App drive, all the way to the record.
    *
    * The five-minute sweep is the recovery, not the path. What a developer
    * watching `thwip ship` waits on is the merge the acceptance of their receipt
@@ -827,8 +638,7 @@ describe("the receipt the machine signs", () => {
   it("reaches a verified-merge record from the drive the receipt itself asks for", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
-    let routes: Routes;
-    routes = app({ driveTurn: async () => void (await mergeAsActionsWould(routes, e)) });
+    const routes = app({ mergeWrite: async () => ({ kind: "merged" as const, mergeSha: MERGE_SHA }) });
     const claimed = await claim(routes, e);
 
     await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
@@ -838,90 +648,6 @@ describe("the receipt the machine signs", () => {
     expect(
       raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
     ).toMatchObject({ n: 1 });
-  });
-
-  /**
-   * The queue's own merge closes the pull request, and GitHub says so.
-   *
-   * `pull_request closed` arrives while the merge workflow is still reporting
-   * what it did, and the close handler cancelled the entry and terminated its
-   * attempt `ADMIN_CANCELLED`. So `/merged` was refused `RESULT_NOT_AUTHORIZED`
-   * for an attempt that had just merged: GitHub held the commit and the chain
-   * held nothing. `recallnet/thwip-test` pull request 2 merged as `b4a9c56` with
-   * no record, one second after the close beat the report.
-   *
-   * A merge write already sent to GitHub is not the operator's to cancel and
-   * not a webhook's either. Only confirmation may say what it did.
-   */
-  it("records the merge when the close webhook beats the report of it", async () => {
-    const e = env();
-    const db = e.DB as unknown as D1Like;
-    const routes = app({ driveTurn: async () => {} });
-    const claimed = await claim(routes, e);
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-
-    const verdict = (await (await authorize(routes, e, { prepare: true, candidate })).json()) as Verdict;
-    expect(verdict.operationId).not.toBeNull();
-    const held = await attemptId(e);
-
-    // GitHub's close, in the window between the merge landing and the report.
-    await withQueueState(db, REPO, REF, (store) => {
-      commandsFor(store).cancel({
-        idempotencyKey: `webhook:closed:${held}`,
-        entryId: `entry_${REPO}_${PR}`,
-        actorPrincipalId: "github",
-        reason: "the pull request was closed",
-      });
-    });
-
-    const reported = await routes.request(
-      `/v1/queue/${REPO}/merged`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          baseRef: REF,
-          attemptId: held,
-          operationId: verdict.operationId,
-          mergeSha: MERGE_SHA,
-        }),
-      },
-      e,
-    );
-    expect(reported.status).toBe(200);
-
-    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
-    expect(after.entries[0]).toMatchObject({ state: "Merged" });
-    expect(
-      raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'verified-merge'").get(),
-    ).toMatchObject({ n: 1 });
-  });
-
-  /**
-   * And a close that is a close still ends the turn. Nothing was sent to
-   * GitHub for this attempt, so there is no write to protect and the lane has
-   * to be freed for whatever is behind it.
-   */
-  it("still cancels a turn whose pull request was closed before any merge was asked for", async () => {
-    const e = env();
-    const db = e.DB as unknown as D1Like;
-    const routes = app({ driveTurn: async () => {} });
-    const claimed = await claim(routes, e);
-    await post(routes, e, "receipt", await signedReceipt(receipt(claimed)));
-    const held = await attemptId(e);
-
-    await withQueueState(db, REPO, REF, (store) => {
-      commandsFor(store).cancel({
-        idempotencyKey: `webhook:closed:${held}`,
-        entryId: `entry_${REPO}_${PR}`,
-        actorPrincipalId: "github",
-        reason: "the pull request was closed",
-      });
-    });
-
-    const after = await withQueueState(db, REPO, REF, (store) => buildSnapshot(store));
-    expect(after.entries[0]).toMatchObject({ state: "Cancelled" });
-    expect(after.activeAttemptId).toBeNull();
   });
 
   it("still reports an idle lane as idle", async () => {
@@ -929,7 +655,6 @@ describe("the receipt the machine signs", () => {
     const routes = app();
     const response = await post(routes, e, "nudge", {});
     expect(await response.json()).toMatchObject({ nudged: false, reason: "LANE_IDLE" });
-    expect(driven).toEqual([]);
   });
 });
 

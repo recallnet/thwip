@@ -7,9 +7,9 @@
  * registration therefore failed the diagnostic written beside its manifest.
  *
  * `contents: write` is what performs the merge: writing the commit object and
- * moving the branch ref are both Contents, and `managedOwnershipRuleset` already
- * names the App as the only actor allowed to update a managed branch. The
- * repository_dispatch the queue drives lanes with is Contents: write too.
+ * moving the branch ref are both Contents, and `appOwnershipRuleset` already
+ * names the App as the only actor allowed to update the queued branch. The
+ * candidate verifier dispatch is Contents: write too.
  *
  * `issues: write` is deliberately absent, and the reason is worth keeping. The
  * status comment goes to `/issues/{n}/comments`, which reads as an Issues

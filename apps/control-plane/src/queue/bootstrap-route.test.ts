@@ -207,9 +207,9 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(row?.base_ref).toBe("refs/heads/main");
     expect(row?.enabled).toBe(1);
     expect(row?.activation_state).toBe("enforced");
-    expect(row?.backend).toBe("managed");
-    expect(row?.merge_method).toBe("merge");
-    expect(row?.merge_writer).toBe("app");
+    expect(Object.hasOwn(row ?? {}, "backend")).toBe(false);
+    expect(Object.hasOwn(row ?? {}, "merge_method")).toBe(false);
+    expect(Object.hasOwn(row ?? {}, "merge_writer")).toBe(false);
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
   });
 
@@ -272,20 +272,6 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(github.openedFiles).toContain("thwip.yaml");
   });
 
-  it("takes the backend the caller asked for", async () => {
-    seedInstalledRepository();
-    await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "admin" },
-      REPOSITORY_ID,
-      { backend: "native", mergeMethod: "merge" },
-      port,
-    );
-    const row = queueProjectRow();
-    expect(row?.backend).toBe("native");
-    expect(row?.merge_method).toBe("merge");
-  });
-
   it("returns an exact manual ruleset payload without writing it as the App", async () => {
     seedInstalledRepository();
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
@@ -315,22 +301,6 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
         },
       ],
     });
-  });
-
-  it("refuses a squash configuration the App writer cannot bind to the verified head", async () => {
-    seedInstalledRepository();
-    const response = await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "admin" },
-      REPOSITORY_ID,
-      { mergeMethod: "squash" },
-      port,
-    );
-    expect(response).toMatchObject({
-      status: 400,
-      body: { code: "MERGE_COMMITS_REQUIRED" },
-    });
-    expect(queueProjectRow()).toBeUndefined();
   });
 
   it("structures a GitHub failure while reading rulesets", async () => {

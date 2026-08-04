@@ -1,5 +1,6 @@
 import type { QueueRouteEnv } from "./routes.js";
 import { authorizeTurn, type AuthorizeTurnDeps } from "./authorize-turn.js";
+import { driveQueue } from "./drive-queue.js";
 import type { OnQueue } from "./merge-lane.js";
 
 /** What naming the pull requests on a commit needs of GitHub. */
@@ -22,9 +23,8 @@ export interface ReconsiderHeadDeps<TEnv extends QueueRouteEnv> extends Authoriz
  * this exists to remove.
  *
  * So the App tells itself. Whoever changes a fact about a commit calls this,
- * and the same walk the `pull_request` delivery makes runs again with the new
- * answer. Nothing prepares a merge here: preparing starts the
- * merge-confirmation clock, and this is not the caller that is about to write.
+ * and the same check-facing walk the `pull_request` delivery makes runs again
+ * with the new answer. The write remains a separate internal App wake.
  */
 export async function reconsiderHead<TEnv extends QueueRouteEnv>(
   env: TEnv,
@@ -51,7 +51,10 @@ export async function reconsiderHead<TEnv extends QueueRouteEnv>(
       headSha: input.headSha,
       authorGithubUserId: placement.authorGithubUserId,
       draft: placement.draft,
-      prepare: false,
+    });
+    await driveQueue(env, deps, onQueue, {
+      repositoryId: input.repositoryId,
+      baseRef: placement.baseRef,
     });
     walked += 1;
   }

@@ -329,13 +329,12 @@ export interface ReviewGates {
 /**
  * The four review gates, from one read of the branch rules and the pull request.
  *
- * GitHub enforces all four and only GitHub, at the ref update the merge workflow
- * performs. Nothing in the control plane read a review, so a pull request with
+ * GitHub enforces all four and only GitHub, at the ref update the App performs.
+ * Nothing in the control plane read a review, so a pull request with
  * no approval was called ready, given the lane ahead of everyone waiting, run
  * through the full pipeline on a developer's machine, and handed a signed
  * merge-intent attestation for a merge GitHub was never going to permit. The
- * 422 arrived after all of that, and the sentence that explained it sat in an
- * Actions log.
+ * 422 arrived after all of that, after the queue had already spent the turn.
  *
  * Nothing here refuses on its own arithmetic. A refusal needs GitHub to have
  * already said `REVIEW_REQUIRED` or `CHANGES_REQUESTED`, or a required thread

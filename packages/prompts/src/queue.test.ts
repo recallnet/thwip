@@ -11,7 +11,6 @@ function facts(over: Partial<QueueInstructionFacts> = {}): QueueInstructionFacts
   return {
     repositoryName: "recallnet/thwip",
     baseRef: "refs/heads/main",
-    backend: "managed",
     activationState: "enforced",
     hasDaggerModule: true,
     ...over,

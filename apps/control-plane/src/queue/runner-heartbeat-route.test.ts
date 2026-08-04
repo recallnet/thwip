@@ -209,63 +209,6 @@ describe("the heartbeat endpoint", () => {
     expect(second.holdsOffer).toBe(true);
   });
 
-  it("does not dispatch Actions for a lane held under a device-only profile", async () => {
-    const e = env();
-    queueProject();
-    await readyButOffline(e.DB as unknown as D1Like, "entry_a", "alice", 41);
-
-    let driven = 0;
-    const app = queueRoutes({
-      authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: false }),
-      verifyOidc: async () => null,
-      pinnedVerifier: async () => null,
-      activePolicy: async () => ({ securityProfile: "fresh" }),
-      dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-      principalFor: async () => null,
-      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-      driveTurn: async () => {
-        driven += 1;
-      },
-      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-    });
-
-    const response = await heartbeat(app, e);
-    expect(response.status).toBe(200);
-    // The offer clears AGENT_OFFLINE and is offered in the same call — the
-    // finding this guards is that this exact settle path used to dispatch
-    // Actions for a lane no Actions run would ever claim.
-    const snapshot = await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => buildSnapshot(store));
-    expect(snapshot.entries.find((x) => x.entryId === "entry_a")?.state).toBe("Offered");
-    expect(driven).toBe(0);
-  });
-
-  it("still dispatches Actions for a lane held under a profile that needs it", async () => {
-    const e = env();
-    queueProject();
-    await readyButOffline(e.DB as unknown as D1Like, "entry_a", "alice", 41);
-
-    let driven = 0;
-    const app = queueRoutes({
-      authenticate: async () => ({ ok: true, principalId: "alice", githubUserId: "1", isAdmin: false }),
-      verifyOidc: async () => null,
-      pinnedVerifier: async () => null,
-      activePolicy: async () => ({ securityProfile: "fast" }),
-      dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-      principalFor: async () => null,
-      pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-      driveTurn: async () => {
-        driven += 1;
-      },
-      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
-    });
-
-    const response = await heartbeat(app, e);
-    expect(response.status).toBe(200);
-    expect(driven).toBe(1);
-  });
-
   it("rejects a heartbeat with no device key", async () => {
     const e = env();
     queueProject();

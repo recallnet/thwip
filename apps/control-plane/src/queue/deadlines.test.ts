@@ -66,6 +66,12 @@ const REF = "refs/heads/main";
 function routes() {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
+      // These deadline tests exercise the queue clock, not the merge writer.
+      // With no active policy the internal App wake leaves the offered turn in
+      // place, which is the same precondition a device that stopped answering
+      // creates in production.
+      activePolicy: async () => null,
+      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
     }) as Parameters<typeof queueRoutes>[0],
   );
 }
@@ -279,10 +285,12 @@ async function stateNow(db: D1Like) {
 }
 
 const PORTS = {
-  driveTurn: async () => {},
+  driveQueue: async () => {},
   onQueueTicked: () => {},
   onQueueFailed: () => {},
-  reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
+  reconsiderHead: async () => 0,
+  publishStatusComments: async () => {},
+  retireStatusComments: async () => {},
 };
 
 /** Every read agrees the merge did not happen, which is what was true on the day. */

@@ -22,7 +22,7 @@ import { serviceKey, signPayload } from "./service-signing.js";
 import { appliedMigrations } from "./schema-state.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
-import { capabilityFor, enrolDeviceKey, requiresDeviceOnly } from "./queue/runners.js";
+import { capabilityFor, enrolDeviceKey } from "./queue/runners.js";
 import { isOrgAdmin } from "./queue/repository-access.js";
 import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
 import {
@@ -36,7 +36,6 @@ import type { D1Like } from "./queue/projection.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import {
-  mergeWriterOf,
   performMergeWrite,
   refUpdateRequestBody,
   type MergeIntent,
@@ -48,8 +47,7 @@ import { reconsiderHead } from "./queue/reconsider-head.js";
 import { driveQueue } from "./queue/drive-queue.js";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
-import { requestTurn, type QueueSnapshot } from "./queue/queue-operations.js";
-import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
+import type { QueueSnapshot } from "./queue/queue-operations.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
@@ -75,8 +73,6 @@ import { commentViews } from "./queue/status-comment.js";
 import { writeStatusComment, type CommentApi, type CommentBudget } from "./queue/status-comment-write.js";
 import { externalPushFromWebhook, pushedQueueBranch } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
-import { backfillAttestations } from "./queue/attestation-backfill.js";
-import { hasEvidence, putEvidence, type R2Like } from "./queue/evidence-store.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
 import {
   processAppProof,
@@ -275,7 +271,8 @@ async function orgPlan(env: Env, organizationId: string): Promise<string> {
  */
 function tickPortsFor(env: Env): TickPorts {
   return {
-    driveTurn: (repositoryId, pullRequestNumber) => driveTurnFor(env, repositoryId, pullRequestNumber),
+    driveQueue: (repositoryId, baseRef) =>
+      driveQueue(env, queueDeps as never, queueOnQueue, { repositoryId, baseRef }).then(() => undefined),
     // The same walk the `pull_request` delivery and the proof consumer make.
     // The tick is where a delivery that never landed its projection write gets
     // asked again, and one derivation answers all three.
@@ -1480,7 +1477,7 @@ export async function queueFromPullRequest(env: Env, payload: {
   // ejected it by hand. That happened three times in one night, to pull
   // requests 78, 96 and 97, each already merged.
   if (action === "closed") {
-    const { snapshot } = await runOnQueue(
+    await runOnQueue(
       env,
       String(repositoryId),
       ref,
@@ -1498,27 +1495,10 @@ export async function queueFromPullRequest(env: Env, payload: {
       (update) => publishTurnCheckFor(env, String(repositoryId), update),
     );
 
-    // Cancelling a closed entry that held the lane frees it exactly like an
-    // eject does, and the same ninety-second offer expires unclaimed unless
-    // something drives it. The eject route drives through `driveLane`; this
-    // webhook has no route deps to borrow it from, so it repeats the same
-    // lookup directly against `driveTurnFor`, the same dispatcher the route
-    // uses underneath — and the same `requiresDeviceOnly` check `driveLane`
-    // applies, read here with `readActivePolicy` directly rather than through
-    // a `deps` object this module-level handler does not have. Skipping the
-    // check would spend an Actions run under `fresh`/`audited`, where no
-    // workflow can ever claim it.
-    const holder = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
-    if (holder !== undefined) {
-      const policy = await readActivePolicy(env.DB as unknown as D1Like, String(repositoryId));
-      if (!requiresDeviceOnly(policy?.securityProfile ?? null)) {
-        try {
-          await driveTurnFor(env, String(repositoryId), holder.pullRequestNumber);
-        } catch {
-          /* the turn survives; a later tick or the drain asks again */
-        }
-      }
-    }
+    await driveQueue(env, queueDeps as never, queueOnQueue, {
+      repositoryId: String(repositoryId),
+      baseRef: ref,
+    }).catch(() => undefined);
 
     return { handled: true, detail: "entry cancelled" };
   }
@@ -1586,9 +1566,8 @@ export async function queueFromPullRequest(env: Env, payload: {
   // that lived in a route only a workflow could call.
   //
   // `authorizeTurn` reads what it needs with the App's own token, admits,
-  // evaluates, ticks, claims and drives. `prepare` is false: preparing starts
-  // the merge-confirmation clock, and this delivery is not the caller that is
-  // about to write.
+  // evaluates, ticks and claims. The write is a separate internal App wake so
+  // the check-facing authorization path can never acquire merge side effects.
   const walked = await authorizeTurn(env, queueDeps as never, queueOnQueue, {
     repositoryId: String(repositoryId),
     baseRef: ref,
@@ -1596,8 +1575,14 @@ export async function queueFromPullRequest(env: Env, payload: {
     headSha,
     authorGithubUserId: String(authorId),
     draft: pr?.draft === true,
-    prepare: false,
   });
+
+  if (walked.outcome !== "not-configured") {
+    await driveQueue(env, queueDeps as never, queueOnQueue, {
+      repositoryId: String(repositoryId),
+      baseRef: ref,
+    }).catch(() => undefined);
+  }
 
   return {
     handled: walked.outcome !== "not-configured",
@@ -1665,9 +1650,7 @@ app.post("/api/github/webhooks", async (c) => {
   //
   // Both cases are worth waking for. The queue's own merge frees the lane for
   // whoever is next, and a push from outside it changes the base every waiting
-  // candidate was integrated against. `driveQueue` answers nothing for a
-  // repository that still runs `thwip-merge.yml`, where the dispatch already
-  // starts the workflow that asks.
+  // candidate was integrated against.
   const moved = pushedQueueBranch(event, payload as never);
   if (moved !== null) {
     try {
@@ -1815,38 +1798,6 @@ app.get("/admin/github/manifest/callback", async (c) => {
 /* ---------- Thwip Queue ---------- */
 
 /**
- * Ask GitHub to run the merge workflow for a pull request the queue offered.
- *
- * repository_dispatch, because it needs only Contents: write, which the App
- * has, and because it always runs the default branch's copy of the workflow.
- *
- * Module-level so the request route and the five-minute heartbeat share one
- * implementation rather than each keeping a copy.
- */
-async function driveTurnFor(env: Env, repositoryId: string, pullRequestNumber: number): Promise<void> {
-  const project = await env.DB.prepare(
-    "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
-  )
-    .bind(repositoryId)
-    .first<{ github_name: string; installation_id: string | null }>();
-  if (project === null || project.installation_id === null) return;
-  const token = await installationToken(env, project.installation_id);
-  await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "application/vnd.github+json",
-      "content-type": "application/json",
-      "user-agent": "thwip-control-plane",
-    },
-    body: JSON.stringify({
-      event_type: "thwip-queue-turn",
-      client_payload: { pullRequestNumber },
-    }),
-  });
-}
-
-/**
  * Publish whose turn it is, as a check GitHub can require.
  *
  * Waiting is reported as still running rather than failed. A required check that
@@ -1855,7 +1806,7 @@ async function driveTurnFor(env: Env, repositoryId: string, pullRequestNumber: n
  * authorized, and the queue offered the same turn to a pull request that could
  * not take it.
  *
- * Module-level for the same reason `driveTurnFor` is. The routes reach it
+ * Module-level so routes and webhook reconciliation share one implementation.
  * through their deps object; the pull-request webhook has no deps object and
  * used to publish nothing at all, which left every pull request that waited
  * without the check the branch requires.
@@ -2135,21 +2086,12 @@ const queueDeps = {
   },
   async queueProject(env: Env, repositoryId: string, baseRef: string) {
     const row = await env.DB.prepare(
-      "SELECT activation_state, merge_method, merge_writer FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+      "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
     )
       .bind(repositoryId, baseRef)
-      .first<{ activation_state: string; merge_method: string; merge_writer: string | null }>();
+      .first<{ activation_state: string }>();
     if (row === null) return null;
-    // The column is a free-text default in the schema; a record must never
-    // bind a value the protocol does not recognize.
-    const mergeMethod = row.merge_method === "merge" || row.merge_method === "squash"
-      ? row.merge_method
-      : DEFAULT_MERGE_METHOD;
-    return {
-      activationState: row.activation_state,
-      mergeMethod,
-      mergeWriter: mergeWriterOf(row.merge_writer),
-    };
+    return { activationState: row.activation_state };
   },
   async principalFor(env: Env, githubUserId: string) {
     if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
@@ -2260,15 +2202,6 @@ const queueDeps = {
    */
   async activePolicy(env: Env, repositoryId: string) {
     return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
-  },
-  /**
-   * Ask GitHub to run the merge workflow for a pull request the queue offered.
-   *
-   * repository_dispatch, because it needs only Contents: write, which the App
-   * has, and because it always runs the default branch's copy of the workflow.
-   */
-  async driveTurn(env: Env, repositoryId: string, pullRequestNumber: number) {
-    return driveTurnFor(env, repositoryId, pullRequestNumber);
   },
   /**
    * The App's proof check that verified this head.
@@ -2401,7 +2334,7 @@ const queueDeps = {
             ? { ok: true as const, sha: body.object.sha }
             : { ok: false as const, status: res.status, message: "GitHub moved the ref and named no sha" };
         },
-        // The same two reads `/not-merged` resolves an absence from. GitHub's
+        // The same two reads reconciliation uses to resolve an absence. GitHub's
         // reads lag its own writes, so one negative answer is not a negative.
         async readPull() {
           const res = await fetch(`${api}/pulls/${intent.pullRequestNumber}`, { headers });
@@ -2980,46 +2913,6 @@ export default {
       }
     }
 
-    // Copy anything the mirror missed. Idempotent, bounded, and it reports zero
-    // once the backlog is gone.
-    try {
-      const backfill = await backfillAttestations(env.DB as unknown as D1Like, {
-        organizationIdFor: async (repositoryId) => {
-          const row = await env.DB.prepare(
-            "SELECT organization_id AS id FROM projects WHERE github_repository_id = ?",
-          )
-            .bind(repositoryId)
-            .first<{ id: string }>();
-          return row?.id ?? null;
-        },
-        has: async (input) =>
-          env.EVIDENCE === undefined
-            ? true
-            : hasEvidence(env.EVIDENCE as unknown as R2Like, {
-                organizationId: input.organizationId,
-                repositoryId: input.repositoryId,
-                kind: input.kind as never,
-                digest: input.digest as `sha256:${string}`,
-              }),
-        put: async (input) => {
-          if (env.EVIDENCE === undefined) return;
-          await putEvidence(env.EVIDENCE as unknown as R2Like, {
-            organizationId: input.organizationId,
-            repositoryId: input.repositoryId,
-            kind: input.kind,
-            digest: input.digest as `sha256:${string}`,
-            bytes: input.bytes,
-          });
-        },
-      });
-      console.log(
-        `[attestation backfill] copied=${backfill.copied} alreadyThere=${backfill.alreadyThere} skipped=${backfill.skipped}`,
-      );
-    } catch (error) {
-      // wrangler tail is how this account observes the Worker. A backfill whose
-      // failure vanishes leaves the backlog it exists to drain silently stuck.
-      console.error(`[attestation backfill] run failed:`, error);
-    }
   },
 } satisfies ExportedHandler<Env>;
 

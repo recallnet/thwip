@@ -176,10 +176,9 @@ describe("what a contributor gets over HTTP", () => {
       pinnedVerifier: async () => null,
       activePolicy: async () => null,
       dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+      queueProject: async () => ({ activationState: "enforced" }),
       principalFor: async () => null,
       pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: IDENTITY.baseRef, authorIsBot: false }),
-      driveTurn: async () => {},
       commitFacts: async () => null,
     });
 

@@ -1,15 +1,10 @@
 /**
  * Performing the merge the queue authorized, from the Worker.
  *
- * This used to be shell inside every adopter's `thwip-merge.yml`, behind a
- * `THWIP_ENQUEUE_TOKEN` the adopter minted and pasted into Actions. That put a
- * branch-write credential in the most exposed surface in the design, made every
- * adopter rotate one, and left the guard that makes the whole scheme safe as
- * untested shell in somebody else's repository. The App already requires
- * `contents: write` — writing a commit object and moving a ref are both
- * Contents, and `managedOwnershipRuleset` already names the App as the only
- * actor that may update a managed branch — so the write moves here and the
- * guard becomes code with tests around it.
+ * The App owns the write. Writing a commit object and moving a ref are both
+ * covered by `contents: write`, and `appOwnershipRuleset` names the App as the
+ * only actor that may update the queued branch, so the fast-forward guard is
+ * code this repository tests directly.
  *
  * The guard is one sentence. GitHub accepts a ref update without force only
  * where the branch is an ancestor of the new commit, and the only branch that is
@@ -31,9 +26,8 @@ import { confirmMergeAbsence } from "./merge-absence.js";
  * The one shape a branch move may take.
  *
  * `force` is typed to the literal `false` rather than to `boolean`, so a caller
- * that wants to force cannot be written. The workflow version of this is held
- * to the same property by regex in `scripts/workflow-lint.mjs`; a type is what
- * holds it here, and `merge-write.test.ts` reads the recorded request back.
+ * that wants to force cannot be written. `merge-write.test.ts` also reads the
+ * recorded request back at the runtime boundary.
  */
 export interface RefUpdate {
   readonly sha: string;
@@ -112,9 +106,6 @@ const NOT_A_FAST_FORWARD = /not a fast forward/i;
  * The Worker publishes `thwip / turn` green and moves the branch inside one
  * request, and GitHub's rule evaluation runs behind its own check-run write, so
  * the ref update is refused with 422 naming a check that just concluded.
- * `thwip-merge.yml` never met this: it is a second workflow, and by the time it
- * starts the required check has been concluded for seconds.
- *
  * Narrow on purpose. A required check that is genuinely unsatisfied says
  * "expected" rather than "in progress", takes no retry, and still refuses the
  * merge.
@@ -217,19 +208,4 @@ export async function performMergeWrite(
     return { kind: "not-merged", detail: `${landed.status}: ${landed.message}` };
   }
   return { kind: "unknown", detail: `${landed.status}: ${landed.message}; ${absence.reason}` };
-}
-
-/**
- * Who moves the branch for a queue project.
- *
- * `workflow` is every repository enrolled before this existed: the merge is
- * shell in `thwip-merge.yml` behind the adopter's own token. `app` is the
- * Worker performing it. One at a time, and never before the repository has
- * stopped running the workflow, because two writers racing for one turn is how
- * a merge that landed gets reported as a base that moved.
- */
-export type MergeWriter = "workflow" | "app";
-
-export function mergeWriterOf(value: string | null | undefined): MergeWriter {
-  return value === "app" ? "app" : "workflow";
 }
