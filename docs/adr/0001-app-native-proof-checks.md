@@ -57,6 +57,17 @@ What it buys is one branch-write credential removed from every adopter's Actions
 secrets, and a guard this repository tests. `queue_projects.merge_writer` decides
 which of the two writes, per repository, and it defaults to the workflow.
 
+One thing stands between that default and deleting the column. Moving this
+repository to the App was tried on 4 August 2026 and GitHub refused the ref
+update: `422 Required status check "thwip / turn" is in progress`. The queue
+publishes that check green and then writes the branch inside the same request,
+and GitHub's rule evaluation has not caught up by the time the write arrives.
+The workflow never met this, because it ran in a second workflow that started
+only once the required check had concluded — which is what the comment at the
+top of `thwip-merge.yml` is about. So the Worker has to wait for the check it
+just published to be readable before it moves the branch, and until it does, the
+column stays and the default stays.
+
 ## Rationale
 
 App ownership removes a repository workflow from the trust boundary, gives
