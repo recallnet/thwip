@@ -19,16 +19,20 @@ import type { SelfCheckFinding } from "./chain-self-check.js";
  *
  * So it does the search itself. Given the two shas the finding names, it walks
  * first parents from the far end back to the near one, which is exactly the
- * commits that moved the branch, and asks `authorizationFor` about each. That
- * search has three honest answers and this module keeps them apart:
+ * commits that moved the branch, and asks `authorizationFor` about each. Every
+ * answer that search can give is kept apart from the others:
  *
- * - One intent authorizes the commit. The remedy is the repair that already
- *   exists, with the attempt named.
+ * - One intent authorizes the commit, and it is one a record can be rebuilt
+ *   from. The remedy is the repair that already exists, with the attempt named.
  * - No intent authorizes it. The queue never pinned that tree on those parents,
  *   so no merge record can be written. What can be written is that the branch
  *   moved and the queue did not certify the move, which is weaker on purpose.
  * - Two attempts authorize it. Nothing is written and both are named. Picking
  *   would be a guess wearing a signature.
+ * - One attempt's intents authorize it and disagree. Both digests are named. A
+ *   movement record here would deny a movement the queue's own signatures pin.
+ * - The intent is a verified or an override merge, whose record binds evidence
+ *   the intent never carried. Nothing can rebuild it, so nothing offers to.
  *
  * The healing does not widen what a record may claim. It removes the forensics
  * in front of a call that was already safe, and where the safe call cannot be
