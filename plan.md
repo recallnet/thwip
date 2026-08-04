@@ -7,7 +7,7 @@
 > described below are not supported product configuration. See
 > `docs/adr/0001-app-native-proof-checks.md` for the current decision.
 
-**Status:** build-ready v1 proposal  
+**Status:** historical v1 proposal; Queue setup/runtime superseded by ADR 0001
 **Date:** 2026-07-29  
 **Product:** Thwip  
 **Development origin:** `https://airchime.recall.net`  
