@@ -1125,6 +1125,11 @@ interface BootstrapOutcome {
   step: string;
   detail: string;
   pullRequestNumber?: number;
+  manualRulesets?: Array<
+    | { operation: "create"; ruleset: Record<string, unknown> }
+    | { operation: "update"; rulesetId: number; ruleset: Record<string, unknown> }
+  >;
+  confirmationRequired?: "ruleset-bypass-actors";
 }
 
 interface BootstrapBody {
@@ -1144,12 +1149,13 @@ interface BootstrapBody {
 async function bootstrapRequest(
   repositoryId: string,
   method: "GET" | "POST",
+  input: { confirmRulesetBypassActors?: boolean } = {},
 ): Promise<{ status: number; body: BootstrapBody }> {
   const res = await fetch(withOrg(`/v1/queue/${repositoryId}/bootstrap`), {
     method,
     credentials: "include",
     headers: { "content-type": "application/json" },
-    ...(method === "POST" ? { body: "{}" } : {}),
+    ...(method === "POST" ? { body: JSON.stringify(input) } : {}),
   });
   const body = (await res.json().catch(() => ({}))) as BootstrapBody;
   return { status: res.status, body };
@@ -1171,6 +1177,21 @@ function stoppedOn(body: BootstrapBody): string | null {
   return last === undefined ? null : last.detail;
 }
 
+function rulesetCommand(
+  repository: string,
+  change: NonNullable<BootstrapOutcome["manualRulesets"]>[number],
+): string {
+  const path =
+    change.operation === "create"
+      ? `repos/${repository}/rulesets`
+      : `repos/${repository}/rulesets/${change.rulesetId}`;
+  return [
+    `gh api --method ${change.operation === "create" ? "POST" : "PUT"} ${path} --input - <<'JSON'`,
+    JSON.stringify(change.ruleset, null, 2),
+    "JSON",
+  ].join("\n");
+}
+
 type EnrolmentPhase = "idle" | "running" | "waiting" | "enrolled" | "failed";
 
 /**
@@ -1187,6 +1208,7 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   const [body, setBody] = useState<BootstrapBody>({});
   const [failure, setFailure] = useState<string | null>(null);
   const [pull, setPull] = useState<number | null>(null);
+  const [confirmedBypassActors, setConfirmedBypassActors] = useState(false);
 
   // What setup already got to, so a reader who comes back to this page sees
   // where it stands rather than a button that implies nothing has happened.
@@ -1221,7 +1243,10 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     setPhase("running");
     setFailure(null);
     try {
-      const { status, body: answered } = await bootstrapRequest(repositoryId, "POST");
+      const { status, body: answered } = await bootstrapRequest(repositoryId, "POST", {
+        ...(confirmedBypassActors ? { confirmRulesetBypassActors: true } : {}),
+      });
+      setConfirmedBypassActors(false);
       setBody(answered);
       if (status === 200) {
         setPhase("enrolled");
@@ -1239,6 +1264,7 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
           (status === 409 ? "Setup refused a change that would take a control away." : `${status}`),
       );
     } catch (e) {
+      setConfirmedBypassActors(false);
       setPhase("failed");
       setFailure((e as Error).message);
     }
@@ -1255,25 +1281,57 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     );
   }
 
+  const waiting = body.outcomes?.at(-1);
+  const manualRulesets = waiting?.kind === "waiting" ? (waiting.manualRulesets ?? []) : [];
+  const needsBypassConfirmation =
+    waiting?.kind === "waiting" && waiting.confirmationRequired === "ruleset-bypass-actors";
+
   return (
     <Panel title="Thwip Queue" meta="merges one pull request at a time, with a signed record of each merge">
       <p>
         Setting up opens a pull request on <code>{project.github_name}</code> carrying the two workflows and a{" "}
-        <code>thwip.yaml</code>. Merge it under the controls this repository already has, then continue: setup builds
-        the branch ruleset requiring <code>thwip</code> and <code>thwip / turn</code>, pins each to the source that
-        publishes it, and leaves the queue observing. Running it again changes nothing it has already done.
+        <code>thwip.yaml</code>. Merge it under the controls this repository already has, then continue. Setup returns
+        exact ruleset payloads for you to apply with repository-administrator authority, verifies the visible
+        configuration, and leaves the queue observing. The App never receives repository Administration permission.
       </p>
       {failure && <p className="thwip-error">{failure}</p>}
       {phase === "waiting" && (
-        <p>
-          Waiting on the setup pull request.{" "}
-          {pull !== null && (
-            <a href={`https://github.com/${project.github_name}/pull/${pull}`} target="_blank" rel="noreferrer">
-              #{pull}
-            </a>
-          )}{" "}
-          {stoppedOn(body) ?? `Next: ${body.nextStep ?? "unknown"}.`}
-        </p>
+        <>
+          <p>
+            {pull !== null && (
+              <>
+                Setup pull request{" "}
+                <a href={`https://github.com/${project.github_name}/pull/${pull}`} target="_blank" rel="noreferrer">
+                  #{pull}
+                </a>
+                .{" "}
+              </>
+            )}
+            {stoppedOn(body) ?? `Next: ${body.nextStep ?? "unknown"}.`}
+          </p>
+          {manualRulesets.map((change) => (
+            <div
+              key={`${change.operation}-${change.operation === "update" ? String(change.rulesetId) : "new"}-${String(change.ruleset.name)}`}
+            >
+              <p>
+                Run this while authenticated to GitHub as a repository administrator. Apply the commands in the order
+                shown, then continue setup.
+              </p>
+              <pre className="thwip-code-block">{rulesetCommand(project.github_name, change)}</pre>
+            </div>
+          ))}
+          {needsBypassConfirmation && (
+            <label>
+              <input
+                type="checkbox"
+                checked={confirmedBypassActors}
+                onChange={(event) => setConfirmedBypassActors(event.target.checked)}
+              />{" "}
+              I verified in GitHub that every bypass-actor list exactly matches the generated payload shown during
+              setup.
+            </label>
+          )}
+        </>
       )}
       {phase === "enrolled" && (
         <p>
@@ -1283,7 +1341,11 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
       )}
       {phase !== "enrolled" && (
         <div className="thwip-actions">
-          <button className="gp-btn gp-btn--sm" disabled={phase === "running"} onClick={() => void start()}>
+          <button
+            className="gp-btn gp-btn--sm"
+            disabled={phase === "running" || (needsBypassConfirmation && !confirmedBypassActors)}
+            onClick={() => void start()}
+          >
             {phase === "running" ? "Setting up…" : phase === "waiting" ? "Continue setup" : "Set up the queue"}
           </button>
         </div>

@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { testD1, type TestD1 } from "../../test/d1.js";
+import { GithubApiError } from "../github-error.js";
 import { bootstrapRouteResponse, bootstrapStatusResponse, type BootstrapRouteEnv } from "./bootstrap-route.js";
-import type { BootstrapGitHub, SetupPullRequestState, StoredRuleset } from "./bootstrap.js";
+import type {
+  BootstrapGitHub,
+  ManualRulesetChange,
+  SetupPullRequestState,
+  StoredRuleset,
+} from "./bootstrap.js";
 import { POLICY_RULESET_NAME, type Ruleset } from "./rulesets.js";
 
 /**
@@ -108,6 +114,35 @@ function queueProjectRow(): Record<string, unknown> | undefined {
     .get(REPOSITORY_ID) as Record<string, unknown> | undefined;
 }
 
+async function applyManualRulesets(changes: readonly ManualRulesetChange[]): Promise<void> {
+  for (const change of changes) {
+    if (change.operation === "create") await github.createRuleset(change.ruleset);
+    else await github.replaceRuleset(change.rulesetId, change.ruleset);
+  }
+}
+
+async function postThroughManualSetup(githubOrgRole: "admin" | "owner" = "admin") {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const response = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole },
+      REPOSITORY_ID,
+      { confirmRulesetBypassActors: true },
+      port,
+    );
+    const body = response.body as {
+      outcomes?: Array<{ kind: string; manualRulesets?: readonly ManualRulesetChange[] }>;
+    };
+    const changes = body.outcomes?.at(-1)?.manualRulesets;
+    if (changes !== undefined) {
+      await applyManualRulesets(changes);
+      continue;
+    }
+    return response;
+  }
+  throw new Error("manual route setup did not converge");
+}
+
 describe("POST /v1/queue/:repositoryId/bootstrap", () => {
   it("refuses a caller with no session", async () => {
     seedInstalledRepository();
@@ -126,8 +161,8 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
       port,
     );
     expect(response.status).toBe(403);
-    // Setup writes rulesets and a pull request into somebody's repository, so a
-    // refusal has to happen before any of it, not after enrolment.
+    // Setup opens a pull request and publishes checks in somebody's repository,
+    // so a refusal has to happen before any of it, not after enrolment.
     expect(queueProjectRow()).toBeUndefined();
     expect(github.rulesets.size).toBe(0);
   });
@@ -145,13 +180,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("answers 404 when the organization has no installation to act through", async () => {
     seedInstalledRepository({ installationId: null });
-    const response = await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "admin" },
-      REPOSITORY_ID,
-      {},
-      port,
-    );
+    const response = await postThroughManualSetup();
     expect(response.status).toBe(404);
     expect(queueProjectRow()).toBeUndefined();
   });
@@ -162,13 +191,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     // Already reviewed and merged, which is the second call an administrator
     // makes. The first opens the pull request and stops.
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
-    const response = await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "admin" },
-      REPOSITORY_ID,
-      {},
-      port,
-    );
+    const response = await postThroughManualSetup();
 
     expect(response.status).toBe(200);
     const row = queueProjectRow();
@@ -176,6 +199,9 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(row?.base_ref).toBe("refs/heads/main");
     expect(row?.enabled).toBe(1);
     expect(row?.activation_state).toBe("observe");
+    expect(row?.backend).toBe("managed");
+    expect(row?.merge_method).toBe("merge");
+    expect(row?.merge_writer).toBe("app");
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
   });
 
@@ -183,26 +209,14 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     seedInstalledRepository();
     enforceAppProofCheck();
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
-    const response = await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "owner" },
-      REPOSITORY_ID,
-      {},
-      port,
-    );
+    const response = await postThroughManualSetup("owner");
     expect(response.status).toBe(200);
   });
 
   it("enables the queue while the proof check is still an administrator's to enforce", async () => {
     seedInstalledRepository();
     github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
-    const response = await bootstrapRouteResponse(
-      env(),
-      { githubOrgRole: "admin" },
-      REPOSITORY_ID,
-      {},
-      port,
-    );
+    const response = await postThroughManualSetup();
 
     expect(response.status).toBe(202);
     expect(queueProjectRow()?.enabled).toBe(1);
@@ -220,6 +234,86 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     const row = queueProjectRow();
     expect(row?.backend).toBe("native");
     expect(row?.merge_method).toBe("merge");
+  });
+
+  it("returns an exact manual ruleset payload without writing it as the App", async () => {
+    seedInstalledRepository();
+    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+
+    const response = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      {},
+      port,
+    );
+
+    expect(response.status).toBe(202);
+    expect(github.rulesets.size).toBe(0);
+    expect(response.body).toMatchObject({
+      outcomes: [
+        { kind: "advanced", step: "merge-setup-pr" },
+        {
+          kind: "waiting",
+          step: "create-disabled-policy-without-source",
+          manualRulesets: [
+            {
+              operation: "create",
+              ruleset: { name: "Thwip Repository Policy", enforcement: "disabled" },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("refuses a squash configuration the App writer cannot bind to the verified head", async () => {
+    seedInstalledRepository();
+    const response = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      { mergeMethod: "squash" },
+      port,
+    );
+    expect(response).toMatchObject({
+      status: 400,
+      body: { code: "MERGE_COMMITS_REQUIRED" },
+    });
+    expect(queueProjectRow()).toBeUndefined();
+  });
+
+  it("structures a GitHub failure while reading rulesets", async () => {
+    seedInstalledRepository();
+    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.rulesetNamed = async () => {
+      throw new GithubApiError(
+        "/repos/acme/widgets/rulesets",
+        403,
+        "Resource not accessible by integration",
+      );
+    };
+
+    const response = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      {},
+      port,
+    );
+
+    expect(response).toMatchObject({
+      status: 502,
+      body: {
+        code: "GITHUB_SETUP_FAILED",
+        error: "GitHub refused repository setup",
+      },
+    });
+    const progress = JSON.parse(String(queueProjectRow()?.bootstrap_progress_json)) as Record<
+      string,
+      boolean
+    >;
+    expect(progress["merge-setup-pr"]).toBe(true);
   });
 
   it("waits rather than finishing while the setup pull request is unmerged", async () => {

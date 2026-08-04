@@ -165,22 +165,25 @@ describe("queueSetupPrompt", () => {
   it("is explicit about what only the owner can do", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
     expect(prompt).toMatch(/merge the setup pull request/);
-    expect(prompt).toMatch(/THWIP_ENQUEUE_TOKEN repository secret/);
-    expect(prompt).toMatch(/grant the thwip App "checks: write"/);
+    expect(prompt).not.toContain("THWIP_ENQUEUE_TOKEN");
+    expect(prompt).toMatch(/installed App performs authorized merges/);
+    expect(prompt).toMatch(/apply each ruleset payload/);
+    expect(prompt).toMatch(/confirm every bypass-actor list/);
+    expect(prompt).toMatch(/does not request the broad "administration: write" permission/);
   });
 
   /**
-   * The bootstrap route builds the ruleset now. A prompt that still told an
-   * agent to hand-build it would produce a ruleset enrolment then refuses to
-   * replace, which is the branch nobody can merge on.
+   * Enrolment generates each phase and the administrator applies exactly what
+   * it returns. That keeps ordering in one state machine without giving the App
+   * repository Administration permission.
    */
   it("sends ruleset work to enrolment rather than to the agent", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/It builds the branch ruleset itself/);
-    expect(prompt).toMatch(/Do\n *not edit that ruleset by hand/);
+    expect(prompt).toMatch(/apply each ruleset payload enrolment returns/);
+    expect(prompt).toMatch(/start enrolment again after each manual change/);
     // GitHub can only pin a context to its source after that source has
     // published the check, and the prompt says who handles that ordering.
-    expect(prompt).toMatch(/pins each to the source that publishes it/);
+    expect(prompt).toMatch(/checks that each is pinned\n *to the source that publishes it/);
   });
 
   it("names the request that enrols the repository", () => {
@@ -211,13 +214,13 @@ describe("queueSetupPrompt", () => {
 
   it("asks for proof before the checks are made required", () => {
     expect(queueSetupPrompt("recallnet/thwip")).toMatch(
-      /required check that\n *nothing publishes blocks every merge/,
+      /required check that nothing\n *publishes blocks every merge/,
     );
   });
 
   it("tells the agent to preserve what someone else authored", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/drop a rule or a required check somebody else added/);
+    expect(prompt).toMatch(/drop a rule\n *or required check somebody else added/);
     expect(prompt).toMatch(/Do not rewrite instructions\n *someone else authored/);
   });
 });

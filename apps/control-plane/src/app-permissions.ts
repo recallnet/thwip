@@ -2,12 +2,9 @@
  * What the App has to be granted, in one place.
  *
  * There were two lists. `queueDoctor` checked an installation against `checks`,
- * `contents`, `pull_requests` and `statuses`, all write, and reported `canMerge`
- * off it. The App manifest a few hundred lines away asked for `contents: read`,
- * `pull_requests: read` and no `statuses` at all, so an App registered from that
- * manifest failed the diagnostic in the same file that wrote it. The manifest
- * describes a fresh registration and nothing else, which is why nobody found out
- * from an installation that already worked.
+ * `contents`, `pull_requests` and `statuses`, all write, while the App manifest
+ * asked for `contents: read`, `pull_requests: read` and no `statuses`. A fresh
+ * registration therefore failed the diagnostic written beside its manifest.
  *
  * `contents: write` is what performs the merge: writing the commit object and
  * moving the branch ref are both Contents, and `managedOwnershipRuleset` already
@@ -24,6 +21,11 @@
  * diagnostic somebody runs when the queue is stuck, which is where a false
  * alarm costs the most. `canComment` reads off `pull_requests` because that is
  * what actually carries the comment.
+ *
+ * Ruleset reads use the existing Metadata permission. Ruleset writes stay with
+ * a repository administrator: GitHub's only App scope for them is the broad
+ * `administration: write`, which also grants unrelated repository-management
+ * authority that the runtime queue does not need.
  */
 export const REQUIRED_APP_PERMISSIONS: Readonly<Record<string, string>> = {
   checks: "write",

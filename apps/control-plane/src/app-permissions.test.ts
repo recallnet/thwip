@@ -10,11 +10,10 @@ const source = (name: string): string =>
 /**
  * The manifest asked for less than the doctor in the same file demands.
  *
- * `queueDoctor` reports `canMerge` off `contents` and `pull_requests` being
- * write, and the manifest requested both as read and left `statuses` out
- * altogether. An App registered from that manifest fails the diagnostic written
- * beside it. Nobody found out, because a manifest describes a fresh
- * registration and the installed App was granted its permissions by hand.
+ * `queueDoctor` reports capabilities from the same permissions the manifest
+ * requests. A fresh installation has to publish checks and perform its merges.
+ * A repository administrator owns ruleset changes because GitHub offers no
+ * narrow App permission for that operation.
  */
 describe("what the App asks for against what it needs", () => {
   it("requests every permission the doctor requires", () => {
@@ -45,6 +44,11 @@ describe("what the App asks for against what it needs", () => {
     expect(APP_MANIFEST_PERMISSIONS["issues"]).toBeUndefined();
   });
 
+  it("does not ask the runtime App for repository administration", () => {
+    expect(REQUIRED_APP_PERMISSIONS["administration"]).toBeUndefined();
+    expect(APP_MANIFEST_PERMISSIONS["administration"]).toBeUndefined();
+  });
+
   it("widens nothing beyond what the doctor requires", () => {
     const extra = Object.entries(APP_MANIFEST_PERMISSIONS).filter(
       ([scope, level]) => REQUIRED_APP_PERMISSIONS[scope] !== level,
@@ -56,6 +60,8 @@ describe("what the App asks for against what it needs", () => {
     expect(source("index.ts")).toContain("default_permissions: APP_MANIFEST_PERMISSIONS");
     expect(source("index.ts")).not.toMatch(/default_permissions:\s*\{/);
     expect(source("index.ts")).toContain("requiredPermissions: REQUIRED_APP_PERMISSIONS");
+    expect(source("index.ts")).toContain("canConfigureRulesets");
+    expect(source("index.ts")).toContain("canInspectRulesets");
   });
 
   /**

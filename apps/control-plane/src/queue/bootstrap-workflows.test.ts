@@ -11,6 +11,13 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const files = setupPullRequestFiles({
   endpoint: "https://thwip.example.test",
   actionRef: "recallnet/thwip@v1.2.3",
+  mergeWriter: "app",
+});
+
+const legacyFiles = setupPullRequestFiles({
+  endpoint: "https://thwip.example.test",
+  actionRef: "recallnet/thwip@v1.2.3",
+  mergeWriter: "workflow",
 });
 
 function file(path: string): string {
@@ -19,10 +26,15 @@ function file(path: string): string {
   return found.content;
 }
 
+function legacyFile(path: string): string {
+  const found = legacyFiles.find((f) => f.path === path);
+  if (found === undefined) throw new Error(`no legacy generated file at ${path}`);
+  return found.content;
+}
+
 describe("setupPullRequestFiles", () => {
   it("offers the workflows and the policy a new repository has none of", () => {
     expect(files.map((f) => f.path).sort()).toEqual([
-      ".github/workflows/thwip-merge.yml",
       ".github/workflows/thwip-queue-verify.yml",
       ".github/workflows/thwip-required.yml",
       "thwip.yaml",
@@ -81,12 +93,20 @@ describe("setupPullRequestFiles", () => {
 
   it("carries the endpoint the control plane is deployed at", () => {
     expect(file(".github/workflows/thwip-required.yml")).toContain("https://thwip.example.test");
-    expect(file(".github/workflows/thwip-merge.yml")).toContain("https://thwip.example.test");
+    expect(file(".github/workflows/thwip-queue-verify.yml")).toContain("https://thwip.example.test");
     expect(file(".github/workflows/thwip-required.yml")).not.toContain("thwip.recall.net");
   });
 
-  it("keeps the merge workflow reading the enqueue token it needs", () => {
-    expect(file(".github/workflows/thwip-merge.yml")).toContain("secrets.THWIP_ENQUEUE_TOKEN");
+  it("needs no merge workflow or repository write token when the App writes", () => {
+    expect(files.map((generated) => generated.path)).not.toContain(".github/workflows/thwip-merge.yml");
+    expect(files.map((generated) => generated.content).join("\n")).not.toContain("THWIP_ENQUEUE_TOKEN");
+    const body = setupPullRequestBody({
+      endpoint: "https://thwip.example.test",
+      actionRef: "recallnet/thwip@v1.2.3",
+      mergeWriter: "app",
+    });
+    expect(body).toMatch(/does not request `administration: write`/);
+    expect(body).toMatch(/No repository merge token is needed/);
   });
 
   it("commits a thwip.yaml the policy layer can read", () => {
@@ -133,7 +153,7 @@ describe("the generated workflows under the workflow lint", () => {
  * the one claim this queue makes.
  */
 describe("a merge method the queue cannot bind", () => {
-  const merge = file(".github/workflows/thwip-merge.yml");
+  const merge = legacyFile(".github/workflows/thwip-merge.yml");
 
   it("refuses it by name instead of performing it", () => {
     expect(merge).toContain('if [ "$method" != "merge" ]; then');
@@ -149,6 +169,7 @@ describe("a merge method the queue cannot bind", () => {
     const body = setupPullRequestBody({
       endpoint: "https://thwip.example.test",
       actionRef: "recallnet/thwip@v1.2.3",
+      mergeWriter: "workflow",
     });
     expect(body).toMatch(/squash/i);
   });
@@ -190,7 +211,11 @@ describe("drift against this repository's own workflows", () => {
     (path) => {
       const live = readFileSync(join(repoRoot, path), "utf8");
       expect(live).toBe(
-        setupPullRequestFiles({ endpoint: PRODUCTION_ENDPOINT, actionRef: "recallnet/thwip@v1" }).find(
+        setupPullRequestFiles({
+          endpoint: PRODUCTION_ENDPOINT,
+          actionRef: "recallnet/thwip@v1",
+          mergeWriter: path.endsWith("thwip-merge.yml") ? "workflow" : "app",
+        }).find(
           (f) => f.path === path,
         )?.content,
       );

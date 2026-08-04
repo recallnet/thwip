@@ -54,7 +54,10 @@ function commit(sha: string, tree: string, parents: string[]) {
 describe("githubHttp.json", () => {
   it("throws on a non-2xx read, which is what we want for reads", async () => {
     const { impl } = fakeFetch({ "/x": () => json({ message: "gone" }, 404) });
-    await expect(githubHttp("t", impl).json("/x")).rejects.toThrow(/404/);
+    await expect(githubHttp("t", impl).json("/x")).rejects.toMatchObject({
+      status: 404,
+      path: "/x",
+    });
   });
 });
 
