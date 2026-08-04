@@ -110,10 +110,10 @@ export interface BootstrapDeps {
   readonly actionsIntegrationId?: number;
   readonly endpoint: string;
   readonly actionRef: string;
-  readonly review: {
-    readonly requiredApprovingReviewCount: number;
-    readonly requireCodeOwnerReview: boolean;
-  };
+  /** Include a repository override only when the administrator explicitly chose it. */
+  readonly includeRepositoryConfig?: boolean;
+  /** Begin the observe-to-enforced handoff after a real pull request was checked. */
+  readonly confirmQueueEnforcement?: boolean;
   /**
    * GitHub hides ruleset bypass actors from an App that cannot edit rulesets.
    * A repository administrator must therefore confirm that the generated
@@ -125,6 +125,11 @@ export interface BootstrapDeps {
 export type ManualRulesetChange =
   | { readonly operation: "create"; readonly ruleset: Ruleset }
   | { readonly operation: "update"; readonly rulesetId: number; readonly ruleset: Ruleset };
+
+export interface ExpectedBypassActors {
+  readonly ruleset: string;
+  readonly bypassActors: Ruleset["bypass_actors"];
+}
 
 /**
  * `pullRequestNumber` is carried rather than left in `detail` because a caller
@@ -145,7 +150,8 @@ export type StepOutcome =
       readonly detail: string;
       readonly pullRequestNumber?: number;
       readonly manualRulesets?: readonly ManualRulesetChange[];
-      readonly confirmationRequired?: "ruleset-bypass-actors";
+      readonly confirmationRequired?: "queue-enforcement" | "ruleset-bypass-actors";
+      readonly expectedBypassActors?: readonly ExpectedBypassActors[];
     }
   | { readonly kind: "refused"; readonly step: BootstrapStep; readonly detail: string }
   | { readonly kind: "complete" };
@@ -331,12 +337,43 @@ export async function recordBootstrapStep(
   return progress;
 }
 
-/** The queue starts observing. It cannot block anything until an operator says so. */
+/** The queue starts observing under the repository's existing controls. */
 export async function observeQueueProject(db: D1Like, project: QueueProject): Promise<void> {
   await db
     .prepare("UPDATE queue_projects SET enabled = 1, activation_state = 'observe' WHERE id = ?")
     .bind(project.id)
     .run();
+}
+
+/**
+ * Persist the explicit enforcement decision before a human applies ownership.
+ * `canary` is already an enforcing writer state, so the App remains able to
+ * advance the branch during the manual ruleset handoff instead of being locked
+ * out between the ownership write and the next setup request.
+ */
+export async function beginQueueEnforcement(db: D1Like, project: QueueProject): Promise<boolean> {
+  await db
+    .prepare("UPDATE queue_projects SET activation_state = 'canary' WHERE id = ? AND activation_state = 'observe'")
+    .bind(project.id)
+    .run();
+  const stored = await db
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
+    .bind(project.id)
+    .first<{ activation_state: string }>();
+  return stored?.activation_state === "canary";
+}
+
+/** The durable state follows only after ownership and policy were read back. */
+export async function enforceQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
+  await db
+    .prepare("UPDATE queue_projects SET activation_state = 'enforced' WHERE id = ? AND activation_state IN ('canary', 'enforced')")
+    .bind(project.id)
+    .run();
+  const stored = await db
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
+    .bind(project.id)
+    .first<{ activation_state: string }>();
+  return stored?.activation_state === "enforced";
 }
 
 /* ---------------------------------------------------------------- */
@@ -381,9 +418,6 @@ function policyFor(
     integrationId: deps.integrationId,
     actionsIntegrationId: deps.actionsIntegrationId ?? GITHUB_ACTIONS_INTEGRATION_ID,
     proofCheckMode: options.proofCheckMode,
-    mergeMethod: project.mergeMethod,
-    requiredApprovingReviewCount: deps.review.requiredApprovingReviewCount,
-    requireCodeOwnerReview: deps.review.requireCodeOwnerReview,
     existingRequiredChecks: requiredChecksOf(existing?.ruleset ?? null),
     enforcement: options.enforcement,
     pinCheckSource: options.pinCheckSource,
@@ -577,6 +611,7 @@ async function performStep(
             endpoint: deps.endpoint,
             actionRef: deps.actionRef,
             mergeWriter: project.mergeWriter,
+            ...(deps.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
           }),
           baseSha,
         });
@@ -672,6 +707,25 @@ async function performStep(
       const allowed = mayActivate(project.progress);
       if (!allowed.ok) return { kind: "refused", step, detail: allowed.reason };
 
+      const shouldBeginEnforcement = project.activationState === "observe";
+      if (shouldBeginEnforcement) {
+        if (deps.confirmQueueEnforcement !== true) {
+          return {
+            kind: "waiting",
+            step,
+            detail:
+              "the queue is observing under the repository's existing controls; validate its checks on a real pull request, then explicitly begin enforcement",
+            confirmationRequired: "queue-enforcement",
+          };
+        }
+      } else if (project.activationState !== "canary" && project.activationState !== "enforced") {
+        return {
+          kind: "refused",
+          step,
+          detail: `the queue must observe before enforcement (current state: ${project.activationState})`,
+        };
+      }
+
       const existingPolicy = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
       const policy = policyFor(deps, project, existingPolicy, {
         enforcement: "active",
@@ -721,6 +775,9 @@ async function performStep(
         changes.push(manualChange(existingPolicy, policy));
       }
       if (changes.length > 0) {
+        if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+          return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+        }
         return {
           kind: "waiting",
           step,
@@ -736,15 +793,28 @@ async function performStep(
       const bypassActorsAreHidden =
         !bypassActorsVisible(existingSecond.ruleset) || !bypassActorsVisible(existingPolicy.ruleset);
       if (bypassActorsAreHidden && deps.confirmRulesetBypassActors !== true) {
+        if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+          return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+        }
         return {
           kind: "waiting",
           step,
           detail:
             "GitHub hides bypass actors from a read-only App; confirm that the policy has no bypass and the ownership ruleset names only the generated writer",
           confirmationRequired: "ruleset-bypass-actors",
+          expectedBypassActors: [
+            { ruleset: second.name, bypassActors: second.bypass_actors },
+            { ruleset: policy.name, bypassActors: policy.bypass_actors },
+          ],
         };
       }
 
+      if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+        return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+      }
+      if (!(await enforceQueueProject(deps.db, project))) {
+        return { kind: "refused", step, detail: "the queue activation state changed before enforcement completed" };
+      }
       return { kind: "advanced", step, detail: `activated the policy and ${second.name}` };
     }
 
@@ -793,6 +863,7 @@ async function performStep(
           detail:
             "GitHub hides bypass actors from a read-only App; confirm that the updated policy still has no bypass actors",
           confirmationRequired: "ruleset-bypass-actors",
+          expectedBypassActors: [{ ruleset: policy.ruleset.name, bypassActors: [] }],
         };
       }
       return { kind: "advanced", step, detail: `${PROOF_CHECK} is sourced from the Thwip App` };

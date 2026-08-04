@@ -22,9 +22,6 @@ function policy(over: Partial<Parameters<typeof policyRuleset>[0]> = {}): Rulese
   return policyRuleset({
     baseRef: BASE,
     integrationId: INTEGRATION_ID,
-    mergeMethod: "squash",
-    requiredApprovingReviewCount: 1,
-    requireCodeOwnerReview: true,
     ...over,
   });
 }
@@ -94,19 +91,8 @@ describe("policyRuleset", () => {
     ]);
   });
 
-  it("allows exactly the configured merge method", () => {
-    const pr = policy({ mergeMethod: "merge" }).rules.find((r) => r.type === "pull_request")!;
-    expect(pr.parameters!["allowed_merge_methods"]).toEqual(["merge"]);
-  });
-
-  it("keeps the review controls the spec names", () => {
-    const pr = policy().rules.find((r) => r.type === "pull_request")!;
-    expect(pr.parameters).toMatchObject({
-      dismiss_stale_reviews_on_push: true,
-      require_last_push_approval: true,
-      required_review_thread_resolution: true,
-      require_code_owner_review: true,
-    });
+  it("does not impose a review model on the repository", () => {
+    expect(policy().rules.map((rule) => rule.type)).not.toContain("pull_request");
   });
 });
 
@@ -222,7 +208,9 @@ describe("bootstrap sequence", () => {
     const blocked = mayActivate(almost);
     expect(blocked).toMatchObject({ ok: false });
     if (!blocked.ok) expect(blocked.reason).toMatch(/canary-negative-test/);
-    expect(mayActivate({ ...almost, "canary-negative-test": true })).toEqual({ ok: true });
+    expect(mayActivate({ ...almost, "canary-negative-test": true, "record-genesis": true })).toEqual({
+      ok: true,
+    });
   });
 
   it("refuses activation when the source was never attached", () => {

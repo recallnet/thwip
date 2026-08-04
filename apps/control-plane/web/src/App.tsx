@@ -1129,7 +1129,8 @@ interface BootstrapOutcome {
     | { operation: "create"; ruleset: Record<string, unknown> }
     | { operation: "update"; rulesetId: number; ruleset: Record<string, unknown> }
   >;
-  confirmationRequired?: "ruleset-bypass-actors";
+  confirmationRequired?: "queue-enforcement" | "ruleset-bypass-actors";
+  expectedBypassActors?: Array<{ ruleset: string; bypassActors: Array<Record<string, unknown>> }>;
 }
 
 interface BootstrapBody {
@@ -1149,7 +1150,11 @@ interface BootstrapBody {
 async function bootstrapRequest(
   repositoryId: string,
   method: "GET" | "POST",
-  input: { confirmRulesetBypassActors?: boolean } = {},
+  input: {
+    includeRepositoryConfig?: boolean;
+    confirmQueueEnforcement?: boolean;
+    confirmRulesetBypassActors?: boolean;
+  } = {},
 ): Promise<{ status: number; body: BootstrapBody }> {
   const res = await fetch(withOrg(`/v1/queue/${repositoryId}/bootstrap`), {
     method,
@@ -1208,6 +1213,8 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   const [body, setBody] = useState<BootstrapBody>({});
   const [failure, setFailure] = useState<string | null>(null);
   const [pull, setPull] = useState<number | null>(null);
+  const [includeRepositoryConfig, setIncludeRepositoryConfig] = useState(false);
+  const [confirmedQueueEnforcement, setConfirmedQueueEnforcement] = useState(false);
   const [confirmedBypassActors, setConfirmedBypassActors] = useState(false);
 
   // What setup already got to, so a reader who comes back to this page sees
@@ -1244,8 +1251,11 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     setFailure(null);
     try {
       const { status, body: answered } = await bootstrapRequest(repositoryId, "POST", {
+        ...(includeRepositoryConfig ? { includeRepositoryConfig: true } : {}),
+        ...(confirmedQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
         ...(confirmedBypassActors ? { confirmRulesetBypassActors: true } : {}),
       });
+      setConfirmedQueueEnforcement(false);
       setConfirmedBypassActors(false);
       setBody(answered);
       if (status === 200) {
@@ -1264,6 +1274,7 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
           (status === 409 ? "Setup refused a change that would take a control away." : `${status}`),
       );
     } catch (e) {
+      setConfirmedQueueEnforcement(false);
       setConfirmedBypassActors(false);
       setPhase("failed");
       setFailure((e as Error).message);
@@ -1283,18 +1294,31 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
 
   const waiting = body.outcomes?.at(-1);
   const manualRulesets = waiting?.kind === "waiting" ? (waiting.manualRulesets ?? []) : [];
+  const needsQueueEnforcementConfirmation =
+    waiting?.kind === "waiting" && waiting.confirmationRequired === "queue-enforcement";
   const needsBypassConfirmation =
     waiting?.kind === "waiting" && waiting.confirmationRequired === "ruleset-bypass-actors";
 
   return (
     <Panel title="Thwip Queue" meta="merges one pull request at a time, with a signed record of each merge">
       <p>
-        Setting up opens a pull request on <code>{project.github_name}</code> carrying the two workflows and a{" "}
-        <code>thwip.yaml</code>. Merge it under the controls this repository already has, then continue. Setup returns
-        exact ruleset payloads for you to apply with repository-administrator authority, verifies the visible
-        configuration, and leaves the queue observing. The App never receives repository Administration permission.
+        Setting up opens a pull request on <code>{project.github_name}</code> carrying the two queue workflows. It
+        inherits organization policy by default; a repository-specific <code>thwip.yaml</code> is added only when you
+        choose that override below. Merge it under the controls this repository already has, then continue. The queue
+        observes a real pull request before setup offers enforcement. The App never receives repository Administration
+        permission.
       </p>
       {failure && <p className="thwip-error">{failure}</p>}
+      {phase === "idle" && (
+        <label>
+          <input
+            type="checkbox"
+            checked={includeRepositoryConfig}
+            onChange={(event) => setIncludeRepositoryConfig(event.target.checked)}
+          />{" "}
+          Add a repository-specific Node.js policy override instead of inheriting organization defaults.
+        </label>
+      )}
       {phase === "waiting" && (
         <>
           <p>
@@ -1321,14 +1345,27 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
             </div>
           ))}
           {needsBypassConfirmation && (
+            <>
+              <p>GitHub hides these fields from the read-only App. Compare the exact expected lists:</p>
+              <pre className="thwip-code-block">{JSON.stringify(waiting.expectedBypassActors ?? [], null, 2)}</pre>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={confirmedBypassActors}
+                  onChange={(event) => setConfirmedBypassActors(event.target.checked)}
+                />{" "}
+                I verified in GitHub that every bypass-actor list exactly matches the expected lists above.
+              </label>
+            </>
+          )}
+          {needsQueueEnforcementConfirmation && (
             <label>
               <input
                 type="checkbox"
-                checked={confirmedBypassActors}
-                onChange={(event) => setConfirmedBypassActors(event.target.checked)}
+                checked={confirmedQueueEnforcement}
+                onChange={(event) => setConfirmedQueueEnforcement(event.target.checked)}
               />{" "}
-              I verified in GitHub that every bypass-actor list exactly matches the generated payload shown during
-              setup.
+              I validated the observe-mode proof and queue checks on a real pull request. Begin queue enforcement.
             </label>
           )}
         </>
@@ -1343,10 +1380,20 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
         <div className="thwip-actions">
           <button
             className="gp-btn gp-btn--sm"
-            disabled={phase === "running" || (needsBypassConfirmation && !confirmedBypassActors)}
+            disabled={
+              phase === "running" ||
+              (needsQueueEnforcementConfirmation && !confirmedQueueEnforcement) ||
+              (needsBypassConfirmation && !confirmedBypassActors)
+            }
             onClick={() => void start()}
           >
-            {phase === "running" ? "Setting up…" : phase === "waiting" ? "Continue setup" : "Set up the queue"}
+            {phase === "running"
+              ? "Setting up…"
+              : needsQueueEnforcementConfirmation
+                ? "Begin enforcement"
+                : phase === "waiting"
+                  ? "Continue setup"
+                  : "Set up the queue"}
           </button>
         </div>
       )}
