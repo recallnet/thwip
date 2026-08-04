@@ -7,6 +7,7 @@ import { projectsInReach } from "./dashboard-scope.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import { APP_MANIFEST_PERMISSIONS, REQUIRED_APP_PERMISSIONS } from "./app-permissions.js";
 import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
 import { syncInstallations } from "./admin-sync.js";
 import {
@@ -1017,14 +1018,10 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
   const rulesets = await gh<Array<{ id: number; name: string; enforcement: string }>>(
     `/repos/${repo}/rulesets`,
   );
-  const required: Record<string, string> = {
-    checks: "write",
-    contents: "write",
-    pull_requests: "write",
-    statuses: "write",
-  };
   const granted = installation.permissions ?? {};
-  const missing = Object.entries(required).filter(([scope, level]) => granted[scope] !== level);
+  const missing = Object.entries(REQUIRED_APP_PERMISSIONS).filter(
+    ([scope, level]) => granted[scope] !== level,
+  );
 
   // What the App is subscribed to, against what the router handles. This
   // installation delivered `check_suite` and nothing else for months, so every
@@ -1038,7 +1035,7 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     repo,
     installationId: String(installation.id),
     grantedPermissions: granted,
-    requiredPermissions: required,
+    requiredPermissions: REQUIRED_APP_PERMISSIONS,
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
     canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
@@ -1726,14 +1723,12 @@ app.get("/admin/github/manifest", async (c) => {
     // exists. An installed deployment needs the flag flipped in the App's own
     // settings, which only its owner can do.
     public: true,
-    default_permissions: {
-      checks: "write",
-      contents: "read",
-      emails: "read",
-      members: "read",
-      metadata: "read",
-      pull_requests: "read",
-    },
+    // The same list the doctor checks an installation against, never a copy of
+    // it. This asked for `contents: read` and `pull_requests: read` while
+    // `queueDoctor` a few hundred lines up reported `canMerge` off both being
+    // write, so an App registered from this manifest failed the diagnostic
+    // written beside it.
+    default_permissions: APP_MANIFEST_PERMISSIONS,
     // The same list the router handles, never a copy of it. A fresh App
     // registered from a copy that fell behind delivers nothing for whatever the
     // copy is missing, and the handler waits forever without erroring.

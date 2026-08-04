@@ -1,7 +1,8 @@
 import type { D1Like } from "./projection.js";
 import { setupPullRequestFiles, type SetupFile } from "./bootstrap-workflows.js";
 import {
-  bootstrapCheckRun,
+  bootstrapCheckRuns,
+  BOOTSTRAP_STEPS,
   checkRulesetForBackend,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
@@ -11,6 +12,8 @@ import {
   nextBootstrapStep,
   policyRuleset,
   POLICY_RULESET_NAME,
+  proofIntegrationFor,
+  type ProofCheckMode,
   type Backend,
   type BootstrapProgress,
   type BootstrapStep,
@@ -356,12 +359,13 @@ function policyFor(
   deps: BootstrapDeps,
   project: QueueProject,
   existing: StoredRuleset | null,
-  options: { enforcement: "active" | "disabled"; pinCheckSource: boolean },
+  options: { enforcement: "active" | "disabled"; pinCheckSource: boolean; proofCheckMode: ProofCheckMode },
 ): Ruleset {
   return policyRuleset({
     baseRef: project.baseRef,
     integrationId: deps.integrationId,
     actionsIntegrationId: deps.actionsIntegrationId ?? GITHUB_ACTIONS_INTEGRATION_ID,
+    proofCheckMode: options.proofCheckMode,
     mergeMethod: project.mergeMethod,
     requiredApprovingReviewCount: deps.review.requiredApprovingReviewCount,
     requireCodeOwnerReview: deps.review.requireCodeOwnerReview,
@@ -369,6 +373,68 @@ function policyFor(
     enforcement: options.enforcement,
     pinCheckSource: options.pinCheckSource,
   });
+}
+
+/**
+ * Whether the App publishes `thwip` for this repository yet.
+ *
+ * Read from `projects.proof_check_mode` on every step rather than carried on the
+ * queue project, because it is changed elsewhere — by an administrator on the
+ * proof-mode route — and a copy would go stale between the change and the next
+ * run of setup.
+ */
+async function proofCheckMode(deps: BootstrapDeps, project: QueueProject): Promise<ProofCheckMode> {
+  const row = await deps.db
+    .prepare("SELECT proof_check_mode FROM projects WHERE github_repository_id = ?")
+    .bind(project.repositoryId)
+    .first<{ proof_check_mode: string }>();
+  return row?.proof_check_mode === "enforced" ? "enforced" : "observe";
+}
+
+/**
+ * Read back what GitHub stored, and refuse anything that is not what it was
+ * sent. Returns null when everything matched.
+ *
+ * GitHub does not always keep a source it accepted. A ruleset that took the
+ * payload and dropped the pin leaves a context any workflow in the repository
+ * can satisfy, and believing the payload we sent rather than the one GitHub kept
+ * is how that goes unnoticed. Which Integration is expected for `thwip` follows
+ * the publisher, so this reads it the same way the payload did.
+ */
+async function confirmSourcePins(
+  deps: BootstrapDeps,
+  project: QueueProject,
+  ruleset: Ruleset,
+  step: BootstrapStep,
+): Promise<StepOutcome | null> {
+  const stored = requiredChecksOf(ruleset);
+  const expected: Array<[string, number]> = [
+    [
+      PROOF_CHECK,
+      proofIntegrationFor({
+        mode: await proofCheckMode(deps, project),
+        integrationId: deps.integrationId,
+        ...(deps.actionsIntegrationId === undefined
+          ? {}
+          : { actionsIntegrationId: deps.actionsIntegrationId }),
+      }),
+    ],
+    [TURN_CHECK, deps.integrationId],
+  ];
+  for (const [context, integrationId] of expected) {
+    const found = stored.find((c) => c.context === context);
+    if (found === undefined) {
+      return { kind: "refused", step, detail: `GitHub is not requiring ${context}` };
+    }
+    if (found.integration_id !== integrationId) {
+      return {
+        kind: "refused",
+        step,
+        detail: `GitHub kept ${context} sourced from ${found.integration_id ?? "anything"}, not ${integrationId}`,
+      };
+    }
+  }
+  return null;
 }
 
 function requiredChecksOf(ruleset: Ruleset | null): Array<{ context: string; integration_id?: number }> {
@@ -391,10 +457,13 @@ async function writePolicy(
   deps: BootstrapDeps,
   project: QueueProject,
   step: BootstrapStep,
-  options: { enforcement: "active" | "disabled"; pinCheckSource: boolean },
+  options: { enforcement: "active" | "disabled"; pinCheckSource: boolean; proofCheckMode?: ProofCheckMode },
 ): Promise<StepOutcome> {
   const existing = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
-  const next = policyFor(deps, project, existing, options);
+  const next = policyFor(deps, project, existing, {
+    ...options,
+    proofCheckMode: options.proofCheckMode ?? (await proofCheckMode(deps, project)),
+  });
 
   const backend = checkRulesetForBackend(next, project.backend);
   if (!backend.ok) return { kind: "refused", step, detail: backend.reason };
@@ -474,20 +543,27 @@ async function performStep(
       if (policy === null) return { kind: "refused", step, detail: "the policy ruleset is missing" };
 
       const baseSha = await deps.github.baseSha();
-      const run = bootstrapCheckRun({ headSha: baseSha, policyEnforcement: policy.ruleset.enforcement });
-      if (!run.ok) return { kind: "refused", step, detail: run.reason };
+      const runs = bootstrapCheckRuns({ headSha: baseSha, policyEnforcement: policy.ruleset.enforcement });
+      if (!runs.ok) return { kind: "refused", step, detail: runs.reason };
 
-      const published = await deps.github.publishBootstrapCheck(run.checkRun);
-      // The pin has to be the Integration GitHub says published the check. Pinning
-      // the id we expected instead would require a source that does not exist.
-      if (published.appId !== deps.integrationId) {
-        return {
-          kind: "refused",
-          step,
-          detail: `GitHub attributed the ${TURN_CHECK} check to integration ${published.appId}, not ${deps.integrationId}`,
-        };
+      for (const run of runs.checkRuns) {
+        const published = await deps.github.publishBootstrapCheck(run);
+        // The pin has to be the Integration GitHub says published the check.
+        // Pinning the id we expected instead would require a source that does
+        // not exist.
+        if (published.appId !== deps.integrationId) {
+          return {
+            kind: "refused",
+            step,
+            detail: `GitHub attributed the ${run.name} check to integration ${published.appId}, not ${deps.integrationId}`,
+          };
+        }
       }
-      return { kind: "advanced", step, detail: `published ${TURN_CHECK} on ${baseSha}` };
+      return {
+        kind: "advanced",
+        step,
+        detail: `published ${runs.checkRuns.map((r) => r.name).join(" and ")} on ${baseSha}`,
+      };
     }
 
     case "attach-integration-id-while-disabled": {
@@ -516,24 +592,8 @@ async function performStep(
         return { kind: "refused", step, detail: "the source pin must be proven while the policy is disabled" };
       }
 
-      const stored = requiredChecksOf(policy.ruleset);
-      const expected: Array<[string, number]> = [
-        [PROOF_CHECK, deps.actionsIntegrationId ?? GITHUB_ACTIONS_INTEGRATION_ID],
-        [TURN_CHECK, deps.integrationId],
-      ];
-      for (const [context, integrationId] of expected) {
-        const found = stored.find((c) => c.context === context);
-        if (found === undefined) {
-          return { kind: "refused", step, detail: `GitHub is not requiring ${context}` };
-        }
-        if (found.integration_id !== integrationId) {
-          return {
-            kind: "refused",
-            step,
-            detail: `GitHub kept ${context} sourced from ${found.integration_id ?? "anything"}, not ${integrationId}`,
-          };
-        }
-      }
+      const kept = await confirmSourcePins(deps, project, policy.ruleset, step);
+      if (kept !== null) return kept;
       return { kind: "advanced", step, detail: "GitHub kept both source pins" };
     }
 
@@ -569,6 +629,47 @@ async function performStep(
       return { kind: "advanced", step, detail: `activated the policy and ${second.name}` };
     }
 
+    case "pin-proof-check-to-app": {
+      // The last thing setup does, and the only one that happens after the
+      // branch is already protected and merging.
+      //
+      // While `thwip` is sourced from GitHub Actions, any workflow in the
+      // repository can publish a green check by that name and satisfy the
+      // requirement. Sourcing it from the App narrows that to one publisher.
+      //
+      // It cannot happen earlier. The App publishes `thwip` only where
+      // `proof_check_mode` is `enforced`; in `observe` it publishes
+      // `thwip / proof (observe)` and never the enforced name. Moving the pin
+      // first would leave the branch requiring a check with no publisher, and
+      // every open pull request in the repository stuck behind it. So this
+      // waits, the repository goes on merging on the workflow's check, and
+      // enrolment is simply not finished until an administrator enforces.
+      if ((await proofCheckMode(deps, project)) !== "enforced") {
+        return {
+          kind: "waiting",
+          step,
+          detail:
+            `${PROOF_CHECK} is still sourced from GitHub Actions, which any workflow in this ` +
+            "repository can satisfy. Enforce the App's proof check to move it to the App; the " +
+            "branch keeps merging on the workflow's check until then.",
+        };
+      }
+
+      const written = await writePolicy(deps, project, step, {
+        enforcement: "active",
+        pinCheckSource: true,
+        proofCheckMode: "enforced",
+      });
+      if (written.kind !== "advanced") return written;
+
+      // Read back, because GitHub accepting a payload is not GitHub keeping it.
+      const policy = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
+      if (policy === null) return { kind: "refused", step, detail: "the policy ruleset is missing" };
+      const kept = await confirmSourcePins(deps, project, policy.ruleset, step);
+      if (kept !== null) return kept;
+      return { kind: "advanced", step, detail: `${PROOF_CHECK} is sourced from the Thwip App` };
+    }
+
     case "record-genesis":
       // The signed genesis transition is the queue's to write when it first
       // moves the branch. What enrolment owes it is a project that is on and
@@ -600,7 +701,10 @@ export async function runBootstrap(
   const outcomes: StepOutcome[] = [];
   let current = project;
 
-  for (let i = 0; i <= 7; i += 1) {
+  // One pass per step, plus the pass that answers `complete`. Bound from the
+  // list rather than a literal, so adding a step cannot silently stop the run
+  // one short of the end.
+  for (let i = 0; i <= BOOTSTRAP_STEPS.length; i += 1) {
     const outcome = await advanceBootstrap(deps, current);
     outcomes.push(outcome);
     if (outcome.kind !== "advanced") break;
