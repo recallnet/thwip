@@ -26,9 +26,35 @@ export interface QueueConsumerDeps {
   reconcileProjectProofChecks?: (repositoryId: string) => Promise<unknown>;
   processAppProof?: (request: AppProofRequest) => Promise<unknown>;
   requestForRerequest?: (verificationId: string) => Promise<AppProofRequest | null>;
+  /**
+   * Walk the queue again for the pull requests on a head the App has just
+   * judged.
+   *
+   * The verdict is what a `fast` merge rests on, and it lands after the
+   * `pull_request` delivery that placed the entry. Nothing used to notice: the
+   * entry stayed blocked on a proof that had passed until a workflow polled
+   * `/authorize`, which is the workflow app-only adoption removes.
+   */
+  reconsiderHead?: (repositoryId: string, headSha: string) => Promise<unknown>;
 }
 
 const noop = async (): Promise<void> => {};
+
+/**
+ * Tell the queue the verdict on this head has moved.
+ *
+ * A merge-group subject is a commit GitHub composed and no pull request is on
+ * it, so there is nothing to walk. Failing here must not retry the
+ * verification, which has already been stored and published.
+ */
+async function considered(deps: Required<QueueConsumerDeps>, request: AppProofRequest): Promise<void> {
+  if (request.event !== "pull_request") return;
+  try {
+    await deps.reconsiderHead(request.repositoryId, request.subjectSha);
+  } catch {
+    /* the verdict stands; the next delivery or the tick asks again */
+  }
+}
 
 function resolveDeps(deps: QueueConsumerDeps): Required<QueueConsumerDeps> {
   return {
@@ -39,6 +65,7 @@ function resolveDeps(deps: QueueConsumerDeps): Required<QueueConsumerDeps> {
     reconcileProjectProofChecks: deps.reconcileProjectProofChecks ?? noop,
     processAppProof: deps.processAppProof ?? noop,
     requestForRerequest: deps.requestForRerequest ?? (async () => null),
+    reconsiderHead: deps.reconsiderHead ?? noop,
   };
 }
 
@@ -78,9 +105,13 @@ export async function processQueueMessage(
   }
   if (body.appProofTask?.kind === "verify") {
     await resolved.processAppProof(body.appProofTask.request);
+    await considered(resolved, body.appProofTask.request);
   } else if (body.appProofTask?.kind === "rerequest") {
     const request = await resolved.requestForRerequest(body.appProofTask.verificationId);
-    if (request !== null) await resolved.processAppProof(request);
+    if (request !== null) {
+      await resolved.processAppProof(request);
+      await considered(resolved, request);
+    }
   }
 }
 

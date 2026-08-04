@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { withQueueState } from "./queue-state.js";
 import { buildSnapshot } from "./queue-operations.js";
@@ -47,7 +48,14 @@ const REPO = "1315419165";
 const REF = "refs/heads/main";
 const ORG = "org_1";
 
-/** A repository whose active policy names `securityProfile`, plus a principal per author id. */
+/**
+ * A repository whose active policy names `securityProfile`, a principal per
+ * author id, and the App's passing verdict on each of their heads.
+ *
+ * The proof is part of the setup because this file is about runner presence.
+ * A head the App has not verified is blocked on that instead, which is a true
+ * answer to a different question.
+ */
 function seed(securityProfile: string, authorGithubUserIds: number[]) {
   raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run(ORG, "1", "acme");
   raw
@@ -66,6 +74,7 @@ function seed(securityProfile: string, authorGithubUserIds: number[]) {
     )
     .run(`sha256:${"d".repeat(64)}`, "proj_1", JSON.stringify({ schemaVersion: "1", securityProfile, version: 1 }));
   for (const id of authorGithubUserIds) {
+    acceptProof(raw, REPO, String(id).padStart(40, "a"));
     raw
       .prepare(
         "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -125,6 +134,7 @@ function heartbeat(app: ReturnType<typeof routesAs>, e: QueueRouteEnv, deviceKey
 }
 
 async function authorize(app: ReturnType<typeof routesAs>, e: QueueRouteEnv, pullRequestNumber: number) {
+  acceptProof(raw, REPO, String(pullRequestNumber).padStart(40, "a"));
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -135,7 +145,6 @@ async function authorize(app: ReturnType<typeof routesAs>, e: QueueRouteEnv, pul
         headSha: String(pullRequestNumber).padStart(40, "a"),
         baseRef: REF,
         authorGithubUserId: String(pullRequestNumber),
-        proofAccepted: true,
         draft: false,
       }),
     },

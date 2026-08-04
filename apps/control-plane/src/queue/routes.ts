@@ -727,7 +727,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     pullRequestNumber: number,
-  ): Promise<{ authorGithubUserId: string; baseRef: string; authorIsBot: boolean } | null>;
+  ): Promise<{
+    authorGithubUserId: string;
+    baseRef: string;
+    authorIsBot: boolean;
+    /** Whether the pull request is a draft, which no caller may assert. */
+    draft: boolean;
+    /** The head the pull request is on now, which no caller may assert. */
+    headSha: string;
+  } | null>;
   /** Ask GitHub to run the merge workflow for a pull request the queue has offered. */
   driveTurn(env: TEnv, repositoryId: string, pullRequestNumber: number): Promise<void>;
   /**
@@ -2073,7 +2081,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       headSha?: string;
       baseRef?: string;
       authorGithubUserId?: string;
-      proofAccepted?: boolean;
       draft?: boolean;
       workReceiptDigest?: string;
       prepare?: boolean;
@@ -2097,7 +2104,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       headSha: body.headSha,
       authorGithubUserId: String(body.authorGithubUserId ?? ""),
       draft: body.draft === true,
-      proofAccepted: body.proofAccepted === true,
       prepare: body.prepare === true,
     });
     return c.json(authorizationResponse(result));

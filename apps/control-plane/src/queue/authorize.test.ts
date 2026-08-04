@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
+import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 
 /**
@@ -100,12 +101,21 @@ interface Verdict {
   operationId: string | null;
 }
 
+/**
+ * Ask the gate about a pull request whose head the App has verified.
+ *
+ * `proven: false` leaves the verdict absent, which is the only way a caller can
+ * now affect it: the request body used to carry `proofAccepted` and the queue
+ * believed it.
+ */
 async function authorize(
   routes: ReturnType<typeof app>,
   e: QueueRouteEnv,
   pullRequestNumber: number,
   over: Record<string, unknown> = {},
+  proven = true,
 ): Promise<Verdict> {
+  if (proven) acceptProof(raw, REPO, (over["headSha"] as string | undefined) ?? String(pullRequestNumber).padStart(40, "a"));
   const response = await routes.request(
     `/v1/queue/${REPO}/authorize`,
     {
@@ -116,7 +126,6 @@ async function authorize(
         headSha: String(pullRequestNumber).padStart(40, "a"),
         baseRef: REF,
         authorGithubUserId: String(pullRequestNumber),
-        proofAccepted: true,
         draft: false,
         ...over,
       }),
@@ -165,10 +174,10 @@ describe("the merge gate", () => {
     expect(driven).toContain(59);
   });
 
-  it("refuses a pull request whose proof was not accepted", async () => {
+  it("refuses a pull request the App has not verified", async () => {
     const e = env();
     const routes = app();
-    const verdict = await authorize(routes, e, 59, { proofAccepted: false });
+    const verdict = await authorize(routes, e, 59, {}, false);
     expect(verdict.authorized).toBe(false);
     expect(verdict.reason).toBe("LOCAL_RECEIPT_MISSING");
   });
