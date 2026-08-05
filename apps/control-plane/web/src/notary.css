@@ -527,7 +527,6 @@
   color: var(--civic);
 }
 .mq-hero h1 {
-  max-width: 13ch;
   margin: 0;
   font-family: var(--num);
   font-variation-settings: "wdth" 118, "wght" 690;
@@ -535,6 +534,7 @@
   line-height: 0.93;
   letter-spacing: -0.048em;
 }
+.mq-hero__line { display: block; white-space: nowrap; }
 .mq-hero__lede {
   max-width: 51ch;
   margin: 30px 0 0;
@@ -751,6 +751,7 @@
   .nt-record__lines { min-height: 0; }
   .mq-hero { padding-top: 58px; padding-bottom: 40px; }
   .mq-hero h1 { font-size: clamp(46px, 14vw, 66px); }
+  .mq-hero__line { white-space: normal; }
   .mq-hero__lede { font-size: 19px; }
   .mq-measures { grid-template-columns: 1fr; }
   .mq-measure,

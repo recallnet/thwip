@@ -91,9 +91,9 @@ export function Home({
           <section className="mq-hero">
             <p className="mq-kicker">Merge queue for AI-native teams</p>
             <h1>
-              Your agents ran CI.
-              <br />
-              Your merge queue should use it.
+              <span className="mq-hero__line">Your agents ran CI.</span>
+              <span className="mq-hero__line">Your merge queue</span>
+              <span className="mq-hero__line">should use it.</span>
             </h1>
             <p className="mq-hero__lede">
               Each coding agent tests its branch before its pull request joins the line. Thwip carries that work into

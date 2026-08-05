@@ -13,7 +13,8 @@ describe("Home", () => {
     );
 
     expect(html).toContain("Your agents ran CI.");
-    expect(html).toContain("Your merge queue should use it.");
+    expect(html).toContain('<span class="mq-hero__line">Your merge queue</span>');
+    expect(html).toContain('<span class="mq-hero__line">should use it.</span>');
     expect(html).toContain("14.0s");
     expect(html).toContain("Fast reuses the proof the pull request already carries.");
     expect(html).toContain('href="/dashboard"');
