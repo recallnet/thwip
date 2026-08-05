@@ -605,7 +605,12 @@ export function walkToMergeReady(
     attemptId: input.attemptId,
     operationId: input.operationId,
   });
-  return done(begun.status === "applied" || begun.status === "already-started" ? input.operationId : null);
+  // Only the caller that created the durable write record may cross the
+  // network side-effect boundary. `already-started` means a write may already
+  // be in flight (or may have reached GitHub), so handing the operation id to
+  // another caller would turn the guard into permission to retry the mutation.
+  // Every later wake observes and reconciles that operation instead.
+  return done(begun.status === "applied" ? input.operationId : null);
 }
 
 export interface ConfirmInput {
