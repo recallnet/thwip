@@ -23,7 +23,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = resolve(process.argv[2] ?? join(root, "packages/cli/dist"));
 
 const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
-const version = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8")).version;
+// Same source as the bundle's own package.json, so the two cannot disagree
+// about what was published.
+const version =
+  process.env.THWIP_RELEASE_VERSION ||
+  JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8")).version;
 
 writeFileSync(
   join(outDir, "build-stamp.json"),
