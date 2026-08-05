@@ -1,6 +1,6 @@
 ---
 title: "Can local checks count at merge time?"
-description: "Cloud CI gives a team a shared answer, but rebuilding every change costs time and money. Agents already have a warm checkout and need fast feedback. thwip turns that local work into a signed claim about an exact Git tree, then lets GitHub verify it—or run the checks again when the team wants an independent second run."
+description: "Agents are turning software development into a continuous stream of local work. Cloud CI provides a shared answer, but rebuilding every change costs time and money. thwip lets local checks carry a signed claim about the exact Git tree into GitHub, where the claim can be verified or the checks can run again when an independent rerun is worth the cost."
 author: thwip
 pubDate: 2026-08-04T12:00:00.000Z
 tags:
@@ -13,21 +13,27 @@ heroImage: /blog/beta-hero.svg
 heroAlt: Local run, signed proof, GitHub verifies
 ---
 
-Most teams know the CI loop: push a change, wait for a cloud runner to install
-the project, run the checks, and report a status on the pull request. The cloud
-runner gives everyone a shared answer. It is slower and more expensive than a
-warm checkout on a developer's machine, but it gives the team a place to trust.
+Software development is becoming a continuous stream of changes. An agent edits
+code, runs checks, revises, and tries again—often while other agents work on the
+same repository. Most teams know the CI loop that follows: push a change, wait
+for a cloud runner to install the project, run the checks, and report a status
+on the pull request. The cloud runner gives everyone a shared answer. It is
+slower and more expensive than a warm checkout on a developer's machine, but it
+gives the team a place to trust.
 
-Agents make the cost of that loop easier to see. An agent may run the same
-checks many times while it is working. It already has the source, dependencies,
-and tools on disk, so it can get useful feedback locally in seconds. Sending
-every attempt back to a fresh cloud runner adds setup time and another CI bill.
+For an agent, the local loop is the work: edit, check, revise, repeat. The agent
+already has the source, dependencies, and tools on disk, so it can get useful
+feedback locally in seconds. Sending every attempt back to a fresh cloud runner
+adds setup time and another CI bill.
 
 That does not mean a local green terminal should replace CI. The local machine
 may have run the wrong command, reported only the checks that passed, or tested
 a checkout that is no longer the code that will merge. The question is whether
 the work already done locally can help with the merge decision without asking
 GitHub to trust an unexplained report.
+
+The opportunity is to let local work travel with the code as evidence, so remote
+CI does not need to rediscover everything from scratch.
 
 {% mermaid label="Local checks produce a proof that GitHub can verify" %}
 ```mermaid
@@ -39,18 +45,19 @@ flowchart LR
 ```
 {% /mermaid %}
 
-There is a second problem even when the local run was completely honest. CI on
-a pull request usually checks the pull request's head. The code that lands may
-also include newer changes from `main`. If those two snapshots differ, a green
-result for the first one does not say anything certain about the second. [The
-merge-queue post](/blog/merge-queue/) explains how thwip builds and pins that
-integrated candidate.
+Evidence only helps if it travels with the right code. There is a second
+problem even when the local run was completely honest. CI on a pull request
+usually checks the pull request's head. The code that lands may also include
+newer changes from `main`. If those two snapshots differ, a green result for the
+first one does not say anything certain about the second. [The merge-queue
+post](/blog/merge-queue/) explains how thwip builds and pins that integrated
+candidate.
 
-So thwip asks a practical question: what if the local work could produce a
-clear, signed claim about exactly what it checked? GitHub could then compare the
-claim with the code under review. If the team wants a second execution, GitHub
-could still run the checks itself. The proof would not replace trust; it would
-make the remaining trust visible.
+That is the bridge thwip is trying to build: local work produces a clear, signed
+claim about exactly what it checked, and GitHub compares that claim with the
+code under review. If the team wants a second execution, GitHub can still run
+the checks itself. The code and its evidence can move together, while the policy
+decides how much of that evidence is enough.
 
 ## What the proof says
 
@@ -85,9 +92,8 @@ The proof names the tree and the base it was built from, so GitHub can tell whic
 code and which version of `main` were involved. It names the policy, which says
 what checks were required. It names the pipeline—the instructions for running
 those checks, similar to a GitHub Actions workflow definition—and records a
-cryptographic digest of those instructions. If the instructions change, the
-digest changes. It also records the runner and timing, the individual suite
-results, and the signing key's identity.
+cryptographic digest of those instructions. It also records the runner and
+timing, the individual suite results, and the signing key's identity.
 
 While a proof cannot remove every trust assumption, it lets GitHub compare the
 claim with the change, the active policy, and the required checks instead of
@@ -141,14 +147,14 @@ it allows the required check to pass.
 The signature does not prove that the checks really ran or that the local
 machine was uncompromised. A compromised device can still sign a false claim.
 
-The signature gives GitHub a precise, tamper-evident claim to evaluate; it is
-not a recording of the local machine's execution. A second GitHub run provides
-a different kind of evidence, at a different cost.
+The signature gives GitHub a precise, tamper-evident claim to evaluate. A second
+GitHub run provides a different kind of evidence, at a different cost.
 
 ## Four ways to pay for confidence
 
-Different projects will make different tradeoffs about where to place trust and
-where to spend compute. thwip puts those choices in four profiles:
+Policies choose how much local work to carry forward and how much to repeat
+remotely. Different projects will make different tradeoffs about where to place
+trust and where to spend compute. thwip puts those choices in four profiles:
 
 | Profile | What supplies the evidence | Trade-off |
 | --- | --- | --- |
@@ -164,12 +170,13 @@ the integration. `remote` places execution with GitHub. `audited` combines a
 device-run proof with a GitHub rerun. The policy therefore makes the trust
 choice explicit without changing what a tree-bound proof means.
 
-The cost difference is measurable. Compare the time a warm local checkout spends
-running the suites with the time a cloud job spends before it can start: runner
-setup, checkout, dependency installation, and build. For an agent running many
-iterations, that setup repeats at every remote run. A local proof reuses work
-already done; a remote verifier pays the setup to gain an independent
-execution.
+The cost difference is measurable. The local-evidence model is about keeping the
+fast agent loop while avoiding unnecessary repeated setup. Compare the time a
+warm local checkout spends running the suites with the time a cloud job spends
+before it can start: runner setup, checkout, dependency installation, and build.
+For an agent running many iterations, that setup repeats at every remote run. A
+local proof reuses work already done; a remote verifier pays the setup to gain an
+independent execution.
 
 GitHub also bills runner time by runner class and rounds jobs up to whole
 minutes. [Its published rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
@@ -183,12 +190,6 @@ check.
 Proofs complement code review. A passing suite says that named checks passed on
 a named tree. It does not establish that the product is secure or that the
 tests cover the important behavior.
-
-Proofs also do not remove environment differences. If a suite needs a cloud
-service, a platform-specific runner, or a secret that cannot exist on a local
-machine, keep that suite remote. A project can combine remote suites with a
-local profile, and `audited` can add a full GitHub rerun when the stronger
-reference is worth its cost.
 
 As with any technology choice, the tradeoff is where trust and cost land. Under
 `fast`, there is no second execution, so a compromised signing device could
