@@ -118,11 +118,12 @@ The policy then decides where the evidence comes from:
 | `remote` | A pinned GitHub Actions verifier runs the candidate. | Central reference machine, with a CI run for each candidate. |
 | `audited` | A project agent run is followed by a GitHub Actions rerun. | Strongest check, with both execution costs. |
 
-The important detail is the pairing: the queue pins the candidate, and the
-evidence names that candidate. In `fresh`, for example, the project agent gets
-a signed assignment saying which code snapshot and suites to run. Its receipt
-is accepted only if it describes that same snapshot. The queue can then accept
-a run it did not perform itself.
+Once pinned, the candidate has a fixed identity: any evidence from a run against
+the integrated code must name its tree and base. If either does not match, thwip
+rejects the evidence. In `fresh`, for example, the project agent gets a signed
+assignment saying which candidate and suites to run. Its receipt is accepted
+only if it describes that same candidate. The queue can then accept a run it did
+not perform itself.
 
 Signed CI receipts deserve their own follow-up post. Here, their role is simple:
 they let the queue verify what ran, where it ran, and which candidate it
