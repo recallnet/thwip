@@ -113,7 +113,7 @@ The policy then decides where the evidence comes from:
 
 | Profile | What happens | Trade-off |
 | --- | --- | --- |
-| `fast` | Reuse the signed proof already attached to the PR head. | Fastest, with no new run against the integrated candidate. |
+| `fast` | Reuse the signed proof already attached to the PR head. | Fastest, but it adds trust: the integrated candidate is not run again. |
 | `fresh` | Ask the agent or agents working on the project to re-run the pinned candidate and sign a receipt. | No cloud rerun, but a project runner must be available. |
 | `remote` | A pinned GitHub Actions verifier runs the candidate. | Central reference machine, with a CI run for each candidate. |
 | `audited` | A project agent run is followed by a GitHub Actions rerun. | Strongest check, with both execution costs. |
