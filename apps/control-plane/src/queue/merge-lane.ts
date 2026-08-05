@@ -605,6 +605,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         commands.mergeOutcomeUnknown({
           idempotencyKey: `worker-merge:unknown:${input.attemptId}`,
           attemptId: input.attemptId,
+          detail: "Git settled the merge but did not return a commit sha",
         }),
       );
       return { merged: true, recorded: false, reason: "MERGE_UNNAMED" };
@@ -629,6 +630,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       commands.mergeOutcomeUnknown({
         idempotencyKey: `worker-merge:unknown:${input.attemptId}`,
         attemptId: input.attemptId,
+        detail: outcome.detail,
       }),
     );
     return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };

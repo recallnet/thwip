@@ -231,7 +231,7 @@ export function diagnose(store: SnapshotQueueStore, limit = 25): QueueDiagnosis 
     })),
     events: store.recentEvents(limit).map((row) => {
       const body = row.body as Record<string, unknown>;
-      const parts = ["entryId", "attemptId", "outcome", "primaryReason", "reason"]
+      const parts = ["entryId", "attemptId", "outcome", "primaryReason", "reason", "detail"]
         .map((k) => (body[k] === undefined || body[k] === null ? null : `${k}=${String(body[k])}`))
         .filter((v): v is string => v !== null);
       return { sequence: row.sequence, at: row.at, type: row.type, detail: parts.join(" ") };
