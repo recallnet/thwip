@@ -464,6 +464,7 @@ export type DriveLaneOutcome =
   | { readonly dispatched: false; readonly reason: "APP_WRITES"; readonly pullRequestNumber: number }
   | { readonly dispatched: false; readonly reason: "DEVICE_ONLY"; readonly pullRequestNumber: number }
   | { readonly dispatched: false; readonly reason: "DISPATCH_FAILED"; readonly pullRequestNumber: number }
+  | { readonly dispatched: false; readonly reason: "ALREADY_RUNNING"; readonly pullRequestNumber: number }
   | { readonly dispatched: true; readonly pullRequestNumber: number };
 
 export async function driveLane<TEnv extends QueueRouteEnv>(
@@ -472,6 +473,20 @@ export async function driveLane<TEnv extends QueueRouteEnv>(
   repositoryId: string,
   baseRef: string,
   snapshot: QueueSnapshot,
+  /**
+   * The pull request whose own run is making this call, when one is.
+   *
+   * `/authorize` drives after it walks, because the walk can hand the lane to a
+   * different pull request and nothing else would tell that one. The caller is
+   * a run already executing for its own turn, so a dispatch back to it starts a
+   * second run for work in flight, and `thwip-merge.yml` serialises on one
+   * group per queue, so the second cancels the first. The cancelled one is the
+   * run that would have written the merge.
+   *
+   * That ran 100 times in 35 minutes on 5 August 2026, one dispatch every
+   * twenty seconds, and nothing merged for as long as it lasted.
+   */
+  options: { readonly exceptPullRequestNumber?: number } = {},
 ): Promise<DriveLaneOutcome> {
   const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
   // Under a device-only profile the run is over by the time the merge has to be
@@ -518,6 +533,9 @@ export async function driveLane<TEnv extends QueueRouteEnv>(
   }
   if (holder === undefined) return { dispatched: false, reason: "LANE_IDLE" };
   const pullRequestNumber = holder.pullRequestNumber;
+  if (pullRequestNumber === options.exceptPullRequestNumber) {
+    return { dispatched: false, reason: "ALREADY_RUNNING", pullRequestNumber };
+  }
 
   try {
     await deps.driveTurn(env, repositoryId, pullRequestNumber);
