@@ -13,8 +13,17 @@ const HEAD = "2".repeat(40);
 const CANDIDATE = "3".repeat(40);
 const TREE = "4".repeat(40);
 
-/** A fetch stand-in driven by a routing table, recording every call. */
+/** Where the base branch actually points, which is what a merge writes onto. */
+const BASE_REF_PATH = "/repos/recallnet/thwip/git/ref/heads/main";
+
+/**
+ * A fetch stand-in driven by a routing table, recording every call.
+ *
+ * The base ref answers BASE unless a test says otherwise, so a test about
+ * something else does not have to describe the branch.
+ */
 function fakeFetch(routes: Record<string, () => Response | Promise<Response> | never>) {
+  routes = { [BASE_REF_PATH]: () => json({ object: { sha: BASE } }), ...routes };
   const calls: Array<{ path: string; method: string; body?: unknown }> = [];
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const path = String(url).replace("https://api.github.com", "");
@@ -131,6 +140,36 @@ describe("resolveCandidate", () => {
       status: "blocked",
       reason: "CANDIDATE_PARENTS_UNEXPECTED",
     });
+  });
+
+  it("pins the branch tip, not the base sha carried on the pull request", async () => {
+    // GitHub caches `base.sha` on the pull request and updates it late. When it
+    // and `merge_commit_sha` are stale together the parent check agrees with
+    // itself, so the queue used to pin a base that was already gone, sign an
+    // intent for it, and watch the merge write come back 422. The attempt
+    // resolved, the lane offered the same turn again, and the same stale read
+    // came back. Pull request 206 sat in that loop until somebody force-pushed.
+    const MOVED = "8".repeat(40);
+    const { impl } = fakeFetch({
+      [BASE_REF_PATH]: () => json({ object: { sha: MOVED } }),
+      "/repos/recallnet/thwip/pulls/42": () => json(pull()),
+      [`/repos/recallnet/thwip/git/commits/${CANDIDATE}`]: () => json(commit(CANDIDATE, TREE, [BASE, HEAD])),
+    });
+    expect(await resolveCandidate(githubHttp("t", impl), REPO, 42)).toEqual({
+      status: "blocked",
+      reason: "CANDIDATE_PARENTS_UNEXPECTED",
+    });
+  });
+
+  it("pins when the branch tip is what the candidate was built on", async () => {
+    const MOVED = "8".repeat(40);
+    const { impl } = fakeFetch({
+      [BASE_REF_PATH]: () => json({ object: { sha: MOVED } }),
+      "/repos/recallnet/thwip/pulls/42": () => json(pull()),
+      [`/repos/recallnet/thwip/git/commits/${CANDIDATE}`]: () => json(commit(CANDIDATE, TREE, [MOVED, HEAD])),
+    });
+    const result = await resolveCandidate(githubHttp("t", impl), REPO, 42);
+    expect(result.status === "pinned" && result.subject.baseSha).toBe(MOVED);
   });
 
   it("recognises a fork head repository", async () => {
