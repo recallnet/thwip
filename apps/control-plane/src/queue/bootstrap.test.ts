@@ -55,6 +55,7 @@ class FakeGitHub implements BootstrapGitHub {
   publishedChecks: Array<{ name: string; headSha: string; conclusion: string }> = [];
   appId = APP_INTEGRATION_ID;
   hideBypassActors = false;
+  omitFalseUpdateParameters = false;
   private nextId = 100;
 
   constructor(private readonly options: { mergesSetupPr?: boolean } = {}) {}
@@ -82,8 +83,19 @@ class FakeGitHub implements BootstrapGitHub {
 
   async rulesetNamed(name: string): Promise<StoredRuleset | null> {
     const stored = this.rulesets.get(name) ?? null;
-    if (stored === null || !this.hideBypassActors) return stored;
-    const { bypass_actors: _hidden, ...ruleset } = stored.ruleset;
+    if (stored === null) return null;
+    const readBack = {
+      ...stored.ruleset,
+      rules: stored.ruleset.rules.map((rule) =>
+        this.omitFalseUpdateParameters &&
+        rule.type === "update" &&
+        rule.parameters?.["update_allows_fetch_and_merge"] === false
+          ? { type: rule.type }
+          : rule,
+      ),
+    };
+    if (!this.hideBypassActors) return { id: stored.id, ruleset: readBack };
+    const { bypass_actors: _hidden, ...ruleset } = readBack;
     return { id: stored.id, ruleset: ruleset as Ruleset };
   }
 
@@ -444,6 +456,17 @@ describe("runBootstrap", () => {
     expect(continued.enabled).toBe(true);
     expect(continued.status.activationState).toBe("enforced");
     expect(continued.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+  });
+
+  it("accepts GitHub read-back that omits the false update-rule parameter", async () => {
+    const github = new FakeGitHub({ mergesSetupPr: true });
+    github.omitFalseUpdateParameters = true;
+    await enrolled();
+
+    const run = await runAsRepositoryAdministrator(github);
+
+    expect(run.status.activationState).toBe("enforced");
+    expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
   });
 
   it("observes before an explicit, recoverable enforcement handoff", async () => {
