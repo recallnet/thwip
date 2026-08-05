@@ -216,6 +216,20 @@ export class SnapshotQueueStore {
   ) {
     const held = cell.read();
     this.doc = held === null ? emptyDocument({ queueKey, repositoryId, baseRef }) : (JSON.parse(held) as Document);
+
+    // Pay down a backlog the moment the document is opened, not when the next
+    // event happens to apply.
+    //
+    // A queue that has grown too large has usually stopped applying events:
+    // the tick no longer fits in an invocation, so nothing applies, so a bound
+    // that only ran on an applied event never ran. That is what shipped on
+    // 5 August, and it left 1057 outbox items in place on the queue it was
+    // written for, because the queue had gone quiet by the time it landed.
+    //
+    // A document already within its bounds writes nothing, so opening stays
+    // free for the reads it was kept free for. One that is over pays once and
+    // is never over again.
+    if (this.overBounds()) this.flush();
   }
 
   static open(
@@ -223,9 +237,12 @@ export class SnapshotQueueStore {
     identity: { queueKey: string; repositoryId: string; baseRef: string },
     compaction: CompactionLimits = DEFAULT_COMPACTION,
   ): SnapshotQueueStore {
-    // Opening writes nothing. A queue nobody has used yet has no document, and
-    // creating one on every read would turn each poll of an idle repository into
-    // a write.
+    // Opening an empty or already-bounded document writes nothing. A queue
+    // nobody has used yet has no document, and creating one on every read would
+    // turn each poll of an idle repository into a write. The one exception is a
+    // legacy document above its bounds: opening it performs the cleanup write
+    // that lets a queue too large to process recover without first accepting an
+    // event.
     return new SnapshotQueueStore(
       cell,
       identity.queueKey,
@@ -235,7 +252,27 @@ export class SnapshotQueueStore {
     );
   }
 
+  /**
+   * Persist the document, within its bounds.
+   *
+   * The bounds are applied here rather than where an event is accepted, because
+   * a queue that is already too large has usually stopped accepting events. The
+   * tick stops fitting in an invocation, so nothing applies, so a bound that
+   * only ran on an applied event never runs. Shipped that way on 5 August, it
+   * left 1057 outbox items in place on the queue it was written for.
+   *
+   * Opening pays an existing backlog down, and every later persistence path
+   * keeps it down: an applied event, a no-op command, or a merge write starting
+   * or settling. What is persisted is always within bounds, which is the
+   * property worth having.
+   */
   private flush(): void {
+    this.trimOutbox();
+    this.trimMergeOperations();
+    if (this.doc.events.length > EVENT_TAIL) this.doc.events = this.doc.events.slice(-EVENT_TAIL);
+    if (this.doc.dedupe.length > DEDUPE_WINDOW) {
+      this.doc.dedupe = [...this.doc.dedupe].sort((a, b) => a.sequence - b.sequence).slice(-DEDUPE_WINDOW);
+    }
     this.cell.write(JSON.stringify(this.doc));
   }
 
@@ -340,7 +377,6 @@ export class SnapshotQueueStore {
     if (options.bumpAttemptRevision === true) this.doc.attemptRevision += 1;
 
     this.doc.events.push({ sequence, at: event.at, type: event.type, body: full });
-    if (this.doc.events.length > EVENT_TAIL) this.doc.events = this.doc.events.slice(-EVENT_TAIL);
     this.remember({ key: event.idempotencyKey, sequence, result: "applied", at: event.at });
 
     // Drop what no live decision can reach, before it is written.
@@ -382,9 +418,6 @@ export class SnapshotQueueStore {
       });
       this.doc.nextOutboxId += 1;
     }
-    this.trimOutbox();
-    this.trimMergeOperations();
-
     this.cached = next;
     this.flush();
     return {
@@ -397,11 +430,6 @@ export class SnapshotQueueStore {
 
   private remember(row: DedupeRow): void {
     this.doc.dedupe.push(row);
-    if (this.doc.dedupe.length > DEDUPE_WINDOW) {
-      this.doc.dedupe = [...this.doc.dedupe]
-        .sort((a, b) => a.sequence - b.sequence)
-        .slice(-DEDUPE_WINDOW);
-    }
   }
 
   /* ---------------- scheduler ---------------- */
@@ -449,6 +477,16 @@ export class SnapshotQueueStore {
     const before = this.doc.deadlines.length;
     this.doc.deadlines = this.doc.deadlines.filter((d) => !(d.kind === kind && d.attemptId === attemptId));
     if (this.doc.deadlines.length !== before) this.flush();
+  }
+
+  /** Whether anything in the document is past the size it is allowed to be. */
+  private overBounds(): boolean {
+    return (
+      this.doc.outbox.length > OUTBOX_TAIL ||
+      this.doc.mergeOperations.filter((row) => row.outcome !== null).length > MERGE_OPERATION_TAIL ||
+      this.doc.events.length > EVENT_TAIL ||
+      this.doc.dedupe.length > DEDUPE_WINDOW
+    );
   }
 
   /** Keep the newest items, because the newest are what an operator is asking about. */
@@ -533,10 +571,6 @@ export class SnapshotQueueStore {
       outcome: null,
       resolvedAt: null,
     });
-    // Merge writes are recorded outside `append`, so the bound is applied here
-    // as well. A repository that merges without any other command in between
-    // would otherwise grow this array unwatched.
-    this.trimMergeOperations();
     this.flush();
     return { status: "started" };
   }
@@ -547,9 +581,6 @@ export class SnapshotQueueStore {
     if (row === undefined) return;
     row.outcome = outcome;
     row.resolvedAt = at;
-    // Settling is what makes a row droppable, so the bound is applied at the
-    // moment one becomes so rather than waiting for the next write to start.
-    this.trimMergeOperations();
     this.flush();
   }
 

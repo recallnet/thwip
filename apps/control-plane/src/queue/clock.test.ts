@@ -129,6 +129,61 @@ describe("tickOwedByTraffic", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * A cron that starts a tick every five minutes and never finishes one must
+   * not lock traffic out of the queue.
+   *
+   * The claim compared `started_at` against the same fifteen minutes that
+   * define staleness, so each failing firing refreshed `started_at` and put the
+   * next traffic claim fifteen minutes away again. Live on 5 August between
+   * 18:46Z and 19:16Z: the row read `started_at 19:10:47` with
+   * `finished_at 18:46:42`, thirty minutes of no finished tick, and every
+   * request through the door was refused the work it existed to pick up.
+   *
+   * Two different questions were being asked of one column. Whether a tick is
+   * already running is about `started_at` and is answered in minutes. Whether
+   * the queue has stopped is about `finished_at` and is answered in quarter
+   * hours.
+   */
+  it("takes over from a cron that keeps starting ticks and never finishing one", async () => {
+    const run = vi.fn();
+    await tickOwedByTraffic(
+      {
+        readClock: async () => ({
+          startedAt: "2026-08-05T19:10:47.000Z",
+          finishedAt: "2026-08-05T18:46:42.000Z",
+          source: "cron",
+        }),
+        claim: async (_now, notBefore) =>
+          // The real compare-and-swap: the row is only taken when the last
+          // start is older than `notBefore`.
+          "2026-08-05T19:10:47.000Z" < notBefore,
+        finish: async () => {},
+        run,
+      },
+      "2026-08-05T19:14:52.000Z",
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a tick that is genuinely in flight alone", async () => {
+    const run = vi.fn();
+    await tickOwedByTraffic(
+      {
+        readClock: async () => ({
+          startedAt: "2026-08-05T19:14:30.000Z",
+          finishedAt: "2026-08-05T18:46:42.000Z",
+          source: "cron",
+        }),
+        claim: async (_now, notBefore) => "2026-08-05T19:14:30.000Z" < notBefore,
+        finish: async () => {},
+        run,
+      },
+      "2026-08-05T19:14:52.000Z",
+    );
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("runs nothing when another request already took the claim", async () => {
     const run = vi.fn();
     await tickOwedByTraffic(

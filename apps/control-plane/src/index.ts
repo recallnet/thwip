@@ -383,7 +383,13 @@ app.get("/health", async (c) => {
     },
   };
   const jws = await signPayload(c.env, payload, "thwip-health+jws");
-  return c.json({ ...payload, jws });
+  // Never from a cache. Cloudflare's edge served this route from cache within
+  // minutes of the tick age being added to it, so the first read of the new
+  // field came back with the previous deploy's build sha and no tick at all.
+  // The watchdog exists to notice a queue that stopped, and a cached answer is
+  // the one thing that would let it report a stopped queue as a running one.
+  // `/v1/schema` carries this header for the same reason.
+  return c.json({ ...payload, jws }, 200, { "cache-control": "no-store" });
 });
 
 /**
