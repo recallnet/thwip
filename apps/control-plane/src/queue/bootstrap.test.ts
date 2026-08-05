@@ -225,6 +225,7 @@ describe("enrollQueueProject", () => {
     expect(row.base_ref).toBe(BASE_REF);
     expect(row.enabled).toBe(0);
     expect(row.activation_state).toBe("configured");
+    expect(row.chain_public).toBe(0);
     expect(row.bootstrap_progress_json).toBe("{}");
     const columns = d1.raw.prepare("PRAGMA table_info(queue_projects)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).not.toContain("backend");
@@ -246,6 +247,25 @@ describe("enrollQueueProject", () => {
       .prepare("SELECT COUNT(*) AS n FROM queue_projects WHERE github_repository_id = ?")
       .get(REPOSITORY_ID) as { n: number };
     expect(rows.n).toBe(1);
+  });
+
+  it("persists an explicit chain-publication choice and changes it only when asked", async () => {
+    const enrolled = await enrollQueueProject(d1.db, {
+      repositoryId: REPOSITORY_ID,
+      baseRef: BASE_REF,
+      chainPublic: true,
+    });
+    expect(enrolled).toMatchObject({ ok: true, project: { chainPublic: true } });
+
+    await enrollQueueProject(d1.db, { repositoryId: REPOSITORY_ID, baseRef: BASE_REF });
+    expect((await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))?.chainPublic).toBe(true);
+
+    await enrollQueueProject(d1.db, {
+      repositoryId: REPOSITORY_ID,
+      baseRef: BASE_REF,
+      chainPublic: false,
+    });
+    expect((await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))?.chainPublic).toBe(false);
   });
 
   /**
@@ -811,6 +831,17 @@ describe("handleBootstrapRequest", () => {
     const second = await handleAsRepositoryAdministrator(github);
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ enabled: true, complete: true });
+  });
+
+  it("returns the stored chain-publication choice on every bootstrap response", async () => {
+    const github = new FakeGitHub();
+    const response = await handleBootstrapRequest({
+      ...deps(github),
+      repositoryId: REPOSITORY_ID,
+      baseRef: BASE_REF,
+      chainPublic: true,
+    });
+    expect(response.body).toMatchObject({ chainPublic: true });
   });
 
   it("answers 404 for a repository the App is not installed on", async () => {

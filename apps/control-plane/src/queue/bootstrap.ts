@@ -50,6 +50,7 @@ export interface QueueProject {
   readonly baseRef: string;
   readonly enabled: boolean;
   readonly activationState: string;
+  readonly chainPublic: boolean;
   readonly progress: BootstrapProgress;
 }
 
@@ -157,6 +158,7 @@ interface ProjectRow {
   base_ref: string;
   enabled: number;
   activation_state: string;
+  chain_public: number;
   bootstrap_progress_json: string;
 }
 
@@ -179,6 +181,7 @@ function toProject(row: ProjectRow): QueueProject {
     baseRef: row.base_ref,
     enabled: row.enabled === 1,
     activationState: row.activation_state,
+    chainPublic: row.chain_public === 1,
     progress,
   };
 }
@@ -191,7 +194,7 @@ export async function readQueueProject(
   const row = await db
     .prepare(
       `SELECT id, organization_id, github_repository_id, base_ref,
-              enabled, activation_state, bootstrap_progress_json
+              enabled, activation_state, chain_public, bootstrap_progress_json
          FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ?`,
     )
@@ -203,6 +206,8 @@ export async function readQueueProject(
 export interface EnrollmentRequest {
   readonly repositoryId: string;
   readonly baseRef: string;
+  /** Public chains need no session to read. Private is the safe default. */
+  readonly chainPublic?: boolean;
 }
 
 export type Enrollment =
@@ -273,8 +278,8 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
     .prepare(
       `INSERT INTO queue_projects
          (id, organization_id, github_repository_id, base_ref,
-          enabled, activation_state, bootstrap_progress_json, verifier_json)
-       VALUES (?, ?, ?, ?, 0, 'configured', '{}', ?)
+          enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json)
+       VALUES (?, ?, ?, ?, 0, 'configured', ?, '{}', ?)
        ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
     )
     .bind(
@@ -282,6 +287,7 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       installed.organizationId,
       request.repositoryId,
       request.baseRef,
+      request.chainPublic === true ? 1 : 0,
       JSON.stringify(
         pinnedVerifierFor({
           repositoryId: request.repositoryId,
@@ -292,6 +298,18 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       ),
     )
     .run();
+
+  // Omitting the choice on a later setup request leaves the stored privacy
+  // decision alone. Supplying either boolean is an explicit administrator
+  // change, including for a repository whose bootstrap already completed.
+  if (request.chainPublic !== undefined) {
+    await db
+      .prepare(
+        "UPDATE queue_projects SET chain_public = ? WHERE github_repository_id = ? AND base_ref = ?",
+      )
+      .bind(request.chainPublic ? 1 : 0, request.repositoryId, request.baseRef)
+      .run();
+  }
 
   const project = await readQueueProject(db, request.repositoryId, request.baseRef);
   if (project === null) return { ok: false, reason: "the queue project could not be read back" };
@@ -365,6 +383,7 @@ export interface BootstrapStatus {
   readonly baseRef: string;
   readonly enabled: boolean;
   readonly activationState: string;
+  readonly chainPublic: boolean;
   readonly progress: BootstrapProgress;
   readonly nextStep: BootstrapStep | null;
   readonly complete: boolean;
@@ -378,6 +397,7 @@ export function bootstrapStatus(project: QueueProject): BootstrapStatus {
     baseRef: project.baseRef,
     enabled: project.enabled,
     activationState: project.activationState,
+    chainPublic: project.chainPublic,
     progress: project.progress,
     nextStep: next,
     complete: next === null,
@@ -906,6 +926,7 @@ export async function runBootstrap(
 export interface BootstrapRequest extends BootstrapDeps {
   readonly repositoryId: string;
   readonly baseRef: string;
+  readonly chainPublic?: boolean;
 }
 
 export interface BootstrapResponse {
@@ -926,6 +947,7 @@ export async function handleBootstrapRequest(request: BootstrapRequest): Promise
   const enrolled = await enrollQueueProject(request.db, {
     repositoryId: request.repositoryId,
     baseRef: request.baseRef,
+    ...(request.chainPublic !== undefined ? { chainPublic: request.chainPublic } : {}),
   });
   if (!enrolled.ok) return { status: 404, body: { error: enrolled.reason } };
 
