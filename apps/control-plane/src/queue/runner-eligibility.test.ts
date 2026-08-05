@@ -190,10 +190,12 @@ describe("scheduler eligibility, under a device-only profile", () => {
     // exactly as `scheduled-tick.ts` does every five minutes.
     raw.prepare("UPDATE queue_runners SET last_heartbeat_at = '2000-01-01T00:00:00.000Z'").run();
     await tickAllQueues(e, {
-      driveTurn: async () => {},
+      driveQueue: async () => {},
       onQueueTicked: () => {},
       onQueueFailed: () => {},
-      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
     });
     const afterTick = entryFor(await snapshotEntries(e), 59);
     expect(afterTick?.schedulerEligible).toBe(false);

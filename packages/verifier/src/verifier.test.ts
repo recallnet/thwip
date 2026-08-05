@@ -402,7 +402,7 @@ describe("hybrid: remote suites proven by GitHub", () => {
    * The bug this covers: one read of GitHub's check list decided the proof, so a
    * check that had not finished was written down as a failure the developer then
    * read as "your tests failed". The merge path lost three merges to the same
-   * shape (.superpowers/sdd/not-merged-report.md).
+   * shape from the earlier settlement investigation.
    */
   it("passes when the check reports pending on the first read and success after", async () => {
     const answers = [

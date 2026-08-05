@@ -72,26 +72,13 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   );
 }
 
-interface Verdict {
-  authorized: boolean;
-  reason: string;
-  detail?: string;
-  operationId: string | null;
-  merge?: { baseSha: string; treeOid: string; parentShas: string[] } | null;
-}
-
-async function prepareMerge(
+async function enrol(
   app: ReturnType<typeof routes>,
   e: QueueRouteEnv,
-  candidate: Record<string, unknown> = {
-    baseSha: BASE,
-    candidateSha: CANDIDATE,
-    candidateTreeOid: TREE,
-    parentShas: [BASE, HEAD],
-  },
-): Promise<Verdict> {
+  extra: Record<string, unknown> = {},
+): Promise<void> {
   acceptProof(raw, REPO, HEAD);
-  const response = await app.request(
+  await app.request(
     `/v1/queue/${REPO}/authorize`,
     {
       method: "POST",
@@ -102,13 +89,15 @@ async function prepareMerge(
         baseRef: REF,
         authorGithubUserId: "1",
         draft: false,
-        prepare: true,
-        candidate,
+        ...extra,
       }),
     },
     e,
   );
-  return (await response.json()) as Verdict;
+}
+
+async function drive(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<void> {
+  await enrol(app, e);
 }
 
 /** Every merge intent the queue signed, oldest first. */
@@ -127,7 +116,11 @@ function intents(): Array<{ baseSha: string; candidateTreeOid: string; candidate
  * a test there: the walk pins the candidate and the reducer then refuses the
  * merge intent, which leaves the attempt holding the lane with its base pinned.
  */
-async function pinCandidateWhilePaused(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<void> {
+async function pinCandidateWhilePaused(
+  app: ReturnType<typeof routes>,
+  e: QueueRouteEnv,
+  makeCandidateReadable: () => void,
+): Promise<void> {
   // The turn first, so there is an attempt for the walk below to pin against.
   acceptProof(raw, REPO, HEAD);
   await app.request(
@@ -154,7 +147,8 @@ async function pinCandidateWhilePaused(app: ReturnType<typeof routes>, e: QueueR
     },
     e,
   );
-  expect((await prepareMerge(app, e)).reason).toBe("QUEUE_PAUSED");
+  makeCandidateReadable();
+  await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
   const resumed = await app.request(`/v1/queue/${REPO}/resume?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
   expect(resumed.status).toBe(200);
 }
@@ -182,16 +176,16 @@ describe("the base a merge intent pins", () => {
   it("signs nothing once the branch has left the base this attempt was integrated against", async () => {
     const e = env();
     let base = BASE;
+    let readable = false;
     const app = routes({
-      integratedCandidate: async () => ({
-        status: "pinned",
-        baseSha: base,
-        headSha: HEAD,
-        candidateSha: CANDIDATE,
-        candidateTreeOid: TREE,
-      }),
+      integratedCandidate: async () =>
+        readable
+          ? { status: "pinned", baseSha: base, headSha: HEAD, candidateSha: CANDIDATE, candidateTreeOid: TREE }
+          : { status: "pending", reason: "MERGEABILITY_UNKNOWN" },
     });
-    await pinCandidateWhilePaused(app, e);
+    await pinCandidateWhilePaused(app, e, () => {
+      readable = true;
+    });
     const signedSoFar = intents();
     // The two assertions below both hold over an empty list, so this pins that
     // there is something for them to be about. A test that cannot fail was
@@ -199,13 +193,8 @@ describe("the base a merge intent pins", () => {
     expect(signedSoFar.length).toBeGreaterThan(0);
 
     base = MOVED;
-    const verdict = await prepareMerge(app, e);
+    await drive(app, e);
 
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.reason).toBe("CANDIDATE_BASE_MOVED");
-    expect(verdict.operationId).toBeNull();
-    // A refusal names nothing to merge.
-    expect(verdict.merge ?? null).toBeNull();
     // Nothing new was signed, and nothing signed names the base the branch moved to.
     expect(intents()).toEqual(signedSoFar);
     expect(intents().every((git) => git.baseSha === BASE)).toBe(true);
@@ -214,19 +203,19 @@ describe("the base a merge intent pins", () => {
   it("hands the turn back, so the pull request takes another one", async () => {
     const e = env();
     let base = BASE;
+    let readable = false;
     const app = routes({
-      integratedCandidate: async () => ({
-        status: "pinned",
-        baseSha: base,
-        headSha: HEAD,
-        candidateSha: CANDIDATE,
-        candidateTreeOid: TREE,
-      }),
+      integratedCandidate: async () =>
+        readable
+          ? { status: "pinned", baseSha: base, headSha: HEAD, candidateSha: CANDIDATE, candidateTreeOid: TREE }
+          : { status: "pending", reason: "MERGEABILITY_UNKNOWN" },
     });
-    await pinCandidateWhilePaused(app, e);
+    await pinCandidateWhilePaused(app, e, () => {
+      readable = true;
+    });
 
     base = MOVED;
-    await prepareMerge(app, e);
+    await drive(app, e);
 
     // Deferred keeps the place in line. The turn is spent, and the candidate
     // for the base that is there now is built on the next one.
@@ -237,12 +226,10 @@ describe("the base a merge intent pins", () => {
     const e = env();
     const app = routes({ integratedCandidate: async () => null });
 
-    const verdict = await prepareMerge(app, e);
+    await drive(app, e);
 
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.reason).toBe("BASE_UNREADABLE");
-    expect(verdict.operationId).toBeNull();
     expect(intents()).toEqual([]);
+    expect(await entryState(app, e)).toBe("Active");
   });
 
   /**
@@ -259,11 +246,8 @@ describe("the base a merge intent pins", () => {
       integratedCandidate: async () => ({ status: "blocked", reason: "MERGE_CONFLICT" }),
     });
 
-    const verdict = await prepareMerge(app, e);
+    await drive(app, e);
 
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.reason).toBe("MERGE_CONFLICT");
-    expect(verdict.operationId).toBeNull();
     expect(intents()).toEqual([]);
     // The lane is free and the entry says what the developer has to fix.
     const after = await lane(app, e);
@@ -277,9 +261,8 @@ describe("the base a merge intent pins", () => {
       integratedCandidate: async () => ({ status: "blocked", reason: "PR_CLOSED" }),
     });
 
-    const verdict = await prepareMerge(app, e);
+    await drive(app, e);
 
-    expect(verdict.reason).toBe("PR_CLOSED");
     const after = await lane(app, e);
     expect(after.state).toBe("Cancelled");
     expect(after.activeAttemptId).toBeNull();
@@ -291,69 +274,26 @@ describe("the base a merge intent pins", () => {
       integratedCandidate: async () => ({ status: "pending", reason: "MERGEABILITY_UNKNOWN" }),
     });
 
-    const verdict = await prepareMerge(app, e);
+    await drive(app, e);
 
-    expect(verdict.reason).toBe("MERGEABILITY_UNKNOWN");
     // Transient, so the place in line and the turn are both kept.
     expect(await entryState(app, e)).toBe("Active");
   });
 
-  /**
-   * A merge run is dispatched about a second after the one ahead of it lands,
-   * and GitHub has invalidated mergeability for every open pull request without
-   * having recomputed it. The refusal spends the run. Nothing re-drove the lane,
-   * so the next attempt waited for the five-minute cron, and merges dropped to
-   * one per five minutes whenever the recompute outran the backoff.
-   */
-  it("re-drives the lane when it cannot read a base", async () => {
-    const e = env();
-    const driven: number[] = [];
-    const app = routes({
-      integratedCandidate: async () => null,
-      driveTurn: async (_env, _repositoryId, pullRequestNumber) => {
-        driven.push(pullRequestNumber);
-      },
-    });
-
-    expect((await prepareMerge(app, e)).reason).toBe("BASE_UNREADABLE");
-    expect(driven).toEqual([117]);
-  });
-
-  it("re-drives the lane when the head moved under it", async () => {
-    const e = env();
-    const driven: number[] = [];
-    const app = routes({
-      integratedCandidate: async () => ({
-        status: "pinned",
-        baseSha: BASE,
-        headSha: "a".repeat(40),
-        candidateSha: CANDIDATE,
-        candidateTreeOid: TREE,
-      }),
-      driveTurn: async (_env, _repositoryId, pullRequestNumber) => {
-        driven.push(pullRequestNumber);
-      },
-    });
-
-    expect((await prepareMerge(app, e)).reason).toBe("HEAD_MOVED");
-    expect(driven).toEqual([117]);
-  });
-
-  it("pins what GitHub says the candidate is, not what the caller sent", async () => {
+  it("pins what GitHub says the candidate is, not fields sent to the check API", async () => {
     const e = env();
     const app = routes();
 
-    const verdict = await prepareMerge(app, e, {
-      // A caller naming its own tree and its own parents. Both are read from
-      // GitHub, so neither of these reaches a signed record.
-      baseSha: BASE,
-      candidateSha: "e".repeat(40),
-      candidateTreeOid: "9".repeat(40),
-      parentShas: ["9".repeat(40)],
+    await enrol(app, e, {
+      candidate: {
+        baseSha: BASE,
+        candidateSha: "e".repeat(40),
+        candidateTreeOid: "9".repeat(40),
+        parentShas: ["9".repeat(40)],
+      },
     });
+    await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
 
-    expect(verdict.reason).toBe("HOLDS_TURN");
-    expect(verdict.merge?.treeOid).toBe(TREE);
     expect(intents()).toEqual([
       expect.objectContaining({ baseSha: BASE, candidateTreeOid: TREE, candidateParentOids: [BASE, HEAD] }),
     ]);

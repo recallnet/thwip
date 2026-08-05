@@ -4,20 +4,13 @@ import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
+import { loadQueueState } from "./queue-state.js";
+import { buildSnapshot } from "./queue-operations.js";
+import type { D1Like } from "./projection.js";
 
 /**
- * The merge write, performed by the Worker rather than by the adopter's
- * workflow.
- *
- * The write was shell in every adopter's `thwip-merge.yml`, behind a
- * `THWIP_ENQUEUE_TOKEN` they minted and pasted into Actions. Moving it here
- * takes a branch-write credential out of every adopter's Actions secrets and
- * puts the fast-forward guard in code this repository tests.
- *
- * One writer at a time. A repository still running the workflow is answered
- * with the pins and writes its own merge; one that has stopped is answered with
- * none and this writes it. Two writers racing for one turn is how a merge that
- * landed gets reported as a base that moved.
+ * The App performs the merge with the installation credential and keeps the
+ * fast-forward guard in code this repository tests.
  */
 
 const open: Array<{ close(): void }> = [];
@@ -65,7 +58,7 @@ afterEach(() => {
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD }, {
-      queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge", mergeWriter: "app" }),
+      queueProject: async () => ({ activationState: "enforced" }),
       commitFacts: async (_e: unknown, _r: string, sha: string) =>
         sha === LANDED
           ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "Merge pull request #117 (Thwip Queue)" }
@@ -108,7 +101,6 @@ async function authorize(
         baseRef: REF,
         authorGithubUserId: "1",
         draft: false,
-        prepare: true,
       }),
     },
     e,
@@ -116,11 +108,23 @@ async function authorize(
   return (await response.json()) as Record<string, unknown>;
 }
 
+async function drive(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<Record<string, unknown>> {
+  // The required workflow's authorization request is the event that arrives
+  // when proof and CI become ready. It must wake the App writer itself rather
+  // than relying on the five-minute queue heartbeat.
+  return authorize(app, e);
+}
+
+async function entryState(e: QueueRouteEnv): Promise<string | null> {
+  const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+  return buildSnapshot(store).entries[0]?.state ?? null;
+}
+
 describe("the Worker performing the merge", () => {
-  it("hands the writer the base, the tree and the parents the queue pinned", async () => {
+  it("wakes immediately from a newly-ready authorization and hands the writer the pinned merge", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
-    await authorize(routes({ mergeWrite: w.port }), e);
+    await drive(routes({ mergeWrite: w.port }), e);
 
     expect(w.intents).toHaveLength(1);
     expect(w.intents[0]).toMatchObject({
@@ -140,38 +144,22 @@ describe("the Worker performing the merge", () => {
   it("writes the message the record binds", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
-    await authorize(routes({ mergeWrite: w.port }), e);
+    await drive(routes({ mergeWrite: w.port }), e);
     expect(w.intents[0]?.message).toMatch(/Merge pull request #117 \(Thwip Queue\)/);
     expect(w.intents[0]?.message).toMatch(/thwip-queue-operation: merge_/);
   });
 
-  /**
-   * An old workflow reading this answer finds no pins and errors rather than
-   * merging, which is the loud half of a repository that flipped the writer
-   * without dropping the workflow. Silence there would be two writers.
-   */
-  it("hands out no pins once it is the writer", async () => {
+  it("does not expose merge pins or write results through the check API", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
     const answer = await authorize(routes({ mergeWrite: w.port }), e);
-    expect(answer["merge"]).toBeNull();
-    expect(answer["mergeWriter"]).toBe("app");
-    expect(answer["merged"]).toBe(true);
-  });
-
-  it("leaves the pins alone for a repository still running the workflow", async () => {
-    const e = env();
-    const w = writer({ kind: "merged", mergeSha: LANDED });
-    const answer = await authorize(
-      routes({
-        mergeWrite: w.port,
-        queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
-      }),
-      e,
-    );
-    expect(answer["mergeWriter"]).toBe("workflow");
-    expect(answer["merge"]).toMatchObject({ baseSha: BASE, treeOid: TREE });
-    expect(w.intents).toEqual([]);
+    expect(answer).not.toHaveProperty("merge");
+    expect(answer).not.toHaveProperty("mergeWriter");
+    expect(answer).not.toHaveProperty("merged");
+    // The route captures this answer, then wakes the internal writer. The
+    // side effect is real, but none of its authority or outcome crosses the
+    // check-facing response boundary.
+    expect(w.intents).toHaveLength(1);
   });
 
   /**
@@ -185,7 +173,7 @@ describe("the Worker performing the merge", () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
     let asked = 0;
-    const answer = await authorize(
+    await authorize(
       routes({
         mergeWrite: w.port,
         baseContainsSha: async () => {
@@ -196,24 +184,31 @@ describe("the Worker performing the merge", () => {
       e,
     );
     expect(asked).toBeGreaterThan(2);
-    expect(answer["recorded"]).toBe(true);
-    expect(answer["transitionDigest"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    const record = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
+      .get() as { digest: string } | undefined;
+    expect(record?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   /** A read that never agrees records nothing. The sweep asks again. */
   it("records nothing when the branch never says it contains the commit", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
-    const answer = await authorize(routes({ mergeWrite: w.port, baseContainsSha: async () => false }), e);
-    expect(answer["recorded"]).toBe(false);
+    await authorize(routes({ mergeWrite: w.port, baseContainsSha: async () => false }), e);
+    const records = raw
+      .prepare("SELECT COUNT(*) AS count FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
+      .get() as { count: number };
+    expect(records.count).toBe(0);
   });
 
   it("writes a signed record for the merge it performed", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
-    const answer = await authorize(routes({ mergeWrite: w.port }), e);
-    expect(answer["recorded"]).toBe(true);
-    expect(answer["transitionDigest"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    await drive(routes({ mergeWrite: w.port }), e);
+    const record = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
+      .get() as { digest: string } | undefined;
+    expect(record?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   /**
@@ -223,48 +218,15 @@ describe("the Worker performing the merge", () => {
   it("frees the lane when the base moved under it", async () => {
     const e = env();
     const w = writer({ kind: "base-moved", detail: "the base branch is no longer " + BASE });
-    const answer = await authorize(routes({ mergeWrite: w.port }), e);
-    expect(answer).toMatchObject({ merged: false, reason: "BASE_MOVED" });
+    await drive(routes({ mergeWrite: w.port }), e);
+    expect(await entryState(e)).toBe("Deferred");
   });
 
   it("leaves an outcome it could not read to reconciliation", async () => {
     const e = env();
     const w = writer({ kind: "unknown", detail: "GitHub could not be read" });
-    const answer = await authorize(routes({ mergeWrite: w.port }), e);
-    expect(answer).toMatchObject({ merged: false, reason: "MERGE_OUTCOME_UNKNOWN" });
+    await drive(routes({ mergeWrite: w.port }), e);
+    expect(await entryState(e)).toBe("Reconciling");
   });
 
-  /**
-   * A squash commit does not contain the pull request head, so the branch's own
-   * required checks refuse the ref update and GitHub cannot tell the pull
-   * request was merged. Nothing is written, and the lane is handed back.
-   */
-  it("refuses a squash rather than performing one it cannot bind", async () => {
-    const e = env();
-    const w = writer({ kind: "merged", mergeSha: LANDED });
-    const answer = await authorize(
-      routes({
-        mergeWrite: w.port,
-        queueProject: async () => ({
-          activationState: "enforced",
-          mergeMethod: "squash",
-          mergeWriter: "app",
-        }),
-      }),
-      e,
-    );
-    expect(answer).toMatchObject({ merged: false, reason: "SQUASH_UNBINDABLE" });
-    expect(w.intents).toEqual([]);
-  });
-
-  /**
-   * A deployment with no way to reach GitHub with the App's own credential
-   * cannot write, and must go on letting the workflow do it rather than
-   * answering with neither pins nor a merge.
-   */
-  it("keeps the pins where the deployment cannot write at all", async () => {
-    const e = env();
-    const answer = await authorize(routes({}), e);
-    expect(answer["merge"]).toMatchObject({ baseSha: BASE });
-  });
 });

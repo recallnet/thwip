@@ -63,13 +63,8 @@ for (const f of workerSources) {
 // And the workflows nobody checked in.
 //
 // `bootstrap-workflows.ts` emits the workflows every adopted repository runs, so
-// they are workflows and the rules above are theirs. Reading only
-// `.github/workflows` is how this repository's merge came to bind the base it
-// verified while the copy that ships to customers went on merging onto whatever
-// the branch happened to be.
-//
-// The merge workflow here is the template rendered at the production endpoint,
-// so a change to one is a change to both.
+// they are workflows and the rules above are theirs. Reading only checked-in
+// `.github/workflows` would leave setup templates unvalidated.
 {
   const { generatedWorkflows, RENDERED_HERE } = await import("./generate-workflows.mjs");
   for (const [path, content] of Object.entries(generatedWorkflows())) {

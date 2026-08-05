@@ -8,8 +8,7 @@ import { describe, expect, it } from "vitest";
  * `merge-commit.ts` owns the operation id, the title and the attribution
  * trailer, because each of them is agreed with somewhere else: the trailer with
  * `external-push.ts`, which uses it to tell the queue's own merges from a push
- * around the queue, and the title and message with the YAML in
- * `.github/workflows/thwip-merge.yml`.
+ * around the queue, and the title and message with the App writer.
  *
  * Retyping one is how a second merge path came to write merges carrying no
  * attribution, which would have been read back as external pushes and appended
@@ -51,11 +50,9 @@ describe("merge commit details", () => {
   it("scans the files that write merges", () => {
     const names = sources().map((s) => s.name);
     expect(names).toContain("routes.ts");
-    // Where the merge is written: the shell every repository runs, including
-    // this one, and the file that signs the intent naming the operation it
-    // will perform.
-    expect(names).toContain("bootstrap-workflows.ts");
-    expect(names).toContain("github-port.ts");
+    // Where the merge is written and where its intent/record are signed.
+    expect(names).toContain("merge-write.ts");
+    expect(names).toContain("merge-lane.ts");
     expect(names).toContain("attestation.ts");
   });
 });
