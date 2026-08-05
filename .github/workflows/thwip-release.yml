@@ -146,10 +146,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # The CLI imports the workspace packages through their built entry points,
-      # so they have to exist before the bundle can resolve them.
+      # so they have to exist before the bundle can resolve them. Only those:
+      # the bundler inlines packages and nothing else, and building the apps
+      # here put the Worker's SPA and the Astro blog between a CLI fix and the
+      # registry for no reason.
       - name: Build workspace packages
         if: steps.decide.outputs.release == 'true'
-        run: pnpm build
+        run: pnpm -r --filter './packages/**' run build
 
       - name: Build the package at the new version
         if: steps.decide.outputs.release == 'true'
