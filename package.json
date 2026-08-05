@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@11.1.2",
   "scripts": {
-    "build": "pnpm -r --filter './packages/**' --filter './apps/**' run build",
+    "build": "pnpm -r --filter './packages/**' --filter './apps/**' --filter '!@thwip/blog' run build && pnpm --filter @thwip/blog run build",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "lint": "node scripts/lint.mjs",
