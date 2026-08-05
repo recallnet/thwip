@@ -105,6 +105,25 @@ function racingOnQueue(
 }
 
 describe("the final App-write revalidation", () => {
+  it("does not enter the App-write walk while the project is observing", async () => {
+    const e = env();
+    const writes: number[] = [];
+    const reads = {
+      ...deps(writes),
+      queueProject: async () => ({ activationState: "observe" }),
+    } as Parameters<typeof driveQueue>[1];
+    await place(e, reads, 1);
+
+    await driveQueue(e, reads, baseOnQueue, { repositoryId: REPO, baseRef: REF });
+
+    const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+    const snapshot = buildSnapshot(store);
+    expect(snapshot.entries.find((entry) => entry.pullRequestNumber === 1)?.state).toBe("Active");
+    expect(snapshot.activeCandidate).toBeNull();
+    expect(store.mergeOperations()).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
   it("does not combine the old operation with a replacement lane holder", async () => {
     const e = env();
     const writes: number[] = [];
