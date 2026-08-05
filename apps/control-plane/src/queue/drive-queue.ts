@@ -33,6 +33,18 @@ export async function driveQueue<TEnv extends QueueRouteEnv>(
   const holder = [...store.state().entries.values()].find((e) => HOLDING.includes(e.state));
   if (holder === undefined) return 0;
 
+  // Observation stops before the App-write walk. `authorizeAppWrite` does more
+  // than decide whether a ref may move: it pins the integrated candidate,
+  // signs a merge intent, and advances the document to `Merging`. Calling it
+  // and checking `result.enforcing` afterward therefore records a write that
+  // was never attempted and leaves an observe-only lane holding an unresolved
+  // merge operation. Only the two states that deliberately enable the App
+  // writer may cross this boundary.
+  const project = await deps.queueProject(env, input.repositoryId, input.baseRef);
+  if (project === null || (project.activationState !== "canary" && project.activationState !== "enforced")) {
+    return 1;
+  }
+
   // Read from GitHub rather than taken from the entry. The entry's head is what
   // it was placed with, and a push that landed while the turn was being offered
   // moves it; walking the old one signs an intent for a tree nothing will take.
