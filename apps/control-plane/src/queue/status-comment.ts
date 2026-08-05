@@ -199,7 +199,7 @@ function reasonFor(view: CommentView): string | null {
     case "draft":
       return "PR_DRAFT";
     case "cooldown":
-      return "COOLDOWN_ACTIVE";
+      return view.reason ?? "COOLDOWN_ACTIVE";
     case "waiting":
       return "WAITING_FOR_TURN";
     case "holds":

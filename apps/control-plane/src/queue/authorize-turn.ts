@@ -43,6 +43,7 @@ import {
 } from "./merge-lane.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import type { ReasonCode } from "@thwip/vocabulary";
+import { DEFAULT_TIMINGS } from "./commands.js";
 
 /**
  * How long a dispatched verifier may stay silent before another is asked for. A
@@ -535,10 +536,11 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         current === null ? "BASE_UNREADABLE" : current.reason;
 
       // A pull request that is closed or conflicting cannot merge from this
-      // turn or any turn until somebody changes it, so the turn ends here and
-      // the lane goes to whoever is behind it. Everything else is transient:
-      // mergeability GitHub has not finished computing, a candidate it has
-      // not rebuilt yet. Those keep the turn and are asked again.
+      // turn or any turn until somebody changes it, so the turn ends here. A
+      // stale candidate also ends this turn, but keeps the entry and exact head
+      // for a bounded retry; holding the lane is what kept GitHub's old merge
+      // ref in front of every entry behind it. Other transient reads keep the
+      // turn and are asked again.
       let after: QueueSnapshot | null = null;
       if (reason === "MERGE_CONFLICT") {
         ({ snapshot: after } = await onQueue(env, repositoryId, baseRef, ({ store, commands }) => {
@@ -558,6 +560,26 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
             reason: "the pull request is closed",
           });
         }));
+      } else if (reason === "CANDIDATE_STALE") {
+        ({ snapshot: after } = await onQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+          if (store.state().activeAttemptId !== attemptId) return;
+          // The exact head is still valid; only GitHub's synthetic merge ref is
+          // based on the previous branch tip. Spend this attempt so the lane is
+          // not held while GitHub rebuilds it, keep the entry's ordinal, and
+          // record the reason the operator sees during the bounded cooldown.
+          commands.terminateAttempt({
+            idempotencyKey: `authorize:stale-candidate:${attemptId}`,
+            attemptId,
+            outcome: "BASE_MOVED",
+          });
+          commands.evaluateReadiness({
+            idempotencyKey: `authorize:stale-candidate-readiness:${attemptId}`,
+            entryId,
+            ready: true,
+            schedulerEligible: true,
+            primaryReason: "CANDIDATE_STALE",
+          });
+        }));
       }
 
       // The lane, driven on the way out. GitHub invalidates mergeability for
@@ -571,10 +593,14 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         reason,
         detail: nextAction(reason),
         entryId,
-        // Only where asking again is the answer. A turn that ended here waits
-        // on a person, and telling the caller to come back in twenty seconds
-        // would say the opposite.
-        ...(after === null ? { retryAfterSeconds: 20 } : {}),
+        // Only where asking again is the answer. A conflict or closed pull
+        // request waits on a person; a stale candidate names the longer queue
+        // cooldown that now owns its retry.
+        ...(after === null
+          ? { retryAfterSeconds: 20 }
+          : reason === "CANDIDATE_STALE"
+            ? { retryAfterSeconds: DEFAULT_TIMINGS.noClaimCooldownSeconds }
+            : {}),
       };
     }
     if (current.headSha !== headSha) {

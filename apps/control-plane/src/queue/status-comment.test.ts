@@ -84,6 +84,23 @@ describe("which of the six a reader is looking at", () => {
     expect(statusCommentBody(view, NOW)).toContain("21:14:17");
   });
 
+  it("names a stale GitHub candidate while showing when the queue retries it", () => {
+    const view = only(
+      snapshot({
+        entries: [
+          entry({
+            state: "Deferred",
+            primaryReason: "CANDIDATE_STALE",
+            cooldownUntil: "2026-08-04T21:14:17.000Z",
+          }),
+        ],
+      }),
+    );
+    const body = statusCommentBody(view, NOW);
+    expect(body).toContain("GitHub is rebuilding the merge commit");
+    expect(body).toContain("21:14:17");
+  });
+
   it("counts a cooldown that has run out as waiting, not as cooling", () => {
     const view = only(
       snapshot({

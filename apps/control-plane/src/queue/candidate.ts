@@ -111,9 +111,13 @@ export function pinCandidate(input: {
 
   const parents = input.candidate.parentShas;
   if (parents.length !== 2) return { status: "blocked", reason: "CANDIDATE_PARENTS_UNEXPECTED" };
-  if (parents[0] !== pr.baseSha || parents[1] !== pr.headSha) {
+  // GitHub may keep the synthetic merge ref on the previous base after another
+  // queued pull request lands. That is stale, not malformed: a fresh turn must
+  // give GitHub another chance to rebuild it without changing the PR head.
+  if (parents[1] !== pr.headSha) {
     return { status: "blocked", reason: "CANDIDATE_PARENTS_UNEXPECTED" };
   }
+  if (parents[0] !== pr.baseSha) return { status: "blocked", reason: "CANDIDATE_STALE" };
 
   return {
     status: "pinned",

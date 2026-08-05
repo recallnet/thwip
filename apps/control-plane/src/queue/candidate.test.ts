@@ -72,7 +72,7 @@ describe("pinCandidate", () => {
       const stale = commit({ parentShas: ["9".repeat(40), HEAD] });
       expect(pinCandidate({ pr: pr(), candidate: stale, expectedBaseRef: "refs/heads/main" })).toEqual({
         status: "blocked",
-        reason: "CANDIDATE_PARENTS_UNEXPECTED",
+        reason: "CANDIDATE_STALE",
       });
     });
 
@@ -86,8 +86,9 @@ describe("pinCandidate", () => {
 
     it("rejects parents in the wrong order", () => {
       const swapped = commit({ parentShas: [HEAD, BASE] });
-      expect(pinCandidate({ pr: pr(), candidate: swapped, expectedBaseRef: "refs/heads/main" })).toMatchObject({
+      expect(pinCandidate({ pr: pr(), candidate: swapped, expectedBaseRef: "refs/heads/main" })).toEqual({
         status: "blocked",
+        reason: "CANDIDATE_PARENTS_UNEXPECTED",
       });
     });
 
