@@ -52,7 +52,17 @@ import { requestTurn, type QueueSnapshot } from "./queue/queue-operations.js";
 import { DEFAULT_MERGE_METHOD } from "./queue/merge-commit.js";
 import { githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
-import { tickAllQueues } from "./queue/scheduled-tick.js";
+import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
+import {
+  claimTick,
+  finishTick,
+  readClock,
+  secondsBefore,
+  tickAgeSeconds,
+  tickOwedByTraffic,
+  TICK_INTERVAL_SECONDS,
+  TICK_STALE_SECONDS,
+} from "./queue/clock.js";
 import {
   CANDIDATE_CHECK,
   PROOF_CHECK,
@@ -257,7 +267,70 @@ async function orgPlan(env: Env, organizationId: string): Promise<string> {
   return org.plan === "pro" ? "pro" : "free";
 }
 
+/**
+ * Everything the sweep needs, built from an Env.
+ *
+ * Named because two clocks call it now: the five minute trigger, and any
+ * request that finds the trigger has stopped.
+ */
+function tickPortsFor(env: Env): TickPorts {
+  return {
+    driveTurn: (repositoryId, pullRequestNumber) => driveTurnFor(env, repositoryId, pullRequestNumber),
+    // The same walk the `pull_request` delivery and the proof consumer make.
+    // The tick is where a delivery that never landed its projection write gets
+    // asked again, and one derivation answers all three.
+    reconsiderHead: (repositoryId, headSha) =>
+      reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
+    // The comments on every pull request in the queue, held against the queue
+    // this tick just advanced. A write GitHub refused on a transition leaves the
+    // page behind with nothing that owns coming back for it.
+    publishStatusComments: (repositoryId, baseRef, snapshot, budget) =>
+      publishStatusCommentsFor(env, repositoryId, baseRef, snapshot, budget),
+    retireStatusComments: (repositoryId, baseRef, pullRequestNumbers) =>
+      retireStatusCommentsFor(env, repositoryId, baseRef, pullRequestNumbers),
+    onQueueTicked: () => {},
+    onQueueFailed: (repositoryId, error) => {
+      // wrangler tail is how this account observes the Worker. A heartbeat
+      // whose failures vanish is the problem this port exists to prevent.
+      console.error(`[queue heartbeat] tick failed for repository ${repositoryId}:`, error);
+    },
+  };
+}
+
 const app = new Hono<{ Bindings: Env }>();
+
+/**
+ * Traffic as a clock.
+ *
+ * Registered before the routes and doing its work after them, so nothing here
+ * sits on the path of the answer the caller is waiting for. `waitUntil` keeps
+ * the invocation alive past the response, which is what lets a queue receiving
+ * twenty webhooks an hour keep moving with no scheduled trigger at all.
+ *
+ * Cloudflare stopped dispatching thwip's five minute trigger at 03:55Z on
+ * 5 August with the schedule still listed by its own API, and the eleven hours
+ * that followed had traffic the whole way through.
+ */
+app.use("*", async (c, next) => {
+  await next();
+  const ctx = c.executionCtx as ExecutionContext | undefined;
+  if (ctx === undefined) return;
+  const env = c.env;
+  const db = env.DB as unknown as D1Like;
+  ctx.waitUntil(
+    tickOwedByTraffic(
+      {
+        readClock: () => readClock(db),
+        claim: (now, notBefore) => claimTick(db, now, notBefore, "traffic"),
+        finish: (now) => finishTick(db, now),
+        run: async () => {
+          await tickAllQueues(env as unknown as QueueRouteEnv, tickPortsFor(env));
+        },
+      },
+      nowIso(),
+    ),
+  );
+});
 
 // --- Better Auth (sessions, GitHub login, device flow, Stripe billing) -----
 
@@ -285,7 +358,26 @@ app.get("/api/auth/callback/github", async (c, next) => {
 app.on(["GET", "POST"], "/api/auth/*", (c) => createAuth(c.env).handler(c.req.raw));
 
 app.get("/health", async (c) => {
-  const payload = { service: "thwip", env: c.env.THWIP_ENV, buildSha: c.env.BUILD_SHA, now: nowIso() };
+  // The age of the last finished tick, signed with everything else here.
+  //
+  // A stopped clock is what this endpoint now makes external. The trigger that
+  // died on 5 August left the schedule registered, the Worker answering, and
+  // nothing on any page that said the queue had stopped.
+  const clock = await readClock(c.env.DB as unknown as D1Like);
+  const now = nowIso();
+  const ageSeconds = tickAgeSeconds(clock, now);
+  const payload = {
+    service: "thwip",
+    env: c.env.THWIP_ENV,
+    buildSha: c.env.BUILD_SHA,
+    now,
+    tick: {
+      finishedAt: clock.finishedAt,
+      source: clock.source,
+      ageSeconds,
+      stale: ageSeconds > TICK_STALE_SECONDS,
+    },
+  };
   const jws = await signPayload(c.env, payload, "thwip-health+jws");
   return c.json({ ...payload, jws });
 });
@@ -2850,27 +2942,20 @@ export default {
     // daily reconciliation because a queue that only moves when CI traffic
     // arrives will sit on an expired offer indefinitely on a quiet repository.
     if (controller.cron === "*/5 * * * *") {
-      const result = await tickAllQueues(env as unknown as QueueRouteEnv, {
-        driveTurn: (repositoryId, pullRequestNumber) => driveTurnFor(env, repositoryId, pullRequestNumber),
-        // The same walk the `pull_request` delivery and the proof consumer
-        // make. The tick is where a delivery that never landed its projection
-        // write gets asked again, and one derivation answers all three.
-        reconsiderHead: (repositoryId, headSha) =>
-          reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
-        // The comments on every pull request in the queue, held against the
-        // queue this tick just advanced. A write GitHub refused on a transition
-        // leaves the page behind with nothing that owns coming back for it.
-        publishStatusComments: (repositoryId, baseRef, snapshot, budget) =>
-          publishStatusCommentsFor(env, repositoryId, baseRef, snapshot, budget),
-        retireStatusComments: (repositoryId, baseRef, pullRequestNumbers) =>
-          retireStatusCommentsFor(env, repositoryId, baseRef, pullRequestNumbers),
-        onQueueTicked: () => {},
-        onQueueFailed: (repositoryId, error) => {
-          // wrangler tail is how this account observes the Worker. A heartbeat
-          // whose failures vanish is the problem this port exists to prevent.
-          console.error(`[queue heartbeat] tick failed for repository ${repositoryId}:`, error);
-        },
-      });
+      const db = env.DB as unknown as D1Like;
+      const startedAt = nowIso();
+      // The traffic clock may have run one moments ago. Claiming rather than
+      // assuming is what keeps the two from ticking one lane at once.
+      //
+      // The thirty second allowance is Cloudflare's scheduling jitter. Without
+      // it a trigger that fires at 12:04:58 for the 12:05 slot loses its claim
+      // to the 12:00 one and the queue quietly halves its own cadence.
+      if (!(await claimTick(db, startedAt, secondsBefore(startedAt, TICK_INTERVAL_SECONDS - 30), "cron"))) {
+        console.log("[queue heartbeat] a tick ran inside the interval, skipping this firing");
+        return;
+      }
+      const result = await tickAllQueues(env as unknown as QueueRouteEnv, tickPortsFor(env));
+      await finishTick(db, nowIso());
       console.log(
         `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed} ` +
           `reconciled=${result.reconciled} settledWrites=${result.settledWrites} ` +
