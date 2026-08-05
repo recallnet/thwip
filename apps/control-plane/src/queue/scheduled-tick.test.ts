@@ -1111,6 +1111,48 @@ describe("settling a write the workflow walked away from", () => {
     expect(await readChain(db, "1", REF)).toHaveLength(1);
   });
 
+  /**
+   * What re-epoching this repository did on 5 August, before this was fixed.
+   *
+   * The attested range moved past every existing record, and the two lookups
+   * that answer "does the chain hold this merge" were scoped to the current
+   * range. Fifty-nine merges recorded below it read back as unrecorded, and the
+   * sweep began writing a second record for each at the head, so the new range
+   * said the base had moved to a commit the branch had left days before.
+   *
+   * A range boundary says which records a verifier is asked to check. It does
+   * not un-record a merge.
+   */
+  it("writes no second record for a merge the chain holds behind the attested range", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+
+    const ports = {
+      driveTurn: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
+    };
+    await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
+    const recorded = await readChain(db, "1", REF);
+    expect(recorded).toHaveLength(1);
+
+    // The range moves past it, the way `/re-epoch` moves it.
+    raw
+      .prepare("UPDATE queue_projects SET attested_from_sequence = 99 WHERE github_repository_id = ?")
+      .run("1");
+
+    const again = await tickAllQueues(e, ports, readsThatSayMerged(), recordDepsThatRecord());
+
+    expect(again.settledWrites).toBe(0);
+    expect(await readChain(db, "1", REF)).toHaveLength(1);
+  });
+
   /** And it stops asking once the record is there. */
   it("leaves a merge that already has its record alone", async () => {
     const e = env();
