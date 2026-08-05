@@ -30,7 +30,10 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   /* Before anything is sent. */
   UNCOMMITTED_CHANGES: "Commit or stash your changes. A proof binds the committed tree.",
   LOGIN_REQUIRED: "Run thwip login. It needs your browser, so run it in your own terminal.",
-  DEVICE_NOT_ENROLLED: "Run thwip enroll on this machine to register its signing key.",
+  // There is no `thwip enroll`, and this sentence named it for as long as the
+  // code existed. Enrolment is a GitHub signing key, which `thwip keys status`
+  // reads back.
+  DEVICE_NOT_ENROLLED: "Run thwip keys status. It says which key would sign here and whether GitHub lists it.",
 
   /* Permission. */
   OWNER_UNAUTHORIZED: "You no longer have the repository permission this queue requires.",
@@ -122,7 +125,7 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The signature does not match the proof it covers, so the proof changed after it was signed. Run thwip run again to sign a fresh one.",
   SIGNER_KEY_REVOKED: "The key that signed this proof is revoked. Enroll a current key and run thwip run again.",
   SIGNER_KEY_UNKNOWN:
-    "This repository does not accept the key that signed the proof. Run thwip enroll on the machine that signed it, and where the policy asks for it, publish that key on the signer's GitHub account.",
+    "This repository does not accept the key that signed the proof. Run thwip keys status on the machine that signed it, and register that key on the signer's GitHub account as a signing key.",
   SIGNER_MISMATCH:
     "The proof names one signer and carries another's signature. Run thwip run again on the machine that owns the key.",
   PIPELINE_DIGEST_MISMATCH:
@@ -173,8 +176,11 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   EXPIRED_EXECUTION: "The turn ran past its deadline and was released. The queue will offer another turn.",
   SUPERSEDED: "A newer attempt replaced this one. The queue is working on the newer one.",
   COOLDOWN_ACTIVE: "A turn was offered and not claimed, so there is a short cooldown before the next one.",
+  // Plain `thwip ship` queues the branch and exits, so it named a process that
+  // leaves. Both forms below heartbeat for as long as they run, which is what
+  // a fresh or audited turn waits for.
   AGENT_OFFLINE:
-    "No machine of yours is connected to run the integration. Start thwip ship, or leave it queued and it will be offered again.",
+    "No machine of yours is connected to run the integration. Run thwip ship --wait, or thwip queue work --watch to stay available for any branch.",
   NO_COMPATIBLE_RUNNER: "No connected machine can run this project's pipeline.",
   WAITING_FOR_TURN: "You are queued and waiting for a turn. Nothing is required from you.",
   HOLDS_TURN: "This pull request holds the lane and is being integrated.",
