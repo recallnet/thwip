@@ -1,233 +1,79 @@
-import React, { useEffect, useRef, useState } from "react";
+import React from "react";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import "./notary.css";
 
-/**
- * Every value on this page is taken from one real record: commit cb0fe50 in
- * this repository, its decoded thwip-proof trailer, and the check runs GitHub
- * reports for that commit. The verification sequence mirrors the twelve steps
- * in @thwip/verifier, with the reason codes it actually returns. Nothing here
- * is illustrative, and nothing describes behaviour that is not implemented.
- */
+const METRICS = [
+  { value: "14.0s", label: "Fast queue turn to confirmed merge", source: "9 merges · recallnet/thwip" },
+  { value: "28.0s", label: "Fresh assignment to signed merge record", source: "7 merges · recallnet/thwip-test" },
+  { value: "73s", label: "Cloud candidate-verification wall clock", source: "18 jobs · recallnet/thwip" },
+] as const;
 
-const RECORD = {
-  capturedAt: "2026-07-29",
-  commit: "cb0fe50",
-  tree: "71032873f3e27b80eea468445dfe653875c544c8",
-  baseSha: "f3dbaf1ae01840df881b5aaec43def092e6e4ce9",
-  policyDigest: "sha256:317753137073f185d383fadf07904f4d8d760de3e8769f6dc6b0a8e7826db7a3",
-  policyVersion: 4,
-  pipelineDigest: "sha256:b87e9754d2239b0496f98295c453a34973f795be4c20261c48ec77270ae545e9",
-  runner: "command",
-  evaluationMode: "head-tree",
-  keyId: "SHA256:nXERD2khQGOHccKTXtLUpsivMtnR2X1BSV6mLOeKfV4",
-  githubUserId: "264261678",
-  trailer:
-    "thwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJwYXlsb2FkIjoiZXlKZmRIbHdaU0k2SW1oMGRIQnpPaTh2YVc0dGRHOTBieTVwYnk5VGRHRjBaVzFsYm5RdmRqRWlMQ0p6ZFdKcVpXTjBJanBiZXlKdVlXMWxJam9pWjJsMExYUnlaV1VpTENKa2FXZGxjM1FpT25zaWMyaGhNU0k2SWpjeE1ETXlPRGN6",
-  trailerBytes: 2622,
-  suites: [
-    { id: "lint", status: "passed", ms: 205 },
-    { id: "typecheck", status: "passed", ms: 1916 },
-    { id: "test", status: "passed", ms: 693 },
-  ],
-  totalMs: 2815,
-  checkSeconds: 14,
-} as const;
+const PROFILES = [
+  {
+    name: "Fast",
+    body: "Fast reuses the proof the pull request already carries. The queue moves the branch without starting a cloud run.",
+  },
+  {
+    name: "Fresh",
+    body: "Fresh pins the integration candidate. A device claims the turn, runs that candidate, and returns a signed receipt.",
+  },
+  {
+    name: "Remote",
+    body: "Remote runs the required suites in GitHub Actions for repositories that require a cloud result.",
+  },
+  {
+    name: "Audited",
+    body: "Audited requires the device receipt and the GitHub result before the merge moves the branch.",
+  },
+] as const;
 
-type Step = { kind: "cmd" } | { kind: "suite"; i: number } | { kind: "sign" } | { kind: "trailer" };
-
-const STEPS: Step[] = [
-  { kind: "cmd" },
-  { kind: "suite", i: 0 },
-  { kind: "suite", i: 1 },
-  { kind: "suite", i: 2 },
-  { kind: "sign" },
-  { kind: "trailer" },
-];
-
-/** Wall-clock offset at which each line appeared, from the record's own timings. */
-function stepTimes(): number[] {
-  const t = [0];
-  let acc = 0;
-  for (const s of RECORD.suites) {
-    acc += s.ms;
-    t.push(acc);
+function SetupAction({
+  me,
+  signIn,
+}: {
+  me: { organization: { github_login: string } | null } | null | undefined;
+  signIn: () => void;
+}) {
+  if (me) {
+    return (
+      <a className="nt-btn" href="/dashboard">
+        Set up Thwip Queue
+      </a>
+    );
   }
-  t.push(acc + 60);
-  t.push(acc + 120);
-  return t;
-}
-
-function useReplay() {
-  const reduced =
-    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const [visible, setVisible] = useState(reduced ? STEPS.length : 0);
-  const [clock, setClock] = useState(reduced ? RECORD.totalMs : 0);
-  const raf = useRef(0);
-
-  useEffect(() => {
-    if (reduced) return;
-    const times = stepTimes();
-    const start = performance.now();
-    const tick = (now: number) => {
-      const t = now - start;
-      setClock(Math.min(t, RECORD.totalMs));
-      let n = 0;
-      while (n < times.length && times[n]! <= t) n += 1;
-      setVisible(n);
-      if (n < STEPS.length) raf.current = requestAnimationFrame(tick);
-    };
-    raf.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf.current);
-  }, [reduced]);
-
-  return { visible, clock, done: visible >= STEPS.length };
-}
-
-function Record() {
-  const { visible, clock, done } = useReplay();
-
   return (
-    <figure className="nt-record">
-      <div className="nt-record__head">
-        <span>Record of a run</span>
-        <span>
-          {RECORD.capturedAt} · commit {RECORD.commit}
-        </span>
+    <button className="nt-btn" onClick={signIn}>
+      Set up Thwip Queue
+    </button>
+  );
+}
+
+function QueueDiagram() {
+  return (
+    <figure className="mq-diagram" aria-label="Three agent checkouts feed a protected merge queue">
+      <div className="mq-diagram__agents">
+        {["agent 01", "agent 02", "agent 03"].map((agent, index) => (
+          <div className="mq-agent" key={agent}>
+            <span className="mq-agent__id">{agent}</span>
+            <span className="mq-agent__branch">branch checked</span>
+            <span className="mq-agent__proof">proof attached</span>
+            <span className="mq-agent__line" aria-hidden="true" />
+            <span className="mq-agent__number">{String(index + 1).padStart(2, "0")}</span>
+          </div>
+        ))}
       </div>
-      <div className="nt-record__lines">
-        {STEPS.slice(0, visible).map((s, idx) => {
-          if (s.kind === "cmd") {
-            return (
-              <div className="nt-line nt-line--cmd" key={idx}>
-                <span>$</span>
-                <em>thwip run</em>
-              </div>
-            );
-          }
-          if (s.kind === "suite") {
-            const suite = RECORD.suites[s.i]!;
-            return (
-              <div className="nt-line" key={idx}>
-                <span className="nt-line__id">{suite.id}</span>
-                <span className="nt-dot" />
-                <span className="nt-line__st">{suite.status}</span>
-                <span className="nt-line__ms">{suite.ms} ms</span>
-              </div>
-            );
-          }
-          if (s.kind === "sign") {
-            return (
-              <div className="nt-line nt-line--cmd" key={idx}>
-                <span className="nt-line__id">signed</span>
-                <span>
-                  tree <b>{RECORD.tree.slice(0, 12)}</b> · {RECORD.keyId.slice(0, 21)}…
-                </span>
-              </div>
-            );
-          }
-          return (
-            <div className="nt-line nt-line--cmd" key={idx}>
-              <span className="nt-line__id">trailer</span>
-              <span>
-                {RECORD.trailerBytes} bytes on HEAD
-                {!done && <span className="nt-caret" />}
-              </span>
-            </div>
-          );
-        })}
+      <div className="mq-lane">
+        <span className="mq-lane__label">Thwip Queue</span>
+        <span className="mq-lane__detail">one protected merge lane</span>
+        <span className="mq-lane__arrow" aria-hidden="true">→</span>
+        <span className="mq-lane__main">main</span>
       </div>
-      <figcaption className="nt-record__foot">
-        <span>
-          Replay of a captured run · suites took{" "}
-          <span className="nt-clock">{(clock / 1000).toFixed(3)}s</span>
-        </span>
-        <span className={done ? "nt-stamp nt-stamp--on" : "nt-stamp"} aria-hidden={!done}>
-          <b>Pass</b>
-          {RECORD.capturedAt}
-        </span>
+      <figcaption>
+        Agents run CI in parallel. The queue carries their proof through the merge point.
       </figcaption>
     </figure>
   );
 }
-
-/** The twelve checks in @thwip/verifier, in the order it runs them. */
-const SEQUENCE: Array<{ step: string; asks: string; codes: string[] }> = [
-  {
-    step: "Carrier",
-    asks: "Does the head commit carry exactly one trailer of a sane size, shaped like a DSSE envelope?",
-    codes: ["PROOF_MISSING", "PROOF_DUPLICATE", "PROOF_TOO_LARGE", "PROOF_MALFORMED"],
-  },
-  {
-    step: "Signature",
-    asks: "Does the SSH signature verify over the exact payload bytes, before any of it is parsed?",
-    codes: ["SIGNER_KEY_UNKNOWN", "SIGNER_KEY_REVOKED", "SIGNER_KEY_ALGORITHM_FORBIDDEN", "SIGNATURE_INVALID"],
-  },
-  {
-    step: "Statement",
-    asks: "Does the signed statement parse strictly, at a schema version this verifier knows?",
-    codes: ["PROOF_MALFORMED", "PROOF_SCHEMA_UNSUPPORTED"],
-  },
-  {
-    step: "Repository",
-    asks: "Do the owner and repository ids match what GitHub reports, rather than what the proof claims?",
-    codes: ["SUBJECT_REPOSITORY_MISMATCH"],
-  },
-  {
-    step: "Git subject",
-    asks: "Is the signed tree the tree of this head commit, with the recorded ancestry and base?",
-    codes: ["SUBJECT_TREE_MISMATCH", "SUBJECT_ANCESTRY_MISMATCH", "SUBJECT_BASE_MISMATCH"],
-  },
-  {
-    step: "Pipeline",
-    asks: "Do the pipeline digest and runner match the policy in force right now?",
-    codes: ["PIPELINE_DIGEST_MISMATCH"],
-  },
-  {
-    step: "Signer",
-    asks: "Is the signer the key's owner, holding an active grant of sufficient permission, and permitted to sign their own pull request?",
-    codes: ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"],
-  },
-  {
-    step: "Required suites",
-    asks: "Is every required suite present exactly once, and did each one pass?",
-    codes: ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"],
-  },
-  {
-    step: "Remote suites",
-    asks: "For suites the policy sends to GitHub, did GitHub's own check on this commit succeed?",
-    codes: ["SUITE_MISSING", "SUITE_NOT_PASSED"],
-  },
-  {
-    step: "Age",
-    asks: "Did the run finish inside the policy's maximum proof age?",
-    codes: ["PROOF_EXPIRED"],
-  },
-  {
-    step: "Lease",
-    asks: "If the profile requires a lease, does the run carry one?",
-    codes: ["LEASE_REQUIRED"],
-  },
-];
-
-/**
- * Two profiles, because two profiles are what @thwip/policy derives. A third,
- * "Fresh", was described here as though you could pick it. Picking it fails: it
- * needs an integration receipt signed where the suites ran, and nothing issues
- * one. A page that lists software we do not have is a page that lies.
- */
-const PROFILES = [
-  {
-    name: "Fast",
-    body: "The run signs its own network and cache modes along with the result, and the check reads that.",
-    fact: "Reuses the run you already did",
-  },
-  {
-    name: "Remote",
-    body: "Named suites run on GitHub, and the check waits for GitHub's own answer.",
-    fact: "GitHub ran and signed it",
-  },
-];
 
 export function Home({
   me,
@@ -237,252 +83,149 @@ export function Home({
   signIn: () => void;
 }) {
   return (
-    <div className="nt">
+    <div className="nt mq">
       <div className="nt-page">
         <SiteBar me={me} signIn={signIn} />
 
-        {/* 1 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 1<b>What this is</b>
-          </div>
-          <div className="nt-body">
-            <div className="nt-figures">
-              <div className="nt-fig">
-                <span className="nt-fig__n">
-                  2.8<small>s</small>
-                </span>
-                <span className="nt-fig__l">Suites, start to finish, on the developer's machine</span>
-              </div>
-              <div className="nt-fig">
-                <span className="nt-fig__n">
-                  {RECORD.checkSeconds}
-                  <small>s</small>
-                </span>
-                <span className="nt-fig__l">For the check to report on GitHub, runner startup included</span>
-              </div>
-              <div className="nt-fig">
-                <span className="nt-fig__n">0</span>
-                <span className="nt-fig__l">Suites re-run in the cloud for this commit</span>
-              </div>
-            </div>
-            <p className="nt-lede">
-              CI runs where the code lives. thwip signs a proof of the exact Git tree, carries it on the commit,
-              and a protected check verifies that proof instead of running your tests again.
+        <main>
+          <section className="mq-hero">
+            <p className="mq-kicker">Merge queue for AI-native teams</p>
+            <h1>
+              Your agents ran CI.
+              <br />
+              Your merge queue should use it.
+            </h1>
+            <p className="mq-hero__lede">
+              Each coding agent tests its branch before its pull request joins the line. Thwip carries that work into
+              a protected merge lane, so completed runs move <code>main</code> instead of becoming a cloud CI queue.
             </p>
-            <Record />
-            <div className="nt-actions">
-              <a className="nt-btn" href="/install">
-                Set up a repository
-              </a>
-              <a className="nt-btn nt-btn--ghost" href="/faq">
-                Read the trust model
+            <div className="nt-actions mq-hero__actions">
+              <SetupAction me={me} signIn={signIn} />
+              <a className="nt-btn nt-btn--ghost" href="/blog/merge-queue/">
+                Read the queue research
               </a>
             </div>
-            <p className="nt-note">Both figures come from the record below.</p>
-          </div>
-        </section>
+            <p className="mq-hero__note">Thwip runs its own merge queue this way.</p>
+          </section>
 
-        {/* 2 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 2<b>What got signed</b>
-          </div>
-          <div className="nt-body">
-            <h2>The proof commits to the tree, not to a claim about the tree.</h2>
-            <dl className="nt-pairs">
-              <div className="nt-pair">
-                <dt>Subject</dt>
-                <dd>git-tree {RECORD.tree}</dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Predicate type</dt>
-                <dd>urn:thwip:attestation:ci-run:v1</dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Evaluation mode</dt>
-                <dd>{RECORD.evaluationMode}</dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Base</dt>
-                <dd>origin/main {RECORD.baseSha.slice(0, 12)}</dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Policy</dt>
-                <dd>
-                  version {RECORD.policyVersion} · {RECORD.policyDigest}
-                </dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Pipeline</dt>
-                <dd>
-                  {RECORD.runner} · {RECORD.pipelineDigest}
-                </dd>
-              </div>
-              <div className="nt-pair">
-                <dt>Signer key</dt>
-                <dd>{RECORD.keyId}</dd>
-              </div>
-              <div className="nt-pair">
-                <dt>GitHub user id</dt>
-                <dd>{RECORD.githubUserId}</dd>
-              </div>
-            </dl>
-            <p className="nt-note">{RECORD.trailerBytes} bytes, carried as a Git trailer:</p>
-            <pre className="nt-raw">{RECORD.trailer}…</pre>
-            <p>
-              Signed with the SSH key GitHub already lists for you, so thwip never asks you to create an account
-              with it.
-            </p>
-          </div>
-        </section>
+          <section className="mq-measures" aria-label="Queue operating measurements">
+            {METRICS.map((metric) => (
+              <article className="mq-measure" key={metric.label}>
+                <strong>{metric.value}</strong>
+                <span>{metric.label}</span>
+                <small>{metric.source}</small>
+              </article>
+            ))}
+          </section>
 
-        {/* 3 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 3<b>How the check decides</b>
-          </div>
-          <div className="nt-body">
-            <p>
-              Twelve checks, in this order, against the head commit. A failure names the step, not a log to go
-              read.
-            </p>
-            <div className="nt-scroll">
-            <table className="nt-table">
-              <thead>
-                <tr>
-                  <th className="nt-th-n" />
-                  <th className="nt-th-s">Step</th>
-                  <th>What it asks</th>
-                  <th className="nt-th-c">Reason codes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {SEQUENCE.map((row, i) => (
-                  <tr key={row.step}>
-                    <td className="n m">{String(i + 1).padStart(2, "0")}</td>
-                    <td>{row.step}</td>
-                    <td>{row.asks}</td>
-                    <td>
-                      {row.codes.map((c) => (
-                        <code className="nt-code-fail" key={c}>
-                          {c}
-                        </code>
-                      ))}
-                    </td>
-                  </tr>
+          <section className="nt-field mq-field">
+            <div className="nt-label">
+              The work<b>Already ran</b>
+            </div>
+            <div className="nt-body">
+              <h2>Agent work arrives in parallel. Cloud queues put it back in series.</h2>
+              <p>
+                Your agents finish branches at the same time. Each pull request reaches the merge lane with a passing
+                run behind it. A cloud queue creates an integrated candidate and starts another CI job for each turn.
+              </p>
+              <p>
+                Thwip keeps the proof with the commit. Fast uses it at the merge point. Fresh uses the same agent
+                capacity to verify the pinned candidate when the pull request reaches the front of the line.
+              </p>
+              <QueueDiagram />
+            </div>
+          </section>
+
+          <section className="nt-field mq-field">
+            <div className="nt-label">
+              The lane<b>Moves on evidence</b>
+            </div>
+            <div className="nt-body">
+              <h2>Turn agent-run CI into merge capacity.</h2>
+              <p>
+                Thwip gives one pull request a turn, pins its base, head, candidate commit, and candidate tree, then
+                asks for the evidence that policy requires. The GitHub App writes the merge on the protected branch.
+              </p>
+              <div className="mq-profiles">
+                {PROFILES.map((profile) => (
+                  <article className="mq-profile" key={profile.name}>
+                    <h3>{profile.name}</h3>
+                    <p>{profile.body}</p>
+                  </article>
                 ))}
-                <tr className="is-pass">
-                  <td className="n m">✓</td>
-                  <td>Verdict</td>
-                  <td>All twelve, on this commit, with no step skipped.</td>
-                  <td>
-                    <code className="nt-code-pass">PASS</code>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+              </div>
+              <p className="nt-note">
+                Pick an organization default in the dashboard. Use <code>thwip.yaml</code> when one repository needs
+                a different merge policy.
+              </p>
             </div>
-            <p className="nt-note">
-              <code>thwip verify</code> runs the same twelve steps locally, so you see the answer before you push.
-            </p>
-          </div>
-        </section>
+          </section>
 
-        {/* 4 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 4<b>Where the work runs</b>
-          </div>
-          <div className="nt-body">
-            <h2>Choose, per suite, who has to have done the work.</h2>
-            <p>
-              A proof is a named person's signed assertion. When a suite needs a third party to have run it
-              instead, send that one to GitHub. <a href="/faq">What a proof establishes</a>.
-            </p>
-            <div className="nt-cols">
-              {PROFILES.map((p) => (
-                <div className="nt-col" key={p.name}>
-                  <h3>{p.name}</h3>
-                  <p>{p.body}</p>
-                  <span className="slsa">{p.fact}</span>
+          <section className="nt-field mq-field">
+            <div className="nt-label">
+              The branch<b>Stays controlled</b>
+            </div>
+            <div className="nt-body">
+              <h2>One writer for <code>main</code>. One answer for every pull request.</h2>
+              <p>
+                The queue rejects a candidate when its base moved, required evidence does not match policy, or a
+                required suite failed. Each pull request gets a position, a state, and a reason. Your agents read the
+                same queue state through one authenticated API call.
+              </p>
+              <div className="mq-ledger" role="list">
+                <div role="listitem">
+                  <span>Branch writer</span>
+                  <strong>Thwip GitHub App</strong>
                 </div>
-              ))}
+                <div role="listitem">
+                  <span>Protected merge shape</span>
+                  <strong>Pinned base and candidate tree</strong>
+                </div>
+                <div role="listitem">
+                  <span>Pull-request status</span>
+                  <strong>Position, state, and reason</strong>
+                </div>
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
 
-        {/* 5 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 5<b>How it fits your repository</b>
-          </div>
-          <div className="nt-body">
-            <p>One committed file. This is the whole configuration of the repository above:</p>
-            <pre className="nt-raw nt-raw--code">{`version: 4
-profile: fast
-required:
-  - lint
-  - typecheck
-  - test`}</pre>
-            <p>Suite ids name the package.json scripts you already run.</p>
-            <div className="nt-cmd">
-              <span>$</span> thwip init --required &quot;lint,typecheck,test&quot;
+          <section className="nt-field mq-field">
+            <div className="nt-label">
+              The record<b>Stays with the merge</b>
             </div>
-            <div className="nt-cmd">
-              <span>$</span> thwip run
+            <div className="nt-body">
+              <h2>The proof sits behind the merge.</h2>
+              <p>
+                The queue signs a record for each merge. Fast records the reused proof. Fresh records the candidate
+                receipt. Remote records the verifier result. You can fetch those signed bytes and verify the branch
+                chain without a Thwip account.
+              </p>
+              <div className="nt-actions">
+                <a className="nt-btn nt-btn--ghost" href="/faq">
+                  Read the trust model
+                </a>
+                <a className="nt-btn nt-btn--ghost" href="/blog/beta/">
+                  Read the research
+                </a>
+              </div>
             </div>
-            <p className="nt-note">
-              Setup is a prompt for your coding agent, at <a href="/install">/install</a>.
+          </section>
+
+          <section className="mq-setup">
+            <p className="mq-kicker">Repository setup</p>
+            <h2>Put Thwip in front of your protected branch.</h2>
+            <p>
+              Start in the dashboard. Thwip opens the setup pull request, your team observes the queue on live pull
+              requests, and a repository administrator enables the App as the branch writer.
             </p>
-          </div>
-        </section>
-
-        {/* 6 ─────────────────────────────────────────── */}
-        <section className="nt-field">
-          <div className="nt-label">
-            Field 6<b>Price</b>
-          </div>
-          <div className="nt-body">
-            <h2>Both plans verify identically. The plan sets the limits.</h2>
-            <div className="nt-scroll">
-            <table className="nt-table">
-              <thead>
-                <tr>
-                  <th className="nt-th-s">Plan</th>
-                  <th className="nt-th-s">Price</th>
-                  <th className="nt-th-s">Enabled projects</th>
-                  <th>Signers</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Free</td>
-                  <td className="n">$0</td>
-                  <td className="n">3</td>
-                  <td className="n">5</td>
-                </tr>
-                <tr>
-                  <td>Pro</td>
-                  <td className="n">$5 / month</td>
-                  <td className="n">15</td>
-                  <td className="n">25</td>
-                </tr>
-              </tbody>
-            </table>
-            </div>
             <div className="nt-actions">
-              <a className="nt-btn" href="/install">
-                Set up a repository
+              <SetupAction me={me} signIn={signIn} />
+              <a className="nt-btn nt-btn--ghost" href="/install">
+                Set up an agent machine
               </a>
-              {!me && (
-                <button className="nt-btn nt-btn--ghost" onClick={signIn}>
-                  Sign in with GitHub
-                </button>
-              )}
             </div>
-          </div>
-        </section>
+          </section>
+        </main>
 
         <SiteFoot />
       </div>
