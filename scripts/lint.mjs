@@ -5,6 +5,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  describeMigrationNumberCollision,
+  readMigrationNumberCollisions,
+} from "./migration-numbers.mjs";
 import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs";
 import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
 import { validateWorkflow } from "./workflow-lint.mjs";
@@ -38,6 +42,17 @@ for (const f of workerSources) {
     console.error(`lint: ${f} imports node builtins; the Worker must stay Web-API only`);
     failures++;
   }
+}
+
+// D1 tracks complete filenames, but humans rely on the numeric prefix for
+// ordering. The two historic collisions cannot be renamed after application;
+// their exact filenames are baselined by this check so no third collision (or
+// new duplicate number) can make fresh-database order ambiguous again.
+for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
+  for (const line of describeMigrationNumberCollision(finding).split("\n")) {
+    console.error(`lint: ${line}`);
+  }
+  failures++;
 }
 
 // Workflows must parse. One that does not is silently not run by GitHub, which is
