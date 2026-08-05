@@ -121,6 +121,24 @@ export async function driveQueue<TEnv extends QueueRouteEnv>(
     return 1;
   }
 
+  // The fleet heartbeat can offer a turn in its own queue transaction, before
+  // `driveQueue` enters through the normal publishing wrapper. By then both
+  // the before and after snapshots say this entry holds the lane, so a diff
+  // publishes nothing and the required turn check can remain in progress. The
+  // branch writer then deadlocks on its own gate. Synchronize the exact head at
+  // the final side-effect boundary; the publisher is idempotent when it is
+  // already green, and a rejected publication stops before any branch write.
+  if (deps.publishTurnCheck === undefined) return 1;
+  await deps.publishTurnCheck(env, input.repositoryId, {
+    entryId: entry.entryId,
+    pullRequestNumber: entry.pullRequestNumber,
+    headSha: candidate.headSha,
+    state: "holds",
+    waiting: 0,
+    primaryReason: entry.primaryReason,
+    haltReason: null,
+  });
+
   const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
   await performMergeFromWorker(env, {
     repositoryId: input.repositoryId,

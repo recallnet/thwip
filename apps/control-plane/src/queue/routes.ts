@@ -909,7 +909,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         e.state === "Merged" || e.state === "Cancelled"
           ? null
           : e.cooldownUntil !== null && e.cooldownUntil > now
-            ? `cooling down until ${e.cooldownUntil}`
+            ? `${e.primaryReason === null ? "" : `${e.primaryReason}; `}cooling down until ${e.cooldownUntil}`
             : !e.schedulerEligible
               ? (e.primaryReason ?? "not schedulable")
               : report.snapshot.activeAttemptId !== null && e.state === "Ready"
