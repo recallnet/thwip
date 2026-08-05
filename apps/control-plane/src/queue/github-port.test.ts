@@ -133,7 +133,7 @@ describe("resolveCandidate", () => {
     expect(result).toEqual({ status: "blocked", reason: "PR_CLOSED" });
   });
 
-  it("blocks a candidate whose parents do not match the live base and head", async () => {
+  it("calls a candidate on the previous live base stale", async () => {
     const { impl } = fakeFetch({
       "/repos/recallnet/thwip/pulls/42": () => json(pull()),
       [`/repos/recallnet/thwip/git/commits/${CANDIDATE}`]: () =>
@@ -141,7 +141,7 @@ describe("resolveCandidate", () => {
     });
     expect(await resolveCandidate(githubHttp("t", impl), REPO, 42)).toEqual({
       status: "blocked",
-      reason: "CANDIDATE_PARENTS_UNEXPECTED",
+      reason: "CANDIDATE_STALE",
     });
   });
 
@@ -160,7 +160,7 @@ describe("resolveCandidate", () => {
     });
     expect(await resolveCandidate(githubHttp("t", impl), REPO, 42)).toEqual({
       status: "blocked",
-      reason: "CANDIDATE_PARENTS_UNEXPECTED",
+      reason: "CANDIDATE_STALE",
     });
   });
 

@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { queueRouteDeps } from "../../test/queue-deps.js";
 import { acceptProof } from "../../test/proof.js";
+import type { MergeIntent } from "./merge-write.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 
 /**
@@ -60,6 +61,7 @@ function env(): QueueRouteEnv {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   while (open.length > 0) open.pop()!.close();
 });
 
@@ -278,6 +280,75 @@ describe("the base a merge intent pins", () => {
 
     // Transient, so the place in line and the turn are both kept.
     expect(await entryState(app, e)).toBe("Active");
+  });
+
+  it("frees the lane for a stale merge ref, then retries the same head once", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-08-05T20:55:44.000Z");
+    const e = env();
+    let candidateReads = 0;
+    let mergeWrites = 0;
+    let writtenIntent: MergeIntent | null = null;
+    const app = routes({
+      integratedCandidate: async () => {
+        candidateReads += 1;
+        return candidateReads === 1
+          ? { status: "blocked" as const, reason: "CANDIDATE_STALE" as const }
+          : {
+              status: "pinned" as const,
+              baseSha: MOVED,
+              headSha: HEAD,
+              candidateSha: CANDIDATE,
+              candidateTreeOid: TREE,
+            };
+      },
+      mergeWrite: async (_env, _repositoryId, intent) => {
+        mergeWrites += 1;
+        writtenIntent = intent;
+        return { kind: "unknown" as const, detail: "the test keeps GitHub unchanged" };
+      },
+    });
+
+    await drive(app, e);
+
+    const deferred = await lane(app, e);
+    expect(deferred).toEqual({ state: "Deferred", activeAttemptId: null });
+    expect(mergeWrites).toBe(0);
+
+    const explanation = await app.request(
+      `/v1/queue/${REPO}/explain?ref=${encodeURIComponent(REF)}&events=5`,
+      {},
+      e,
+    );
+    const first = (await explanation.json()) as {
+      snapshot: { entries: Array<{ pullRequestNumber: number; headSha: string; primaryReason: string | null }> };
+      why: Array<{ pullRequestNumber: number; blockedBy: string | null }>;
+    };
+    expect(first.snapshot.entries.find((entry) => entry.pullRequestNumber === 117)).toMatchObject({
+      headSha: HEAD,
+      primaryReason: "CANDIDATE_STALE",
+    });
+    expect(first.why.find((entry) => entry.pullRequestNumber === 117)?.blockedBy).toMatch(
+      /^CANDIDATE_STALE; cooling down until /,
+    );
+
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    const tick = await app.request(
+      `/v1/queue/${REPO}/tick?ref=${encodeURIComponent(REF)}`,
+      { method: "POST" },
+      e,
+    );
+    expect(tick.status).toBe(200);
+
+    expect(candidateReads).toBe(2);
+    expect(mergeWrites).toBe(1);
+    expect(writtenIntent).toMatchObject({ baseSha: MOVED, headSha: HEAD });
+    const retrying = await lane(app, e);
+    expect(retrying.activeAttemptId).not.toBeNull();
+
+    // A repeated wake observes the unknown write; it cannot send another one.
+    await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
+    expect(mergeWrites).toBe(1);
   });
 
   it("pins what GitHub says the candidate is, not fields sent to the check API", async () => {
