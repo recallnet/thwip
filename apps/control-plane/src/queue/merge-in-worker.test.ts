@@ -163,6 +163,40 @@ describe("the Worker performing the merge", () => {
   });
 
   /**
+   * Two authorization deliveries can overlap while the first App write is in
+   * flight. The durable operation row is a no-retry guard, not a lease another
+   * delivery may reuse. Playhouse #500 had two writers for one operation: one
+   * moved the branch, while the loser observed stale GitHub state and recorded
+   * that the same merge had not happened.
+   */
+  it("sends exactly one App write when another wake arrives while it is in flight", async () => {
+    const e = env();
+    let writes = 0;
+    let releaseWrite!: () => void;
+    let announceWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { announceWrite = resolve; });
+    const released = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const app = routes({
+      mergeWrite: async () => {
+        writes += 1;
+        announceWrite();
+        await released;
+        return { kind: "unknown", detail: "the test leaves the first write to reconciliation" };
+      },
+    });
+
+    const first = authorize(app, e);
+    await writeStarted;
+    const second = authorize(app, e);
+    await second;
+
+    expect(writes).toBe(1);
+    releaseWrite();
+    await first;
+    expect(writes).toBe(1);
+  });
+
+  /**
    * The record asks GitHub whether the branch contains the commit before it
    * will sign, and this is the second read that races the App's own write. On
    * 4 August pull request 183 merged, the queue confirmed it, and no record was
