@@ -71,8 +71,8 @@ also report that 81.1% of the genuine secret leaks in their corpus reached merge
 undetected. Those numbers rule out answering the cost problem by loosening the
 gate.
 
-Our own repository sits inside this workload. Between 28 July and 3 August 2026,
-agents wrote 524 commits across 131 merged pull requests, over 10 packages and 2
+Our own repository sits inside this workload. Between 28 July and 4 August 2026,
+agents wrote 638 commits across 191 merged pull requests, over 10 packages and 2
 apps carrying 1,928 tests.
 
 ## What the literature attests
@@ -229,12 +229,12 @@ integrated candidate, so the run on the branch is rarely the last run.
 
 ## Measurements
 
-Everything below comes from this repository between 28 July and 3 August 2026,
+Everything below comes from this repository between 28 July and 4 August 2026,
 out of the git history, the GitHub API and the published chain.
 
-**Proof coverage.** 168 commits on `main` carry a `thwip-proof` trailer. Every
-one of those envelopes decodes and parses against the shipped schema, all 168 of
-them declaring `evaluationMode: head-tree`. Of the 132 merges, 128 carried a
+**Proof coverage.** 225 commits on `main` carry a `thwip-proof` trailer. Every
+one of those envelopes decodes and parses against the shipped schema, all 225 of
+them declaring `evaluationMode: head-tree`. Of the 189 merges, 185 carried a
 proof on the pull request head. The 4 without one are pull requests #1, #2, #4
 and #5, which merged before the App was enforcing.
 
@@ -291,18 +291,19 @@ is the machine that runs the suites against it.
 {% product-shot src="/blog/fig-setup-vs-work.svg" alt="Bar comparison of 36 seconds of environment rebuild against 4.5 seconds of suite execution at the edge" caption="Figure 3. On this repository, re-verifying in the cloud spends most of its time rebuilding a state the edge machine already holds. `fresh` skips that rebuild." /%}
 
 **The chain.** `thwip verify-chain --repo recallnet/thwip` walks the published
-merge chain from outside thwip, needing no account or token. When this was
-written it reported 57 links, 57 of 57 signatures verified against the service
-keys at `/.well-known/thwip-keys`, and no findings. Of those records, 47 are
-`reused-proof-merge`, 5 are `candidate-verified-merge`, 4 are
-`external-transition`, and 1 is a `base-correction`. Merging this post adds
-another link, so run the script yourself for a current count. The chain only
-reached that clean state on the evening of 3 August, after being broken since
-the morning of 2 August.
+merge chain from outside thwip, needing no account or token. It reports every
+link, how many signatures it checked against the service keys at
+`/.well-known/thwip-keys`, and any finding.
 
-{% product-shot src="/blog/fig-chain-kinds.svg" alt="Bar chart of 57 chain records by kind: 47 reused-proof merges, 5 candidate-verified merges, 4 external transitions, 1 base correction" caption="Figure 4. Every record on this repository's chain, by what it claims. The 47 reused-proof merges are the dial sitting on `fast`. The four external transitions are the merges of 2 August, described below." /%}
+The chain on this branch opens at sequence 156. Everything before that came from
+earlier versions of thwip and carried defects the current code refuses to
+produce: a commit sha written into a field that holds a record digest, and a
+transition index position with no signed record behind it. Rather than sign
+corrections for records that no running code would write, we opened a new
+attested range with a genesis record at its start. The old records still resolve
+at `/v1/queue/records/:digest`. The walk begins where the current code does.
 
-**Posture, published as it is.** Every one of the 168 proofs used the
+**Posture, published as it is.** Every one of the 225 proofs used the
 `command` runner instead of a content-addressed
 [Dagger](https://dagger.io/) pipeline, with `networkMode: unrestricted` and
 `cacheMode: read-write`, which is the weakest posture the schema permits.
@@ -312,10 +313,10 @@ pipeline digests and policy versions 1, 3, and 4.
 ## What this repository demonstrates
 
 This repository is where thwip gets built, and it merges through thwip, so what
-it offers is an existence proof. 168 envelopes decode and parse against the
-shipped schema, 128 of 132 merges carried a proof on the head, and 57 of 57
-chain signatures verify against the published keys under a script anybody can
-run without an account.
+it offers is an existence proof. 225 envelopes decode and parse against the
+shipped schema, 185 of 189 merges carried a proof on the head, and every
+signature on the attested chain verifies against the published keys under a
+command anybody can run without an account.
 
 Every policy version this repository has activated sets `fast`, so `fresh` runs
 on `recallnet/thwip-test`. Seven merges have landed there under that profile.
