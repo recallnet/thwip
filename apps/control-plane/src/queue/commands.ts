@@ -528,9 +528,15 @@ export class QueueCommands {
   }
 
   /** A timeout or reset is a typed nonterminal state, never an exception (§40.1). */
-  mergeOutcomeUnknown(input: { idempotencyKey: string; attemptId: string }): CommandResult {
+  mergeOutcomeUnknown(input: { idempotencyKey: string; attemptId: string; detail?: string }): CommandResult {
     return this.store.append(
-      { idempotencyKey: input.idempotencyKey, at: this.clock.now(), type: "MergeOutcomeUnknown", attemptId: input.attemptId },
+      {
+        idempotencyKey: input.idempotencyKey,
+        at: this.clock.now(),
+        type: "MergeOutcomeUnknown",
+        attemptId: input.attemptId,
+        ...(input.detail === undefined ? {} : { detail: input.detail.slice(0, 500) }),
+      },
       {
         setDeadlines: [
           {
@@ -650,6 +656,7 @@ export class QueueCommands {
           { kind: "offer", attemptId: input.attemptId },
           { kind: "execution", attemptId: input.attemptId },
           { kind: "grace", attemptId: input.attemptId },
+          { kind: "merge-confirm", attemptId: input.attemptId },
         ],
         bumpAttemptRevision: true,
       },
@@ -744,6 +751,7 @@ export class QueueCommands {
 
     for (const deadline of due) {
       const key = `alarm:${deadline.kind}:${deadline.attemptId}:${deadline.dueAt}`;
+      let keepDeadline = false;
       switch (deadline.kind) {
         case "offer":
           results.push(this.expireOffer({ idempotencyKey: key, attemptId: deadline.attemptId }));
@@ -765,15 +773,27 @@ export class QueueCommands {
           );
           break;
         case "merge-confirm":
-          // Never a blind retry: ask for reconciliation instead (§40.1).
-          results.push(this.mergeOutcomeUnknown({ idempotencyKey: key, attemptId: deadline.attemptId }));
+          // Never a blind retry. If the network write never reported anything,
+          // enter the typed unknown state and give it one confirmation window.
+          // Once it is already unknown, leave this due row in place: the caller
+          // performs the read-only GitHub reconciliation outside the queue
+          // transaction. Clearing it here hid the only clock that could do so.
+          if (this.store.state().attempts.get(deadline.attemptId)?.outcomeUnknown === true) {
+            results.push({ status: "noop", detail: "merge reconciliation is due outside the queue transaction" });
+            keepDeadline = true;
+          } else {
+            const unknown = this.mergeOutcomeUnknown({ idempotencyKey: key, attemptId: deadline.attemptId });
+            results.push(unknown);
+            keepDeadline = unknown.status === "applied";
+          }
           break;
         case "readiness":
           results.push({ status: "noop", detail: "readiness refresh is scheduled outside the object" });
           break;
       }
 
-      // Clear it whatever the command decided.
+      // Clear it unless this is a reconciliation the caller must perform
+      // outside the state transaction.
       //
       // Only the readiness case did this; the others trusted the command to clear
       // the deadline as a side effect of changing state. When the command is a
@@ -784,9 +804,10 @@ export class QueueCommands {
       //
       // A wake loop that writes no events, so nothing in the state showed it: the
       // generation sat still at 360 while the object burned an entire day of its
-      // request budget in a few hours. Clearing unconditionally is what makes the
-      // alarm terminate.
-      this.store.clearDeadline(deadline.kind, deadline.attemptId);
+      // request budget in a few hours. The merge-confirm exception is safe now:
+      // D1 has no alarm loop, and keeping the due row is how the next queue clock
+      // sees that it owes GitHub a read rather than another write.
+      if (!keepDeadline) this.store.clearDeadline(deadline.kind, deadline.attemptId);
     }
 
     // Freeing the lane is only half of it. Expiring an offer or terminating an

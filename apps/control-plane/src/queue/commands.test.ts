@@ -356,6 +356,29 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(store.pendingOutbox().some((o) => o.kind === "reconcile-merge")).toBe(true);
       // Crucially, no second merge-write item was produced.
       expect(store.pendingOutbox().filter((o) => o.kind === "merge-write")).toHaveLength(1);
+
+      // The unknown event starts one bounded confirmation window. Once that
+      // expires, the row remains due for the caller's read-only reconciliation;
+      // repeated clock handling neither writes again nor floods the outbox.
+      clock.advance(61);
+      expect((await commands.runAlarm()).handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
+      expect((await commands.runAlarm()).handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
+      expect(store.pendingOutbox().filter((o) => o.kind === "reconcile-merge")).toHaveLength(1);
+      expect(store.pendingOutbox().filter((o) => o.kind === "merge-write")).toHaveLength(1);
+    });
+
+    it("keeps a bounded provider explanation on the unknown event", async () => {
+      const { store, commands } = harness();
+      const attemptId = await driveToMergeRequested(commands);
+      commands.mergeOutcomeUnknown({ idempotencyKey: "unknown-detail", attemptId, detail: "x".repeat(800) });
+
+      // Recent diagnostic bodies live in the D1 document store. The legacy
+      // Durable Object store is read-only in production and exposes no event
+      // tail API, so there is no diagnostic response to assert there.
+      if (!(store instanceof SnapshotQueueStore)) return;
+      const event = store.recentEvents(1)[0];
+      expect(event?.type).toBe("MergeOutcomeUnknown");
+      expect((event?.body as { detail?: string }).detail).toBe("x".repeat(500));
     });
 
     it("reschedules to the next earliest deadline", async () => {

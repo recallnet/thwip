@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyState, type BranchQueueState } from "./reducer.js";
 import { applyEvents } from "./test/apply-events.js";
-import { overdueReconciliation } from "./reconciliation.js";
+import { overdueReconciliation, reconciliationAtDeadline } from "./reconciliation.js";
 import type { QueueEvent } from "./events.js";
 
 /**
@@ -88,11 +88,35 @@ describe("an attempt reconciling past its execution deadline", () => {
     expect(overdue?.entryId).toBe("e114");
     expect(overdue?.pullRequestNumber).toBe(114);
     expect(overdue?.headSha).toBe("h".repeat(40));
-    expect(overdue?.executionDeadline).toBe(DEADLINE);
+    expect(overdue?.reconciliationDeadline).toBe(DEADLINE);
+    expect(overdue?.trigger).toBe("execution");
   });
 
   it("is left alone while the deadline is still ahead", () => {
     expect(overdueReconciliation(reconciling(), "2026-08-02T04:50:00.000Z")).toBeNull();
+  });
+
+  it("names the same attempt at its shorter merge-confirm deadline", () => {
+    const due = reconciliationAtDeadline(reconciling(), "2026-08-02T04:42:00.000Z", {
+      attemptId: "att_2dc5e37e",
+      dueAt: "2026-08-02T04:41:00.000Z",
+      trigger: "merge-confirm",
+    });
+    expect(due).toMatchObject({
+      attemptId: "att_2dc5e37e",
+      reconciliationDeadline: "2026-08-02T04:41:00.000Z",
+      trigger: "merge-confirm",
+    });
+  });
+
+  it("does not let another attempt's deadline settle the lane holder", () => {
+    expect(
+      reconciliationAtDeadline(reconciling(), "2026-08-02T04:42:00.000Z", {
+        attemptId: "att_someone_else",
+        dueAt: "2026-08-02T04:41:00.000Z",
+        trigger: "merge-confirm",
+      }),
+    ).toBeNull();
   });
 
   it("says nothing about a turn whose merge outcome was never in doubt", () => {

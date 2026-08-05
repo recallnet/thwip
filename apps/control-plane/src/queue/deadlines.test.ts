@@ -197,15 +197,18 @@ function queueProject(repositoryId: string): void {
  * than twenty minutes, so the deadline is already behind by the time the tick
  * reads it, which is the same condition without waiting out the clock.
  */
-async function reconcilingLane(db: D1Like): Promise<string> {
+async function reconcilingLane(
+  db: D1Like,
+  timing: { executionSeconds?: number; mergeConfirmSeconds?: number } = {},
+): Promise<string> {
   return withQueueState(db, REPO, REF, async (store) => {
     const commands = commandsFor(store, {
       offerSeconds: 90,
-      executionSeconds: 0,
+      executionSeconds: timing.executionSeconds ?? 0,
       heartbeatSeconds: 20,
       graceSeconds: 60,
       noClaimCooldownSeconds: 300,
-      mergeConfirmSeconds: 60,
+      mergeConfirmSeconds: timing.mergeConfirmSeconds ?? 60,
     });
     for (const [entryId, pr] of [
       ["e114", 114],
@@ -303,6 +306,20 @@ const NOT_MERGED: ReconciliationReads = {
 };
 
 describe("a merge outcome nobody could settle, past its deadline", () => {
+  it("settles at merge confirmation without waiting for the execution fallback", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queueProject(REPO);
+    const attemptId = await reconcilingLane(db, { executionSeconds: 20 * 60, mergeConfirmSeconds: 0 });
+
+    await tickAllQueues(e, PORTS, NOT_MERGED);
+
+    const after = await stateNow(db);
+    expect(after.of(114)?.state).toBe("Deferred");
+    expect(after.activeAttemptId).not.toBe(attemptId);
+    expect(["Offered", "Active"]).toContain(after.of(115)?.state);
+  });
+
   it("confirms the refusal, frees the lane, and lets the next pull request take a turn", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;
@@ -371,6 +388,11 @@ describe("a merge outcome nobody could settle, past its deadline", () => {
     expect(after.of(114)?.primaryReason).toBe("MERGE_OUTCOME_UNKNOWN");
     expect(after.activeAttemptId).not.toBe(attemptId);
     expect(["Offered", "Active"]).toContain(after.of(115)?.state);
+    expect(
+      await withQueueState(db, REPO, REF, (store) =>
+        store.dueDeadlines(new Date().toISOString()).filter((deadline) => deadline.kind === "merge-confirm"),
+      ),
+    ).toEqual([]);
 
     // And it stays out of the running. The scheduler considers Ready entries and
     // Deferred entries serving a cooldown; a Blocked one is neither, so no later
