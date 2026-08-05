@@ -77,6 +77,7 @@ describe("what the deploy command does", () => {
   });
 
   it("keeps applying migrations as its own command", () => {
-    expect(scripts["migrate:staging"]).toMatch(/d1 migrations apply/);
+    expect(scripts["migrate:staging"]).toMatch(/scripts\/migrate\.mjs/);
+    expect(scripts["migrate:staging"]).not.toMatch(/d1 migrations apply/);
   });
 });

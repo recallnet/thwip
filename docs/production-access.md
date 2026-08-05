@@ -129,6 +129,23 @@ This is the one command that administers the database, and it is deliberately
 not part of a deploy. It needs its own token, holding **Account / D1:Edit** and
 nothing else, exported the same way.
 
+The command is a repository guard around Wrangler, not an alias for it. Wrangler
+applies every pending migration it can see and has no phase selector. The guard
+first reads the complete applied filenames from the live Worker and then:
+
+- applies a pending set containing only `before-worker` migrations;
+- applies a pending set containing only `after-worker` migrations only when the
+  exact clean commit in the checkout is already live; or
+- refuses without touching D1 when both phases are pending, listing every file
+  and the staged sequence required to separate them.
+
+Never work around a refusal with raw `wrangler d1 migrations apply`. For a mixed
+set, use reviewed intermediate commits to expose one phase at a time in migration
+order. Apply a `before-worker` batch and then deploy that commit; deploy an
+`after-worker` batch and then apply it. Repeat until the current tree is level.
+Historic filename collisions such as `0008` and `0023` are safe because the
+guard, like D1, compares complete filenames rather than numeric prefixes.
+
 Each migration declares which side of the deploy it belongs on, in its header:
 
 - `-- DEPLOY ORDER: before-worker` for a migration the next Worker reads. Apply,
