@@ -213,6 +213,32 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
   });
 
+  it("stores, reads back, and updates an administrator's chain-publication choice", async () => {
+    seedInstalledRepository();
+    const first = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      { chainPublic: true },
+      port,
+    );
+    expect(first.body).toMatchObject({ chainPublic: true });
+    expect(queueProjectRow()?.chain_public).toBe(1);
+
+    const read = await bootstrapStatusResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID);
+    expect(read.body).toMatchObject({ chainPublic: true });
+
+    const changed = await bootstrapRouteResponse(
+      env(),
+      { githubOrgRole: "admin" },
+      REPOSITORY_ID,
+      { chainPublic: false },
+      port,
+    );
+    expect(changed.body).toMatchObject({ chainPublic: false });
+    expect(queueProjectRow()?.chain_public).toBe(0);
+  });
+
   it("lets an owner run setup, not only an admin", async () => {
     seedInstalledRepository();
     enforceAppProofCheck();
