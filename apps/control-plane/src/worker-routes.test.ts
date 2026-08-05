@@ -57,7 +57,7 @@ describe("paths that reach the Worker", () => {
  */
 describe("paths the Worker must answer itself", () => {
   it("claims the paths it owns", () => {
-    for (const path of ["/health", "/v1/queue/1/chain", "/api/anything", "/admin/seed", "/.well-known/thwip-keys"]) {
+    for (const path of ["/health", "/v1/queue/1/chain", "/api/anything", "/admin/sync", "/.well-known/thwip-keys"]) {
       expect(isWorkerOwnedPath(path), `${path} would be answered by the dashboard's HTML`).toBe(true);
     }
   });
