@@ -64,7 +64,7 @@ Every mutation goes through a route that writes a record naming who asked.
 | Answer a chain finding | `POST /v1/queue/:repositoryId/heal` with `{ finding, code, reason }` |
 | Record a merge the queue authorized | `POST /v1/queue/:repositoryId/repair` |
 | Revoke a device key | `POST /v1/devices/:keyId/revoke` |
-| Enrol an organization, project and policy | `POST /admin/seed` |
+| Enrol an organization, project and policy | Install the GitHub App, then `POST /admin/sync` |
 | Pause or resume a lane | `POST /v1/queue/:repositoryId/pause` \| `/resume` |
 
 A heal binds the principal who asked as a witness on the transition, and the
