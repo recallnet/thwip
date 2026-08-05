@@ -79,9 +79,8 @@ function cutoff(now: string): string {
  * A held lane under either one must never cause a `repository_dispatch`.
  * There is nothing for Actions to do — the runner claims the offer itself,
  * over the heartbeat response — and dispatching anyway spends a whole Actions
- * run to be told so. This is the one place that set lives, so the two callers
- * that decide whether to drive a lane through Actions (`routes.ts`'s
- * `driveLane` and `scheduled-tick.ts`'s tick loop) cannot drift apart on it.
+ * run to be told so. This is the one place that set lives, so runner
+ * eligibility and merge authorization cannot drift apart on it.
  */
 const DEVICE_ONLY_SECURITY_PROFILES: ReadonlySet<string> = new Set(["fresh", "audited"]);
 

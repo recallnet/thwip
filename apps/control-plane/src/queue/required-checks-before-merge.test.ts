@@ -77,10 +77,17 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
+    pullRequestPlacement: async () => ({
+      authorGithubUserId: "1",
+      baseRef: REF,
+      authorIsBot: false,
+      draft: false,
+      headSha: HEAD,
+    }),
+    mergeWrite: async () => ({ kind: "unknown" as const, detail: "GitHub could not be read" }),
+    baseContainsSha: async () => true,
     integratedCandidate: async () => ({
       status: "pinned",
       baseSha: "b".repeat(40),
@@ -114,18 +121,13 @@ async function prepareMerge(app: ReturnType<typeof routes>, e: QueueRouteEnv): P
         baseRef: REF,
         authorGithubUserId: "1",
         draft: false,
-        prepare: true,
-        candidate: {
-          baseSha: "b".repeat(40),
-          candidateSha: "c".repeat(40),
-          candidateTreeOid: TREE,
-          parentShas: ["b".repeat(40), "6".repeat(40)],
-        },
       }),
     },
     e,
   );
-  return (await response.json()) as Verdict;
+  const verdict = (await response.json()) as Verdict;
+  await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
+  return verdict;
 }
 
 describe("what the branch requires, read before the merge is asked for", () => {
@@ -142,10 +144,9 @@ describe("what the branch requires, read before the merge is asked for", () => {
 
     const verdict = await prepareMerge(app, e);
 
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.operationId).toBeNull();
-    expect(verdict.reason).toBe("REQUIRED_CHECK_MISSING");
-    expect(verdict.detail).toContain(TURN_CHECK);
+    expect(verdict.reason).toBe("HOLDS_TURN");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 0 });
   });
 
   it("prepares the merge when every required check is on the head", async () => {
@@ -163,7 +164,8 @@ describe("what the branch requires, read before the merge is asked for", () => {
     const verdict = await prepareMerge(app, e);
 
     expect(verdict.reason).toBe("HOLDS_TURN");
-    expect(verdict.operationId).not.toBeNull();
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 1 });
   });
 
   it("prepares the merge when the branch rules cannot be read, because unknown is not a refusal", async () => {
@@ -172,7 +174,9 @@ describe("what the branch requires, read before the merge is asked for", () => {
 
     const verdict = await prepareMerge(app, e);
 
-    expect(verdict.operationId).not.toBeNull();
+    expect(verdict.reason).toBe("HOLDS_TURN");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 1 });
   });
 });
 

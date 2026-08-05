@@ -71,14 +71,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   );
 }
 
-interface Verdict {
-  authorized: boolean;
-  reason: string;
-  detail?: string;
-  operationId: string | null;
-}
-
-async function prepareMerge(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<Verdict> {
+async function drive(app: ReturnType<typeof routes>, e: QueueRouteEnv): Promise<void> {
   acceptProof(raw, REPO, HEAD);
   const response = await app.request(
     `/v1/queue/${REPO}/authorize`,
@@ -91,87 +84,48 @@ async function prepareMerge(app: ReturnType<typeof routes>, e: QueueRouteEnv): P
         baseRef: REF,
         authorGithubUserId: "1",
         draft: false,
-        prepare: true,
-        candidate: {
-          baseSha: "b".repeat(40),
-          candidateSha: "c".repeat(40),
-          candidateTreeOid: TREE,
-          parentShas: ["b".repeat(40), "6".repeat(40)],
-        },
       }),
     },
     e,
   );
-  return (await response.json()) as Verdict;
+  expect(response.status).toBe(200);
+  await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
 }
 
 describe("the repository the policy assumes, read before the merge is asked for", () => {
-  it("refuses a merge on a branch whose ruleset has drifted", async () => {
+  it.each([
+    { ...HEALTHY, rulesetEnforced: false },
+    { ...HEALTHY, appPermissionsHealthy: false },
+    { ...HEALTHY, sponsorAuthorized: false },
+    { rulesetEnforced: false, appPermissionsHealthy: false, sponsorAuthorized: false },
+  ])("does not sign a merge intent when repository assumptions drift", async (health) => {
     const e = env();
-    const app = routes({ platformHealth: async () => ({ ...HEALTHY, rulesetEnforced: false }) });
+    const app = routes({ platformHealth: async () => health });
 
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.operationId).toBeNull();
-    expect(verdict.reason).toBe("RULESET_DRIFT");
-  });
-
-  it("refuses a merge when the App installation has lost a permission", async () => {
-    const e = env();
-    const app = routes({ platformHealth: async () => ({ ...HEALTHY, appPermissionsHealthy: false }) });
-
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.operationId).toBeNull();
-    expect(verdict.reason).toBe("APP_PERMISSION_DRIFT");
-  });
-
-  it("refuses a merge when the signer's repository permission has been revoked", async () => {
-    const e = env();
-    const app = routes({ platformHealth: async () => ({ ...HEALTHY, sponsorAuthorized: false }) });
-
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.authorized).toBe(false);
-    expect(verdict.operationId).toBeNull();
-    // `PERMISSION_REVOKED` is the attempt outcome; `OWNER_UNAUTHORIZED` is what a
-    // reader is told, and the reducer already maps one to the other.
-    expect(verdict.reason).toBe("OWNER_UNAUTHORIZED");
-  });
-
-  it("names the most actionable problem when more than one holds", async () => {
-    const e = env();
-    const app = routes({
-      platformHealth: async () => ({ rulesetEnforced: false, appPermissionsHealthy: false, sponsorAuthorized: false }),
-    });
-
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.reason).toBe("OWNER_UNAUTHORIZED");
+    await drive(app, e);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 0 });
   });
 
   it("prepares the merge when all three still hold", async () => {
     const e = env();
     const app = routes({ platformHealth: async () => HEALTHY });
 
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.reason).toBe("HOLDS_TURN");
-    expect(verdict.operationId).not.toBeNull();
+    await drive(app, e);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 1 });
   });
 
   it("prepares the merge when GitHub could not be read, because unknown is not a refusal", async () => {
     const e = env();
     const app = routes({ platformHealth: async () => null });
 
-    const verdict = await prepareMerge(app, e);
-
-    expect(verdict.operationId).not.toBeNull();
+    await drive(app, e);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_attestations WHERE kind = 'merge-intent'").get())
+      .toEqual({ n: 1 });
   });
 
-  it("does not read GitHub for a pull request that is only asking whose turn it is", async () => {
+  it("rechecks repository assumptions on the internal App wake after answering the check", async () => {
     const e = env();
     let reads = 0;
     const app = routes({
@@ -199,6 +153,6 @@ describe("the repository the policy assumes, read before the merge is asked for"
     );
 
     expect(response.status).toBe(200);
-    expect(reads).toBe(0);
+    expect(reads).toBe(1);
   });
 });

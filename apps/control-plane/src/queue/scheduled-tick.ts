@@ -4,7 +4,7 @@ import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
-import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
+import { retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
 import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
 import type { D1Like } from "./projection.js";
@@ -72,11 +72,11 @@ const RECORD_FROM_INTENT_DEPS: RecordFromIntentDeps<QueueRouteEnv> = recordFromI
  * GitHub for it and settles it whichever way the reads come out.
  *
  * Deliberately cheap. One row read per queue, a write only when the clock
- * actually changed something, a dispatch only when a lane is held, and GitHub is
+ * actually changed something, an App continuation only when a lane is held, and GitHub is
  * read only for a queue that has an overdue reconciliation waiting.
  */
 export interface TickPorts {
-  driveTurn(repositoryId: string, pullRequestNumber: number): Promise<void>;
+  driveQueue(repositoryId: string, baseRef: string): Promise<void>;
   onQueueTicked(repositoryId: string): void;
   onQueueFailed(repositoryId: string, error: unknown): void;
   /**
@@ -197,9 +197,6 @@ export async function tickAllQueues(
   // try block, so a repository whose retirement read fails only fails that
   // repository's queues, the same as any other per-queue failure below.
   const offlinePrincipalsByRepo = new Map<string, readonly string[]>();
-  // Same shape, same reason: the security profile is a repository setting, so
-  // it is looked up once per repository per tick, not once per queue row.
-  const deviceOnlyByRepo = new Map<string, boolean>();
 
   // One budget for the whole sweep, not one per queue.
   //
@@ -227,12 +224,6 @@ export async function tickAllQueues(
       if (offlinePrincipals === undefined) {
         offlinePrincipals = await retireStaleRunners(db, row.repositoryId, now);
         offlinePrincipalsByRepo.set(row.repositoryId, offlinePrincipals);
-      }
-      let deviceOnly = deviceOnlyByRepo.get(row.repositoryId);
-      if (deviceOnly === undefined) {
-        const policy = await readActivePolicy(db, row.repositoryId);
-        deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
-        deviceOnlyByRepo.set(row.repositoryId, deviceOnly);
       }
       const swept = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => {
         const commands = commandsFor(
@@ -311,31 +302,19 @@ export async function tickAllQueues(
         );
       }
 
-      // Only a held lane needs driving. Dispatching for an idle queue would
-      // spend a CI run to be told there is nothing to do — and under `fresh`
-      // or `audited` there is no Actions fallback for the run, so a lane still
-      // being run on a device is not this tick's to drive; the connected device
-      // claims it itself, over the heartbeat response (plan.md §5.0).
-      //
-      // Past the run, it is. `Verifying` and `MergeGuard` mean the device's
-      // receipt is in and the merge write is still Actions' job, and the only
-      // thing that ever asked for it was one fire-and-forget dispatch from the
-      // receipt route. A dispatch GitHub dropped, or a run that answered before
-      // some other fact settled, left the attempt in `RECEIPT_SUBMITTED` with
-      // the lane held until its execution deadline and nothing willing to ask
-      // again. This is the asking again. It is the same split `driveLane` makes
-      // in routes.ts, and it costs a run only while an attempt really is
-      // waiting to be merged.
+      // Only a held lane needs driving. The App re-reads placement and the
+      // active profile before it advances, so an offered device-only turn stays
+      // offered while a completed device run can proceed to the merge write.
       const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
       const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
-      const holder = deviceOnly ? (running === undefined ? ran : undefined) : (running ?? ran);
+      const holder = running ?? ran;
       if (holder !== undefined) {
-        await ports.driveTurn(row.repositoryId, holder.pullRequestNumber);
+        await ports.driveQueue(row.repositoryId, row.baseRef);
         driven += 1;
       }
 
-      // A write the workflow walked away from is nobody's job until it is this
-      // one's. `settleReconciliation` above needs a surviving attempt; these
+      // A write whose response was lost is nobody's job until it is this one's.
+      // `settleReconciliation` above needs a surviving attempt; these
       // rows outlive every attempt, which is why four merges sat unrecorded.
       //
       // Last, after the lane has been driven. Settling a write reads GitHub

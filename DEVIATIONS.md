@@ -1,5 +1,9 @@
 # Deviations from plan.md in the v1 vertical slice
 
+> Historical implementation record. It is not setup guidance or executable
+> configuration. Current repositories use the single App-owned merge path in
+> `docs/adr/0001-app-native-proof-checks.md`.
+
 This build implements the plan's Phase 0 + Phase 1 vertical slice plus the
 merge-queue end state. Where the slice deviates from the full specification,
 the deviation and the reason are recorded here.
@@ -56,25 +60,12 @@ the deviation and the reason are recorded here.
   in the Worker); catalog created via Stripe CLI: `thwip Pro` at $5/month
   and $50/year with lookup keys `thwip_pro_monthly` / `thwip_pro_annual`.
 
-## GitHub enforcement
+## GitHub enforcement at the time of this record
 
-- **Compatibility mode for the required check.** The plan's strongest path —
-  a ruleset `workflows` rule pinned to an immutable SHA — is not available
-  on this private repository's plan (GitHub rejects the rule). The active
-  ruleset therefore uses `merge_queue` + `required_status_checks` pinned to
-  the GitHub Actions app (`integration_id: 15368`) with context `thwip`,
-  exactly the degraded mode the plan documents in §26.1. The verify workflow
-  checks out `github.workflow_sha` and never executes PR-controlled code.
-- **Merge queue is supported, ahead of the plan's v1 scope.** On
-  `merge_group` events the Action walks the group's first-parent chain and
-  independently verifies the proof on every member PR's exact head commit
-  (repository, tree, ancestry, base, policy, signer, suites). The synthetic
-  group commit itself is not treated as a proof subject.
-- **Merge-group semantics caveat:** verifying each PR head's proof does
-  not re-run CI against the combined group tree. This matches the goal
-  ("the only green gate is a valid thwip proof for the PR head commit") and
-  the plan's honesty requirements; the stronger group-tree rerun remains
-  future work (§30, §55).
+The vertical slice originally used GitHub's native queue and an Actions-owned
+proof check. That configuration has been retired. Current setup creates an
+App-owned branch and policy ruleset, the App is the sole queue writer, and the
+source pin moves from the observe workflow to the App before setup completes.
 
 ## Signing keys
 

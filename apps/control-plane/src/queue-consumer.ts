@@ -32,8 +32,8 @@ export interface QueueConsumerDeps {
    *
    * The verdict is what a `fast` merge rests on, and it lands after the
    * `pull_request` delivery that placed the entry. Nothing used to notice: the
-   * entry stayed blocked on a proof that had passed until a workflow polled
-   * `/authorize`, which is the workflow app-only adoption removes.
+   * entry stayed blocked on a proof that had passed until some unrelated event
+   * woke the lane. The App must reconsider it as soon as the verdict lands.
    */
   reconsiderHead?: (repositoryId: string, headSha: string) => Promise<unknown>;
 }
@@ -114,4 +114,3 @@ export async function processQueueMessage(
     }
   }
 }
-

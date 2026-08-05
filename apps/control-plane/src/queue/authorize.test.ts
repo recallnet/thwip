@@ -57,16 +57,11 @@ afterEach(() => {
 const REPO = "1315419165";
 const REF = "refs/heads/main";
 
-/** Every pull request is sponsored by a different principal, so fairness applies. */
-const driven: number[] = [];
-
 function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
-  driven.length = 0;
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF }, {
-      driveTurn: async (_e: unknown, _r: string, pullRequestNumber: number) => {
-        driven.push(pullRequestNumber);
-      },
+      activePolicy: async () => null,
+      commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: ["p".repeat(40)] }),
       ...over,
     }) as Parameters<typeof queueRoutes>[0],
   );
@@ -160,12 +155,20 @@ describe("the merge gate", () => {
     }
   });
 
-  it("asks GitHub to run the merge for whoever holds the lane", async () => {
+  it("does not expose the App write through the check-facing response", async () => {
     const e = env();
-    const routes = app();
+    let writes = 0;
+    const routes = app({ mergeWrite: async () => {
+      writes += 1;
+      return { kind: "unknown" as const, detail: "unreadable" };
+    } });
     const first = await authorize(routes, e, 59);
     expect(first.reason).toBe("HOLDS_TURN");
-    expect(driven).toContain(59);
+    expect(first.operationId).toBeNull();
+    // This fixture carries no readable commit proof, so the internal wake
+    // cannot write. The App-writer integration suite supplies the complete
+    // proof and asserts that the same request does write without a cron tick.
+    expect(writes).toBe(0);
   });
 
   it("refuses a pull request the App has not verified", async () => {
@@ -193,7 +196,7 @@ describe("the merge gate", () => {
 
   it("observes without enforcing", async () => {
     const e = env();
-    const routes = app({ queueProject: async () => ({ activationState: "observe", mergeMethod: "merge" }) });
+    const routes = app({ queueProject: async () => ({ activationState: "observe" }) });
     await authorize(routes, e, 59);
     // The second pull request is told what would have happened and let through
     // anyway, which is what makes adoption reversible.

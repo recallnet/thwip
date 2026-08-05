@@ -1,17 +1,13 @@
 /**
- * Ruleset generation for the managed and native backends (plan.md §44).
+ * Ruleset generation for the App-owned queue.
  *
  * Two rules govern everything here. Unrelated controls are merged, never
  * replaced: a generated payload that dropped someone's existing protection would
- * be a security regression delivered by a setup tool. And a managed ownership
- * rule must never reach a native branch, nor a native merge-queue rule a managed
- * one, because each would hand the branch to the wrong writer.
+ * be a security regression delivered by a setup tool. The App is the only
+ * supported writer, so a merge-queue rule is always a conflicting control.
  */
 
 import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
-
-export type Backend = "managed" | "native";
-export type MergeMethod = "merge" | "squash";
 
 /*
  * `Thwip / Merge` is gone.
@@ -88,9 +84,6 @@ export interface PolicyOptions {
   readonly actionsIntegrationId?: number;
   /** Whether the App publishes `thwip` itself yet. Defaults to observing. */
   readonly proofCheckMode?: ProofCheckMode;
-  readonly mergeMethod: MergeMethod;
-  readonly requiredApprovingReviewCount: number;
-  readonly requireCodeOwnerReview: boolean;
   /** Checks the repository already requires, which must survive generation. */
   readonly existingRequiredChecks?: ReadonlyArray<{ context: string; integration_id?: number }>;
   readonly enforcement?: "active" | "disabled";
@@ -103,10 +96,10 @@ function refCondition(baseRef: string): Ruleset["conditions"] {
 }
 
 /**
- * Only the Thwip App may update a managed branch, because the App performs the
+ * Only the Thwip App may update the queued branch, because the App performs the
  * merge. Deletion and force-push stay blocked for everyone.
  */
-export function managedOwnershipRuleset(input: { baseRef: string; integrationId: number }): Ruleset {
+export function appOwnershipRuleset(input: { baseRef: string; integrationId: number }): Ruleset {
   return {
     name: OWNERSHIP_RULESET_NAME,
     target: "branch",
@@ -124,8 +117,10 @@ export function managedOwnershipRuleset(input: { baseRef: string; integrationId:
 }
 
 /**
- * The repository policy: review requirements plus the two checks the queue
- * actually publishes.
+ * The repository policy contains only the checks and ref-integrity controls the
+ * queue owns. Review policy belongs to the repository's existing rulesets,
+ * which GitHub layers with this one; setup must not invent approvals, dismissal
+ * behavior, last-push approval, or thread-resolution requirements.
  *
  * `thwip` answers whether the proof is good for this tree. `thwip / turn`
  * answers whose turn it is and is published by the App the moment it offers the
@@ -170,17 +165,6 @@ export function policyRuleset(input: PolicyOptions): Ruleset {
     conditions: refCondition(input.baseRef),
     rules: [
       {
-        type: "pull_request",
-        parameters: {
-          allowed_merge_methods: [input.mergeMethod],
-          required_approving_review_count: input.requiredApprovingReviewCount,
-          dismiss_stale_reviews_on_push: true,
-          require_code_owner_review: input.requireCodeOwnerReview,
-          require_last_push_approval: true,
-          required_review_thread_resolution: true,
-        },
-      },
-      {
         type: "required_status_checks",
         parameters: {
           do_not_enforce_on_create: true,
@@ -194,56 +178,13 @@ export function policyRuleset(input: PolicyOptions): Ruleset {
   };
 }
 
-export interface NativeQueueOptions {
-  readonly baseRef: string;
-  readonly integrationId: number;
-  readonly mergeMethod: MergeMethod;
-  /** Must exceed the longest turn plus verifier and reconciliation allowance. */
-  readonly checkResponseTimeoutMinutes: number;
-}
+/** Guard against mixing GitHub's merge queue with the App-owned branch. */
+export type AppRulesetCheck = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
-/**
- * The native adapter keeps GitHub's queue as the writer, so it must not carry
- * the managed ownership rule. Group size is one: Thwip admits exactly one
- * selection at a time, and speculative batching is not in v1.
- */
-export function nativeMergeQueueRuleset(input: NativeQueueOptions): Ruleset {
-  return {
-    name: "Thwip Native Merge Queue",
-    target: "branch",
-    enforcement: "active",
-    bypass_actors: [],
-    conditions: refCondition(input.baseRef),
-    rules: [
-      {
-        type: "merge_queue",
-        parameters: {
-          check_response_timeout_minutes: input.checkResponseTimeoutMinutes,
-          grouping_strategy: "ALLGREEN",
-          max_entries_to_build: 1,
-          max_entries_to_merge: 1,
-          merge_method: input.mergeMethod.toUpperCase(),
-          min_entries_to_merge: 1,
-          min_entries_to_merge_wait_minutes: 0,
-        },
-      },
-      { type: "deletion" },
-      { type: "non_fast_forward" },
-    ],
-  };
-}
-
-/** Guard against sending a backend's rules to the wrong kind of branch (§44.2). */
-export type BackendCheck = { readonly ok: true } | { readonly ok: false; readonly reason: string };
-
-export function checkRulesetForBackend(ruleset: Ruleset, backend: Backend): BackendCheck {
+export function checkAppRuleset(ruleset: Ruleset): AppRulesetCheck {
   const types = new Set(ruleset.rules.map((rule) => rule.type));
-  if (backend === "native") {
-    if (ruleset.name === OWNERSHIP_RULESET_NAME || types.has("update")) {
-      return { ok: false, reason: "a native branch is updated by GitHub's queue, not by the Thwip App" };
-    }
-  } else if (types.has("merge_queue")) {
-    return { ok: false, reason: "a managed branch must not carry GitHub's merge_queue rule" };
+  if (types.has("merge_queue")) {
+    return { ok: false, reason: "an App-owned branch must not carry GitHub's merge_queue rule" };
   }
   return { ok: true };
 }
@@ -320,8 +261,8 @@ export const BOOTSTRAP_STEPS = [
   "publish-bootstrap-check",
   "attach-integration-id-while-disabled",
   "canary-negative-test",
-  "activate-policy-and-ownership",
   "record-genesis",
+  "activate-policy-and-ownership",
   "pin-proof-check-to-app",
 ] as const;
 
@@ -348,6 +289,7 @@ export function mayActivate(progress: BootstrapProgress): ActivationCheck {
     "publish-bootstrap-check",
     "attach-integration-id-while-disabled",
     "canary-negative-test",
+    "record-genesis",
   ];
   for (const step of required) {
     if (progress[step] !== true) return { ok: false, reason: `${step} has not been completed` };

@@ -4,10 +4,9 @@ import type { D1Like } from "./projection.js";
 /**
  * Candidate verdicts and dispatch claims, in D1 rather than in the Durable Object.
  *
- * Both used to live in the object's own SQLite. The merge workflow waits for a
- * candidate to be verified and asked by calling the authorization endpoint every
- * twenty seconds, so every poll woke the coordination object to answer a question
- * that has nothing to do with coordination.
+ * Both used to live in the object's own SQLite, so checking candidate progress
+ * woke the coordination object to answer a question that has nothing to do with
+ * coordination.
  *
  * A verdict is an immutable record keyed by the tree it judged. A dispatch claim
  * is a rate limit. Neither needs serialising against anything, and neither should

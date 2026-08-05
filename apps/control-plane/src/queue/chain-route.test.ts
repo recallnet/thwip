@@ -41,7 +41,6 @@ function routes(authOk: boolean) {
     queueProject: async () => null,
     principalFor: async () => null,
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async () => {},
     commitFacts: async () => null,
     signRecordBytes: async () => "jws",
   });

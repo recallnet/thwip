@@ -1,19 +1,5 @@
 #!/usr/bin/env node
-/**
- * This repository's merge workflow, written from the template every adopted
- * repository receives.
- *
- * There were two of them. `.github/workflows/thwip-merge.yml` was fixed in PR
- * 123 to compose the merge commit on the base the queue pinned and land it with
- * a ref update that does not force; `bootstrap-workflows.ts` went on calling the
- * merge-pull-request API, which has no expected base, so every enrolled
- * repository kept the defect that merged four unverified trees onto this one.
- * The attribution trailer went missing from one of the two copies the same way.
- *
- * So there is one merge now. The template is it, and this repository's copy is
- * what the template renders at the production endpoint. `scripts/lint.mjs`
- * fails if the checked-in file is not what this writes.
- */
+/** Generate the repository workflows shared with newly enrolled projects. */
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -30,7 +16,6 @@ export const PRODUCTION_ENDPOINT = "https://thwip.recall.net";
  * which no other repository can do.
  */
 export const RENDERED_HERE = [
-  ".github/workflows/thwip-merge.yml",
   ".github/workflows/thwip-queue-verify.yml",
 ];
 
