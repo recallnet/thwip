@@ -1117,7 +1117,19 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // evaluates, ticks and claims. If that offered the turn to somebody else,
   // nothing was telling them, and the lane sat until an unrelated call happened
   // to notice.
-  await driveLane(env, deps, repositoryId, baseRef, snapshot);
+  //
+  // Somebody else is the whole point, so a caller that is already the merge run
+  // for this pull request is excluded. `prepare` is what says so: only
+  // `thwip-merge.yml` sets it, and only when it is about to write the merge.
+  // The check workflow asks without it and still needs the merge run started.
+  //
+  // A merge run that dispatched itself started a second run for its own turn,
+  // and the workflow serialises on one concurrency group per queue, so the
+  // second cancelled the first. The first was the run that would have written
+  // the merge.
+  await driveLane(env, deps, repositoryId, baseRef, snapshot, {
+    ...(input.prepare ? { exceptPullRequestNumber: pullRequestNumber } : {}),
+  });
 
   // An attempt already walked to merge-ready by an earlier caller still has an
   // operation, and the caller that will perform the write needs its id. Without

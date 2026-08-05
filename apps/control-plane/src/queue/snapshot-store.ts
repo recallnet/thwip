@@ -80,6 +80,33 @@ const DEDUPE_WINDOW = 512;
  */
 const EVENT_TAIL = 200;
 
+/**
+ * How many outbox items the document keeps.
+ *
+ * Nothing in the Worker acknowledges one. `acknowledgeOutbox` had no caller
+ * outside the tests, so every item any command ever appended was still here,
+ * unacknowledged, and the array is re-serialised on every command and every
+ * tick. On 5 August 2026 it held 1053 items and 281KB of a 613KB document, the
+ * oldest dating from 31 July. The tick stopped fitting in a Worker invocation,
+ * Cloudflare stopped dispatching the five minute trigger, and the queue sat for
+ * eleven hours.
+ *
+ * The side effects these items describe are performed directly by the routes
+ * that record them, so what is kept is a diagnostic tail, the same as the
+ * events above.
+ */
+const OUTBOX_TAIL = 200;
+
+/**
+ * How many settled merge writes the document keeps.
+ *
+ * Only settled ones are counted. A write whose outcome nobody could confirm is
+ * exactly what the sweep comes back for, and it can sit unsettled across many
+ * later merges, so dropping one for being old would leave a merge unrecorded
+ * with nothing left that knows to look.
+ */
+const MERGE_OPERATION_TAIL = 200;
+
 interface DedupeRow {
   key: string;
   sequence: number;
@@ -355,6 +382,8 @@ export class SnapshotQueueStore {
       });
       this.doc.nextOutboxId += 1;
     }
+    this.trimOutbox();
+    this.trimMergeOperations();
 
     this.cached = next;
     this.flush();
@@ -422,6 +451,28 @@ export class SnapshotQueueStore {
     if (this.doc.deadlines.length !== before) this.flush();
   }
 
+  /** Keep the newest items, because the newest are what an operator is asking about. */
+  private trimOutbox(): void {
+    if (this.doc.outbox.length > OUTBOX_TAIL) {
+      this.doc.outbox = this.doc.outbox.slice(-OUTBOX_TAIL);
+    }
+  }
+
+  /**
+   * Drop the oldest settled merge writes, and never an unsettled one.
+   *
+   * The sweep finds an orphaned write by asking for the ones that never
+   * settled, so those stay however old they are. What is bounded is the record
+   * of writes that already have an outcome, which `/explain` reports and
+   * nothing decides from.
+   */
+  private trimMergeOperations(): void {
+    const settled = this.doc.mergeOperations.filter((row) => row.outcome !== null);
+    if (settled.length <= MERGE_OPERATION_TAIL) return;
+    const dropped = new Set(settled.slice(0, settled.length - MERGE_OPERATION_TAIL).map((row) => row.operationId));
+    this.doc.mergeOperations = this.doc.mergeOperations.filter((row) => !dropped.has(row.operationId));
+  }
+
   pendingOutbox(): PendingOutbox[] {
     return this.doc.outbox
       .filter((row) => !row.acknowledged)
@@ -482,6 +533,10 @@ export class SnapshotQueueStore {
       outcome: null,
       resolvedAt: null,
     });
+    // Merge writes are recorded outside `append`, so the bound is applied here
+    // as well. A repository that merges without any other command in between
+    // would otherwise grow this array unwatched.
+    this.trimMergeOperations();
     this.flush();
     return { status: "started" };
   }
@@ -492,6 +547,9 @@ export class SnapshotQueueStore {
     if (row === undefined) return;
     row.outcome = outcome;
     row.resolvedAt = at;
+    // Settling is what makes a row droppable, so the bound is applied at the
+    // moment one becomes so rather than waiting for the next write to start.
+    this.trimMergeOperations();
     this.flush();
   }
 
