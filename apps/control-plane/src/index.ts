@@ -946,62 +946,20 @@ app.post("/v1/devices/:keyId/revoke", async (c) => {
       WHERE key_id = ? AND revoked_at IS NULL
       RETURNING github_user_id`,
   )
-    .bind(nowIso(), reason ?? "revoked", c.req.param("keyId"))
+    // Who did it, in the field the dashboard's own revocation writes it to.
+    // The operator token is shared, so this names the token rather than a
+    // person, which is as much as the row can honestly say.
+    .bind(
+      nowIso(),
+      reason === undefined ? "revoked by operator token" : `revoked by operator token: ${reason}`,
+      c.req.param("keyId"),
+    )
     .first<{ github_user_id: string }>();
   if (revoked !== null) await reconcileProofsForGithubUser(c.env, revoked.github_user_id);
   return c.json({ revoked: revoked !== null });
 });
 
 // --- Admin bootstrap / sync ------------------------------------------------
-
-app.post("/admin/seed", async (c) => {
-  if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
-  const body = (await c.req.json()) as {
-    organization: { githubOrgId: string; githubLogin: string };
-    project: { githubRepositoryId: string; githubName: string; defaultBranch: string; securityProfile: string };
-    policy: { canonicalJson: string; digest: string; version: number };
-    grants: Array<{ githubUserId: string; githubLogin: string; permission: string }>;
-  };
-  const orgId = randomId("org");
-  const projectId = randomId("prj");
-  const stmts = [
-    c.env.DB.prepare(
-      "INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?) ON CONFLICT(github_org_id) DO UPDATE SET github_login = excluded.github_login",
-    ).bind(orgId, body.organization.githubOrgId, body.organization.githubLogin),
-    c.env.DB.prepare(
-      `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch, enabled, active_policy_digest, security_profile)
-       SELECT ?, o.id, ?, ?, ?, 1, ?, ? FROM organizations o WHERE o.github_org_id = ?
-       ON CONFLICT(github_repository_id) DO UPDATE SET github_name = excluded.github_name, default_branch = excluded.default_branch, enabled = 1, active_policy_digest = excluded.active_policy_digest, security_profile = excluded.security_profile`,
-    ).bind(
-      projectId,
-      body.project.githubRepositoryId,
-      body.project.githubName,
-      body.project.defaultBranch,
-      body.policy.digest,
-      body.project.securityProfile,
-      body.organization.githubOrgId,
-    ),
-    c.env.DB.prepare(
-      `INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status, activated_at)
-       SELECT ?, p.id, ?, ?, 'active', ? FROM projects p WHERE p.github_repository_id = ?
-       ON CONFLICT(digest) DO UPDATE SET status = 'active', activated_at = excluded.activated_at`,
-    ).bind(body.policy.digest, body.policy.version, body.policy.canonicalJson, nowIso(), body.project.githubRepositoryId),
-    c.env.DB.prepare(
-      `UPDATE policy_bundles SET status = 'retired' WHERE project_id = (SELECT id FROM projects WHERE github_repository_id = ?) AND digest != ? AND status = 'active'`,
-    ).bind(body.project.githubRepositoryId, body.policy.digest),
-  ];
-  for (const g of body.grants) {
-    stmts.push(
-      c.env.DB.prepare(
-        `INSERT INTO repository_grants (project_id, github_user_id, github_login, permission, active, synced_at)
-         SELECT p.id, ?, ?, ?, 1, ? FROM projects p WHERE p.github_repository_id = ?
-         ON CONFLICT(project_id, github_user_id) DO UPDATE SET permission = excluded.permission, active = 1, synced_at = excluded.synced_at`,
-      ).bind(g.githubUserId, g.githubLogin, g.permission, nowIso(), body.project.githubRepositoryId),
-    );
-  }
-  await c.env.DB.batch(stmts);
-  return c.json({ ok: true });
-});
 
 app.post("/admin/sync", async (c) => {
   if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
