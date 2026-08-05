@@ -31,11 +31,11 @@ function requiredChecks(ruleset: Ruleset): Array<{ context: string; integration_
 }
 
 describe("appOwnershipRuleset", () => {
-  it("lets only the App update the branch and blocks deletion and force-push", () => {
+  it("gives only the direct-writing App an always bypass and blocks deletion and force-push for everyone else", () => {
     const ruleset = appOwnershipRuleset({ baseRef: BASE, integrationId: INTEGRATION_ID });
     expect(ruleset.rules.map((r) => r.type).sort()).toEqual(["deletion", "non_fast_forward", "update"]);
     expect(ruleset.bypass_actors).toEqual([
-      { actor_id: INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
+      { actor_id: INTEGRATION_ID, actor_type: "Integration", bypass_mode: "always" },
     ]);
     const update = ruleset.rules.find((r) => r.type === "update")!;
     expect(update.parameters).toEqual({ update_allows_fetch_and_merge: false });
