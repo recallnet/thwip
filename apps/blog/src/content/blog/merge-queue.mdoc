@@ -1,264 +1,155 @@
 ---
-title: "Merge queues re-run CI in series"
-description: "Everyone's agent works in parallel until the merge, and then the queue takes them one at a time. A queue that re-verifies each integrated candidate in the cloud spends a full CI run per merge, so the line moves at the speed of your slowest job. thwip pins the candidate and merges on evidence that already exists, or on a run done on a developer's own machine. On this repository the lane holds a merge for about fourteen seconds."
+title: "Why merge queues slow down with agents"
+description: "Agents can work in parallel, but a protected branch still accepts one change at a time. Here is why the queue becomes the bottleneck, and how candidate pinning and signed evidence shorten the wait."
 author: thwip
 pubDate: 2026-08-04T12:00:00.000Z
+updatedDate: 2026-08-05T12:00:00.000Z
 tags:
-  - research
   - merge-queue
   - agents
   - continuous-integration
-  - execution-provenance
 heroImage: /blog/queue-hero.svg
-heroAlt: Six branches into one lane, the candidate pinned, merged on evidence
+heroAlt: Several pull requests joining a single merge lane
 ---
 
-Six engineers on one repository, each with an agent open, produce six branches
-that never touch each other until they land. Up to that point everything runs at
-whatever speed the machine underneath it runs. Then the branches meet, and a
-protected branch takes one commit at a time, so the queue ends up being the one
-piece of shared infrastructure every change passes through and the only serial
-thing in a setup that is parallel everywhere else.
+Imagine three coding agents working on the same repository. Each has a branch,
+and each branch can run its checks without waiting for the others. The work is
+parallel until somebody tries to update `main`.
 
-## Where a shared repo jams
+`main` is shared. It can accept one new commit at a time. That is where a merge
+queue helps, and where a traditional queue can become the slowest part of the
+system.
 
-[Xu, Subramanian and Karthik](https://arxiv.org/abs/2607.04697v2) worked from the
-AIDev-pop dataset: 33,596 agent-authored pull requests across 2,807
-repositories. Counting exact temporal overlap, co-active pairs account for 79.4%
-of every pull request an agent wrote. Widen the window to a week and it reaches
-95.0%. They then replayed three-way merges on 747 co-active pairs, one per
-repository, and counted textual conflicts: 41.7% for pairs written by different
-agents, 19.8% for pairs written by the same one, with non-overlapping confidence
-intervals.
+## The problem a queue solves
 
-Cross-agent pairs were 0.5% of the co-active pairs in that corpus. On a team
-where each person runs their own agent, that rare case is the ordinary one, and
-those overlapping pull requests are what arrives at the queue.
+A pull request usually tests the latest commit on its own branch. Call that the
+PR's **head**. The commit that lands is different: it combines that head with
+the current tip of `main`.
 
-## Why a queue exists at all
+While the PR was being reviewed, another change may have landed. The two
+changes can merge cleanly as text and still fail together because they rely on
+different types, APIs, or configuration. A green PR is evidence about one
+snapshot of the code. It is not automatically evidence about the snapshot that
+will land.
 
-Your suite runs on your branch. What lands is your branch combined with whatever
-the base picked up while you were working, and git resolves that combination by
-looking at text. Two changes can merge cleanly and still break each other:
-somebody narrowed a type your new call site relies on, somebody renamed a fixture
-you added a test against.
+One study of agent-authored pull requests found that 79.4% overlapped in time
+with another pull request from an agent on the same repository, and that
+different-agent pairs had textual conflicts 41.7% of the time. [The study](https://arxiv.org/abs/2607.04697v2)
+is a useful picture of why this matters: agents create more simultaneous work,
+so more branches arrive at the same integration point.
 
-You answer that by serializing. The queue takes one pull request at a time and
-builds the commit it would produce against the current base, so somebody learns
-about the combination before it becomes the branch everybody pulls.
+The queue makes that integration point explicit. It chooses one eligible pull
+request and combines it with the current base. Depending on policy, it runs the
+required gate on that combined candidate or reuses signed evidence from the PR
+head, then merges only the pinned candidate.
 
-## Why the queue became the bottleneck
-
-The usual way to find out is to run the suites on the integrated candidate in
-the cloud, and to do it again for the next one, because merging the first
-changed the base the second has to be built on.
-
-[Bouzenia and Pradel](https://software-lab.org/publications/icse2024_workflows.pdf)
-mined 1.3 million GitHub Actions runs across 952 repositories over 30 months for
-ICSE 2024. They measured what one of those runs costs.
-
-| Measured across 1.3M runs | Figure |
-| --- | --- |
-| Average job duration | 6.3 minutes |
-| Share of resources on testing and building | 91.2% |
-| Mean yearly spend, paid-tier repository | $504 |
-
-Six pull requests behind a queue like that wait through six of those, one after
-another, and a failure part-way sends its candidate back and rebuilds every
-candidate behind it. Six agents working since breakfast can fill that line by
-lunch, and the person at the back of it waits out every run in front of them
-before their own starts.
-
-## How this one moves
-
-One lane per protected branch. `main` and `release` hash to different queue
-keys, so they never share a turn. Inside a lane the scheduler is
-`principal-round-robin-v1`: only a person's oldest eligible entry competes in a
-round, and the person served least recently wins it, so ten pull requests from
-one author cannot precede one pull request from somebody else.
-
-The entry that wins the round gets a candidate pinned to it. GitHub computes
-`refs/pull/N/merge` for every open pull request and rewrites it whenever either
-side moves, so what the queue holds on to is the objects that ref pointed at:
-the candidate commit, its two parents, and its tree.
-`apps/control-plane/src/queue/candidate.ts` checks the parents before it will
-hand any of that out.
-
-```ts
-const parents = input.candidate.parentShas;
-if (parents.length !== 2) return { status: "blocked", reason: "CANDIDATE_PARENTS_UNEXPECTED" };
-if (parents[0] !== pr.baseSha || parents[1] !== pr.headSha) {
-  return { status: "blocked", reason: "CANDIDATE_PARENTS_UNEXPECTED" };
-}
+{% mermaid label="A pull request changes from a tested branch into an integrated candidate" %}
+```mermaid
+flowchart LR
+  A[PR head<br/>checks pass] --> C[Current main<br/>may have moved]
+  C --> D[Integrated candidate<br/>main + PR]
+  D --> E{Candidate passes?}
+  E -- yes --> F[Merge]
+  E -- no --> G[Fix or wait]
 ```
+{% /mermaid %}
 
-A first parent that is not the current base means GitHub simulated the merge
-against a branch tip that has since moved, and if the second parent has drifted
-off the head then it simulated different code. Seven states block a candidate
-outright and one more says GitHub has not finished computing mergeability. Each
-of the eight travels as its own code, because the queue acts on a conflict
-differently from how it acts on an answer GitHub still owes it.
+## Why the usual queue is expensive
 
-The profile in `thwip.yaml` decides what the queue will merge that candidate on.
-Under `fast`, the evidence is the proof the developer signed on the pull request
-head. `requiresIntegratedRun` returns false for `fast` and true for the other
-three. The merge record it writes is a `reused-proof-merge`. Seven kinds of
-record exist and that one is alone in claiming no run against the integration.
+The ordinary implementation repeats the same sequence for every pull request:
 
-Under `fresh`, the queue signs an assignment naming the candidate tree, the
-required suites and the policy behind them, and offers it to a device that
-claimed the turn. That machine verifies the assignment against the published
-service keys, fetches the candidate, runs the suites, and signs a receipt over
-the tree it built. `requiresRemoteVerification` returns false for `fresh`, so
-there is no fallback into Actions.
+1. Build the merge candidate.
+2. Run CI on it in the cloud.
+3. Merge it.
+4. Start again against the new base.
 
-`audited` is `fresh` with every required suite proven a second time by GitHub's
-own checks. `remote` is that second execution on its own. All three take a run
-lease good for 1800 seconds; `fast` takes none.
+Those steps are serial. If six pull requests are ready, the sixth waits for
+five integrated CI runs before its own run starts. A slow or failing run holds
+the line, and everything behind it may need to be rebuilt.
 
-A signature proves a run happened on a tree. The tree it covers is the branch
-before integration, and GitHub writes a different commit to `main`. A queue
-holds that commit. Everything a queue on its own knows about it comes from a run
-the queue starts in the cloud and pays for.
+That cost is easy to feel in a repository with agents. The agents save time by
+working at the same time, then the queue asks the team to pay for the same
+integration setup over and over. A study of 1.3 million GitHub Actions runs
+measured mean job time at 6.3 minutes. [Its results](https://software-lab.org/publications/icse2024_workflows.pdf)
+are repository-wide averages, not a promise about any one project, but the
+serial shape is the important part.
 
-In the same system, the queue fixes the candidate before it hands the work out,
-so there is one tree to run and one tree to sign. A merge then lands in seconds
-and the evidence covers the commit that landed, because the signature is what
-lets the queue take a result from a machine nobody there owns or watched.
+## How thwip moves a change through the lane
 
-On this repository, running `fast`, the lane held these:
+There is one lane for each protected branch. `main` and `release` have separate
+lanes. Within a lane, each person's oldest eligible pull request competes, and
+the person served least recently gets the next turn. A single busy author
+cannot fill the front of the queue with ten pull requests.
 
-| The lane, 9 merges | Value |
-| --- | --- |
-| Turn offered to merge confirmed, median | 14.0s |
-| Fastest | 11.6s |
-| Slowest | 19.2s |
-| Merge confirmed to signed record | 3.1s to 4.7s |
+The winning pull request gets a **pinned candidate**. GitHub's temporary merge
+ref can change as the PR or base changes, so thwip stores the candidate commit,
+its parents, and its code snapshot. The parents must still be the current base
+and current PR head. If either moved, thwip discards the candidate and builds a
+new one. It never runs checks for one snapshot and merges a different one.
 
-The write itself is GitHub's. Across 111 merge operations the call took 3.3
-seconds at the median, 2.2 at the fastest and 4.3 at p90.
+The policy then decides where the evidence comes from:
 
-The same repository's pinned verifier workflow is what `remote` and `audited`
-spend on every merge. It runs in Actions:
+| Profile | What happens | Trade-off |
+| --- | --- | --- |
+| `fast` | Reuse the signed proof already attached to the PR head. | Fastest, with no new run against the integrated candidate. |
+| `fresh` | An enrolled device runs the pinned candidate and signs a receipt. | No cloud rerun, but a connected device must take the turn. |
+| `remote` | A pinned GitHub Actions verifier runs the candidate. | Central reference machine, with a CI run for each candidate. |
+| `audited` | A device run is followed by a GitHub Actions rerun. | Strongest check, with both execution costs. |
 
-| The cloud run, 18 successful jobs | Value |
-| --- | --- |
-| Median wall clock | 73s |
-| Fastest | 64s |
-| Slowest | 85s |
+The important detail is the pairing: the queue pins the candidate, and the
+evidence names that candidate. In `fresh`, for example, the device receives a
+signed assignment saying which code snapshot and suites to run. Its receipt is
+accepted only if it describes that same snapshot. The queue can then accept a
+run it did not perform itself.
 
-Between 31 July and 4 August 2026 the queue recorded 138 movements of this
-branch. Of the 96 the chain serves with signed bytes, 86 are reused-proof
-merges, 5 are candidate-verified merges, 4 are external transitions and 1 is a
-base correction.
-
-## What an agent can see
-
-An agent reads the queue over one authenticated call.
-`GET /v1/queue/:repositoryId?ref=refs/heads/main` answers with every entry's
-state, its blocking reason, its fairness ordinal, whether the scheduler will
-consider it, and when its cooldown ends. That read is served from a D1
-projection so a polling dashboard never wakes the queue object; `?live=1` reads
-the object for an operator who cannot afford to be four seconds stale.
-`/explain` adds a sentence per entry saying what is holding it.
-
-The reasons are codes, from a closed union of 113 across five vocabularies.
-
-| Vocabulary | Codes |
-| --- | --- |
-| Queue blocking reasons | 28 |
-| Attempt outcomes | 19 |
-| Proof verifier | 29 |
-| Control plane, on the wire | 28 |
-| Raised by the CLI about this machine | 15 |
-| Distinct, after the six that appear twice | 113 |
-
-Each of the 113 has exactly one sentence, in a `Record<ReasonCode, string>` that
-the check, the CLI and the dashboard all read. Adding a code without writing its
-sentence fails the build. The three surfaces used to keep their own copies and
-the copies drifted, so one event read as "the source changed" in a terminal and
-"push a fix" on a web page, which sent somebody to edit code that was fine.
-
-A person gets the same facts as one comment on the pull request, edited in
-place. It gives the position, the length of the line, the numbers of the pull
-requests ahead, and the reason sentence for whatever state the entry is in.
-GitHub sends no notification for an edit, so the comment can follow the queue as
-closely as it likes. The queue fingerprints
-everything the comment says apart from the clock and writes nothing when the
-fingerprint matches, so a tick where nothing moved costs no GitHub calls.
-
-Every merge leaves a signed record, and `GET /v1/queue/records/:digest` returns
-the exact bytes that were signed. A `reused-proof-merge` carries the proof's
-digest, the policy digest, the pipeline digest, the required-suites digest and
-the check run that accepted the proof. A `candidate-verified-merge` carries the
-verifier's result instead. They are separate kinds in the schema and each
-refuses the other's fields, so months later you can still tell which one a
-merge was.
-
-## What it refuses
-
-When the queue assembles the evidence for a reuse merge, anything it cannot read
-stops the merge and gets named, so an absent value has no route through this
-code that ends in a signature.
-
-```ts
-if (policy === null) return { missing: "the repository has no active policy" };
-if (policy.pipelineDigest === null) return { missing: "the active policy names no pipeline" };
-if (proofCheckRunId === null) {
-  return { missing: "no passing proof check was found for this head" };
-}
+{% mermaid label="The queue flow from selection through an evidence-backed merge" %}
+```mermaid
+flowchart TD
+  A[Pull request is ready] --> B[Choose one turn]
+  B --> C[Pin current base + PR head]
+  C --> D{Still current?}
+  D -- no --> C
+  D -- yes --> E{Policy}
+  E -- fast --> F[Reuse signed head proof]
+  E -- fresh --> G[Device runs candidate<br/>and signs receipt]
+  E -- remote --> H[Pinned GitHub verifier<br/>runs candidate]
+  E -- audited --> I[Device run<br/>then GitHub rerun]
+  F --> J[Merge pinned candidate]
+  G --> J
+  H --> J
+  I --> J
+  J --> K[Write signed record<br/>and release lane]
 ```
+{% /mermaid %}
 
-Further down, a head whose proof binds a policy the merge cannot read stops
-there too, and a proof that ran a different pipeline or skipped a required suite
-comes back as `POLICY_CHANGED` with the suite named. A head commit carrying no
-readable proof digest ends the walk with `WORK_RECEIPT_UNREADABLE`, because the
-merge record would otherwise cite nothing. Each of these was once a placeholder
-constant, and a record built on a placeholder reads as evidence while binding
-nothing.
+## What the queue buys you
 
-The vocabularies work the same way. A value the parser does not recognise
-fails, and a fact nobody has read carries the word `"unread"`, so a reviewer can
-see the difference between a check that passed and a check nobody made.
+The queue still serializes the one operation that must be serial: updating the
+protected branch. Its work around that operation is more deliberate.
 
-The published chain shows a limit right now. All 96 signatures on it verify
-against the keys at `/.well-known/thwip-keys`, and the walk still prints
-findings, because the chain route omits record 121, an external transition the
-index holds. The record after it names a predecessor nobody was served, and the
-walk reports a break there. Those findings are correct, and the chain stays
-broken until that record is served.
+- **A controlled merge point.** The queue refuses a stale candidate. Profiles
+  that run the integration bind their evidence to it, while `fast` records that
+  it reused proof from the PR head.
+- **Less cloud work.** `fast` spends no integrated CI run. `fresh` runs the
+  candidate without sending the work to GitHub Actions. `remote` and `audited`
+  keep the cloud check when that reference is worth the cost.
+- **A fairer line.** Turns are assigned per person, and an expired or failed
+  turn is deferred without losing its place.
+- **An explanation after the fact.** Each movement gets a signed record. A
+  reviewer can see whether a merge reused head proof, used a device receipt,
+  or passed a pinned cloud verifier.
 
-## What this does not buy
+There is a real choice here. `fast` trusts the enrolled signing key and the
+proof it produced; it does not claim that the integrated candidate ran. `fresh`
+adds that integrated run, but depends on a device being available. `remote`
+keeps the familiar GitHub execution model and pays its latency. The queue makes
+those choices explicit instead of hiding them inside a workflow.
 
-A signed receipt from a device says a suite passed on a tree. Whether the change
-is a good idea is a question somebody still has to answer by reading the code.
-Under `fast` an attacker holding an enrolled key can sign a
-proof over a tree whose suites never passed, and the queue will merge it;
-`audited` and `remote` answer that by running the suites in Actions and paying
-for the run.
-
-The five candidate-verified merges above came from the pinned verifier in
-Actions. This branch runs `fast`, so the `fresh` numbers are from
-`recallnet/thwip-test`: seven merges under that profile, five of them on 4
-August 2026. On each of the five the queue signed an assignment over the
-candidate tree, naming `lint` and `test` as the suites and policy v4 as the
-authority for them. Before it fetched the candidate the device checked that
-signature against the published keys. The control plane accepted the receipt a
-median 7.4 seconds after the queue signed, and the `verified-merge` record
-followed at 28.0 seconds, 26.6 at the fastest and 33.2 at the slowest. The chain
-there reads 7 links with 7 of 7 signatures checked and no findings.
-
-## Sources and code
-
-The monorepo is [public](https://github.com/recallnet/thwip) and it merges
-through this queue. The scheduler is
-[`packages/queue-domain`](https://github.com/recallnet/thwip/tree/main/packages/queue-domain),
-the record schema is
-[`packages/queue-protocol`](https://github.com/recallnet/thwip/tree/main/packages/queue-protocol),
-and both ship with their tests. Short forms for agents: [llms.txt](/llms.txt),
-[faq.md](/faq.md).
+The result is a merge lane that keeps the branch controlled while giving a team
+more than one way to pay for confidence: reuse evidence, run locally, or run in
+the cloud.
 
 {% cta-row %}
-{% cta href="https://github.com/recallnet/thwip" label="Repository" /%}
+{% cta href="https://github.com/recallnet/thwip" label="Read the code" /%}
 {% cta href="/install" label="Try the beta" variant="ghost" /%}
 {% /cta-row %}
