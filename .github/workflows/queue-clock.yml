@@ -1,0 +1,37 @@
+name: queue clock
+
+# Cloudflare stopped dispatching thwip's own five minute trigger at 03:55Z on
+# 5 August, with the schedule still listed by its own API and no error recorded
+# against it. Eleven hours passed before anybody noticed, and what noticed was a
+# person comparing invocation counts against webhook rows by hand.
+#
+# This reads the age of the last finished tick from a scheduler that is not
+# Cloudflare's, and the request it makes is itself traffic, which is the queue's
+# second clock. Two vendors now have to stop for the queue to stop quietly.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-the-clock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask thwip when it last moved
+        run: |
+          set -euo pipefail
+          health=$(curl -fsS https://thwip.recall.net/health)
+          echo "$health" | jq .
+          age=$(echo "$health" | jq -r '.tick.ageSeconds // empty')
+          if [ -z "$age" ]; then
+            echo "::error::/health reported no tick age, so the live build predates the queue clock"
+            exit 1
+          fi
+          if [ "$age" -gt 900 ]; then
+            echo "::error::the queue has not finished a tick in ${age}s"
+            exit 1
+          fi
+          echo "last tick ${age}s ago, by $(echo "$health" | jq -r '.tick.source')"
