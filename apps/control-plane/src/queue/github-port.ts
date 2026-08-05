@@ -1,10 +1,11 @@
+import { GithubApiError } from "../github-error.js";
 import { pinCandidate, type CommitFacts, type PullRequestFacts } from "./candidate.js";
 
 /**
- * The real GitHub side of an integration turn.
+ * The shared GitHub HTTP boundary for queue reads and bootstrap writes.
  *
- * Reads only. The merge write lives in Actions, and every call here throws on a
- * non-2xx response, which is what a read should do.
+ * Every non-2xx response keeps its path, status, and bounded body so callers can
+ * distinguish a permission refusal from an outage without parsing prose.
  */
 
 const API = "https://api.github.com";
@@ -27,7 +28,7 @@ export function githubHttp(token: string, fetchImpl: typeof fetch = fetch): GitH
   return {
     async json<T>(path: string, init?: RequestInit): Promise<T> {
       const res = await fetchImpl(`${API}${path}`, { ...init, headers: headers(init?.headers) });
-      if (!res.ok) throw new Error(`GitHub ${path} -> ${res.status}: ${await res.text()}`);
+      if (!res.ok) throw new GithubApiError(path, res.status, await res.text());
       return (await res.json()) as T;
     },
   };
@@ -129,22 +130,11 @@ export async function resolveCandidate(
 }
 
 /**
- * The merge is not here, and this is the note that says where it is.
+ * Candidate reads live here; the single merge implementation does not.
  *
- * Two functions in this file wrote merges and nothing called either. One asked
- * GitHub's merge-pull-request API, which takes an expected head and no expected
- * base and so merges onto whatever the branch is at that instant; that is the
- * call that landed four unverified trees on this repository. The other composed
- * the merge on the pinned base and landed it with a ref update that does not
- * force, which is the fix, and it was a second unreachable spelling of a merge
- * that already existed in YAML.
- *
- * The merge runs in Actions, because the merge token lives there and the run has
- * to happen after the required check concludes. So there is one of it:
- * `bootstrap-workflows.ts` holds the shell, `.github/workflows/thwip-merge.yml`
- * is what that renders, and `scripts/workflow-lint.mjs` fails a workflow that
- * merges without binding the base. A third spelling here is how the first two
- * came to disagree about the attribution trailer.
+ * The App-owned writer is `merge-write.ts`. It composes the verified tree on
+ * the pinned base and updates the branch ref without force. Keeping that write
+ * out of this general read boundary makes duplicate merge paths harder to add.
  */
 
 /** One check run on a head, as far as a required-status-check rule cares. */

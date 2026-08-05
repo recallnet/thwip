@@ -538,7 +538,7 @@ describe("App-native check publication", () => {
  * The bug: a single read of GitHub decided the proof's fate, so a check that had
  * not finished, and a read that failed outright, both became durable verdicts a
  * developer read as "your tests failed". The merge path lost three merges to the
- * same shape (.superpowers/sdd/not-merged-report.md).
+ * same shape from the earlier settlement investigation.
  */
 describe("evidence that has not settled", () => {
   const env = { PUBLIC_ORIGIN: "https://thwip.example" } as Env;

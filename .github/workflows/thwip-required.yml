@@ -9,13 +9,11 @@ name: thwip
 # now, the moment it offers the lane.
 
 run-name: >-
-  thwip: verify proof ${{ github.event_name == 'merge_group'
-    && format('for merge group {0}', github.event.merge_group.head_sha)
-    || format('for PR #{0} — {1}', github.event.pull_request.number, github.event.pull_request.title) }}
+  thwip: verify proof for PR #${{ github.event.pull_request.number }} —
+  ${{ github.event.pull_request.title }}
 
 on:
   pull_request:
-  merge_group:
 
 permissions:
   contents: read

@@ -29,16 +29,13 @@ import {
   storeAttestation,
   verifiedEvidenceFor,
 } from "./attestation.js";
-import { mergeOperationId, type MergeMethod } from "./merge-commit.js";
-import type { MergeWriter } from "./merge-write.js";
+import { mergeOperationId } from "./merge-commit.js";
 import { requiredSuitesDigest, type Sha256 } from "@thwip/queue-protocol";
 import { decideCandidate, requiresRemoteVerification } from "./candidate-verdict.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
 import { headProofAccepted } from "./head-proof.js";
 import { candidateVerdict as readCandidateVerdict, claimCandidateDispatch } from "./candidate-store.js";
 import {
-  driveLane,
-  mergeLaneFor,
   storeEvidence,
   type ActivePolicy,
   type MergeLaneDeps,
@@ -69,7 +66,7 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string; mergeMethod: MergeMethod; mergeWriter?: MergeWriter } | null>;
+  ): Promise<{ activationState: string } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
   /**
@@ -147,22 +144,6 @@ export interface TurnRequest {
   readonly headSha: string;
   readonly authorGithubUserId: string;
   readonly draft: boolean;
-  /**
-   * Walk the held attempt to the point a merge may be written. Only the caller
-   * that is about to write asks for this: preparing earlier starts the
-   * merge-confirmation clock while nothing is writing, and the deadline then
-   * turns a perfectly good turn into a reconciliation.
-   */
-  readonly prepare: boolean;
-}
-
-/** What the pins are, where the queue hands them to somebody else to write. */
-export interface MergePins {
-  readonly baseRef: string;
-  readonly baseSha: string;
-  readonly headSha: string;
-  readonly treeOid: string;
-  readonly parentShas: string[];
 }
 
 /** What the queue decided about one ask. */
@@ -193,24 +174,10 @@ export type TurnAuthorization =
       readonly entryId: string;
     }
   | {
-      readonly outcome: "written";
-      readonly activationState: string;
-      readonly enforcing: boolean;
-      readonly authorized: boolean;
-      readonly mergeMethod: MergeMethod;
-      readonly mergeWriter: MergeWriter;
-      readonly entryId: string;
-      readonly operationId: string;
-      readonly written: Record<string, unknown>;
-    }
-  | {
       readonly outcome: "settled";
       readonly activationState: string;
       readonly enforcing: boolean;
       readonly authorized: boolean;
-      readonly mergeMethod: MergeMethod;
-      readonly mergeWriter: MergeWriter;
-      readonly merge: MergePins | null;
       readonly reason: ReasonCode;
       readonly entryId: string;
       readonly operationId: string | null;
@@ -249,31 +216,11 @@ export function authorizationResponse(result: TurnAuthorization): Record<string,
         operationId: null,
         retryAfterSeconds: 20,
       };
-    case "written":
-      return {
-        authorized: result.authorized,
-        enforcing: result.enforcing,
-        activationState: result.activationState,
-        mergeMethod: result.mergeMethod,
-        // Named, not sent. An old workflow reading this answer finds no pins and
-        // errors rather than merging, which is the loud half of a repository
-        // that flipped the writer without dropping the workflow.
-        mergeWriter: result.mergeWriter,
-        merge: null,
-        entryId: result.entryId,
-        operationId: result.operationId,
-        ...result.written,
-      };
     case "settled":
       return {
         authorized: result.authorized,
         enforcing: result.enforcing,
         activationState: result.activationState,
-        // What the writer must tell GitHub when it performs this merge, so the
-        // method it uses and the method the signed record binds can never drift.
-        mergeMethod: result.mergeMethod,
-        mergeWriter: result.mergeWriter,
-        merge: result.merge,
         reason: result.reason,
         entryId: result.entryId,
         operationId: result.operationId,
@@ -291,14 +238,14 @@ export function authorizationResponse(result: TurnAuthorization): Record<string,
  * made here, from the App's own installation token, so the caller is never the
  * source of a fact the queue signs against.
  */
-export async function authorizeTurn<TEnv extends QueueRouteEnv>(
+async function walkTurn<TEnv extends QueueRouteEnv>(
   env: TEnv,
   deps: AuthorizeTurnDeps<TEnv>,
   onQueue: OnQueue<TEnv>,
   input: TurnRequest,
+  appWillWrite: boolean,
 ): Promise<TurnAuthorization> {
   const { repositoryId, baseRef } = input;
-  const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
   const project = await deps.queueProject(env, repositoryId, baseRef);
   if (project === null) {
     // Not a queue branch: the check must not start failing because a queue was
@@ -548,16 +495,9 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // Only for the entry that holds the lane. Somebody else's turn is answered
   // from the snapshot below, and reading GitHub for a pull request that is
   // merely waiting would spend a call to say what the queue already knows.
-  // Prepared for the caller that asked, and for the App whenever it is the
-  // writer.
-  //
-  // Preparing starts the merge-confirmation clock, so the rule was that only
-  // the caller about to write asks for it. Once the App is that caller there is
-  // nobody else to ask: `thwip-merge.yml` is what used to arrive with
-  // `prepare: true`, and a repository that has stopped running it has no other
-  // trigger. So the writer decides, and the clock starts where the write does.
-  const walkToMerge = input.prepare || (project.mergeWriter ?? "workflow") === "app";
-  if (walkToMerge && held.activeAttemptId !== null && held.activeEntryId === entryId) {
+  // The App is the only writer, so it walks the holder and starts the
+  // merge-confirmation clock at the point where it can perform the write.
+  if (appWillWrite && held.activeAttemptId !== null && held.activeEntryId === entryId) {
     const attemptId = held.activeAttemptId;
     const holder = held.entries.find((e) => e.entryId === entryId);
 
@@ -625,7 +565,6 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
       // second later reads null, is refused here, and is spent. Nothing re-drove
       // the lane, so the next attempt waited for the five-minute cron and the
       // branch merged once per five minutes.
-      await driveLane(env, deps, repositoryId, baseRef, after ?? held);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -642,7 +581,6 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
       // A push landed while this turn was being asked about. The candidate
       // GitHub is offering integrates a commit whose proof nothing here has
       // read, and the entry's own head follows on the next ask.
-      await driveLane(env, deps, repositoryId, baseRef, held);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -670,7 +608,6 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
           outcome: "BASE_MOVED",
         });
       });
-      await driveLane(env, deps, repositoryId, baseRef, after);
       return {
         outcome: "refused",
         activationState: project.activationState,
@@ -720,7 +657,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
     //
     // `fresh` is the one profile whose integrated run happens somewhere else.
     // Its suites ran on the device, under an assignment this queue signed, and
-    // asking GitHub Actions to run them again is the fallback plan.md §5.0
+    // dispatching those suites to GitHub Actions is a different security profile
     // says `fresh` does not have. `audited` asks for both, and still does.
     const needsIntegratedRun = policy !== null && requiresRemoteVerification(policy.securityProfile);
     // Null unless something actually ran. Under reuse nothing does, and the
@@ -1017,9 +954,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
           headSha,
           candidateSha,
           candidateTreeOid: candidateTree,
-          // A merge commit's second parent is the pull request head; a squash
-          // has none, because it never becomes a parent of anything.
-          candidateParentOids: project.mergeMethod === "squash" ? [baseSha] : [baseSha, headSha],
+          candidateParentOids: [baseSha, headSha],
         },
         position: {
           queueEpoch: held.queueEpoch,
@@ -1028,7 +963,7 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
           previousTransitionDigest: (held.chainHead?.digest ?? null) as Sha256 | null,
         },
         pullRequestNumber: input.pullRequestNumber,
-        mergeMethod: project.mergeMethod,
+        mergeMethod: "merge" as const,
         createdAt: new Date().toISOString(),
         signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
       };
@@ -1113,24 +1048,6 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   const snapshot = latest;
   const entry = snapshot.entries.find((e) => e.entryId === entryId);
 
-  // A check's authorize moves the lane as much as a tick does: admit enqueues,
-  // evaluates, ticks and claims. If that offered the turn to somebody else,
-  // nothing was telling them, and the lane sat until an unrelated call happened
-  // to notice.
-  //
-  // Somebody else is the whole point, so a caller that is already the merge run
-  // for this pull request is excluded. `prepare` is what says so: only
-  // `thwip-merge.yml` sets it, and only when it is about to write the merge.
-  // The check workflow asks without it and still needs the merge run started.
-  //
-  // A merge run that dispatched itself started a second run for its own turn,
-  // and the workflow serialises on one concurrency group per queue, so the
-  // second cancelled the first. The first was the run that would have written
-  // the merge.
-  await driveLane(env, deps, repositoryId, baseRef, snapshot, {
-    ...(input.prepare ? { exceptPullRequestNumber: pullRequestNumber } : {}),
-  });
-
   // An attempt already walked to merge-ready by an earlier caller still has an
   // operation, and the caller that will perform the write needs its id. Without
   // this, the second asker is told it holds the turn and given nothing to act on,
@@ -1162,79 +1079,11 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
   // been. That is what makes adoption reversible.
   const authorized = enforcing ? holdsUsableTurn : true;
 
-  // The commit this merge must produce, from the queue document rather than
-  // from the caller's own reads.
-  //
-  // The workflow used to compute the base for itself and then hand GitHub an
-  // expected head and nothing else, so the merge landed on whatever the branch
-  // was at that instant. Pull requests 114, 117 and 119 were signed against
-  // one base and merged onto another, and every one of them produced a tree no
-  // suite had run. The base the intent bound is a fact the queue holds, so the
-  // queue is what says it, and the writer merges that or merges nothing.
-  const pinned = snapshot.activeCandidate;
-  const merge =
-    operationId === null || pinned === null
-      ? null
-      : {
-          baseRef,
-          baseSha: pinned.baseSha,
-          headSha: pinned.headSha,
-          treeOid: pinned.candidateTree,
-          // A merge commit's second parent is the pull request head; a squash
-          // has none, because it never becomes a parent of anything.
-          parentShas:
-            project.mergeMethod === "squash"
-              ? [pinned.baseSha]
-              : [pinned.baseSha, pinned.headSha],
-        };
-
-  // The Worker performs the write itself where the repository has moved to it.
-  //
-  // One writer at a time. Two racing for one turn is how a merge that landed
-  // gets reported as a base that moved, so a repository still running
-  // `thwip-merge.yml` is answered with the pins and writes its own, and one
-  // that has stopped is answered with none and this writes it.
-  const mergeWriter = project.mergeWriter ?? "workflow";
-  if (
-    mergeWriter === "app" &&
-    deps.mergeWrite !== undefined &&
-    merge !== null &&
-    operationId !== null &&
-    authorized &&
-    enforcing
-  ) {
-    const written = await performMergeFromWorker(env, {
-      repositoryId,
-      baseRef,
-      attemptId: snapshot.activeAttemptId!,
-      operationId,
-      pullRequestNumber: input.pullRequestNumber,
-      merge,
-      mergeMethod: project.mergeMethod,
-    });
-    return {
-      outcome: "written",
-      authorized,
-      enforcing,
-      activationState: project.activationState,
-      mergeMethod: project.mergeMethod,
-      mergeWriter,
-      entryId,
-      operationId,
-      written,
-    };
-  }
-
   return {
     outcome: "settled",
     authorized,
     enforcing,
     activationState: project.activationState,
-    // What the workflow must tell GitHub when it performs this merge, so the
-    // method it uses and the method the signed record binds can never drift.
-    mergeMethod: project.mergeMethod,
-    mergeWriter,
-    merge,
     reason: halted
       ? snapshot.rebaselineRequired
         ? "REBASELINE_REQUIRED"
@@ -1248,4 +1097,30 @@ export async function authorizeTurn<TEnv extends QueueRouteEnv>(
     operationId,
     queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
   };
+}
+
+/**
+ * Enrol and evaluate a pull request for the check-facing API.
+ *
+ * This never prepares or writes a merge. The installed App owns that side
+ * effect through `authorizeAppWrite`, which is called only by internal wake
+ * paths after the check has established queue state.
+ */
+export function authorizeTurn<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  deps: AuthorizeTurnDeps<TEnv>,
+  onQueue: OnQueue<TEnv>,
+  input: TurnRequest,
+): Promise<TurnAuthorization> {
+  return walkTurn(env, deps, onQueue, input, false);
+}
+
+/** Walk the holder to a signed intent so the installed App can write it. */
+export function authorizeAppWrite<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  deps: AuthorizeTurnDeps<TEnv>,
+  onQueue: OnQueue<TEnv>,
+  input: TurnRequest,
+): Promise<TurnAuthorization> {
+  return walkTurn(env, deps, onQueue, input, true);
 }

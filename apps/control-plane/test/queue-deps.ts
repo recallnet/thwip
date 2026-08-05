@@ -88,7 +88,7 @@ export function queueRouteDeps(
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e: unknown, bytes: Uint8Array) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async (_e: unknown, userId: string) => `principal_${userId}`,
     pullRequestPlacement: async (_e: unknown, _r: string, pullRequestNumber: number) => ({
       authorGithubUserId: githubUserId,
@@ -97,7 +97,7 @@ export function queueRouteDeps(
       draft: false,
       headSha: headShaFor(pullRequestNumber),
     }),
-    driveTurn: async () => {},
+    mergeWrite: async () => ({ kind: "unknown", detail: "the test did not provide a merge result" }),
     publishTurnCheck: async () => {},
     // A head that carries a readable proof, because the walk to a merge reads
     // the trailer to cite it and a head without one refuses with

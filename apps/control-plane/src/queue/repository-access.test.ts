@@ -10,9 +10,8 @@ import { REPOSITORY_FORBIDDEN } from "./repository-access.js";
  * some organization. It has never established that the caller may act on the
  * repository named in the path, and two routes added on 2026-07-31 took it as
  * though it had. The heartbeat route was the expensive one: it writes the
- * victim's queue document and then dispatches `repository_dispatch` on the
- * victim's repository, so a stranger with any account could spend another
- * organization's Actions minutes, one run per grace window, forever.
+ * victim's queue document and can wake the App's merge path on the victim's
+ * repository.
  *
  * Everything here is written from the caller's side, through the HTTP surface,
  * because the property being protected is a response and not a helper's return
@@ -77,14 +76,14 @@ function seed(chainPublic: 0 | 1 = 0): void {
     .run("prn_bravo", "org_bravo", "21", "bruno");
 }
 
-/** Every dispatch the routes asked GitHub for, so a refusal can be shown to cost nothing. */
-const dispatched: number[] = [];
+/** Every merge write the routes requested, so a refusal can be shown to cost nothing. */
+const writes: number[] = [];
 
 function routes(
   session: { principalId: string; githubUserId: string; isAdmin?: boolean } | null,
   verifyOidc: () => Promise<Record<string, unknown> | null> = async () => null,
 ) {
-  dispatched.length = 0;
+  writes.length = 0;
   return queueRoutes({
     authenticate: async () =>
       session === null
@@ -99,11 +98,18 @@ function routes(
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async () => null,
-    pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-    driveTurn: async (_e, _r, pullRequestNumber) => {
-      dispatched.push(pullRequestNumber);
+    pullRequestPlacement: async () => ({
+      authorGithubUserId: "1",
+      baseRef: REF,
+      authorIsBot: false,
+      draft: false,
+      headSha: "a".repeat(40),
+    }),
+    mergeWrite: async (_e, _r, intent) => {
+      writes.push(intent.pullRequestNumber);
+      return { kind: "unknown" as const, detail: "test write not performed" };
     },
     commitFacts: async () => null,
     signRecordBytes: async () => "jws",
@@ -138,7 +144,7 @@ describe("POST /v1/queue/:repositoryId/runners/heartbeat", () => {
     const response = await heartbeat(routes(BRAVO), e);
 
     expect(response.status).toBe(403);
-    expect(dispatched).toEqual([]);
+    expect(writes).toEqual([]);
     // The heartbeat row is the compare-and-swap's trigger, so a refusal that
     // still wrote one would only move the cost by one call.
     const rows = raw.prepare("SELECT COUNT(*) AS n FROM queue_runners").get() as { n: number };
@@ -218,7 +224,6 @@ describe("the operator token", () => {
       queueProject: async () => null,
       principalFor: async () => null,
       pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
-      driveTurn: async () => {},
       commitFacts: async () => null,
       signRecordBytes: async () => "jws",
     });
@@ -314,11 +319,6 @@ const MEMBER_ROUTES = [
     path: (id: string) => `/v1/queue/${id}/runners/heartbeat`,
     body: { deviceKeyId: DEVICE },
   },
-  {
-    name: "read a candidate verdict",
-    method: "GET",
-    path: (id: string) => `/v1/queue/${id}/candidate?ref=${encodeURIComponent(REF)}&tree=${"7".repeat(40)}`,
-  },
 ] as const;
 
 /** The same, for the routes that additionally want an administrator. */
@@ -335,11 +335,6 @@ const ADMIN_ROUTES = [
     method: "POST",
     path: (id: string) => `/v1/queue/${id}/rebaseline?ref=${encodeURIComponent(REF)}`,
     body: { baseSha: "b".repeat(40) },
-  },
-  {
-    name: "adopt a chain",
-    method: "POST",
-    path: (id: string) => `/v1/queue/${id}/adopt-chain?ref=${encodeURIComponent(REF)}`,
   },
   {
     name: "reconcile a held attempt",
@@ -400,7 +395,7 @@ describe("a principal of another organization", () => {
 
       expect(response.status).toBe(403);
       expect(await refusal(response)).toBe(REPOSITORY_FORBIDDEN);
-      expect(dispatched).toEqual([]);
+      expect(writes).toEqual([]);
     });
   }
 
@@ -493,7 +488,7 @@ describe("a caller with no session at all", () => {
       const response = await call(routes(null), e, route);
 
       expect(response.status).toBe(401);
-      expect(dispatched).toEqual([]);
+      expect(writes).toEqual([]);
     });
   }
 });
@@ -519,18 +514,6 @@ describe("the repository's own workflows", () => {
       path: (id: string) => `/v1/queue/${id}/candidate-result`,
       body: { baseRef: REF },
     },
-    {
-      name: "report a merge",
-      method: "POST",
-      path: (id: string) => `/v1/queue/${id}/merged`,
-      body: { baseRef: REF },
-    },
-    {
-      name: "report that a merge did not happen",
-      method: "POST",
-      path: (id: string) => `/v1/queue/${id}/not-merged`,
-      body: { baseRef: REF },
-    },
   ];
 
   for (const route of WORKFLOW_ROUTES) {
@@ -546,36 +529,19 @@ describe("the repository's own workflows", () => {
     });
   }
 
-  /**
-   * The merge workflow polls the candidate endpoint with the same token it
-   * authorizes with. Requiring a session there sent it a 401 on every poll.
-   */
-  it("reads a candidate verdict with a workflow token and no session", async () => {
-    const e = env();
-    seed();
-    const app = routes(null, async () => ({ repository_id: VICTIM_REPO }));
+});
 
-    const response = await app.request(
-      `/v1/queue/${VICTIM_REPO}/candidate?ref=${encodeURIComponent(REF)}&tree=${"7".repeat(40)}`,
-      {},
-      e,
-    );
-
-    expect(response.status).toBe(200);
-  });
-
-  /** A token minted in another repository is not a way in. */
-  it("refuses a workflow token minted for another repository", async () => {
-    const e = env();
-    seed();
-    const app = routes(null, async () => ({ repository_id: ABSENT_REPO }));
-
-    const response = await app.request(
-      `/v1/queue/${VICTIM_REPO}/candidate?ref=${encodeURIComponent(REF)}&tree=${"7".repeat(40)}`,
-      {},
-      e,
-    );
-
-    expect(response.status).toBe(401);
-  });
+describe("removed legacy routes", () => {
+  for (const suffix of ["candidate", "merged", "not-merged", "adopt-chain"] as const) {
+    it(`returns 404 for ${suffix}`, async () => {
+      const e = env();
+      seed();
+      const response = await routes(ACME).request(
+        `/v1/queue/${VICTIM_REPO}/${suffix}?ref=${encodeURIComponent(REF)}`,
+        { method: suffix === "candidate" ? "GET" : "POST" },
+        e,
+      );
+      expect(response.status).toBe(404);
+    });
+  }
 });

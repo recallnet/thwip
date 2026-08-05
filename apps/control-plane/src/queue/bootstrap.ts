@@ -3,21 +3,18 @@ import { setupPullRequestFiles, type SetupFile } from "./bootstrap-workflows.js"
 import {
   bootstrapCheckRuns,
   BOOTSTRAP_STEPS,
-  checkRulesetForBackend,
+  checkAppRuleset,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
-  managedOwnershipRuleset,
+  appOwnershipRuleset,
   mayActivate,
-  nativeMergeQueueRuleset,
   nextBootstrapStep,
   policyRuleset,
   POLICY_RULESET_NAME,
   proofIntegrationFor,
   type ProofCheckMode,
-  type Backend,
   type BootstrapProgress,
   type BootstrapStep,
-  type MergeMethod,
   type Ruleset,
 } from "./rulesets.js";
 import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
@@ -27,34 +24,30 @@ import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
  *
  * `BOOTSTRAP_STEPS` and `mayActivate` were written, tested, and never called.
  * Bringing `recallnet/thwip-test` into the queue therefore took a `queue_projects`
- * row typed into D1, the workflows copied in by hand, a `THWIP_ENQUEUE_TOKEN` set
- * by hand, and a branch ruleset created with `gh api` because no product path
- * existed. Everything here exists so the next repository takes a request.
+ * row typed into D1, workflows copied in by hand, and a branch ruleset created
+ * with `gh api` because no product path existed. Everything here exists so the
+ * next repository takes a request. New enrolments use the App as their merge
+ * writer, so setup does not ask an adopter to mint a branch-write token.
  *
  * The order is the order in `rulesets.ts`, which is not arbitrary: GitHub will
  * not source-pin a context that does not already exist as a requirement, and it
  * will not offer an App as a source unless the App has recently published a
  * check with that name. Doing the tempting thing instead, creating one active
  * pinned ruleset, fails, and it fails after leaving a branch requiring a check
- * nothing will post. So the policy is created disabled and unpinned, the check
- * is published against it, the pin is attached while it still cannot block, the
- * pin is read back, and only then does enforcement come on.
+ * nothing will post. So setup first asks an administrator for a disabled,
+ * unpinned policy, publishes the check against it, asks for the pin while the
+ * policy still cannot block, reads it back, and only then offers activation.
  *
- * Nothing here decides on its own to activate. Every step that could leave a
- * branch unmergeable refuses instead, and a refusal stops the run where it is
- * with the policy still disabled.
+ * Nothing here writes a ruleset or decides on its own to activate. Every step
+ * that could leave a branch unmergeable stops for a repository administrator,
+ * and a refusal stops the run where it is with the policy still disabled.
  */
-
-/** Longer than the longest turn plus verifier and reconciliation allowance. */
-const NATIVE_CHECK_RESPONSE_TIMEOUT_MINUTES = 60;
 
 export interface QueueProject {
   readonly id: string;
   readonly organizationId: string;
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend: Backend;
-  readonly mergeMethod: MergeMethod;
   readonly enabled: boolean;
   readonly activationState: string;
   readonly progress: BootstrapProgress;
@@ -87,8 +80,6 @@ export interface BootstrapGitHub {
     baseSha: string;
   }): Promise<SetupPullRequestState>;
   rulesetNamed(name: string): Promise<StoredRuleset | null>;
-  createRuleset(ruleset: Ruleset): Promise<StoredRuleset>;
-  replaceRuleset(id: number, ruleset: Ruleset): Promise<StoredRuleset>;
   /** Answers the Integration GitHub attributed the check to, not the one we hoped for. */
   publishBootstrapCheck(run: {
     name: string;
@@ -109,10 +100,25 @@ export interface BootstrapDeps {
   readonly actionsIntegrationId?: number;
   readonly endpoint: string;
   readonly actionRef: string;
-  readonly review: {
-    readonly requiredApprovingReviewCount: number;
-    readonly requireCodeOwnerReview: boolean;
-  };
+  /** Include a repository override only when the administrator explicitly chose it. */
+  readonly includeRepositoryConfig?: boolean;
+  /** Begin the observe-to-enforced handoff after a real pull request was checked. */
+  readonly confirmQueueEnforcement?: boolean;
+  /**
+   * GitHub hides ruleset bypass actors from an App that cannot edit rulesets.
+   * A repository administrator must therefore confirm that the generated
+   * bypass configuration is what they applied before setup may activate.
+   */
+  readonly confirmRulesetBypassActors?: boolean;
+}
+
+export type ManualRulesetChange =
+  | { readonly operation: "create"; readonly ruleset: Ruleset }
+  | { readonly operation: "update"; readonly rulesetId: number; readonly ruleset: Ruleset };
+
+export interface ExpectedBypassActors {
+  readonly ruleset: string;
+  readonly bypassActors: Ruleset["bypass_actors"];
 }
 
 /**
@@ -133,6 +139,9 @@ export type StepOutcome =
       readonly step: BootstrapStep;
       readonly detail: string;
       readonly pullRequestNumber?: number;
+      readonly manualRulesets?: readonly ManualRulesetChange[];
+      readonly confirmationRequired?: "queue-enforcement" | "ruleset-bypass-actors";
+      readonly expectedBypassActors?: readonly ExpectedBypassActors[];
     }
   | { readonly kind: "refused"; readonly step: BootstrapStep; readonly detail: string }
   | { readonly kind: "complete" };
@@ -146,8 +155,6 @@ interface ProjectRow {
   organization_id: string;
   github_repository_id: string;
   base_ref: string;
-  backend: string;
-  merge_method: string;
   enabled: number;
   activation_state: string;
   bootstrap_progress_json: string;
@@ -170,8 +177,6 @@ function toProject(row: ProjectRow): QueueProject {
     organizationId: row.organization_id,
     repositoryId: row.github_repository_id,
     baseRef: row.base_ref,
-    backend: row.backend === "native" ? "native" : "managed",
-    mergeMethod: row.merge_method === "merge" ? "merge" : "squash",
     enabled: row.enabled === 1,
     activationState: row.activation_state,
     progress,
@@ -185,7 +190,7 @@ export async function readQueueProject(
 ): Promise<QueueProject | null> {
   const row = await db
     .prepare(
-      `SELECT id, organization_id, github_repository_id, base_ref, backend, merge_method,
+      `SELECT id, organization_id, github_repository_id, base_ref,
               enabled, activation_state, bootstrap_progress_json
          FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ?`,
@@ -198,8 +203,6 @@ export async function readQueueProject(
 export interface EnrollmentRequest {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend?: Backend;
-  readonly mergeMethod?: MergeMethod;
 }
 
 export type Enrollment =
@@ -269,9 +272,9 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
   await db
     .prepare(
       `INSERT INTO queue_projects
-         (id, organization_id, github_repository_id, base_ref, backend, merge_method,
+         (id, organization_id, github_repository_id, base_ref,
           enabled, activation_state, bootstrap_progress_json, verifier_json)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'configured', '{}', ?)
+       VALUES (?, ?, ?, ?, 0, 'configured', '{}', ?)
        ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
     )
     .bind(
@@ -279,8 +282,6 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       installed.organizationId,
       request.repositoryId,
       request.baseRef,
-      request.backend ?? "managed",
-      request.mergeMethod ?? "squash",
       JSON.stringify(
         pinnedVerifierFor({
           repositoryId: request.repositoryId,
@@ -316,12 +317,43 @@ export async function recordBootstrapStep(
   return progress;
 }
 
-/** The queue starts observing. It cannot block anything until an operator says so. */
+/** The queue starts observing under the repository's existing controls. */
 export async function observeQueueProject(db: D1Like, project: QueueProject): Promise<void> {
   await db
     .prepare("UPDATE queue_projects SET enabled = 1, activation_state = 'observe' WHERE id = ?")
     .bind(project.id)
     .run();
+}
+
+/**
+ * Persist the explicit enforcement decision before a human applies ownership.
+ * `canary` is already an enforcing writer state, so the App remains able to
+ * advance the branch during the manual ruleset handoff instead of being locked
+ * out between the ownership write and the next setup request.
+ */
+export async function beginQueueEnforcement(db: D1Like, project: QueueProject): Promise<boolean> {
+  await db
+    .prepare("UPDATE queue_projects SET activation_state = 'canary' WHERE id = ? AND activation_state = 'observe'")
+    .bind(project.id)
+    .run();
+  const stored = await db
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
+    .bind(project.id)
+    .first<{ activation_state: string }>();
+  return stored?.activation_state === "canary";
+}
+
+/** The durable state follows only after ownership and policy were read back. */
+export async function enforceQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
+  await db
+    .prepare("UPDATE queue_projects SET activation_state = 'enforced' WHERE id = ? AND activation_state IN ('canary', 'enforced')")
+    .bind(project.id)
+    .run();
+  const stored = await db
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
+    .bind(project.id)
+    .first<{ activation_state: string }>();
+  return stored?.activation_state === "enforced";
 }
 
 /* ---------------------------------------------------------------- */
@@ -331,7 +363,6 @@ export async function observeQueueProject(db: D1Like, project: QueueProject): Pr
 export interface BootstrapStatus {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend: Backend;
   readonly enabled: boolean;
   readonly activationState: string;
   readonly progress: BootstrapProgress;
@@ -345,7 +376,6 @@ export function bootstrapStatus(project: QueueProject): BootstrapStatus {
   return {
     repositoryId: project.repositoryId,
     baseRef: project.baseRef,
-    backend: project.backend,
     enabled: project.enabled,
     activationState: project.activationState,
     progress: project.progress,
@@ -366,9 +396,6 @@ function policyFor(
     integrationId: deps.integrationId,
     actionsIntegrationId: deps.actionsIntegrationId ?? GITHUB_ACTIONS_INTEGRATION_ID,
     proofCheckMode: options.proofCheckMode,
-    mergeMethod: project.mergeMethod,
-    requiredApprovingReviewCount: deps.review.requiredApprovingReviewCount,
-    requireCodeOwnerReview: deps.review.requireCodeOwnerReview,
     existingRequiredChecks: requiredChecksOf(existing?.ruleset ?? null),
     enforcement: options.enforcement,
     pinCheckSource: options.pinCheckSource,
@@ -446,14 +473,59 @@ function requiredChecksOf(ruleset: Ruleset | null): Array<{ context: string; int
   }>;
 }
 
+function matchesExpected(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+    const unmatched = [...actual];
+    for (const value of expected) {
+      const index = unmatched.findIndex((candidate) => matchesExpected(candidate, value));
+      if (index === -1) return false;
+      unmatched.splice(index, 1);
+    }
+    return true;
+  }
+  if (expected !== null && typeof expected === "object") {
+    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+    const record = actual as Record<string, unknown>;
+    return Object.entries(expected).every(([key, value]) => matchesExpected(record[key], value));
+  }
+  return Object.is(actual, expected);
+}
+
 /**
- * Write the policy, refusing any payload that would take a control away.
+ * Compare the configuration GitHub exposes to the payload setup generated.
+ * Server-owned response fields are ignored, but every generated field other
+ * than bypass actors must match. GitHub deliberately hides bypass actors from
+ * callers without ruleset-write access, so those are handled separately by an
+ * explicit administrator confirmation before activation.
+ */
+function rulesetConfigurationMatches(actual: Ruleset, expected: Ruleset): boolean {
+  const { bypass_actors: _ignored, ...visibleExpected } = expected;
+  return matchesExpected(actual, visibleExpected);
+}
+
+function bypassActorsVisible(ruleset: Ruleset): boolean {
+  return Object.hasOwn(ruleset, "bypass_actors");
+}
+
+function bypassActorsMatch(actual: Ruleset, expected: Ruleset): boolean {
+  return !bypassActorsVisible(actual) || matchesExpected(actual.bypass_actors, expected.bypass_actors);
+}
+
+function manualChange(existing: StoredRuleset | null, ruleset: Ruleset): ManualRulesetChange {
+  return existing === null
+    ? { operation: "create", ruleset }
+    : { operation: "update", rulesetId: existing.id, ruleset };
+}
+
+/**
+ * Verify a human-owned policy change, or return the exact payload still needed.
  *
  * A setup tool that silently dropped somebody's existing protection would be a
- * security regression delivered as a convenience, so the diff decides and the
- * write only happens when it is safe.
+ * security regression delivered as a convenience, so the diff refuses unsafe
+ * payloads before they are ever shown to an administrator.
  */
-async function writePolicy(
+async function verifyPolicy(
   deps: BootstrapDeps,
   project: QueueProject,
   step: BootstrapStep,
@@ -465,18 +537,25 @@ async function writePolicy(
     proofCheckMode: options.proofCheckMode ?? (await proofCheckMode(deps, project)),
   });
 
-  const backend = checkRulesetForBackend(next, project.backend);
-  if (!backend.ok) return { kind: "refused", step, detail: backend.reason };
+  const compatible = checkAppRuleset(next);
+  if (!compatible.ok) return { kind: "refused", step, detail: compatible.reason };
 
   const diff = diffRuleset(existing?.ruleset ?? null, next);
   if (!diff.safe) return { kind: "refused", step, detail: diff.warnings.join("; ") };
 
-  if (existing === null) {
-    const created = await deps.github.createRuleset(next);
-    return { kind: "advanced", step, detail: `created ruleset ${created.id}` };
+  if (
+    existing !== null &&
+    rulesetConfigurationMatches(existing.ruleset, next) &&
+    bypassActorsMatch(existing.ruleset, next)
+  ) {
+    return { kind: "advanced", step, detail: `verified ruleset ${existing.id}` };
   }
-  const replaced = await deps.github.replaceRuleset(existing.id, next);
-  return { kind: "advanced", step, detail: `updated ruleset ${replaced.id}` };
+  return {
+    kind: "waiting",
+    step,
+    detail: `a repository administrator must ${existing === null ? "create" : "update"} ${next.name}`,
+    manualRulesets: [manualChange(existing, next)],
+  };
 }
 
 /** One step. Never more, so a refusal cannot be walked past. */
@@ -506,7 +585,11 @@ async function performStep(
       if (open === null) {
         const baseSha = await deps.github.baseSha();
         const opened = await deps.github.openSetupPullRequest({
-          files: setupPullRequestFiles({ endpoint: deps.endpoint, actionRef: deps.actionRef }),
+          files: setupPullRequestFiles({
+            endpoint: deps.endpoint,
+            actionRef: deps.actionRef,
+            ...(deps.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
+          }),
           baseSha,
         });
         return {
@@ -536,7 +619,7 @@ async function performStep(
       // Disabled and unsourced, because GitHub will not accept a source for a
       // context that is not yet a requirement, and a disabled rule cannot block
       // the branch while the rest of the sequence runs.
-      return writePolicy(deps, project, step, { enforcement: "disabled", pinCheckSource: false });
+      return verifyPolicy(deps, project, step, { enforcement: "disabled", pinCheckSource: false });
 
     case "publish-bootstrap-check": {
       const policy = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
@@ -572,7 +655,7 @@ async function performStep(
       if (policy.ruleset.enforcement !== "disabled") {
         return { kind: "refused", step, detail: "the policy is already enforcing; the pin is not safe to change here" };
       }
-      return writePolicy(deps, project, step, { enforcement: "disabled", pinCheckSource: true });
+      return verifyPolicy(deps, project, step, { enforcement: "disabled", pinCheckSource: true });
     }
 
     case "canary-negative-test": {
@@ -601,31 +684,103 @@ async function performStep(
       const allowed = mayActivate(project.progress);
       if (!allowed.ok) return { kind: "refused", step, detail: allowed.reason };
 
-      const activated = await writePolicy(deps, project, step, {
+      const shouldBeginEnforcement = project.activationState === "observe";
+      if (shouldBeginEnforcement) {
+        if (deps.confirmQueueEnforcement !== true) {
+          return {
+            kind: "waiting",
+            step,
+            detail:
+              "the queue is observing under the repository's existing controls; validate its checks on a real pull request, then explicitly begin enforcement",
+            confirmationRequired: "queue-enforcement",
+          };
+        }
+      } else if (project.activationState !== "canary" && project.activationState !== "enforced") {
+        return {
+          kind: "refused",
+          step,
+          detail: `the queue must observe before enforcement (current state: ${project.activationState})`,
+        };
+      }
+
+      const existingPolicy = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
+      const policy = policyFor(deps, project, existingPolicy, {
         enforcement: "active",
         pinCheckSource: true,
+        proofCheckMode: await proofCheckMode(deps, project),
       });
-      if (activated.kind !== "advanced") return activated;
+      const policyCompatibility = checkAppRuleset(policy);
+      if (!policyCompatibility.ok) return { kind: "refused", step, detail: policyCompatibility.reason };
+      const policyDiff = diffRuleset(existingPolicy?.ruleset ?? null, policy);
+      if (!policyDiff.safe) return { kind: "refused", step, detail: policyDiff.warnings.join("; ") };
 
-      // Managed branches are written by the App, native ones by GitHub's queue.
-      // Sending either backend's rule to the other hands the branch to the wrong
-      // writer, which `checkRulesetForBackend` refuses.
-      const second =
-        project.backend === "managed"
-          ? managedOwnershipRuleset({ baseRef: project.baseRef, integrationId: deps.integrationId })
-          : nativeMergeQueueRuleset({
-              baseRef: project.baseRef,
-              integrationId: deps.integrationId,
-              mergeMethod: project.mergeMethod,
-              checkResponseTimeoutMinutes: NATIVE_CHECK_RESPONSE_TIMEOUT_MINUTES,
-            });
-      const backend = checkRulesetForBackend(second, project.backend);
-      if (!backend.ok) return { kind: "refused", step, detail: backend.reason };
+      const second = appOwnershipRuleset({ baseRef: project.baseRef, integrationId: deps.integrationId });
+      const compatibility = checkAppRuleset(second);
+      if (!compatibility.ok) return { kind: "refused", step, detail: compatibility.reason };
 
-      const existing = await deps.github.rulesetNamed(second.name);
-      if (existing === null) await deps.github.createRuleset(second);
-      else await deps.github.replaceRuleset(existing.id, second);
+      const existingSecond = await deps.github.rulesetNamed(second.name);
+      const secondDiff = diffRuleset(existingSecond?.ruleset ?? null, second);
+      if (!secondDiff.safe) return { kind: "refused", step, detail: secondDiff.warnings.join("; ") };
 
+      // Ownership goes first. A manual setup may take minutes between writes;
+      // making the App the only branch writer before activating the status-check
+      // policy fails closed during that interval instead of leaving two writers.
+      const changes: ManualRulesetChange[] = [];
+      if (
+        existingSecond === null ||
+        !rulesetConfigurationMatches(existingSecond.ruleset, second) ||
+        !bypassActorsMatch(existingSecond.ruleset, second)
+      ) {
+        changes.push(manualChange(existingSecond, second));
+      }
+      if (
+        existingPolicy === null ||
+        !rulesetConfigurationMatches(existingPolicy.ruleset, policy) ||
+        !bypassActorsMatch(existingPolicy.ruleset, policy)
+      ) {
+        changes.push(manualChange(existingPolicy, policy));
+      }
+      if (changes.length > 0) {
+        if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+          return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+        }
+        return {
+          kind: "waiting",
+          step,
+          detail:
+            "a repository administrator must apply the generated ownership change first, then activate the policy",
+          manualRulesets: changes,
+        };
+      }
+      if (existingSecond === null || existingPolicy === null) {
+        return { kind: "refused", step, detail: "ruleset verification lost its repository state" };
+      }
+
+      const bypassActorsAreHidden =
+        !bypassActorsVisible(existingSecond.ruleset) || !bypassActorsVisible(existingPolicy.ruleset);
+      if (bypassActorsAreHidden && deps.confirmRulesetBypassActors !== true) {
+        if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+          return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+        }
+        return {
+          kind: "waiting",
+          step,
+          detail:
+            "GitHub hides bypass actors from a read-only App; confirm that the policy has no bypass and the ownership ruleset names only the generated writer",
+          confirmationRequired: "ruleset-bypass-actors",
+          expectedBypassActors: [
+            { ruleset: second.name, bypassActors: second.bypass_actors },
+            { ruleset: policy.name, bypassActors: policy.bypass_actors },
+          ],
+        };
+      }
+
+      if (shouldBeginEnforcement && !(await beginQueueEnforcement(deps.db, project))) {
+        return { kind: "refused", step, detail: "the queue activation state changed before enforcement began" };
+      }
+      if (!(await enforceQueueProject(deps.db, project))) {
+        return { kind: "refused", step, detail: "the queue activation state changed before enforcement completed" };
+      }
       return { kind: "advanced", step, detail: `activated the policy and ${second.name}` };
     }
 
@@ -655,7 +810,7 @@ async function performStep(
         };
       }
 
-      const written = await writePolicy(deps, project, step, {
+      const written = await verifyPolicy(deps, project, step, {
         enforcement: "active",
         pinCheckSource: true,
         proofCheckMode: "enforced",
@@ -667,6 +822,16 @@ async function performStep(
       if (policy === null) return { kind: "refused", step, detail: "the policy ruleset is missing" };
       const kept = await confirmSourcePins(deps, project, policy.ruleset, step);
       if (kept !== null) return kept;
+      if (!bypassActorsVisible(policy.ruleset) && deps.confirmRulesetBypassActors !== true) {
+        return {
+          kind: "waiting",
+          step,
+          detail:
+            "GitHub hides bypass actors from a read-only App; confirm that the updated policy still has no bypass actors",
+          confirmationRequired: "ruleset-bypass-actors",
+          expectedBypassActors: [{ ruleset: policy.ruleset.name, bypassActors: [] }],
+        };
+      }
       return { kind: "advanced", step, detail: `${PROOF_CHECK} is sourced from the Thwip App` };
     }
 
@@ -729,8 +894,6 @@ export async function runBootstrap(
 export interface BootstrapRequest extends BootstrapDeps {
   readonly repositoryId: string;
   readonly baseRef: string;
-  readonly backend?: Backend;
-  readonly mergeMethod?: MergeMethod;
 }
 
 export interface BootstrapResponse {
@@ -751,8 +914,6 @@ export async function handleBootstrapRequest(request: BootstrapRequest): Promise
   const enrolled = await enrollQueueProject(request.db, {
     repositoryId: request.repositoryId,
     baseRef: request.baseRef,
-    ...(request.backend === undefined ? {} : { backend: request.backend }),
-    ...(request.mergeMethod === undefined ? {} : { mergeMethod: request.mergeMethod }),
   });
   if (!enrolled.ok) return { status: 404, body: { error: enrolled.reason } };
 
@@ -776,9 +937,9 @@ interface HttpLike {
 /**
  * The port against a real repository.
  *
- * Reads and writes go through the throwing helper on purpose: unlike a merge,
- * none of these are a write that could land twice unnoticed, and a setup step
- * that half-succeeded in silence is worse than one that stops.
+ * Repository writes here are limited to the reviewed setup pull request and
+ * bootstrap checks. Rulesets are read only: an administrator applies the exact
+ * payload returned by the setup route with their own authority.
  */
 export function bootstrapGitHub(
   http: HttpLike,
@@ -845,27 +1006,6 @@ export function bootstrapGitHub(
       if (summary === undefined) return null;
       const full = await http.json<Ruleset>(`${base}/rulesets/${summary.id}`);
       return { id: summary.id, ruleset: full };
-    },
-
-    async createRuleset(ruleset) {
-      const created = await http.json<{ id: number }>(`${base}/rulesets`, {
-        method: "POST",
-        body: JSON.stringify(ruleset),
-        headers: { "content-type": "application/json" },
-      });
-      return { id: created.id, ruleset };
-    },
-
-    async replaceRuleset(id, ruleset) {
-      // Read back what GitHub kept, never what was sent. The source pin the
-      // canary step checks is only worth checking if it came from GitHub.
-      await http.json(`${base}/rulesets/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(ruleset),
-        headers: { "content-type": "application/json" },
-      });
-      const stored = await http.json<Ruleset>(`${base}/rulesets/${id}`);
-      return { id, ruleset: stored };
     },
 
     async publishBootstrapCheck(run) {

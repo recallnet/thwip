@@ -17,9 +17,9 @@ import {
  * Putting a merge back into the chain from what survives the attempt.
  *
  * The attempt does not survive the failure this exists for. A merge write is
- * authorized, GitHub answers 405 while it is still working out mergeability,
- * the workflow exits, the merge lands, and the attempt is terminated and
- * compacted. Four merges reached `main` that way in one morning.
+ * authorized, GitHub returns an ambiguous refusal, the merge lands, and the
+ * attempt is terminated and compacted. Four merges reached `main` that way in
+ * one morning.
  *
  * What survives is the signed merge intent. It is stored by digest and it names
  * the base, the head, the tree the queue authorized, the pull request, the
