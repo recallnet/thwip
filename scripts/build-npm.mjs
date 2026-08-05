@@ -15,7 +15,13 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "packages/cli/dist-npm");
-const version = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8")).version;
+// The release passes the version it computed rather than writing it into the
+// checkout first. Rewriting the file left uncommitted changes behind, so every
+// published build stamped itself `<sha>-dirty` and `thwip version` on a clean
+// npm install said what a local hack says.
+const version =
+  process.env.THWIP_RELEASE_VERSION ||
+  JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8")).version;
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
