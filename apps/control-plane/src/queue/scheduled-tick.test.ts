@@ -521,31 +521,79 @@ describe("readiness nothing else came back to fix", () => {
 });
 
 describe("stale-runner retirement on the tick", () => {
-  it("retires a runner that stopped heartbeating, makes its entries ineligible, and keeps their fairness ordinal", async () => {
+  it.each(["fresh", "audited"])(
+    "retires a runner under %s, makes its entries ineligible, and keeps their fairness ordinal",
+    async (profile) => {
+      const e = env();
+      queue("1", 1);
+      activePolicy("1", profile);
+      const db = e.DB as unknown as D1Like;
+
+      await readyEntry(db, "1", "entry_a", "alice", 41);
+      const before = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+      const ordinalBefore = entryFrom(before, "entry_a")?.fairnessOrdinal;
+      expect(ordinalBefore).toBeDefined();
+
+      await recordHeartbeat(db, {
+        repositoryId: "1",
+        principalId: "alice",
+        deviceKeyId: "d1",
+        now: new Date().toISOString(),
+      });
+      ageHeartbeats(raw);
+
+      await tickAllQueues(e, {
+        driveQueue: async () => {},
+        onQueueTicked: () => {},
+        onQueueFailed: () => {},
+        reconsiderHead: async () => 0,
+        publishStatusComments: async () => {},
+        retireStatusComments: async () => {},
+      });
+
+      const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
+      const entry = entryFrom(after, "entry_a");
+      expect(entry?.schedulerEligible).toBe(false);
+      expect(entry?.primaryReason).toBe("AGENT_OFFLINE");
+      expect(entry?.fairnessOrdinal).toBe(ordinalBefore);
+    },
+  );
+
+  it.each(["fast", "remote"])("does not apply stale device presence to a %s entry", async (profile) => {
     const e = env();
     queue("1", 1);
+    activePolicy("1", profile);
     const db = e.DB as unknown as D1Like;
 
     await readyEntry(db, "1", "entry_a", "alice", 41);
-    const before = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
-    const ordinalBefore = entryFrom(before, "entry_a")?.fairnessOrdinal;
-    expect(ordinalBefore).toBeDefined();
-
-    await recordHeartbeat(db, { repositoryId: "1", principalId: "alice", deviceKeyId: "d1", now: new Date().toISOString() });
+    await recordHeartbeat(db, {
+      repositoryId: "1",
+      principalId: "alice",
+      deviceKeyId: "d1",
+      now: new Date().toISOString(),
+    });
     ageHeartbeats(raw);
 
-    await tickAllQueues(e, { driveQueue: async () => {}, onQueueTicked: () => {}, onQueueFailed: () => {}, reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {}, });
+    await tickAllQueues(e, {
+      driveQueue: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
+    });
 
     const after = await withQueueState(db, "1", REF, (store) => buildSnapshot(store));
-    const entry = entryFrom(after, "entry_a");
-    expect(entry?.schedulerEligible).toBe(false);
-    expect(entry?.primaryReason).toBe("AGENT_OFFLINE");
-    expect(entry?.fairnessOrdinal).toBe(ordinalBefore);
+    expect(entryFrom(after, "entry_a")).toMatchObject({
+      schedulerEligible: true,
+      primaryReason: null,
+    });
   });
 
   it("an offline entry does not block a Ready entry behind it", async () => {
     const e = env();
     queue("1", 1);
+    activePolicy("1", "fresh");
     const db = e.DB as unknown as D1Like;
 
     // alice joined first (an earlier fairness ordinal), then went offline.
@@ -578,6 +626,7 @@ describe("stale-runner retirement on the tick", () => {
   it("leaves a runner still inside the grace window alone", async () => {
     const e = env();
     queue("1", 1);
+    activePolicy("1", "fresh");
     const db = e.DB as unknown as D1Like;
 
     await readyEntry(db, "1", "entry_a", "alice", 41);

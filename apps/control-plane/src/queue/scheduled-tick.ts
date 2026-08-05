@@ -4,7 +4,7 @@ import { reconciliationAtDeadline, TERMINAL_ENTRY_STATES } from "@thwip/queue-do
 import { commandsFor, buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
-import { retireStaleRunners } from "./runners.js";
+import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
 import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
 import type { D1Like } from "./projection.js";
@@ -210,6 +210,7 @@ export async function tickAllQueues(
   // try block, so a repository whose retirement read fails only fails that
   // repository's queues, the same as any other per-queue failure below.
   const offlinePrincipalsByRepo = new Map<string, readonly string[]>();
+  const deviceOnlyByRepo = new Map<string, boolean>();
 
   // One budget for the whole sweep, not one per queue.
   //
@@ -239,6 +240,12 @@ export async function tickAllQueues(
         offlinePrincipals = await retireStaleRunners(db, row.repositoryId, now);
         offlinePrincipalsByRepo.set(row.repositoryId, offlinePrincipals);
       }
+      let deviceOnly = deviceOnlyByRepo.get(row.repositoryId);
+      if (deviceOnly === undefined) {
+        const policy = await readActivePolicy(db, row.repositoryId);
+        deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
+        deviceOnlyByRepo.set(row.repositoryId, deviceOnly);
+      }
       const swept = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => {
         const commands = commandsFor(
           store,
@@ -259,7 +266,12 @@ export async function tickAllQueues(
         // so this sweep would otherwise write a blocking reason onto an entry
         // that can never run again — the same going-around-the-reducer the
         // heartbeat route did from the other direction.
-        if (offlinePrincipals.length > 0) {
+        // Runner presence is an execution requirement only for `fresh` and
+        // `audited`. `fast` and `remote` deliberately do not heartbeat: their
+        // turns run on the server or protected workflow. Applying a stale
+        // device row to those profiles marks every entry AGENT_OFFLINE with no
+        // client capable of clearing it.
+        if (deviceOnly && offlinePrincipals.length > 0) {
           for (const entry of buildSnapshot(store).entries) {
             if (TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number])) continue;
             if (offlinePrincipals.includes(entry.sponsorPrincipalId) && entry.schedulerEligible) {
