@@ -421,7 +421,7 @@ describe("runBootstrap", () => {
 
     const ownership = github.rulesets.get(OWNERSHIP_RULESET_NAME);
     expect(ownership?.ruleset.bypass_actors).toEqual([
-      { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
+      { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "always" },
     ]);
   });
 
@@ -442,7 +442,7 @@ describe("runBootstrap", () => {
         {
           ruleset: OWNERSHIP_RULESET_NAME,
           bypassActors: [
-            { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
+            { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "always" },
           ],
         },
         { ruleset: POLICY_RULESET_NAME, bypassActors: [] },
