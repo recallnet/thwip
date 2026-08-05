@@ -271,6 +271,12 @@ async function orgPlan(env: Env, organizationId: string): Promise<string> {
  */
 function tickPortsFor(env: Env): TickPorts {
   return {
+    // Every invocation advances every queue clock first. The expensive repair,
+    // comment and signed-chain pass rotates one queue at a time so a busy
+    // repository cannot consume the Worker CPU budget before another lane is
+    // offered. Each enabled queue receives maintenance once per fleet rotation
+    // while every queue still receives a five-minute heartbeat.
+    maintenanceQueuesPerTick: 1,
     driveQueue: (repositoryId, baseRef) =>
       driveQueue(env, queueDeps as never, queueOnQueue, { repositoryId, baseRef }).then(() => undefined),
     // The same walk the `pull_request` delivery and the proof consumer make.
