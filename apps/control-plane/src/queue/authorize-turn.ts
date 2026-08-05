@@ -1074,13 +1074,14 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
   const snapshot = latest;
   const entry = snapshot.entries.find((e) => e.entryId === entryId);
 
-  // An attempt already walked to merge-ready by an earlier caller still has an
-  // operation, and the caller that will perform the write needs its id. Without
-  // this, the second asker is told it holds the turn and given nothing to act on,
-  // so nothing ever merges.
-  if (operationId === null && snapshot.activeAttemptId !== null && entry?.state === "Merging") {
-    operationId = mergeOperationId(snapshot.activeAttemptId);
-  }
+  // Do not reconstruct an operation id for an attempt another caller already
+  // walked to `Merging`. The operation row means that caller may have sent the
+  // branch mutation already. Giving a later wake the same id authorizes a
+  // second App writer, and the losing writer can race GitHub's eventually
+  // consistent reads and declare the winning merge absent. Only the caller
+  // that created the operation above receives an id and performs the write;
+  // every later wake leaves the existing operation to confirmation or
+  // reconciliation.
 
   // Holding the lane means this entry owns the one active attempt — not merely
   // that some attempt exists, which would authorize whoever asked while another
