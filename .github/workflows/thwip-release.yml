@@ -154,19 +154,36 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         run: pnpm -r --filter './packages/**' run build
 
+      # The version travels in the environment. Writing it into
+      # packages/cli/package.json first left the checkout dirty, and the build
+      # stamp says so, so every published release claimed `<sha>-dirty` and
+      # `thwip version` on a clean install from npm read like a local hack.
       - name: Build the package at the new version
         if: steps.decide.outputs.release == 'true'
-        run: |
-          set -euo pipefail
-          jq --arg v "${{ steps.decide.outputs.version }}" '.version = $v' packages/cli/package.json > /tmp/pkg.json
-          mv /tmp/pkg.json packages/cli/package.json
-          node scripts/build-npm.mjs
+        env:
+          THWIP_RELEASE_VERSION: ${{ steps.decide.outputs.version }}
+        run: node scripts/build-npm.mjs
 
       # Runs the built artifact rather than the source, so a bundle that cannot
       # start is caught here instead of by whoever installs it.
-      - name: Confirm the bundle runs
+      #
+      # From a packed tarball installed outside the repository, because that is
+      # what an installer gets. Run in place, the bundle resolves any import
+      # through the workspace's own node_modules, so a runtime dependency the
+      # published package.json never declares starts fine here and fails on
+      # every `npm install -g`.
+      - name: Confirm the bundle runs the way it is installed
         if: steps.decide.outputs.release == 'true'
-        run: node packages/cli/dist-npm/thwip.mjs --help > /dev/null
+        run: |
+          set -euo pipefail
+          tarball=$(cd packages/cli/dist-npm && npm pack --silent)
+          probe=$(mktemp -d)
+          cp "packages/cli/dist-npm/$tarball" "$probe/"
+          cd "$probe"
+          npm init -y > /dev/null
+          npm install --silent "./$tarball"
+          ./node_modules/.bin/thwip --help > /dev/null
+          ./node_modules/.bin/thwip version
 
       - name: Publish
         if: steps.decide.outputs.release == 'true'
