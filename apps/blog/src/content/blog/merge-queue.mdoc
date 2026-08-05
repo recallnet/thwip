@@ -91,10 +91,11 @@ based on what a team is optimizing for, and those policies can change over time.
 The result is still a clean, generally fast merge queue; the table below shows
 the choices.
 
-Within those lanes, `main` and `release` stay separate. Each person's oldest
-eligible pull request competes, and the person served least recently gets the
-next turn. A single busy author cannot fill the front of the queue with ten pull
-requests.
+Within those lanes, `main` and `release` stay separate. For this queue, a person
+and the coding agent working for them count as one participant. The oldest
+eligible pull request from each participant competes for the next turn, and the
+participant served least recently gets it. One participant cannot put ten pull
+requests ahead of everyone else.
 
 The winning pull request gets a **pinned candidate**. GitHub's temporary merge
 ref can change as the PR or base changes, so thwip stores the candidate commit,
