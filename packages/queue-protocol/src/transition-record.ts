@@ -361,10 +361,16 @@ function parseBase(v: Record<string, unknown>): ParseResult<TransitionRecordBase
   if (beforeBase !== null && !beforeBase.ok) return beforeBase;
   const beforeTree = before["treeOid"] === null ? null : gitOid(before["treeOid"], "transition.before.treeOid");
   if (beforeTree !== null && !beforeTree.ok) return beforeTree;
-  // Only the first record in an epoch may have an empty "before".
+  // Only a record that opens a range may have an empty "before". That is the
+  // first record, and it is also a genesis wherever one sits: a root starts from
+  // no base at all, which is what lets a walk begin there without asking what
+  // came before. A repository whose early history was written by software that
+  // no longer exists opens its attested range past that history, so the genesis
+  // is not at sequence one and still begins from nothing.
   const isFirst = transitionSequence.value === 1;
-  if (!isFirst && (beforeBase === null || beforeTree === null)) {
-    return fail("only the first transition in an epoch may have a null before state");
+  const opensARange = isFirst || v["kind"] === "genesis";
+  if (!opensARange && (beforeBase === null || beforeTree === null)) {
+    return fail("only a transition that opens a range may have a null before state");
   }
 
   const width = beforeBase !== null && beforeBase.ok ? beforeBase.value.length : null;
@@ -741,12 +747,28 @@ export function parseTransitionRecord(v: unknown): ParseResult<TransitionRecordV
       const prior = nullableSha256(raw["priorEpochClosingDigest"], "transition.genesis.priorEpochClosingDigest");
       if (!prior.ok) return prior;
       digests["priorEpochClosingDigest"] = prior.value;
-      // An epoch opens at sequence one; a later genesis would fork the chain.
-      if (base.value.transitionSequence !== 1) {
-        return fail("a genesis transition must open an epoch at sequence 1");
-      }
-      if (base.value.queueEpoch > 0 && prior.value === null) {
-        return fail("a genesis after the first epoch must name the prior epoch's closing digest");
+      // A genesis opens an attested range. The first one opens it at sequence
+      // one; a later one opens it wherever `attested_from_sequence` says the
+      // range a verifier trusts begins, which is what a repository does when its
+      // early history was written by software that no longer exists. The parser
+      // cannot see that number, so `verifyChain` is what holds a genesis to the
+      // epoch start, and a genesis anywhere else is reported there.
+      //
+      // What the parser can hold is that a genesis opening a later range names
+      // one ancestry rather than two. It closes the range before it at the
+      // record it is chained to, and if those disagree it is claiming to follow
+      // one record while descending from another.
+      if (base.value.transitionSequence === 1) {
+        if (base.value.queueEpoch > 0 && prior.value === null) {
+          return fail("a genesis after the first epoch must name the prior epoch's closing digest");
+        }
+      } else {
+        if (prior.value === null) {
+          return fail("a genesis after sequence 1 must name the closing digest of the range before it");
+        }
+        if (prior.value !== base.value.previousTransitionDigest) {
+          return fail("a genesis must close the range before it at the record it follows");
+        }
       }
       return ok({ ...base.value, kind: "genesis", genesis: digests as unknown as GenesisFacts });
     }

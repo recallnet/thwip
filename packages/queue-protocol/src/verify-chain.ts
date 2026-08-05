@@ -54,7 +54,8 @@ export interface ChainFinding {
     | "MISSING_PREFIX"
     | "CORRECTION_UNANCHORED"
     | "CORRECTION_OVERREACHES"
-    | "WRONG_SUBJECT";
+    | "WRONG_SUBJECT"
+    | "GENESIS_MISPLACED";
   readonly sequence: number | null;
   readonly digest: string;
   readonly detail: string;
@@ -651,6 +652,18 @@ async function inspect(
       sequence: record.value.transitionSequence,
       digest: link.digest,
       detail: `names ${record.value.repositoryId}@${record.value.baseRef}, not the branch this chain was requested for`,
+    });
+  }
+
+  // A genesis says a chain starts here, so it belongs where the attested range
+  // starts and nowhere else. One inside the range would claim a second root and
+  // split what a reader is asked to trust into two chains presented as one.
+  if (record.value.kind === "genesis" && record.value.transitionSequence !== ports.epochStartsAt) {
+    findings.push({
+      code: "GENESIS_MISPLACED",
+      sequence: record.value.transitionSequence,
+      digest: link.digest,
+      detail: `opens a chain at ${record.value.transitionSequence}, and the attested range starts at ${ports.epochStartsAt}`,
     });
   }
 

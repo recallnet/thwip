@@ -62,6 +62,7 @@ import {
   transitionRecordFor,
   verifiedEvidenceFor,
 } from "./attestation.js";
+import { openAttestedRange } from "./re-epoch.js";
 import { applyHeal, planHeal, type HealPlan } from "./chain-heal.js";
 import { findingsForChain } from "./chain-self-check.js";
 import {
@@ -2551,6 +2552,66 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
+   * Say the chain is attested from here, and write the record that opens it.
+   *
+   * A repository whose early history was written by software that no longer
+   * exists carries findings nobody can act on. This one carried four, unchanged
+   * tick after tick: a link whose digest was a commit sha padded with zeroes,
+   * an external transition the route could not serve, and merges that landed
+   * outside the lane. Healing them one at a time repairs a chain no reader is
+   * being asked to trust.
+   *
+   * A route rather than a SQL statement, because the last two days turned on
+   * mutations going through something that records who asked and why. Migration
+   * `0016` raised this same number by hand for this same repository, and the
+   * next adopter with a buggy early history would have needed somebody with a
+   * credential that can also run `DELETE`.
+   *
+   * Nothing is deleted and nothing becomes unfetchable. See `re-epoch.ts`.
+   */
+  app.post("/v1/queue/:repositoryId/re-epoch", async (c) => {
+    const who = c.get("caller");
+    if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
+
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const { repositoryId, baseRef } = selected;
+
+    const body = (await c.req.json().catch(() => ({}))) as { atSha?: string; reason?: string };
+    if (typeof body.reason !== "string" || body.reason.trim().length < 8) {
+      return c.json({ error: "a reason of at least 8 characters is required" }, 400);
+    }
+    // Named rather than inferred. The commit the range opens at is what every
+    // later record chains its base off, and reading it from the queue's own idea
+    // of where the branch stands would open the range at whatever the queue last
+    // believed rather than at what an operator checked.
+    if (typeof body.atSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.atSha)) {
+      return c.json({ error: "atSha required: the commit the branch stands at" }, 400);
+    }
+
+    const outcome = await openAttestedRange(c.env, recordFromIntentDepsFor<TEnv>(deps, onQueue), {
+      repositoryId,
+      baseRef,
+      atSha: body.atSha,
+      actorPrincipalId: who.principalId,
+      reason: body.reason.trim(),
+    });
+    if (outcome.status === "refused") {
+      return c.json({ error: outcome.detail, code: outcome.code }, outcome.code === "NO_QUEUE" ? 404 : 409);
+    }
+    return c.json({
+      opened: "attested",
+      epochStartsAt: outcome.epochStartsAt,
+      previousEpochStartedAt: outcome.previousEpochStartedAt,
+      genesis: outcome.digest,
+      baseSha: outcome.baseSha,
+      actor: who.principalId,
+      reason: body.reason.trim(),
+      note: "records below this sequence are still stored and still fetched at /v1/queue/records/:digest",
+    });
+  });
+
+  /**
    * Correct a record that names a sha the branch does not have.
    *
    * Record 54 says pull request 107's merge left the base at the throwaway test
@@ -3096,7 +3157,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
     if (project === null) return c.json({ error: "no queue for that branch" }, 404);
 
-    const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    const links = await readChain(c.env.DB as unknown as D1Like, repositoryId, baseRef, project.epoch);
     const decoder = new TextDecoder();
     return c.json({
       epochStartsAt: project.epoch,
