@@ -29,13 +29,13 @@ a checkout that is no longer the code that will merge. The question is whether
 the work already done locally can help with the merge decision without asking
 GitHub to trust an unexplained report.
 
-{% mermaid label="The current feedback loop and the gap a proof needs to close" %}
+{% mermaid label="Local checks produce a proof that GitHub can verify" %}
 ```mermaid
 flowchart LR
-  A["Agent edits a pull request"] --> B["Warm local checkout<br/>fast feedback"]
-  A --> C["Cloud CI rebuilds<br/>and checks"]
-  C --> D["Shared merge signal"]
-  B -. "useful work, but<br/>not yet verifiable" .-> D
+  A["Agent edits a pull request"] --> B["Local machine runs<br/>required checks"]
+  B --> C["Sign proof for<br/>exact Git tree"]
+  C --> D["GitHub checks only<br/>the signed proof"]
+  D --> E["Merge decision"]
 ```
 {% /mermaid %}
 
@@ -80,24 +80,26 @@ standard building blocks:
   and the identifier of the key that signed them. If somebody edits the claim,
   signature verification fails.
 
-The statement also gives the claim enough context to check. It names the tree
-and the base it was built from, so a verifier can tell which code and which
-version of `main` were involved. It names the policy, which says what checks
-were required. It names the pipeline, a fingerprint of the check recipe, so a
-change to how the checks run is visible. It records the runner and timing, the
-individual suite results, and the signing key's identity.
+To verify the claim, GitHub needs more than a tree digest and a pass/fail word.
+The proof names the tree and the base it was built from, so GitHub can tell which
+code and which version of `main` were involved. It names the policy, which says
+what checks were required. It names the pipeline—the instructions for running
+those checks, similar to a GitHub Actions workflow definition—and records a
+cryptographic digest of those instructions. If the instructions change, the
+digest changes. It also records the runner and timing, the individual suite
+results, and the signing key's identity.
 
-Those details do not make a local machine trustworthy by themselves. They make
-the claim specific enough for another system to compare it with the change,
-the active policy, and the required checks.
+While a proof cannot remove every trust assumption, it lets GitHub compare the
+claim with the change, the active policy, and the required checks instead of
+treating local output as authoritative.
 
-{% mermaid label="How local work becomes a GitHub merge check" %}
+{% mermaid label="How local checks become a GitHub merge check" %}
 ```mermaid
 flowchart TD
-  A["Run required checks on<br/>one exact Git tree"] --> B["Write a claim about<br/>tree, results, and rules"]
-  B --> C["Sign the claim with<br/>an enrolled device key"]
-  C --> D["GitHub App reads the<br/>claim and the Git tree"]
-  D --> E{"Do they match?"}
+  A["Local machine runs<br/>required checks"] --> B["Proof names<br/>tree and results"]
+  B --> C["Device key signs<br/>the proof"]
+  C --> D["GitHub checks only<br/>the signed proof"]
+  D --> E{"Tree, signer, policy,<br/>and results match?"}
   E -- "no" --> F["Required check fails"]
   E -- "yes" --> G["Required check passes"]
   G --> H["Queue or GitHub may merge"]
@@ -116,35 +118,37 @@ base, the active policy, the check recipe, and the required suite results. A
 proof for one tree cannot satisfy a check for another. If the pull request head
 has changed since the proof was made, the mismatch is visible and the required
 `thwip` check fails. When a queue asks a device to check an integrated
-candidate, the same tree comparison happens between the queue's assignment and
-the device's receipt before the merge.
+candidate, it first gives the device the candidate tree and required checks.
+thwip accepts the device's result only when it names that same tree.
 
-This is the useful boundary. The App can verify who signed the bytes and what
-those bytes claim. It can verify that the claim names the code and checks the
-policy expects. It does not pretend that it watched every command on the local
-machine.
+The App can verify who signed the bytes and what those bytes claim. It can
+verify that the claim names the code and checks the expected policy. It cannot,
+from the signature alone, independently observe every command or environment
+condition behind a local run.
 
-## What the signature does—and does not—establish
+## What the signature does (and does not) establish
 
-The signature establishes that a particular enrolled key signed an unchanged
-statement. The statement says that named checks passed on a named Git tree
-under a named policy and pipeline. GitHub can verify those relationships before
+To see what the signature adds, start with hashing. A cryptographic hash turns
+the bytes of a statement into a fixed-size digest. Change the statement and the
+digest changes. A device signs that statement with a private key; GitHub uses
+the matching public key to check the signature. That check tells GitHub that the
+unchanged bytes were signed by the enrolled key associated with that identity.
+
+Inside those signed bytes is an assertion: named checks passed on a named Git
+tree under a named policy and pipeline. GitHub can verify that assertion before
 it allows the required check to pass.
 
-The signature does not establish that the checks really ran. It does not prove
-that the machine was free of malware, that its network or cache behaved as
-claimed, or that the person holding the key did not sign a false result. A
-compromised device can produce a perfectly valid signature over a bad claim.
+The signature does not prove that the checks really ran or that the local
+machine was uncompromised. A compromised device can still sign a false claim.
 
-That is why thwip treats a proof as a precise claim, not as magic. The claim is
-stronger than terminal output because it is bound to an exact tree and checked
-against GitHub's records. It is weaker than a second execution that GitHub
-performs itself.
+The signature gives GitHub a precise, tamper-evident claim to evaluate; it is
+not a recording of the local machine's execution. A second GitHub run provides
+a different kind of evidence, at a different cost.
 
 ## Four ways to pay for confidence
 
-Different projects will make that trade differently. thwip puts the choices in
-four profiles:
+Different projects will make different tradeoffs about where to place trust and
+where to spend compute. thwip puts those choices in four profiles:
 
 | Profile | What supplies the evidence | Trade-off |
 | --- | --- | --- |
@@ -153,21 +157,19 @@ four profiles:
 | `remote` | A pinned GitHub Actions verifier runs the candidate. | GitHub supplies the second party; each candidate costs CI time. |
 | `audited` | Run on a device, then rerun the required checks in GitHub Actions. | Strongest evidence, with both execution costs. |
 
-`fast` is honest about its limit: it proves that the head proof is valid, not
-that the post-merge candidate was executed. `fresh` goes further. The queue
-gives a device a signed assignment naming the exact candidate tree and required
-checks. The device verifies that assignment, runs the checks, and signs a
-receipt naming the same tree. The control plane accepts the receipt only when
-it answers that assignment. `remote` moves the execution to GitHub. `audited`
-asks for both kinds of evidence.
+At the policy level, the profiles decide where confidence comes from. `fast`
+places the trust in the enrolled key and the machine that produced the proof.
+`fresh` adds a signed result from a device that ran the exact tree required for
+the integration. `remote` places execution with GitHub. `audited` combines a
+device-run proof with a GitHub rerun. The policy therefore makes the trust
+choice explicit without changing what a tree-bound proof means.
 
-The cost difference is practical. In 18 successful candidate verifications in
-this repository, GitHub Actions spent a median 36 seconds setting up the
-runner, checking out the code, installing dependencies, and building workspace
-packages before a suite started. The already-warm local suite results had a
-median of 4.5 seconds. Those are measurements from this repository, not a
-promise about every project, but they show why a team may want local work to
-count.
+The cost difference is measurable. Compare the time a warm local checkout spends
+running the suites with the time a cloud job spends before it can start: runner
+setup, checkout, dependency installation, and build. For an agent running many
+iterations, that setup repeats at every remote run. A local proof reuses work
+already done; a remote verifier pays the setup to gain an independent
+execution.
 
 GitHub also bills runner time by runner class and rounds jobs up to whole
 minutes. [Its published rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
@@ -176,11 +178,11 @@ device. `remote` pays for a shared execution environment. `audited` pays for
 both. thwip makes that choice explicit instead of hiding it inside a green
 check.
 
-## What this does not solve
+## The remaining tradeoffs
 
-Proofs do not replace code review. A passing suite says that named checks passed
-on a named tree. It says nothing about whether the product is secure or whether
-the tests cover the important behavior.
+Proofs complement code review. A passing suite says that named checks passed on
+a named tree. It does not establish that the product is secure or that the
+tests cover the important behavior.
 
 Proofs also do not remove environment differences. If a suite needs a cloud
 service, a platform-specific runner, or a secret that cannot exist on a local
@@ -188,15 +190,17 @@ machine, keep that suite remote. A project can combine remote suites with a
 local profile, and `audited` can add a full GitHub rerun when the stronger
 reference is worth its cost.
 
-The hardest remaining case is a compromised signing device under `fast`. With
-no second execution, there is no mechanism that can detect the first false
-proof. `fresh` narrows the claim by requiring a receipt for the integrated
-candidate; `remote` and `audited` add GitHub's independent execution. None of
-them makes a stolen private key harmless.
+As with any technology choice, the tradeoff is where trust and cost land. Under
+`fast`, there is no second execution, so a compromised signing device could
+produce a false first proof. `fresh` requires a signed result from a device run;
+`remote` and `audited` add GitHub execution. A suite that depends on a cloud
+service, a platform-specific runner, or a secret may still belong in remote CI.
 
-That boundary is the point of the model. A proof tells GitHub exactly what was
-claimed, which code it covered, who signed it, and what the policy required. It
-does not ask GitHub to believe a sentence merely because a terminal printed it.
+That is the larger shift: agents can do more than produce code and ask cloud CI
+to start from scratch. They can carry evidence tied to the exact tree they
+worked on into the systems that review and merge it. As agentic development
+becomes more continuous and parallel, the ability to move verifiable evidence
+alongside the code may become as important as the code itself.
 
 {% cta-row %}
 {% cta href="https://github.com/recallnet/thwip" label="Read the code" /%}
