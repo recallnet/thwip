@@ -13,6 +13,7 @@ import {
 import {
   APP_PROOF_CHECK,
   APP_PROOF_OBSERVE_CHECK,
+  MERGED_OUTCOME,
   appProofTaskFromWebhook,
   evaluateAppProof,
   loadGithubProofTargets,
@@ -194,6 +195,22 @@ describe("App-native webhook planning", () => {
       ).toEqual({ kind: "verify", request: request() });
     },
   );
+
+  it("does not queue a fresh check when the delivery already reports the pull request merged", () => {
+    expect(
+      appProofTaskFromWebhook("pull_request", {
+        ...repository,
+        action: "synchronize",
+        pull_request: {
+          number: 53,
+          merged: true,
+          user: { id: 100 },
+          head: { sha: HEAD },
+          base: { ref: "main" },
+        },
+      }),
+    ).toBeNull();
+  });
 
   it("plans the exact merge-group SHA", () => {
     expect(
@@ -414,6 +431,7 @@ function processDependencies(options: {
   const dependencies: AppProofProcessDependencies = {
     markPending: vi.fn(async () => undefined),
     pendingVerificationExists: vi.fn(async () => true),
+    pullRequestMerged: vi.fn(async () => false),
     reportPending: vi.fn(async (_project, _request, checkRunId, _name, evaluation) => {
       pending.push({ checkRunId, evaluation });
     }),
@@ -475,6 +493,31 @@ describe("App-native check publication", () => {
       mode: "observe",
       checkRunId: `check_${result.verificationId}`,
     });
+  });
+
+  /**
+   * PR #219 merged at 22:46:12 with a successful App proof. Work from an
+   * earlier delivery began at 22:46:15, compared its old head with the new
+   * base, and published SUBJECT_BASE_MISMATCH after the merge. Queue time is
+   * the race: the webhook payload was valid when received and stale when used.
+   */
+  it("does not publish a check when a queued verification starts after the pull request merged", async () => {
+    const state = processDependencies({ mode: "enforced" });
+    const evaluator = vi.fn(() => evaluationDependencies([target()]));
+    state.dependencies.pullRequestMerged = vi.fn(async () => true);
+    state.dependencies.evaluationDependencies = evaluator;
+
+    const result = await processAppProofVerification(env, request(), state.dependencies);
+
+    expect(result).toMatchObject({
+      verificationId: "",
+      checkRunId: "",
+      evaluation: { outcome: MERGED_OUTCOME },
+    });
+    expect(state.dependencies.insertStarted).not.toHaveBeenCalled();
+    expect(state.dependencies.createCheck).not.toHaveBeenCalled();
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(state.completed).toEqual([]);
   });
 
   it("fails the required App check when enforcement is enabled", async () => {

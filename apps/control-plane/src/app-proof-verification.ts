@@ -50,6 +50,7 @@ export type AppProofTask =
 
 interface PullRequestPayload {
   number?: number;
+  merged?: boolean;
   user?: { id?: number };
   head?: { sha?: string };
   base?: { ref?: string };
@@ -169,6 +170,10 @@ export function appProofTaskFromWebhook(event: string, payload: ProofWebhookPayl
     return verifyPullFromChecks(repository, payload.check_run?.head_sha, payload.check_run?.pull_requests, true);
   }
   if (event === "pull_request" && PULL_REQUEST_ACTIONS.has(payload.action ?? "")) {
+    // GitHub can redeliver an earlier actionable event after the pull request
+    // has merged. The process-time read below is authoritative; this hint also
+    // avoids queueing work when the delivery itself already says it is over.
+    if (payload.pull_request?.merged === true) return null;
     const pullRequestNumber = payload.pull_request?.number;
     const subjectSha = gitOid(payload.pull_request?.head?.sha);
     const base = payload.pull_request?.base?.ref;
@@ -403,6 +408,12 @@ interface ProofProject {
 
 export interface AppProofProcessDependencies {
   loadProject(env: Env, request: AppProofRequest): Promise<ProofProject | null>;
+  /**
+   * Read at consumption time, not webhook time. Queue delivery is asynchronous,
+   * so an event that was current when received can describe an already-merged
+   * pull request by the time it would publish a check.
+   */
+  pullRequestMerged(project: ProofProject, request: AppProofRequest): Promise<boolean>;
   insertStarted(
     env: Env,
     input: {
@@ -463,6 +474,7 @@ function verificationId(): string {
  * read GitHub would not answer are both silence, not refusal.
  */
 export const PENDING_OUTCOME = "VERIFICATION_PENDING";
+export const MERGED_OUTCOME = "PULL_REQUEST_ALREADY_MERGED";
 
 /** Same backoff as the merge path's `confirmMergeAbsence`, for the same reason. */
 const EVALUATION_ATTEMPTS = 3;
@@ -542,6 +554,22 @@ export async function processAppProofVerification(
 ): Promise<{ verificationId: string; checkRunId: string; evaluation: AppProofEvaluation }> {
   const project = await dependencies.loadProject(env, request);
   if (project === null) throw new Error(`repository ${request.repositoryId} is not synchronized`);
+  if (request.event === "pull_request" && (await dependencies.pullRequestMerged(project, request))) {
+    // Do not create a verification row or a check run. The successful check
+    // that authorized the merge remains the final verdict on this head.
+    return {
+      verificationId: "",
+      checkRunId: "",
+      evaluation: {
+        outcome: MERGED_OUTCOME,
+        detail: "the pull request merged before this queued verification began",
+        policyDigest: null,
+        policyVersion: null,
+        configSource: "unavailable",
+        targets: [],
+      },
+    };
+  }
   if (request.settleIfPending === true) {
     const waiting = await dependencies.pendingVerificationExists(env, project, request.subjectSha);
     if (!waiting) {
@@ -687,15 +715,20 @@ async function mergeBase(token: string, request: AppProofRequest, headSha: strin
   return sha;
 }
 
+interface PullRequestDetails {
+  commits?: number;
+  merged?: boolean;
+  user?: { id?: number };
+}
+
 async function pullRequestHeadCommit(
   token: string,
   request: AppProofRequest & { pullRequestNumber: number },
+  pullDetails?: PullRequestDetails,
 ): Promise<GitCommit & { prAuthorGithubUserId?: string }> {
-  const pull = await github<{ commits?: number; user?: { id?: number } }>(
-    token,
-    request.repository,
-    `/pulls/${request.pullRequestNumber}`,
-  );
+  const pull =
+    pullDetails ??
+    (await github<PullRequestDetails>(token, request.repository, `/pulls/${request.pullRequestNumber}`));
   const page = Math.max(1, Math.ceil((pull.commits ?? 1) / 100));
   const commits = await github<
     Array<{
@@ -723,13 +756,17 @@ async function commitAuthor(token: string, request: AppProofRequest, sha: string
   return decimal(pull?.user?.id) ?? undefined;
 }
 
-export async function loadGithubProofTargets(token: string, request: AppProofRequest): Promise<AppProofTarget[]> {
+export async function loadGithubProofTargets(
+  token: string,
+  request: AppProofRequest,
+  pullDetails?: PullRequestDetails,
+): Promise<AppProofTarget[]> {
   if (request.event === "pull_request") {
     if (request.pullRequestNumber === undefined) throw new Error("pull request number missing");
     const commit = await pullRequestHeadCommit(token, {
       ...request,
       pullRequestNumber: request.pullRequestNumber,
-    });
+    }, pullDetails);
     const prAuthorGithubUserId = request.prAuthorGithubUserId ?? commit.prAuthorGithubUserId;
     return [
       {
@@ -939,6 +976,7 @@ const defaultStorageDependencies: Pick<
 
 function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
   const tokenByInstallation = new Map<string, Promise<string>>();
+  const pullByRequest = new WeakMap<AppProofRequest, Promise<PullRequestDetails>>();
   const token = (project: ProofProject): Promise<string> => {
     let pending = tokenByInstallation.get(project.installationId);
     if (pending === undefined) {
@@ -947,8 +985,23 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
     }
     return pending;
   };
+  const pull = (project: ProofProject, request: AppProofRequest): Promise<PullRequestDetails> => {
+    if (request.pullRequestNumber === undefined) throw new Error("pull request number missing");
+    let pending = pullByRequest.get(request);
+    if (pending === undefined) {
+      pending = token(project).then((value) =>
+        github<PullRequestDetails>(value, project.repository, `/pulls/${request.pullRequestNumber}`),
+      );
+      pullByRequest.set(request, pending);
+    }
+    return pending;
+  };
   return {
     ...defaultStorageDependencies,
+    async pullRequestMerged(project, request) {
+      if (request.event !== "pull_request") return false;
+      return (await pull(project, request)).merged === true;
+    },
     async createCheck(project, request, id, checkName) {
       const body = await github<{ id?: number }>(await token(project), project.repository, "/check-runs", {
         method: "POST",
@@ -1003,7 +1056,12 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
     },
     evaluationDependencies(project) {
       return {
-        loadTargets: async (request) => loadGithubProofTargets(await token(project), request),
+        loadTargets: async (request) =>
+          loadGithubProofTargets(
+            await token(project),
+            request,
+            request.event === "pull_request" ? await pull(project, request) : undefined,
+          ),
         resolveBundle: (input) => resolveVerificationBundle(env, input),
         remoteCheckConclusions: async (headSha) => {
           const runs = await github<{
