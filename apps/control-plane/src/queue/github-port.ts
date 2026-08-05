@@ -79,10 +79,30 @@ export async function resolveCandidate(
   }
   if (pull === null) return { status: "blocked", reason: "CANDIDATE_MISSING" };
 
+  // Where the branch actually points, read from the ref rather than taken from
+  // the pull request.
+  //
+  // GitHub caches `base.sha` on the pull request and updates it late, and it
+  // caches the test merge alongside it. When both lag the same push they agree
+  // with each other, so the parent check below passed and the queue pinned a
+  // base that was already gone. It signed an intent naming that base, the merge
+  // write was refused 422, the attempt resolved, the lane offered the same turn
+  // again, and the same stale pair came back. Pull request 206 sat in that loop
+  // until somebody force-pushed it out.
+  //
+  // Reading the ref costs one call and makes the disagreement visible: the
+  // candidate's first parent no longer matches, so the turn is refused as stale
+  // and retried once GitHub has recomputed the merge.
+  const baseSha = (
+    await http.json<{ object: { sha: string } }>(
+      `/repos/${repo.owner}/${repo.repo}/git/ref/heads/${pull.base.ref}`,
+    )
+  ).object.sha;
+
   const facts: PullRequestFacts = {
     repositoryId: String(pull.base.repo.id),
     baseRef: `refs/heads/${pull.base.ref}`,
-    baseSha: pull.base.sha,
+    baseSha,
     pullRequestNumber: pull.number,
     headRepositoryId: String(pull.head.repo?.id ?? pull.base.repo.id),
     headSha: pull.head.sha,
@@ -90,7 +110,7 @@ export async function resolveCandidate(
     draft: pull.draft === true,
     mergeable: pull.mergeable,
     mergeCommitSha: pull.merge_commit_sha,
-    objectFormat: pull.base.sha.length === 64 ? "sha256" : "sha1",
+    objectFormat: baseSha.length === 64 ? "sha256" : "sha1",
   };
 
   let candidate: CommitFacts | null = null;
