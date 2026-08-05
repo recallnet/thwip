@@ -317,13 +317,19 @@ shipped schema, 128 of 132 merges carried a proof on the head, and 57 of 57
 chain signatures verify against the published keys under a script anybody can
 run without an account.
 
-No merge on this repository has run under `fresh` or `audited`. Both sign a
-`verified-merge` record and the chain holds none. Every policy version this
-repository has activated sets `fast`, and the only device assignments the queue
-has issued sit on a separate test repository. The 5 candidate-verified merges
-all landed on 31 July, before the queue checked that a verifier's verdict was
-about the integrated candidate, and each cites a check run whose head commit is
-the pull request head.
+Every policy version this repository has activated sets `fast`, so `fresh` runs
+on `recallnet/thwip-test`. Seven merges have landed there under that profile.
+Five came on 4 August 2026, pull requests 5 through 9, each adding a function
+and a test for it. On each of the five the queue signed an assignment naming the
+candidate tree, the suites `lint` and `test`, policy v4 and a twenty-minute
+expiry. The device checked that signature against `/.well-known/thwip-keys`
+before it fetched anything, put the candidate on disk, ran both suites, and
+signed a receipt over the tree it had run. The control plane accepted each
+receipt a median 7.4 seconds after the queue signed the assignment, between 7.0
+and 7.5. By 28.0 seconds the `verified-merge` record was on the chain, between
+26.6 and 33.2. All seven records carry `ranOn: device`. `thwip verify-chain
+--repository-id 1319756073` reads 7 links, checks 7 of 7 signatures and reports
+no findings, and the base the last record leaves is where that branch stands.
 
 ## What a proof does not buy
 
@@ -389,8 +395,9 @@ Ones we intend to close:
   digests" comes out of the graph itself instead of resting on a convention.
 - Hybrid matrices, where part of the suite has to stay remote for platform
   reasons.
-- Enough `fresh` and `audited` merges to say something measured about them,
-  rather than describing them from the code.
+- `fresh` on this repository, so the numbers above stop coming from a test
+  repository of eight files and two suites.
+- A merge under `audited`. No policy anywhere has set that profile.
 
 Ones we do not know how to close:
 
