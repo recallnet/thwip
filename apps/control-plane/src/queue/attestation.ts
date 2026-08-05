@@ -562,13 +562,20 @@ export async function storeAttestation(
  * first, before anything is built or signed, is what makes the second report
  * of a merge an idempotent no-op rather than a second link.
  *
- * Scoped to this epoch, the same way `recordCoveringCommit` is and for the
- * same reason. An operator can raise `attested_from_sequence` past a record
- * this same attempt already produced, the way migration `0016` did: the row
- * does not stop existing, it stops being part of the chain a verifier reads.
- * Answering from it here would report the merge as already recorded while
- * the live chain never mentions it, and the repair that would have fixed
- * that never runs because this said there was nothing to do.
+ * Asked of every range this branch has ever had, not of the current one. A
+ * record for an attempt is written once and cannot be written twice: the
+ * partial unique index on `attempt_id` refuses a second row a position. So an
+ * epoch-scoped answer here cannot lead to a repair, only to a repair attempted
+ * on every tick and refused on every tick.
+ *
+ * Worse than the cost, it re-records. On 5 August the attested range on this
+ * repository moved to 152 and fifty-nine merges recorded below it read back as
+ * unrecorded. The sweep began writing second records for merges the chain
+ * already held, at the head, so the new range said the base had moved to a
+ * commit the branch left days ago and the walk broke at the first one. An epoch
+ * boundary says which records a verifier is asked to check. It does not
+ * un-record a merge, and reading a filtered-out record as an absent one is how
+ * this repository keeps producing the same defect.
  */
 export async function transitionRecordFor(
   db: D1Like,
@@ -580,15 +587,10 @@ export async function transitionRecordFor(
     .prepare(
       `SELECT digest FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ? AND transition_sequence IS NOT NULL
-          AND transition_sequence >= COALESCE(
-            (SELECT attested_from_sequence FROM queue_projects
-              WHERE github_repository_id = ? AND base_ref = ?),
-            0
-          )
         ORDER BY created_at ASC
         LIMIT 1`,
     )
-    .bind(repositoryId, baseRef, attemptId, repositoryId, baseRef)
+    .bind(repositoryId, baseRef, attemptId)
     .first<{ digest: string }>();
   return row === null ? null : row.digest;
 }
@@ -604,24 +606,24 @@ export async function transitionRecordFor(
  * commit already sitting in the chain, and leave the row open to be read from
  * GitHub again on the next tick, forever.
  *
- * Epoch scoping applies to a merge record but not to a movement record, and
- * the two have to be told apart here because this function answers for both
- * kinds. `attested_from_sequence` says where the chain a verifier trusts
- * begins, and a merge record from before it cites a policy, an evidence
- * digest and an intent digest a verifier no longer checks. Settling a write
- * against it would report a merge as recorded while the live chain never
- * mentions it, the failure epoch scoping exists to prevent.
+ * Asked of every range this branch has ever had. A merge record used to be
+ * scoped to the current one, on the reasoning that a record from behind an
+ * epoch boundary cites a policy and an intent a verifier no longer checks, so
+ * answering from it would call a merge recorded while the live chain never
+ * mentions it.
  *
- * A movement record (`kind = 'external-transition'`, `attempt_id =
- * 'movement:<sha>'`) carries none of that. Its whole claim is "the branch
- * reached this commit and no signed intent pins it," a claim that holds
- * regardless of which epoch was current when the queue wrote it down: it
- * reads exactly as true from any epoch behind it. Scoping it away strands
- * the record. `authorizationFor` still finds nothing pins the commit, so the
- * sweep calls the repair path again, which calls this function, which now
- * misses the record it already wrote, and the sweep refuses and re-reads the
- * same commit from GitHub on every tick forever. Excluding this one kind
- * from the epoch filter is what keeps a settled movement settled.
+ * What that produced instead is worse. The record does not stop existing when
+ * the range moves, and the branch does not go back to the commit before it.
+ * When the range on this repository moved to 152 on 5 August, fifty-nine merges
+ * recorded below it read back as absent and the sweep wrote a second record for
+ * each, at the head, saying the base had moved to a commit the branch left days
+ * ago. The walk broke at the first one. A record for a commit is a fact about
+ * git, and it reads as true from any range behind it, exactly the way a
+ * movement record always did.
+ *
+ * Naming the record is not settling a write against it. What a caller does with
+ * the answer is the caller's, and every caller here wants the same thing: stop,
+ * because the chain already holds this.
  */
 export async function recordCoveringCommit(
   db: D1Like,
@@ -634,18 +636,10 @@ export async function recordCoveringCommit(
       `SELECT digest, attempt_id AS attemptId FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
           AND json_extract(bytes, '$.after.baseSha') = ?
-          AND (
-            kind = 'external-transition'
-            OR transition_sequence >= COALESCE(
-              (SELECT attested_from_sequence FROM queue_projects
-                WHERE github_repository_id = ? AND base_ref = ?),
-              0
-            )
-          )
         ORDER BY transition_sequence ASC
         LIMIT 1`,
     )
-    .bind(repositoryId, baseRef, sha, repositoryId, baseRef)
+    .bind(repositoryId, baseRef, sha)
     .first<{ digest: string; attemptId: string | null }>();
   return row === null ? null : { digest: row.digest, attemptId: row.attemptId };
 }

@@ -164,21 +164,20 @@ describe("recordMergeFromIntent", () => {
   });
 
   /**
-   * A chain has a beginning, and it moves. `attested_from_sequence` says which
-   * link the current one starts at, and everything before it belongs to a
-   * chain this branch no longer keeps. A record from back there naming the
-   * commit would settle a write against a chain nobody verifies, so the merge
-   * would read as recorded while the live chain never mentions it.
+   * What re-epoching this repository did on 5 August, before this was fixed.
    *
-   * The same attempt id is used on both sides of the epoch bump, because that
-   * is the common case: an operator raises `attested_from_sequence` and the
-   * attempt whose old record fell behind it is the same attempt asking to be
-   * recorded again. `recordCoveringCommit` already excludes the dead-epoch
-   * row by its digest; `transitionRecordFor` has to exclude it by attempt id
-   * scoped the same way, or it hands back that row's digest as though it
-   * still sat in the live chain.
+   * The attested range moved to 152 and fifty-nine merges recorded below it
+   * read back as unrecorded, because both lookups here were scoped to the
+   * current range. The sweep wrote a second record for each, at the head, so
+   * the new range said the base had moved to a commit the branch had left days
+   * before. The walk broke at the first one.
+   *
+   * A range boundary says which records a verifier is asked to check. It does
+   * not un-record a merge, and it does not put the branch back on the commit
+   * before it. Reading a record filtered out of view as a record that is not
+   * there is the defect this repository keeps producing.
    */
-  it("does not let a record from a previous epoch stand in for one in this chain", async () => {
+  it("does not record a second time for a merge the chain already holds behind the range", async () => {
     const e = env();
     seed();
     await seedIntent(FIRST);
@@ -207,7 +206,7 @@ describe("recordMergeFromIntent", () => {
       witnessPrincipalId: "prin_test",
     });
 
-    expect(outcome).toMatchObject({ status: "recorded", attemptId: FIRST.attemptId });
+    expect(outcome).toMatchObject({ status: "already" });
   });
 
   it("refuses a commit the queue never authorized", async () => {
