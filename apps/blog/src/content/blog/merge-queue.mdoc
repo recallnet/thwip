@@ -48,11 +48,11 @@ one pull request at a time as the base branch advances.
 {% mermaid label="A pull request changes from a tested branch into an integrated candidate" %}
 ```mermaid
 flowchart LR
-  A[PR head<br/>checks pass] --> C[Current main<br/>may have moved]
-  C --> D[Integrated candidate<br/>main + PR]
-  D --> E{Candidate passes?}
-  E -- yes --> F[Merge]
-  E -- no --> G[Fix or wait]
+  A["PR head<br/>checks pass"] --> C["Current main<br/>may have moved"]
+  C --> D["Integrated candidate<br/>main + PR"]
+  D --> E{"Candidate passes?"}
+  E -- "yes" --> F["Merge"]
+  E -- "no" --> G["Fix or wait"]
 ```
 {% /mermaid %}
 
@@ -132,27 +132,27 @@ covered.
 {% mermaid label="The queue flow from selection through an evidence-backed merge" %}
 ```mermaid
 flowchart TD
-  A[Pull request is ready] --> B[Choose one turn]
-  B --> C[Pin current base + PR head]
-  C --> D{Still current?}
-  D -- no --> C
-  D -- yes --> E{Policy}
-  E -- fast --> F[Reuse signed head proof]
-  E -- fresh --> G[Project agent(s)<br/>run candidate<br/>and sign receipt]
-  E -- remote --> H[Pinned GitHub verifier<br/>runs candidate]
-  E -- audited --> I[Project agent run<br/>then GitHub rerun]
-  F --> J[Merge pinned candidate]
+  A["Pull request is ready"] --> B["Choose one turn"]
+  B --> C["Pin current base + PR head"]
+  C --> D{"Still current?"}
+  D -- "no" --> C
+  D -- "yes" --> E{"Policy"}
+  E -- "fast" --> F["Reuse signed head proof"]
+  E -- "fresh" --> G["Project agents run candidate<br/>and sign receipt"]
+  E -- "remote" --> H["Pinned GitHub verifier<br/>runs candidate"]
+  E -- "audited" --> I["Project agent run<br/>then GitHub rerun"]
+  F --> J["Merge pinned candidate"]
   G --> J
   H --> J
   I --> J
-  J --> K[Write signed record<br/>and release lane]
+  J --> K["Write signed record<br/>and release lane"]
 ```
 {% /mermaid %}
 
 ## What the queue buys you
 
-The queue still serializes the one operation that must be serial: updating the
-protected branch. Its work around that operation is more deliberate.
+The thwip queue still serializes the one operation that must be serial: updating
+the protected branch. Its work around that operation is more deliberate.
 
 - **A controlled merge point.** The queue refuses a stale candidate. Profiles
   that run the integration bind their evidence to it, while `fast` records that
