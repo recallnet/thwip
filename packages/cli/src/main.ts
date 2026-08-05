@@ -1289,7 +1289,11 @@ async function main(): Promise<void> {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
   });
-  process.exit(code);
+  // `process.exit` does not wait for an asynchronous stdout write to drain.
+  // A queue doctor document larger than the pipe buffer was therefore cut at
+  // exactly 65,536 bytes when it was piped to jq. Leaving the event loop sets
+  // the same status while allowing stdout and stderr to finish first.
+  process.exitCode = code;
 }
 
 /**
