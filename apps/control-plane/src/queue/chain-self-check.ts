@@ -59,7 +59,27 @@ export async function findingsForChain(
 ): Promise<SelfCheckFinding[]> {
   const published: JSONWebKeySet = { keys: await verificationKeys(db) };
   const keySet = createLocalJWKSet(published);
-  const links = await readChain(db, input.repositoryId, input.baseRef);
+  const links = await readChain(db, input.repositoryId, input.baseRef, input.epochStartsAt);
+  // An attested range that starts past every record this branch has serves
+  // nothing, and a walk over nothing reports nothing. That reads as a clean
+  // chain to anybody counting findings, which is the same silent zero
+  // `NOTHING_CHECKED` was written for. The second read happens only when the
+  // range is empty, so a healthy queue pays for it never.
+  if (links.length === 0) {
+    const stored = await readChain(db, input.repositoryId, input.baseRef);
+    if (stored.length > 0) {
+      return [
+        {
+          code: "NOTHING_CHECKED",
+          sequence: null,
+          digest: "",
+          detail:
+            `the attested range starts at ${input.epochStartsAt} and this branch's last record is ` +
+            `${stored.at(-1)?.sequence ?? "?"}, so the walk read nothing`,
+        },
+      ];
+    }
+  }
   return checkOwnChain(links, {
     epochStartsAt: input.epochStartsAt,
     subject: { repositoryId: input.repositoryId, baseRef: input.baseRef },

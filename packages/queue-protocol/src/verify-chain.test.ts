@@ -465,3 +465,42 @@ describe("verifying a chain", () => {
     });
   });
 });
+
+/**
+ * A genesis says a chain starts here. Where "here" is belongs to the reader's
+ * epoch, and the parser cannot see it, so this is where the two are held
+ * together. A second root inside an attested range would split what a reader is
+ * asked to check into two chains presented as one.
+ */
+describe("a root has to be at the start of the range", () => {
+  const rootAt = async (sequence: number, previous: string | null) =>
+    makeLink({
+      sequence,
+      previous,
+      before: undefined,
+      over: {
+        kind: "genesis",
+        before: { baseSha: null, treeOid: null },
+        reusedProof: undefined,
+        genesis: {
+          policyDigest: D("a"),
+          configDigest: D("b"),
+          rulesetDigest: D("c"),
+          priorEpochClosingDigest: previous,
+        },
+      },
+    });
+
+  it("is silent about a genesis that sits where the range starts", async () => {
+    const root = await rootAt(1, null);
+    const { findings } = await verifyChain([root], { ...signedOk, epochStartsAt: 1 });
+    expect(findings.map((f) => f.code)).not.toContain("GENESIS_MISPLACED");
+  });
+
+  it("reports a genesis inside the range rather than at its start", async () => {
+    const one = await link(1, null);
+    const two = await rootAt(2, one.digest);
+    const { findings } = await verifyChain([one, two], { ...signedOk, epochStartsAt: 1 });
+    expect(findings.map((f) => f.code)).toContain("GENESIS_MISPLACED");
+  });
+});
