@@ -71,15 +71,30 @@ That cost is easy to feel in a repository with agents. The agents save time by
 working at the same time, then the queue asks the team to pay for the same
 integration setup over and over. A study of 1.3 million GitHub Actions runs
 measured mean job time at 6.3 minutes. [Its results](https://software-lab.org/publications/icse2024_workflows.pdf)
-are repository-wide averages, not a promise about any one project, but the
-serial shape is the important part.
+also put average annual GitHub Actions spend at $504 for paid-tier repositories,
+roughly $500. Those are repository-wide averages, not a promise about any one
+project, but the serial shape is the important part.
 
 ## How thwip moves a change through the lane
 
-There is one lane for each protected branch. `main` and `release` have separate
-lanes. Within a lane, each person's oldest eligible pull request competes, and
-the person served least recently gets the next turn. A single busy author
-cannot fill the front of the queue with ten pull requests.
+We created thwip to help us deal with this problem: keep the useful safety
+properties of a merge queue while reducing the amount of serial cloud work. The
+basic shape is familiar. Like other merge queues, thwip has one lane for each
+protected branch, chooses one eligible pull request at a time, checks the
+combination against the current base, and merges only after its policy allows
+it.
+
+The difference comes after the candidate is built. A conventional queue usually
+answers the question with a fresh CI run in the cloud for every candidate.
+Thwip treats that as one option. Its policy can reuse signed evidence already
+on the pull request, or ask an enrolled device to run the candidate and sign a
+receipt. The `remote` profile stays close to the conventional cloud-run model;
+`fast` and `fresh` are the alternatives.
+
+Within those lanes, `main` and `release` stay separate. Each person's oldest
+eligible pull request competes, and the person served least recently gets the
+next turn. A single busy author cannot fill the front of the queue with ten pull
+requests.
 
 The winning pull request gets a **pinned candidate**. GitHub's temporary merge
 ref can change as the PR or base changes, so thwip stores the candidate commit,
