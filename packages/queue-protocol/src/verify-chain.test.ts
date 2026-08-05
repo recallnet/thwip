@@ -358,6 +358,22 @@ describe("verifying a chain", () => {
     expect(one.digest).not.toBe(two.digest);
   });
 
+  /**
+   * A repository that has never been rebaselined sits at queue epoch 0, and its
+   * chain opens at sequence 1. Every fixture here passed `epochStartsAt: 1`, so
+   * nothing exercised that pair, and `thwip verify-chain` on recallnet/thwip-test
+   * reported `MISSING_PREFIX` on a two-link chain that was whole. Sequence 1 is
+   * where a chain starts: the record schema binds it to a null predecessor, so
+   * there is no earlier link a server could have withheld.
+   */
+  it("accepts a chain that opens at sequence 1 on a queue that has never rebaselined", async () => {
+    const one = await link(1, null);
+    const two = await link(2, one.digest);
+    const result = await verifyChain([one, two], { verifySignature: async () => true, epochStartsAt: 0 });
+    expect(result.findings).toEqual([]);
+    expect(result.signaturesChecked).toBe(2);
+  });
+
   it("accepts a first link that sits at the epoch and names pre-attestation history", async () => {
     const twentyTwo = await link(22, D("a"));
     const twentyThree = await link(23, twentyTwo.digest);

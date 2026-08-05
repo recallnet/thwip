@@ -547,8 +547,15 @@ function reachesHead(last: Edge | null, unreadable: number, ports: ChainVerifier
 /**
  * Where a served chain is allowed to begin.
  *
- * The rule: the first link's sequence must not be above `epochStartsAt`. It is
- * either the first attested record, or history sitting below it.
+ * The rule: the first link's sequence must not be above `epochStartsAt`, or it
+ * must be sequence 1. It is the start of the chain, the first attested record,
+ * or history sitting below it.
+ *
+ * Sequence 1 anchors on its own because the record schema binds it to a null
+ * predecessor. There is no earlier link, so a server serving from it has
+ * withheld nothing, whatever `epochStartsAt` says. A queue that has never
+ * rebaselined sits at epoch 0 and opens its chain at 1, and without this clause
+ * every repository in that state reported a prefix it could never have had.
  *
  * Nothing used to anchor the start. `previous` began null, so the first link's
  * predecessor digest and sequence were compared against nothing, and a real
@@ -574,7 +581,7 @@ function reachesHead(last: Edge | null, unreadable: number, ports: ChainVerifier
  * an accusation.
  */
 function anchor(sequence: number | null, digest: string, ports: ChainVerifierPorts): ChainFinding[] {
-  if (sequence === null || sequence <= ports.epochStartsAt) return [];
+  if (sequence === null || sequence === 1 || sequence <= ports.epochStartsAt) return [];
   return [
     {
       code: "MISSING_PREFIX",
