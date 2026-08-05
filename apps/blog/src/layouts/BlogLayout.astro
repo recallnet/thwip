@@ -61,8 +61,8 @@ const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
       <SiteFoot />
     </div>
     <CodeCopy />
-    <script is:inline type="module">
-      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/+esm";
+    <script>
+      import mermaid from "mermaid/dist/mermaid.esm.min.mjs";
 
       const mermaidSource = document.querySelectorAll(".eb-mermaid");
       if (mermaidSource.length > 0) {
@@ -83,17 +83,18 @@ const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
 
         (async () => {
           for (const [index, figure] of mermaidSource.entries()) {
-            const source = figure.querySelector(".eb-mermaid__source pre");
-            const target = figure.querySelector(".eb-mermaid__diagram");
+            const source = figure.querySelector(".eb-mermaid__source pre code");
+            const target = figure.querySelector<HTMLElement>(".eb-mermaid__diagram");
             if (!source || !target) continue;
 
             const chart = source.textContent?.trim();
             if (!chart) continue;
             target.id = `mermaid-diagram-${index}`;
-            target.textContent = chart;
 
             try {
-              await mermaid.run({ nodes: [target] });
+              const { svg, bindFunctions } = await mermaid.render(`mermaid-svg-${index}`, chart);
+              target.innerHTML = svg;
+              bindFunctions?.(target);
               target.classList.add("is-ready");
               figure.classList.add("is-ready");
             } catch {

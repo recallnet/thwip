@@ -6,7 +6,7 @@ interface Props {
 const { label = "Diagram" } = Astro.props;
 ---
 <figure class="eb-mermaid" aria-label={label}>
-  <div class="eb-mermaid__diagram" aria-hidden="true"></div>
+  <div class="eb-mermaid__diagram" aria-hidden="true">Rendering diagram…</div>
   <div class="eb-mermaid__source">
     <slot />
   </div>
