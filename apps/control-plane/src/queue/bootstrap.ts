@@ -501,7 +501,19 @@ function matchesExpected(actual: unknown, expected: unknown): boolean {
  */
 function rulesetConfigurationMatches(actual: Ruleset, expected: Ruleset): boolean {
   const { bypass_actors: _ignored, ...visibleExpected } = expected;
-  return matchesExpected(actual, visibleExpected);
+  // GitHub drops the `parameters` object from an `update` rule when
+  // `update_allows_fetch_and_merge` is false (its safe default). Normalize the
+  // read-back to the explicit payload we generated, otherwise setup asks an
+  // administrator to reapply the already-correct ownership ruleset forever.
+  const normalizedActual = {
+    ...actual,
+    rules: actual.rules.map((rule) =>
+      rule.type === "update" && rule.parameters === undefined
+        ? { ...rule, parameters: { update_allows_fetch_and_merge: false } }
+        : rule,
+    ),
+  };
+  return matchesExpected(normalizedActual, visibleExpected);
 }
 
 function bypassActorsVisible(ruleset: Ruleset): boolean {
