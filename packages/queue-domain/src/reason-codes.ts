@@ -31,6 +31,9 @@ export const BLOCKING_REASONS = [
   "RULESET_DRIFT",
   "POLICY_CHANGED",
   "COOLDOWN_ACTIVE",
+  // GitHub is rebuilding the synthetic merge commit after the base moved. The
+  // entry keeps its place and retry time while another entry may use the lane.
+  "CANDIDATE_STALE",
   "NEEDS_REPAIR",
   // A turn can end for reasons that have nothing to do with the branch. Telling
   // the developer to push a fix when an administrator cancelled the turn, when

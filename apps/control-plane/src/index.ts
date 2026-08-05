@@ -2052,10 +2052,12 @@ async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnC
 
   const id = current?.["id"];
   if (typeof id === "number") {
-    await call(`/check-runs/${id}`, { method: "PATCH", body });
+    const response = await call(`/check-runs/${id}`, { method: "PATCH", body });
+    if (!response.ok) throw new Error(`GitHub refused the turn-check update (${response.status})`);
     return;
   }
-  await call("/check-runs", { method: "POST", body });
+  const response = await call("/check-runs", { method: "POST", body });
+  if (!response.ok) throw new Error(`GitHub refused the turn-check creation (${response.status})`);
 }
 
 /* The queue's own routes. Authorization reuses the GitHub projection: a viewer

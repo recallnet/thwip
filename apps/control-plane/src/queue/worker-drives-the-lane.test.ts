@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
+import { fixturePolicy } from "../../test/queue-deps.js";
+import { provenCommit } from "../../test/proven-commit.js";
 import type { QueueRouteEnv } from "./routes.js";
 import { runOnQueue } from "./routes.js";
 import { loadQueueState } from "./queue-state.js";
@@ -114,7 +116,7 @@ function reads(over: Record<string, unknown> = {}) {
       headSha: HEAD,
     }),
     pullRequestNumbersForCommit: async () => [120],
-    activePolicy: async () => null,
+    activePolicy: async () => fixturePolicy(),
     dispatchCandidateVerification: async () => ({ ok: true }),
     integratedCandidate: async () => ({
       status: "pinned" as const,
@@ -124,8 +126,13 @@ function reads(over: Record<string, unknown> = {}) {
       candidateTreeOid: TREE,
     }),
     mergeWrite: async () => ({ kind: "unknown", detail: "test does not land the merge" }),
-    commitFacts: async () => ({ treeOid: TREE, parentShas: [] }),
-    proofCheckRunId: async () => null,
+    publishTurnCheck: async () => {},
+    commitFacts: async () => ({
+      treeOid: TREE,
+      parentShas: [BASE],
+      message: provenCommit({ repositoryId: REPO, baseRef: REF, treeOid: TREE, baseSha: BASE }),
+    }),
+    proofCheckRunId: async () => "778899",
     baseContainsSha: async () => true,
     signRecordBytes: async () => "jws",
     ...over,
@@ -149,6 +156,78 @@ describe("who drives the lane", () => {
     const walked = await driveQueue(e, reads() as never, onQueue, { repositoryId: REPO, baseRef: REF });
 
     expect(walked).toBe(0);
+  });
+
+  it("publishes the held turn before a heartbeat-offered lane writes", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+
+    const order: string[] = [];
+    await driveQueue(
+      e,
+      reads({
+        publishTurnCheck: async (_env: QueueRouteEnv, repositoryId: string, update: { state: string; headSha: string }) => {
+          expect(repositoryId).toBe(REPO);
+          expect(update).toMatchObject({ state: "holds", headSha: HEAD });
+          order.push("turn-check");
+        },
+        mergeWrite: async () => {
+          order.push("merge-write");
+          return { kind: "unknown" as const, detail: "test does not land the merge" };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(order).toEqual(["turn-check", "merge-write"]);
+  });
+
+  it("does not write the branch when the held-turn publication fails", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+
+    let mergeWrites = 0;
+    await expect(
+      driveQueue(
+        e,
+        reads({
+          publishTurnCheck: async () => {
+            throw new Error("GitHub refused the turn check");
+          },
+          mergeWrite: async () => {
+            mergeWrites += 1;
+            return { kind: "unknown" as const, detail: "must not be reached" };
+          },
+        }) as never,
+        onQueue,
+        { repositoryId: REPO, baseRef: REF },
+      ),
+    ).rejects.toThrow("GitHub refused the turn check");
+    expect(mergeWrites).toBe(0);
+  });
+
+  it("does not write the branch without a held-turn publisher", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+
+    let mergeWrites = 0;
+    await driveQueue(
+      e,
+      reads({
+        publishTurnCheck: undefined,
+        mergeWrite: async () => {
+          mergeWrites += 1;
+          return { kind: "unknown" as const, detail: "must not be reached" };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+    expect(mergeWrites).toBe(0);
   });
 
 });
