@@ -37,6 +37,7 @@ import type { Env } from "../env.js";
 /** What the caller may choose. The base ref comes from the repository. */
 export interface BootstrapRouteBody {
   readonly includeRepositoryConfig?: boolean;
+  readonly chainPublic?: boolean;
   readonly confirmQueueEnforcement?: boolean;
   readonly confirmRulesetBypassActors?: boolean;
 }
@@ -169,6 +170,7 @@ export async function bootstrapRouteResponse(
       actionRef: QUEUE_ACTION_REF,
       repositoryId,
       baseRef: repo.baseRef,
+      ...(typeof body.chainPublic === "boolean" ? { chainPublic: body.chainPublic } : {}),
       ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       ...(body.confirmQueueEnforcement === true ? { confirmQueueEnforcement: true } : {}),
       ...(body.confirmRulesetBypassActors === true ? { confirmRulesetBypassActors: true } : {}),

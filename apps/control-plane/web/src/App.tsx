@@ -1138,6 +1138,7 @@ interface BootstrapBody {
   complete?: boolean;
   enabled?: boolean;
   activationState?: string;
+  chainPublic?: boolean;
   outcomes?: BootstrapOutcome[];
   error?: string;
 }
@@ -1152,6 +1153,7 @@ async function bootstrapRequest(
   method: "GET" | "POST",
   input: {
     includeRepositoryConfig?: boolean;
+    chainPublic?: boolean;
     confirmQueueEnforcement?: boolean;
     confirmRulesetBypassActors?: boolean;
   } = {},
@@ -1222,6 +1224,9 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   const [failure, setFailure] = useState<string | null>(null);
   const [pull, setPull] = useState<number | null>(null);
   const [includeRepositoryConfig, setIncludeRepositoryConfig] = useState(false);
+  const [chainPublic, setChainPublic] = useState(false);
+  const [chainChoiceExplicit, setChainChoiceExplicit] = useState(false);
+  const [savingChainVisibility, setSavingChainVisibility] = useState(false);
   const [confirmedQueueEnforcement, setConfirmedQueueEnforcement] = useState(false);
   const [confirmedBypassActors, setConfirmedBypassActors] = useState(false);
 
@@ -1233,6 +1238,8 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     void bootstrapRequest(repositoryId, "GET").then(({ status, body: read }) => {
       if (!live || status !== 200) return;
       setBody(read);
+      setChainPublic(read.chainPublic === true);
+      setChainChoiceExplicit(false);
       setPhase(read.complete === true ? "enrolled" : "waiting");
     });
     return () => {
@@ -1260,12 +1267,15 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     try {
       const { status, body: answered } = await bootstrapRequest(repositoryId, "POST", {
         ...(includeRepositoryConfig ? { includeRepositoryConfig: true } : {}),
+        ...(chainChoiceExplicit ? { chainPublic } : {}),
         ...(confirmedQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
         ...(confirmedBypassActors ? { confirmRulesetBypassActors: true } : {}),
       });
       setConfirmedQueueEnforcement(false);
       setConfirmedBypassActors(false);
       setBody(answered);
+      setChainPublic(answered.chainPublic === true);
+      setChainChoiceExplicit(false);
       if (status === 200) {
         setPhase("enrolled");
         return;
@@ -1286,6 +1296,24 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
       setConfirmedBypassActors(false);
       setPhase("failed");
       setFailure((e as Error).message);
+    }
+  };
+
+  const saveChainVisibility = async () => {
+    setSavingChainVisibility(true);
+    setFailure(null);
+    try {
+      const { status, body: answered } = await bootstrapRequest(repositoryId, "POST", { chainPublic });
+      setBody(answered);
+      setChainPublic(answered.chainPublic === true);
+      setChainChoiceExplicit(false);
+      if (status !== 200) {
+        setFailure(answered.error ?? stoppedOn(answered) ?? `Could not save chain visibility (${status}).`);
+      }
+    } catch (e) {
+      setFailure((e as Error).message);
+    } finally {
+      setSavingChainVisibility(false);
     }
   };
 
@@ -1327,6 +1355,39 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
           Add a repository-specific Node.js policy override instead of inheriting organization defaults.
         </label>
       )}
+      <div>
+        <label>
+          <input
+            type="checkbox"
+            checked={chainPublic}
+            disabled={phase === "running" || savingChainVisibility}
+            onChange={(event) => {
+              setChainPublic(event.target.checked);
+              setChainChoiceExplicit(true);
+            }}
+          />{" "}
+          Let anyone read and verify this repository's signed queue chain without signing in.
+        </label>
+        <p className="gp-panel__meta">
+          Public records include pull request numbers, commit and tree identifiers, actor GitHub IDs, timestamps, and
+          free-text override reasons. Leave this off for a private repository; authorized organization members can
+          still read its chain. The default is private.
+        </p>
+        {phase === "enrolled" && (
+          <div className="thwip-actions">
+            <button
+              className="gp-btn gp-btn--sm gp-btn--quiet"
+              disabled={savingChainVisibility || chainPublic === body.chainPublic}
+              onClick={() => void saveChainVisibility()}
+            >
+              {savingChainVisibility ? "Saving…" : "Save chain visibility"}
+            </button>
+            <StatusChip tone={body.chainPublic === true ? "ok" : "off"}>
+              {body.chainPublic === true ? "Public chain" : "Private chain"}
+            </StatusChip>
+          </div>
+        )}
+      </div>
       {phase === "waiting" && (
         <>
           <p>
