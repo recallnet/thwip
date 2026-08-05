@@ -1199,6 +1199,14 @@ function rulesetCommand(
 
 type EnrolmentPhase = "idle" | "running" | "waiting" | "enrolled" | "failed";
 
+/** What a completed setup actually does at its final activation state. */
+export function completedQueueActivationText(activationState: string | undefined): string {
+  if (activationState === "enforced") {
+    return "It owns normal branch updates and requires the App proof and turn checks.";
+  }
+  return "It reports what it would do and blocks nothing until you enforce it.";
+}
+
 /**
  * Enrolling a repository, as a control.
  *
@@ -1373,7 +1381,7 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
       {phase === "enrolled" && (
         <p>
           <StatusChip tone="ok">Enrolled</StatusChip> The queue is {body.activationState ?? "observing"} on{" "}
-          <code>{project.default_branch}</code>. It reports what it would do and blocks nothing until you enforce it.
+          <code>{project.default_branch}</code>. {completedQueueActivationText(body.activationState)}
         </p>
       )}
       {phase !== "enrolled" && (
