@@ -377,6 +377,49 @@
   margin-bottom: 0;
 }
 
+.eb-mermaid {
+  margin: 0 0 var(--s5);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  overflow-x: auto;
+}
+
+.eb-mermaid__diagram {
+  display: none;
+  min-width: 560px;
+  padding: var(--s4);
+}
+
+.eb-mermaid__diagram.is-ready {
+  display: block;
+}
+
+.eb-mermaid__diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 560px;
+}
+
+.eb-mermaid__source {
+  padding: 0 var(--s4) var(--s4);
+}
+
+.eb-mermaid.is-ready .eb-mermaid__source {
+  display: none;
+}
+
+.eb-mermaid__source pre {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .eb-mermaid__diagram {
+    min-width: 0;
+    padding: var(--s3);
+  }
+}
+
 .eb-prose a {
   text-underline-offset: 0.15em;
 }

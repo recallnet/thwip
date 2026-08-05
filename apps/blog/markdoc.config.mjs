@@ -53,6 +53,12 @@ export default defineMarkdocConfig({
       },
       selfClosing: true,
     },
+    mermaid: {
+      render: component("./src/components/Mermaid.astro"),
+      attributes: {
+        label: { type: String, required: false },
+      },
+    },
     steps: {
       render: component("./src/components/Steps.astro"),
     },

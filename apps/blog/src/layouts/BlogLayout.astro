@@ -61,5 +61,48 @@ const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
       <SiteFoot />
     </div>
     <CodeCopy />
+    <script>
+      import mermaid from "mermaid/dist/mermaid.esm.min.mjs";
+
+      const mermaidSource = document.querySelectorAll(".eb-mermaid");
+      if (mermaidSource.length > 0) {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: "base",
+          themeVariables: {
+            fontFamily: "Public Sans, system-ui, sans-serif",
+            primaryColor: "#e8f2f8",
+            primaryTextColor: "#1b1b1b",
+            primaryBorderColor: "#005ea2",
+            lineColor: "#565c65",
+            secondaryColor: "#f5f6f7",
+            tertiaryColor: "#ffffff",
+          },
+        });
+
+        (async () => {
+          for (const [index, figure] of mermaidSource.entries()) {
+            const source = figure.querySelector(".eb-mermaid__source pre code");
+            const target = figure.querySelector<HTMLElement>(".eb-mermaid__diagram");
+            if (!source || !target) continue;
+
+            const chart = source.textContent?.trim();
+            if (!chart) continue;
+            target.id = `mermaid-diagram-${index}`;
+
+            try {
+              const { svg, bindFunctions } = await mermaid.render(`mermaid-svg-${index}`, chart);
+              target.innerHTML = svg;
+              bindFunctions?.(target);
+              target.classList.add("is-ready");
+              figure.classList.add("is-ready");
+            } catch {
+              target.textContent = "";
+            }
+          }
+        })();
+      }
+    </script>
   </body>
 </html>
