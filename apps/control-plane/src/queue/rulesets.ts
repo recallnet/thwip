@@ -97,7 +97,12 @@ function refCondition(baseRef: string): Ruleset["conditions"] {
 
 /**
  * Only the Thwip App may update the queued branch, because the App performs the
- * merge. Deletion and force-push stay blocked for everyone.
+ * merge. The App needs an `always` bypass because its writer creates the exact
+ * merge commit and advances the ref directly; GitHub's `pull_request` bypass
+ * applies only to updates made through GitHub's pull-request merge path and
+ * refuses that guarded ref update. No user or team receives a bypass, and the
+ * writer itself still hard-codes `force: false`. Deletion and force-push stay
+ * blocked for everyone else.
  */
 export function appOwnershipRuleset(input: { baseRef: string; integrationId: number }): Ruleset {
   return {
@@ -105,7 +110,7 @@ export function appOwnershipRuleset(input: { baseRef: string; integrationId: num
     target: "branch",
     enforcement: "active",
     bypass_actors: [
-      { actor_id: input.integrationId, actor_type: "Integration", bypass_mode: "pull_request" },
+      { actor_id: input.integrationId, actor_type: "Integration", bypass_mode: "always" },
     ],
     conditions: refCondition(input.baseRef),
     rules: [
