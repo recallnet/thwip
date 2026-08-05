@@ -2,13 +2,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { APP_MANIFEST_EVENTS, HANDLED_WEBHOOK_EVENTS, webhookEventDrift } from "./github-events.js";
+import {
+  APP_MANIFEST_EVENTS,
+  HANDLED_WEBHOOK_EVENTS,
+  OPTIONAL_WEBHOOK_EVENTS,
+  REQUIRED_WEBHOOK_EVENTS,
+  webhookEventDrift,
+} from "./github-events.js";
 
 /**
  * What the App is subscribed to, against what the code handles.
  *
  * The installed App had never delivered a single `pull_request`, `push`,
- * `check_run` or `merge_group` webhook. Eighty-two `check_suite` deliveries and
+ * `check_run` webhook. Eighty-two `check_suite` deliveries and
  * nothing else. So `queueFromPullRequest`, `externalPushFromWebhook` and the
  * policy-push sync had never once run in this deployment, and everything that
  * did work worked because the workflows call `/authorize` directly.
@@ -81,24 +87,28 @@ describe("the events the code handles", () => {
       "check_suite",
       "member",
       "membership",
-      "merge_group",
       "organization",
       "pull_request",
       "push",
       "repository",
       "team",
+      "merge_group",
     ]);
   });
 
   /**
    * The manifest is the one place a fresh registration gets its subscription
-   * from, so it must be the same list rather than a copy of it. A literal array
-   * there is how the two drift.
+   * from, so it must use the App path's required list rather than a copy.
    */
-  it("registers a new App for exactly what the code handles", () => {
-    expect(APP_MANIFEST_EVENTS).toEqual([...HANDLED_WEBHOOK_EVENTS]);
+  it("registers a new App for exactly the events the App path requires", () => {
+    expect(APP_MANIFEST_EVENTS).toEqual([...REQUIRED_WEBHOOK_EVENTS]);
     expect(source("index.ts")).toContain("default_events: APP_MANIFEST_EVENTS");
     expect(source("index.ts")).not.toMatch(/default_events:\s*\[/);
+  });
+
+  it("does not require an event GitHub does not offer for this App", () => {
+    expect([...OPTIONAL_WEBHOOK_EVENTS]).toEqual(["merge_group"]);
+    expect(APP_MANIFEST_EVENTS).not.toContain("merge_group");
   });
 });
 
@@ -108,14 +118,22 @@ describe("comparing an installation against the code", () => {
     expect(drift.deadHandlers).toContain("pull_request");
     expect(drift.deadHandlers).toContain("push");
     expect(drift.deadHandlers).toContain("check_run");
-    expect(drift.deadHandlers).toContain("merge_group");
     expect(drift.healthy).toBe(false);
   });
 
-  it("reports healthy when the App delivers everything the code handles", () => {
-    const drift = webhookEventDrift([...HANDLED_WEBHOOK_EVENTS]);
+  it("reports healthy when the App delivers everything the App path requires", () => {
+    const drift = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS]);
     expect(drift.deadHandlers).toEqual([]);
     expect(drift.healthy).toBe(true);
+  });
+
+  it("treats merge_group as optional rather than dead or unread", () => {
+    const without = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS]);
+    const withEvent = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS, "merge_group"]);
+    expect(without.deadHandlers).not.toContain("merge_group");
+    expect(withEvent.unreadSubscriptions).not.toContain("merge_group");
+    expect(without.healthy).toBe(true);
+    expect(withEvent.healthy).toBe(true);
   });
 
   it("names a subscription nothing reads, without calling it unhealthy", () => {

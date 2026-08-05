@@ -2,7 +2,12 @@
 
 ## Product requirements, architecture, protocol, and build specification
 
-**Status:** build-ready v1 proposal  
+> Historical design record. The shipped setup has one queue runtime: the
+> installed GitHub App writes merge commits. Backend and merge-method options
+> described below are not supported product configuration. See
+> `docs/adr/0001-app-native-proof-checks.md` for the current decision.
+
+**Status:** historical v1 proposal; Queue setup/runtime superseded by ADR 0001
 **Date:** 2026-07-29  
 **Product:** Thwip  
 **Development origin:** `https://airchime.recall.net`  
@@ -5735,4 +5740,3 @@ The acceptance demonstration ends with GitHub’s base branch changed by Thwip, 
 Thwip Queue does not merely decide who should merge next. It gives one fairness principal a bounded chance to produce evidence for an exact future branch state, uses a protected verifier to check that evidence, performs or initiates the actual GitHub merge, and records whether reality matched the claim.
 
 The chain becomes valuable because it makes order, context, attribution, continuity, exceptions, and later corroboration inspectable. Its honesty depends on recording gaps as gaps—and on never turning a green check into a claim that Thwip did not actually establish.
-

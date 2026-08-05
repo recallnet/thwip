@@ -19,10 +19,8 @@ const { queueFromPullRequest } = await import("../index.js");
 /**
  * The Worker taking its own lane to a merge.
  *
- * A repository whose writer is the App has no `thwip-merge.yml` to dispatch, so
- * asking GitHub Actions to run one spends a dispatch on a workflow that is not
- * there. The queue walks the holder itself, and the push its own merge produces
- * is what wakes it for the next one.
+ * The queue walks the holder itself. It never dispatches repository automation
+ * to perform the write, and the push from its own merge wakes the next entry.
  */
 
 const open: Array<{ close(): void }> = [];
@@ -35,7 +33,7 @@ const BASE = "b".repeat(40);
 const CANDIDATE = "c".repeat(40);
 const TREE = "7".repeat(40);
 
-function env(writer: "app" | "workflow"): QueueRouteEnv {
+function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
@@ -44,9 +42,9 @@ function env(writer: "app" | "workflow"): QueueRouteEnv {
     .run("org_1", "1", "acme", "9001");
   raw
     .prepare(
-      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, merge_writer) VALUES (?, ?, ?, ?, 1, 'enforced', ?)",
+      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
     )
-    .run("qp_1", "org_1", REPO, REF, writer);
+    .run("qp_1", "org_1", REPO, REF);
   raw
     .prepare(
       "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
@@ -102,12 +100,10 @@ function watchGithub(): string[] {
   return called;
 }
 
-function reads(writer: "app" | "workflow", over: Record<string, unknown> = {}) {
+function reads(over: Record<string, unknown> = {}) {
   return {
     queueProject: async () => ({
       activationState: "enforced",
-      mergeMethod: "merge" as const,
-      mergeWriter: writer,
     }),
     principalFor: async () => "alice",
     pullRequestPlacement: async () => ({
@@ -127,7 +123,7 @@ function reads(writer: "app" | "workflow", over: Record<string, unknown> = {}) {
       candidateSha: CANDIDATE,
       candidateTreeOid: TREE,
     }),
-    driveTurn: async () => {},
+    mergeWrite: async () => ({ kind: "unknown", detail: "test does not land the merge" }),
     commitFacts: async () => ({ treeOid: TREE, parentShas: [] }),
     proofCheckRunId: async () => null,
     baseContainsSha: async () => true,
@@ -137,8 +133,8 @@ function reads(writer: "app" | "workflow", over: Record<string, unknown> = {}) {
 }
 
 describe("who drives the lane", () => {
-  it("does not spend an Actions dispatch on a repository whose writer is the App", async () => {
-    const e = env("app");
+  it("does not dispatch repository automation to perform an App write", async () => {
+    const e = env();
     const called = watchGithub();
 
     await queueFromPullRequest(e as never, opened());
@@ -147,40 +143,12 @@ describe("who drives the lane", () => {
     expect(called.filter((url) => url.endsWith("/dispatches"))).toEqual([]);
   });
 
-  it("still dispatches for a repository whose writer is the workflow", async () => {
-    const e = env("workflow");
-    const called = watchGithub();
-
-    await queueFromPullRequest(e as never, opened());
-
-    expect(called.filter((url) => url.endsWith("/dispatches"))).toEqual([
-      "https://api.github.com/repos/acme/repo/dispatches",
-    ]);
-  });
-
-  it("walks whoever holds the lane when the base branch moves", async () => {
-    const e = env("app");
-    await queueFromPullRequest(e as never, opened());
-
-    const walked = await driveQueue(e, reads("app") as never, onQueue, { repositoryId: REPO, baseRef: REF });
-
-    expect(walked).toBe(1);
-  });
-
   it("walks nobody when the lane is idle", async () => {
-    const e = env("app");
+    const e = env();
 
-    const walked = await driveQueue(e, reads("app") as never, onQueue, { repositoryId: REPO, baseRef: REF });
-
-    expect(walked).toBe(0);
-  });
-
-  it("walks nobody for a repository that still runs the workflow", async () => {
-    const e = env("workflow");
-    await queueFromPullRequest(e as never, opened());
-
-    const walked = await driveQueue(e, reads("workflow") as never, onQueue, { repositoryId: REPO, baseRef: REF });
+    const walked = await driveQueue(e, reads() as never, onQueue, { repositoryId: REPO, baseRef: REF });
 
     expect(walked).toBe(0);
   });
+
 });

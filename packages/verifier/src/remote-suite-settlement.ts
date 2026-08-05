@@ -5,7 +5,7 @@
  * `confirmMergeAbsence`) applied to a different question. That rule exists
  * because one read of GitHub decided a merge had not happened 1.5 seconds after
  * it had, and three merges left the signed chain
- * (`.superpowers/sdd/not-merged-report.md`). The same shape sat here: one read
+ * in an earlier settlement investigation. The same shape sat here: one read
  * of `check-runs`, and a check that had not finished was written down as a
  * failure the developer read as "your tests failed".
  *

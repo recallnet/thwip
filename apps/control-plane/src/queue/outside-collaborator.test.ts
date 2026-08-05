@@ -85,10 +85,7 @@ function grant(permission: string, projectId = "proj_acme", githubUserId = "31")
     .run(projectId, githubUserId, "olive", permission);
 }
 
-const dispatched: number[] = [];
-
 function routes(session: { principalId: string; githubUserId: string; isAdmin?: boolean } | null) {
-  dispatched.length = 0;
   return queueRoutes({
     authenticate: async () =>
       session === null
@@ -103,12 +100,9 @@ function routes(session: { principalId: string; githubUserId: string; isAdmin?: 
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async () => null,
     pullRequestPlacement: async () => ({ authorGithubUserId: "31", baseRef: REF, authorIsBot: false }),
-    driveTurn: async (_e, _r, pullRequestNumber) => {
-      dispatched.push(pullRequestNumber);
-    },
     commitFacts: async () => null,
     signRecordBytes: async () => "jws",
   });
@@ -279,7 +273,6 @@ describe("an outside collaborator with triage", () => {
 
     expect(response.status).toBe(403);
     expect(await refusal(response)).toBe(REPOSITORY_READ_ONLY);
-    expect(dispatched).toEqual([]);
   });
 });
 

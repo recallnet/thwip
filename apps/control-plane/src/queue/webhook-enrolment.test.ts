@@ -111,7 +111,7 @@ async function entry(e: QueueRouteEnv) {
 /** The queue's own reads, with GitHub stubbed to one open pull request on HEAD. */
 function reads(over: Record<string, unknown> = {}) {
   return {
-    queueProject: async () => ({ activationState: "enforced", mergeMethod: "merge" as const }),
+    queueProject: async () => ({ activationState: "enforced" }),
     principalFor: async () => "alice",
     pullRequestPlacement: async () => ({
       authorGithubUserId: "1",
@@ -123,12 +123,10 @@ function reads(over: Record<string, unknown> = {}) {
     pullRequestNumbersForCommit: async () => [120],
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    driveTurn: async () => {},
     commitFacts: async () => ({ treeOid: "t".repeat(40), parentShas: [] }),
     proofCheckRunId: async () => null,
     baseContainsSha: async () => true,
     signRecordBytes: async () => "jws",
-    queueProjectForRecord: async () => ({ mergeMethod: "merge" as const }),
     ...over,
   };
 }

@@ -2,12 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   BOOTSTRAP_STEPS,
   bootstrapCheckRuns,
-  checkRulesetForBackend,
+  checkAppRuleset,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
-  managedOwnershipRuleset,
+  appOwnershipRuleset,
   mayActivate,
-  nativeMergeQueueRuleset,
   nextBootstrapStep,
   policyRuleset,
   type Ruleset,
@@ -22,9 +21,6 @@ function policy(over: Partial<Parameters<typeof policyRuleset>[0]> = {}): Rulese
   return policyRuleset({
     baseRef: BASE,
     integrationId: INTEGRATION_ID,
-    mergeMethod: "squash",
-    requiredApprovingReviewCount: 1,
-    requireCodeOwnerReview: true,
     ...over,
   });
 }
@@ -34,9 +30,9 @@ function requiredChecks(ruleset: Ruleset): Array<{ context: string; integration_
   return rule.parameters!["required_status_checks"] as Array<{ context: string; integration_id?: number }>;
 }
 
-describe("managedOwnershipRuleset", () => {
+describe("appOwnershipRuleset", () => {
   it("lets only the App update the branch and blocks deletion and force-push", () => {
-    const ruleset = managedOwnershipRuleset({ baseRef: BASE, integrationId: INTEGRATION_ID });
+    const ruleset = appOwnershipRuleset({ baseRef: BASE, integrationId: INTEGRATION_ID });
     expect(ruleset.rules.map((r) => r.type).sort()).toEqual(["deletion", "non_fast_forward", "update"]);
     expect(ruleset.bypass_actors).toEqual([
       { actor_id: INTEGRATION_ID, actor_type: "Integration", bypass_mode: "pull_request" },
@@ -94,67 +90,20 @@ describe("policyRuleset", () => {
     ]);
   });
 
-  it("allows exactly the configured merge method", () => {
-    const pr = policy({ mergeMethod: "merge" }).rules.find((r) => r.type === "pull_request")!;
-    expect(pr.parameters!["allowed_merge_methods"]).toEqual(["merge"]);
-  });
-
-  it("keeps the review controls the spec names", () => {
-    const pr = policy().rules.find((r) => r.type === "pull_request")!;
-    expect(pr.parameters).toMatchObject({
-      dismiss_stale_reviews_on_push: true,
-      require_last_push_approval: true,
-      required_review_thread_resolution: true,
-      require_code_owner_review: true,
-    });
+  it("does not impose a review model on the repository", () => {
+    expect(policy().rules.map((rule) => rule.type)).not.toContain("pull_request");
   });
 });
 
-describe("nativeMergeQueueRuleset", () => {
-  it("uses group size one and ALLGREEN", () => {
-    const rule = nativeMergeQueueRuleset({
-      baseRef: BASE,
-      integrationId: INTEGRATION_ID,
-      mergeMethod: "merge",
-      checkResponseTimeoutMinutes: 60,
-    }).rules.find((r) => r.type === "merge_queue")!;
-    expect(rule.parameters).toMatchObject({
-      grouping_strategy: "ALLGREEN",
-      max_entries_to_build: 1,
-      max_entries_to_merge: 1,
-      min_entries_to_merge: 1,
-      merge_method: "MERGE",
-      check_response_timeout_minutes: 60,
-    });
+describe("checkAppRuleset", () => {
+  it("accepts App ownership", () => {
+    const ownership = appOwnershipRuleset({ baseRef: BASE, integrationId: INTEGRATION_ID });
+    expect(checkAppRuleset(ownership)).toEqual({ ok: true });
   });
 
-  it("does not carry the managed ownership rule", () => {
-    const ruleset = nativeMergeQueueRuleset({
-      baseRef: BASE,
-      integrationId: INTEGRATION_ID,
-      mergeMethod: "squash",
-      checkResponseTimeoutMinutes: 60,
-    });
-    expect(ruleset.rules.map((r) => r.type)).not.toContain("update");
-  });
-});
-
-describe("checkRulesetForBackend", () => {
-  it("refuses managed ownership rules on a native branch", () => {
-    const ownership = managedOwnershipRuleset({ baseRef: BASE, integrationId: INTEGRATION_ID });
-    expect(checkRulesetForBackend(ownership, "native")).toMatchObject({ ok: false });
-    expect(checkRulesetForBackend(ownership, "managed")).toEqual({ ok: true });
-  });
-
-  it("refuses a merge_queue rule on a managed branch", () => {
-    const native = nativeMergeQueueRuleset({
-      baseRef: BASE,
-      integrationId: INTEGRATION_ID,
-      mergeMethod: "squash",
-      checkResponseTimeoutMinutes: 60,
-    });
-    expect(checkRulesetForBackend(native, "managed")).toMatchObject({ ok: false });
-    expect(checkRulesetForBackend(native, "native")).toEqual({ ok: true });
+  it("refuses a GitHub merge queue rule", () => {
+    const conflicting: Ruleset = { ...policy(), rules: [...policy().rules, { type: "merge_queue" }] };
+    expect(checkAppRuleset(conflicting)).toMatchObject({ ok: false });
   });
 });
 
@@ -222,7 +171,9 @@ describe("bootstrap sequence", () => {
     const blocked = mayActivate(almost);
     expect(blocked).toMatchObject({ ok: false });
     if (!blocked.ok) expect(blocked.reason).toMatch(/canary-negative-test/);
-    expect(mayActivate({ ...almost, "canary-negative-test": true })).toEqual({ ok: true });
+    expect(mayActivate({ ...almost, "canary-negative-test": true, "record-genesis": true })).toEqual({
+      ok: true,
+    });
   });
 
   it("refuses activation when the source was never attached", () => {

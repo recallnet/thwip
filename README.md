@@ -13,8 +13,10 @@ use thwip.
 
 - Product: https://recall.network
 - Control plane (staging): https://thwip.recall.net
-- Design: `plan.md`
-- Deviations from the plan taken for the v1 vertical slice: `DEVIATIONS.md`
+- Current Queue architecture: `docs/adr/0001-app-native-proof-checks.md`
+- Queue onboarding and cutover: `docs/queue-single-path-cutover.md`
+- Historical v1 proposal: `plan.md`
+- Historical deviations from the original v1 slice: `DEVIATIONS.md`
 
 ## Effective policy and first activation
 
