@@ -508,6 +508,64 @@ export async function buildExternalTransitionRecord(input: {
   };
 }
 
+/**
+ * Build the record that opens an attested range.
+ *
+ * A chain that begins at a sequence in the middle of a table begins mid-air: a
+ * reader is shown a first link whose predecessor they cannot fetch and whose
+ * base they are asked to take on trust. A genesis is the root. It names what the
+ * queue was configured with when the range opened, it states the commit the
+ * branch stood at, and it starts from no base at all, which is the one place a
+ * walk can start without asking what came before.
+ *
+ * `priorEpochClosingDigest` is the last record of the range before it, and it is
+ * the same value as `previousTransitionDigest` on purpose. The storage chain is
+ * unbroken across the boundary, so the record before this one is still the
+ * record before this one; what changes is which range a verifier is asked to
+ * check. Naming it twice is what stops a genesis claiming to follow one record
+ * while descending from another.
+ */
+export async function buildGenesisRecord(input: {
+  readonly repositoryId: string;
+  readonly baseRef: string;
+  readonly queueEpoch: number;
+  readonly transitionSequence: number;
+  readonly previousTransitionDigest: Sha256 | null;
+  readonly at: { readonly sha: string; readonly treeOid: string; readonly parentShas: readonly string[] };
+  readonly policyDigest: Sha256;
+  readonly configDigest: Sha256;
+  readonly rulesetDigest: Sha256;
+  readonly observedAt: string;
+}): Promise<Record<string, unknown>> {
+  const parents = input.at.parentShas;
+  const embedded = parents.slice(0, 16);
+  return {
+    schemaVersion: "1",
+    kind: "genesis",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    queueEpoch: input.queueEpoch,
+    transitionSequence: input.transitionSequence,
+    previousTransitionDigest: input.previousTransitionDigest,
+    before: { baseSha: null, treeOid: null },
+    after: {
+      baseSha: input.at.sha,
+      treeOid: input.at.treeOid,
+      parentOids: embedded,
+      parentCount: parents.length,
+      parentOidsDigest: await parentOidsDigest(parents),
+      parentsComplete: embedded.length === parents.length,
+    },
+    observedAt: input.observedAt,
+    genesis: {
+      policyDigest: input.policyDigest,
+      configDigest: input.configDigest,
+      rulesetDigest: input.rulesetDigest,
+      priorEpochClosingDigest: input.previousTransitionDigest,
+    },
+  };
+}
+
 /** The three digests a fast-path reuse claim binds (plan.md §21.5). */
 export interface ReuseEquivalence {
   readonly policyDigest: Sha256;

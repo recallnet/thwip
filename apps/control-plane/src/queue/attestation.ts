@@ -813,25 +813,37 @@ export async function readAttestation(
 }
 
 /**
- * Every signed link on a branch, oldest first.
+ * Every signed link in a branch's attested range, oldest first.
  *
  * Only records occupy a position in the chain, so intents are left out: they are
  * cited by the record that follows them and are fetched by digest when a reader
  * wants one.
+ *
+ * `fromSequence` is `attested_from_sequence`, which says where the chain a
+ * verifier is asked to trust begins. Serving what came before it served records
+ * whose signatures the verifier then skipped, so a walk could report nothing
+ * wrong having checked almost nothing, and the early history of this repository
+ * — a link with no record, a commit sha standing in for a digest, merges that
+ * landed outside the lane — arrived as findings a reader had no way to act on.
+ * Below the range the records are still stored, still signed and still fetched
+ * by digest at `/v1/queue/records/:digest`. Starting an attested range is a
+ * statement about what is claimed, and it takes nothing away.
  */
 export async function readChain(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  fromSequence = 0,
 ): Promise<Array<{ digest: string; sequence: number; bytes: Uint8Array; jws: string }>> {
   const rows = await db
     .prepare(
       `SELECT digest, transition_sequence AS sequence, bytes, jws
          FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+          AND transition_sequence >= ?
         ORDER BY transition_sequence, created_at`,
     )
-    .bind(repositoryId, baseRef)
+    .bind(repositoryId, baseRef, fromSequence)
     .all<{ digest: string; sequence: number; bytes: string; jws: string }>();
   const encoder = new TextEncoder();
   return rows.results.map((r) => ({

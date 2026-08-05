@@ -380,7 +380,7 @@ describe("parseTransitionRecord", () => {
       ).toMatchObject({ ok: false });
     });
 
-    it("rejects a genesis that does not open an epoch", () => {
+    it("rejects a genesis that opens nothing and closes nothing", () => {
       const late = {
         ...baseFields(),
         kind: "genesis",
@@ -392,6 +392,50 @@ describe("parseTransitionRecord", () => {
         },
       };
       expect(parseTransitionRecord(late)).toMatchObject({ ok: false });
+    });
+
+    /**
+     * A repository whose early history was written by software that no longer
+     * exists opens its attested range past that history, so its root is not at
+     * sequence one. It still starts from no base at all, and it names the record
+     * it follows in both places: the range it closes and the link it chains to
+     * are the same record, and a genesis that named two would be claiming to
+     * follow one while descending from another.
+     */
+    it("accepts a genesis that opens a later attested range", () => {
+      const reopened = {
+        ...baseFields({
+          transitionSequence: 128,
+          previousTransitionDigest: D("d"),
+          before: { baseSha: null, treeOid: null },
+        }),
+        kind: "genesis",
+        genesis: {
+          policyDigest: D("a"),
+          configDigest: D("b"),
+          rulesetDigest: D("c"),
+          priorEpochClosingDigest: D("d"),
+        },
+      };
+      expect(parseTransitionRecord(reopened)).toMatchObject({ ok: true });
+    });
+
+    it("rejects a genesis that follows one record and descends from another", () => {
+      const twoAncestries = {
+        ...baseFields({
+          transitionSequence: 128,
+          previousTransitionDigest: D("d"),
+          before: { baseSha: null, treeOid: null },
+        }),
+        kind: "genesis",
+        genesis: {
+          policyDigest: D("a"),
+          configDigest: D("b"),
+          rulesetDigest: D("c"),
+          priorEpochClosingDigest: D("e"),
+        },
+      };
+      expect(parseTransitionRecord(twoAncestries)).toMatchObject({ ok: false });
     });
 
     it("requires a later epoch's genesis to name the prior epoch's closing digest", () => {
