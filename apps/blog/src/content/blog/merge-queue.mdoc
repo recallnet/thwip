@@ -97,11 +97,17 @@ eligible pull request from each participant competes for the next turn, and the
 participant served least recently gets it. One participant cannot put ten pull
 requests ahead of everyone else.
 
-The winning pull request gets a **pinned candidate**. GitHub's temporary merge
-ref can change as the PR or base changes, so thwip stores the candidate commit,
-its parents, and its code snapshot. The parents must still be the current base
-and current PR head. If either moved, thwip discards the candidate and builds a
-new one. It never runs checks for one snapshot and merges a different one.
+The winning pull request becomes a **pinned candidate**: the exact merge GitHub
+has prepared from the current base and the current PR head. GitHub exposes that
+merge through a temporary ref, but it can rebuild the ref when either side
+changes. Thwip records the candidate commit, an identifier for the files it
+contains, and its parents. The first parent must be the current base commit; the
+second must be the current PR head. If `main` advances while the candidate is
+waiting, or someone pushes another commit to the PR, thwip treats the candidate
+as stale and asks for a new one. That is what lets the next step tie its
+**evidence** to the exact candidate that will be merged. (`fast` is the explicit
+exception: it reuses proof from the PR head rather than claiming that the
+integrated candidate was tested.)
 
 The policy then decides where the evidence comes from:
 
