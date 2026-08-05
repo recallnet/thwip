@@ -76,6 +76,19 @@ const RECORD_FROM_INTENT_DEPS: RecordFromIntentDeps<QueueRouteEnv> = recordFromI
  * read only for a queue that has an overdue reconciliation waiting.
  */
 export interface TickPorts {
+  /**
+   * How many queues may run the non-clock maintenance pass in one invocation.
+   *
+   * Clock advancement and lane driving always visit every enabled queue. The
+   * maintenance pass reads merge history, refreshes comments/readiness and
+   * verifies signed chains; doing that for the whole fleet before moving to the
+   * next queue let one busy repository exhaust the Worker's CPU budget and
+   * prevented later queues from receiving their heartbeat at all.
+   *
+   * Omit in focused callers and tests to maintain every queue. Production sets
+   * this to one and rotates the selected queue every five-minute firing.
+   */
+  maintenanceQueuesPerTick?: number;
   driveQueue(repositoryId: string, baseRef: string): Promise<void>;
   onQueueTicked(repositoryId: string): void;
   onQueueFailed(repositoryId: string, error: unknown): void;
@@ -185,7 +198,7 @@ export async function tickAllQueues(
   const rows = await db
     .prepare(
       "SELECT github_repository_id AS repositoryId, base_ref AS baseRef, attested_from_sequence AS epochStartsAt " +
-        "FROM queue_projects WHERE enabled = 1",
+        "FROM queue_projects WHERE enabled = 1 ORDER BY github_repository_id, base_ref",
     )
     .bind()
     .all<{ repositoryId: string; baseRef: string; epochStartsAt: number }>();
@@ -218,6 +231,7 @@ export async function tickAllQueues(
   let settledWrites = 0;
   let readinessRechecked = 0;
   let chainFindings = 0;
+  const sweptQueues: Array<{ row: (typeof rows.results)[number]; snapshot: QueueSnapshot }> = [];
   for (const row of rows.results) {
     try {
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
@@ -313,6 +327,41 @@ export async function tickAllQueues(
         driven += 1;
       }
 
+      // The lane-critical pass ends here. Keep its result so the bounded
+      // maintenance pass below can work from the same snapshot, after every
+      // enabled queue has had its clock advanced and its held lane driven.
+      sweptQueues.push({ row, snapshot });
+    } catch (error) {
+      // A heartbeat that reports the same number whether it worked or failed
+      // is not a signal. Keep this out of `ticked` so a fleet-wide outage
+      // shows up as a fleet-wide `failed` count instead of a normal-looking
+      // one, and hand the error to the caller since this port has no other
+      // way to report it.
+      failed += 1;
+      ports.onQueueFailed(row.repositoryId, error);
+    }
+  }
+
+  // Maintenance is intentionally a second pass. It is materially more
+  // expensive than moving queue clocks: it can perform several GitHub reads,
+  // rebuild merge history and verify every signed transition in a branch.
+  // Running it inline used to mean the first busy repository could exhaust the
+  // Worker's CPU budget before the heartbeat ever reached the second one.
+  //
+  // Production admits one queue per five-minute slot. The stable ordering and
+  // time-derived start rotate fairly without another cursor table or migration;
+  // tests and one-off callers omit the limit and retain the exhaustive pass.
+  const configuredMaintenanceLimit = ports.maintenanceQueuesPerTick ?? sweptQueues.length;
+  const maintenanceLimit = Math.max(0, Math.min(configuredMaintenanceLimit, sweptQueues.length));
+  const slot = Math.floor(Date.parse(now) / (5 * 60 * 1_000));
+  const start = sweptQueues.length === 0 ? 0 : slot % sweptQueues.length;
+  const maintenanceQueues = Array.from(
+    { length: maintenanceLimit },
+    (_, index) => sweptQueues[(start + index) % sweptQueues.length]!,
+  );
+
+  for (const { row, snapshot } of maintenanceQueues) {
+    try {
       // A write whose response was lost is nobody's job until it is this one's.
       // `settleReconciliation` above needs a surviving attempt; these
       // rows outlive every attempt, which is why four merges sat unrecorded.
@@ -403,11 +452,9 @@ export async function tickAllQueues(
         );
       }
     } catch (error) {
-      // A heartbeat that reports the same number whether it worked or failed
-      // is not a signal. Keep this out of `ticked` so a fleet-wide outage
-      // shows up as a fleet-wide `failed` count instead of a normal-looking
-      // one, and hand the error to the caller since this port has no other
-      // way to report it.
+      // Maintenance failure must be visible, but it does not erase the fact
+      // that the lane-critical pass already ticked this queue. Most
+      // importantly, it cannot prevent another repository's clock from moving.
       failed += 1;
       ports.onQueueFailed(row.repositoryId, error);
     }
