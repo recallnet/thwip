@@ -117,7 +117,12 @@ export type QueueEvent = EventEnvelope &
       }
     | { readonly type: "MergeIntentCreated"; readonly attemptId: string; readonly intentDigest: string }
     | { readonly type: "MergeRequested"; readonly attemptId: string }
-    | { readonly type: "MergeOutcomeUnknown"; readonly attemptId: string }
+    | {
+        readonly type: "MergeOutcomeUnknown";
+        readonly attemptId: string;
+        /** Safe, bounded provider detail explaining why the write could not be classified. */
+        readonly detail?: string;
+      }
     | {
         readonly type: "MergeConfirmed";
         readonly attemptId: string;

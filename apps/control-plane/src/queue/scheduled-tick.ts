@@ -1,6 +1,6 @@
 // apps/control-plane/src/queue/scheduled-tick.ts
 import { CompactSign } from "jose";
-import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
+import { reconciliationAtDeadline, TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { commandsFor, buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
@@ -289,29 +289,38 @@ export async function tickAllQueues(
         // Named inside the transaction the tick already runs, so discovering the
         // usual nothing costs no extra read. GitHub is only consulted for a
         // queue that really has an attempt stuck reconciling.
-        return { snapshot: buildSnapshot(store), overdue: overdueReconciliation(store.state(), now) };
+        const mergeConfirm = store
+          .dueDeadlines(now)
+          .find((deadline) => deadline.kind === "merge-confirm" && deadline.attemptId === store.state().activeAttemptId);
+        const reconciliation =
+          mergeConfirm === undefined
+            ? overdueReconciliation(store.state(), now)
+            : reconciliationAtDeadline(store.state(), now, {
+                attemptId: mergeConfirm.attemptId,
+                dueAt: mergeConfirm.dueAt,
+                trigger: "merge-confirm",
+              });
+        return { snapshot: buildSnapshot(store), reconciliation };
       });
       ticked += 1;
       ports.onQueueTicked(row.repositoryId);
 
-      // `runAlarm()` has no answer for a merge outcome in doubt. Its only
-      // outcome for an overrun turn is `EXPIRED_EXECUTION`, and the reducer
-      // refuses that while the outcome is unknown, so every sweep rejected its
-      // own command, cleared the deadline row and left the lane exactly where it
-      // found it. That is how one indeterminate merge held a whole queue for
-      // twenty minutes while this cron fired four times. Reading GitHub is the
-      // only thing that can end it, and it happens outside the transaction above
-      // because it takes seconds.
+      // `runAlarm()` preserves a due merge-confirm row but does not answer it:
+      // the deadline knows only that a read is due, never whether the write
+      // landed. Older documents may have lost that row, so the execution
+      // deadline remains a fallback. Reading GitHub is the only thing that can
+      // end either case, and it happens outside the transaction above because it
+      // takes seconds.
       let snapshot = swept.snapshot;
-      if (swept.overdue !== null) {
-        const settled = await settleReconciliation(env, row.repositoryId, row.baseRef, swept.overdue, reads);
+      if (swept.reconciliation !== null) {
+        const settled = await settleReconciliation(env, row.repositoryId, row.baseRef, swept.reconciliation, reads);
         snapshot = settled.snapshot;
         reconciled += 1;
         // Said out loud, on the channel this account watches. A person used to
         // do this by hand and knew they had done it; something doing it for them
         // silently is worse than the wedge it replaces.
         console.log(
-          `[queue heartbeat] settled overdue reconciliation for repository ${row.repositoryId}: ` +
+          `[queue heartbeat] settled ${swept.reconciliation.trigger} reconciliation for repository ${row.repositoryId}: ` +
             `attempt ${settled.outcome.attemptId} ${settled.outcome.settled}`,
         );
       }
