@@ -238,10 +238,15 @@ proof over a tree whose suites never passed, and the queue will merge it;
 for the run.
 
 The five candidate-verified merges above came from the pinned verifier in
-Actions. No merge on this branch has gone through `fresh` yet, so the `fresh`
-paragraphs above rest on the code and on four assignments from another
-repository, where a device answered its turn in about seven and a half seconds.
-We want enough `fresh` merges to say something measured about them.
+Actions. This branch runs `fast`, so the `fresh` numbers are from
+`recallnet/thwip-test`: seven merges under that profile, five of them on 4
+August 2026. On each of the five the queue signed an assignment over the
+candidate tree, naming `lint` and `test` as the suites and policy v4 as the
+authority for them. Before it fetched the candidate the device checked that
+signature against the published keys. The control plane accepted the receipt a
+median 7.4 seconds after the queue signed, and the `verified-merge` record
+followed at 28.0 seconds, 26.6 at the fastest and 33.2 at the slowest. The chain
+there reads 7 links with 7 of 7 signatures checked and no findings.
 
 ## Sources and code
 
