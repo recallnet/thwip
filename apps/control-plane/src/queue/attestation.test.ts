@@ -731,7 +731,7 @@ describe("keeping the signed bytes", () => {
  * to. That is the exact harm `recordCoveringCommit`'s own docblock says it
  * exists to prevent.
  */
-describe("recordCoveringCommit and a movement record across an epoch bump", () => {
+describe("recordCoveringCommit across an epoch bump", () => {
   const open: Array<{ close(): void }> = [];
   afterEach(() => {
     while (open.length > 0) open.pop()!.close();
@@ -779,7 +779,7 @@ describe("recordCoveringCommit and a movement record across an epoch bump", () =
     expect(covering).toMatchObject({ digest: `sha256:${"m".repeat(64)}`, attemptId: `movement:${commitSha}` });
   });
 
-  it("still scopes a merge record to the current epoch", async () => {
+  it("still finds a merge record once the epoch is bumped past it", async () => {
     const { db, raw } = seeded();
     const commitSha = "c1".repeat(20);
     raw
@@ -803,6 +803,9 @@ describe("recordCoveringCommit and a movement record across an epoch bump", () =
 
     const covering = await recordCoveringCommit(db, "1315419165", "refs/heads/main", commitSha);
 
-    expect(covering).toBeNull();
+    // Scoping this to the current range is what re-epoching this repository on
+    // 5 August turned into fifty-nine second records written at the head, each
+    // one saying the base had moved to a commit the branch left days before.
+    expect(covering).toMatchObject({ digest: `sha256:${"n".repeat(64)}`, attemptId: "att_dead_epoch" });
   });
 });
