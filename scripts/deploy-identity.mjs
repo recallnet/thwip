@@ -72,18 +72,30 @@ export function deployIdentity(env) {
 }
 
 /**
- * The live Worker's schema endpoint for an environment.
- *
- * Read out of `wrangler.jsonc` rather than written down again, because a
- * hard-coded origin is how a gate comes to check an environment nobody is
- * deploying.
+ * The live Worker's origin for an environment, read out of `wrangler.jsonc`
+ * rather than written down again, because a hard-coded origin is how a gate
+ * comes to check an environment nobody is deploying.
  */
-export function liveSchemaUrl(env) {
+function liveOrigin(env) {
   const config = readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8");
   const json = JSON.parse(config.replace(/^\s*\/\/.*$/gm, ""));
   const origin = json.env?.[env]?.vars?.PUBLIC_ORIGIN;
   if (typeof origin !== "string") {
     throw new Error(`wrangler.jsonc defines no PUBLIC_ORIGIN for --env ${env}`);
   }
-  return `${origin.replace(/\/$/, "")}/v1/schema`;
+  return origin.replace(/\/$/, "");
+}
+
+/** The live Worker's schema endpoint for an environment. */
+export function liveSchemaUrl(env) {
+  return `${liveOrigin(env)}/v1/schema`;
+}
+
+/**
+ * The live Worker's health endpoint for an environment, which is the only
+ * place the Worker says which build it is running (`buildSha`, from
+ * `apps/control-plane/src/index.ts`'s `/health` route).
+ */
+export function liveHealthUrl(env) {
+  return `${liveOrigin(env)}/health`;
 }
