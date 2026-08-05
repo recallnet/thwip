@@ -141,6 +141,51 @@ describe("the queue heartbeat", () => {
     expect(result.ticked).toBe(2);
   });
 
+  it("ticks every queue before running a bounded rotating maintenance pass", async () => {
+    const e = env();
+    queue("1", 1);
+    queue("2", 1);
+    queue("3", 1);
+    const order: string[] = [];
+    const result = await tickAllQueues(e, {
+      maintenanceQueuesPerTick: 1,
+      driveQueue: async () => {},
+      onQueueTicked: (repositoryId) => order.push(`tick:${repositoryId}`),
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async (repositoryId) => void order.push(`maintain:${repositoryId}`),
+      retireStatusComments: async () => {},
+    });
+
+    expect(result.ticked).toBe(3);
+    expect(order.filter((event) => event.startsWith("tick:"))).toEqual(["tick:1", "tick:2", "tick:3"]);
+    expect(order.filter((event) => event.startsWith("maintain:"))).toHaveLength(1);
+    expect(order.findIndex((event) => event.startsWith("maintain:"))).toBeGreaterThan(
+      order.findLastIndex((event) => event.startsWith("tick:")),
+    );
+  });
+
+  it("can skip maintenance without skipping any queue clock", async () => {
+    const e = env();
+    queue("1", 1);
+    queue("2", 1);
+    const ticked: string[] = [];
+    let maintained = 0;
+    const result = await tickAllQueues(e, {
+      maintenanceQueuesPerTick: 0,
+      driveQueue: async () => {},
+      onQueueTicked: (repositoryId) => ticked.push(repositoryId),
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => void maintained++,
+      retireStatusComments: async () => {},
+    });
+
+    expect(result.ticked).toBe(2);
+    expect(ticked).toEqual(["1", "2"]);
+    expect(maintained).toBe(0);
+  });
+
   it("leaves a disabled queue alone", async () => {
     const e = env();
     queue("1", 0);
