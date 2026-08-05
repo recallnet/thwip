@@ -173,6 +173,18 @@ export interface QueueDiagnosis {
     writeStartedAt: string;
     outcome: string | null;
     resolvedAt: string | null;
+    /**
+     * What the sweep concluded last time it looked at an open write, and how
+     * many consecutive times it concluded the same thing.
+     *
+     * A write the sweep cannot settle waits between reads instead of costing
+     * GitHub calls every five minutes, and waiting is where a write goes quiet
+     * if nothing says so. This is where it says so.
+     */
+    refusalReason: string | null;
+    refusalCount: number;
+    refusedAt: string | null;
+    retryAfter: string | null;
   }>;
   events: Array<{ sequence: number; at: string; type: string; detail: string }>;
 }
@@ -212,6 +224,10 @@ export function diagnose(store: SnapshotQueueStore, limit = 25): QueueDiagnosis 
       writeStartedAt: row.writeStartedAt,
       outcome: row.outcome,
       resolvedAt: row.resolvedAt,
+      refusalReason: row.refusalReason ?? null,
+      refusalCount: row.refusalCount ?? 0,
+      refusedAt: row.refusedAt ?? null,
+      retryAfter: row.retryAfter ?? null,
     })),
     events: store.recentEvents(limit).map((row) => {
       const body = row.body as Record<string, unknown>;

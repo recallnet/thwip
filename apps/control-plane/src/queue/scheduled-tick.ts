@@ -16,6 +16,7 @@ import {
   MERGED_WITHOUT_RECORD_WINDOW_MS,
   ORPHANED_WRITE_GRACE_MS,
   ORPHANED_WRITE_SWEEP_LIMIT,
+  retryAfter,
   settleOrphanedWrite,
 } from "./orphaned-writes.js";
 import { transitionRecordFor } from "./attestation.js";
@@ -542,11 +543,15 @@ async function sweepOrphanedWrites(
   reads: ReconciliationReads,
   recordDeps: RecordFromIntentDeps<QueueRouteEnv>,
 ): Promise<number> {
+  const now = new Date().toISOString();
   const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
   const since = new Date(Date.now() - MERGED_WITHOUT_RECORD_WINDOW_MS).toISOString();
+  // `now` holds back a write the sweep already refused and has not waited out,
+  // before anything is read from GitHub about it. A tick with nothing new to
+  // settle spends nothing.
   const { open, settledRecently } = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => ({
-    open: store.unresolvedMergeOperations(cutoff),
-    settledRecently: store.mergedWritesResolvedAfter(since),
+    open: store.unresolvedMergeOperations(cutoff, now),
+    settledRecently: store.mergedWritesResolvedAfter(since, now),
   }));
 
   // A write is finished when the chain has a record for it, not when the row
@@ -597,14 +602,17 @@ async function sweepOrphanedWrites(
     // Said out loud on the channel this account watches. Something repairing
     // the chain silently is worse than the gap it closes.
     //
-    // A write the sweep could not settle says so once and then stays quiet. It
-    // comes back every five minutes until somebody resolves it, and a line per
-    // row per tick would bury the settlements that matter under a standing
-    // report of the same unreadable row.
+    // A refusal is written to the row as well as logged. The log scrolls away
+    // and the row does not: `/explain` reports the reason, the count and when
+    // the sweep will look again, so a write nobody can settle is a thing a
+    // person can find rather than a line somebody had to be watching for.
     if (outcome.settled === "unknown") {
+      const refusal = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
+        store.refuseMergeOperation(write.operationId, outcome.reason, new Date().toISOString(), retryAfter),
+      );
       console.log(
         `[queue heartbeat] orphaned merge write ${write.operationId} for repository ` +
-          `${row.repositoryId} is still unsettled: ${outcome.reason}`,
+          `${row.repositoryId} is still unsettled after ${refusal?.count ?? 1} attempt(s): ${outcome.reason}`,
       );
       continue;
     }

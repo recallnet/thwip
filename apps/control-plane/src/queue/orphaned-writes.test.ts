@@ -3,6 +3,8 @@ import {
   settleOrphanedWrite,
   ORPHANED_WRITE_GRACE_MS,
   ORPHANED_WRITE_SWEEP_LIMIT,
+  ORPHANED_WRITE_REFUSAL_BACKOFF_CAP_MS,
+  retryAfter,
   type OrphanedWriteReads,
 } from "./orphaned-writes.js";
 
@@ -264,5 +266,38 @@ describe("settleOrphanedWrite", () => {
 
   it("sweeps a bounded number of writes per queue per tick", () => {
     expect(ORPHANED_WRITE_SWEEP_LIMIT).toBe(5);
+  });
+});
+
+/**
+ * What the sweep does with a write it has already established it cannot settle.
+ *
+ * Four merge operations on this repository were examined on every five-minute
+ * tick and refused every time for the same reason. Each ran the full
+ * three-round absence backoff, about fourteen subrequests, and the sweep spent
+ * its budget on them before it reached a write nobody had looked at. On 4
+ * August that spent the invocation's subrequests and failed both queues.
+ */
+describe("how long a refused write waits before it is read again", () => {
+  const AT = "2026-08-04T20:00:00.000Z";
+
+  it("holds a write past the tick after the one that refused it", () => {
+    // Ticks run every five minutes. The first refusal has to outlast one.
+    const waited = Date.parse(retryAfter(1, AT)) - Date.parse(AT);
+    expect(waited).toBeGreaterThan(5 * 60 * 1000);
+  });
+
+  it("waits longer each time the same answer comes back", () => {
+    const first = Date.parse(retryAfter(1, AT)) - Date.parse(AT);
+    const third = Date.parse(retryAfter(3, AT)) - Date.parse(AT);
+    expect(third).toBeGreaterThan(first);
+  });
+
+  it("asks again within a day however often it has been refused", () => {
+    // A write is never forgotten. A pull request GitHub could not answer for an
+    // hour and a merge nobody can name read the same from here, and the only
+    // way to tell them apart is to ask later.
+    const waited = Date.parse(retryAfter(500, AT)) - Date.parse(AT);
+    expect(waited).toBe(ORPHANED_WRITE_REFUSAL_BACKOFF_CAP_MS);
   });
 });

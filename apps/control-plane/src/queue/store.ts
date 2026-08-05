@@ -162,6 +162,7 @@ export type QueueStateStore = Pick<
   | "recordOutboxAttempt"
   | "beginMergeOperation"
   | "resolveMergeOperation"
+  | "refuseMergeOperation"
   | "mergeOperation"
   | "unresolvedMergeOperations"
   | "mergedWritesResolvedAfter"
@@ -771,6 +772,38 @@ export class BranchQueueStore {
   }
 
   /**
+   * Write down that the sweep looked at this write and could not settle it. See
+   * `SnapshotQueueStore.refuseMergeOperation`: the row stays open and reported,
+   * and what stops is the GitHub read on every tick for an answer that has not
+   * changed.
+   */
+  async refuseMergeOperation(
+    operationId: string,
+    reason: string,
+    at: string,
+    retryAt: (count: number, refusedAt: string) => string,
+  ): Promise<{ count: number } | null> {
+    const row = this.sql
+      .exec<{ refusal_reason: string | null; refusal_count: number | null }>(
+        "SELECT refusal_reason, refusal_count FROM merge_operations WHERE operation_id = ?",
+        operationId,
+      )
+      .toArray()[0];
+    if (row === undefined) return null;
+    const count = row.refusal_reason === reason ? (row.refusal_count ?? 0) + 1 : 1;
+    this.sql.exec(
+      "UPDATE merge_operations SET refusal_reason = ?, refusal_count = ?, refused_at = ?, retry_after = ? " +
+        "WHERE operation_id = ?",
+      reason,
+      count,
+      at,
+      retryAt(count, at),
+      operationId,
+    );
+    return { count };
+  }
+
+  /**
    * Writes that were started and that nobody ever resolved, oldest first.
    *
    * The obligation to settle a write belongs to the write. It used to belong to
@@ -783,8 +816,13 @@ export class BranchQueueStore {
    * `startedBefore` is the cutoff. A write sent moments ago is in flight rather
    * than stranded, and sweeping it would race the workflow that is about to
    * report the same operation.
+   *
+   * `now` holds back a row the sweep already refused and has not waited out. The
+   * row is still open, still unsettled and still reported by `/explain`; what it
+   * stops doing is costing GitHub reads on every tick for an answer that has not
+   * changed in hours.
    */
-  unresolvedMergeOperations(startedBefore: string): UnresolvedMergeOperation[] {
+  unresolvedMergeOperations(startedBefore: string, now: string): UnresolvedMergeOperation[] {
     return this.sql
       .exec<{
         operation_id: string;
@@ -800,8 +838,10 @@ export class BranchQueueStore {
                 expected_tree_oid, pull_request_number, write_started_at
            FROM merge_operations
           WHERE outcome IS NULL AND write_started_at < ?
+            AND (retry_after IS NULL OR retry_after <= ?)
           ORDER BY write_started_at, operation_id`,
         startedBefore,
+        now,
       )
       .toArray()
       .map((row) => ({
@@ -830,7 +870,7 @@ export class BranchQueueStore {
    * examines costs a lookup and the ones from last week are either recorded or
    * long past anything a sweep should quietly repair.
    */
-  mergedWritesResolvedAfter(resolvedAfter: string): UnresolvedMergeOperation[] {
+  mergedWritesResolvedAfter(resolvedAfter: string, now: string): UnresolvedMergeOperation[] {
     return this.sql
       .exec<{
         operation_id: string;
@@ -846,8 +886,10 @@ export class BranchQueueStore {
                 expected_tree_oid, pull_request_number, write_started_at
            FROM merge_operations
           WHERE outcome = 'MERGED' AND resolved_at IS NOT NULL AND resolved_at >= ?
+            AND (retry_after IS NULL OR retry_after <= ?)
           ORDER BY write_started_at, operation_id`,
         resolvedAfter,
+        now,
       )
       .toArray()
       .map((row) => ({
