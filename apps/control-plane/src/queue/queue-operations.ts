@@ -271,8 +271,16 @@ export function requestTurn(
     headSha: string;
   },
 ): CommandResult {
+  // Only a pull request that can reopen. GitHub does not let anybody reopen a
+  // merge, so a merged entry asked for again is a late delivery rather than a
+  // reopen, and placing it once more puts a merged pull request back in the
+  // line. It went in `Requested` with a fresh ordinal and no eligibility, so
+  // nothing offered it a turn, so nothing cancelled it, and it stayed. Pull
+  // requests 201 and 209 were still queued five hours after they merged, named
+  // as ahead of the entry actually holding the lane in every status comment
+  // written in that window.
   const existing = store.state().entries.get(input.entryId);
-  const finished = existing !== undefined && (existing.state === "Merged" || existing.state === "Cancelled");
+  const finished = existing !== undefined && existing.state === "Cancelled";
   return commands.requestQueue({
     ...input,
     ...(finished
