@@ -4,8 +4,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   APP_MANIFEST_EVENTS,
-  HANDLED_WEBHOOK_EVENTS,
-  OPTIONAL_WEBHOOK_EVENTS,
   REQUIRED_WEBHOOK_EVENTS,
   webhookEventDrift,
 } from "./github-events.js";
@@ -19,7 +17,7 @@ import {
  * policy-push sync had never once run in this deployment, and everything that
  * did work worked because the workflows call `/authorize` directly.
  *
- * The manifest declares all ten events, but a manifest only describes a fresh
+ * The manifest declares all nine events, but a manifest only describes a fresh
  * registration. Nothing compared it to what the App actually delivers, so a
  * handler can be dead for months without a single failing signal.
  */
@@ -32,7 +30,7 @@ const source = (name: string): string =>
  * never sends these, so they are not part of any subscription and must not be
  * mistaken for a handler with nothing behind it.
  *
- * Declared here rather than beside `HANDLED_WEBHOOK_EVENTS` because this file
+ * Declared here rather than beside `REQUIRED_WEBHOOK_EVENTS` because this file
  * is the only thing that needs both lists, and the source file then describes
  * exactly one thing: what the App subscribes to.
  */
@@ -63,7 +61,7 @@ function eventsComparedInSource(): Set<string> {
 
 describe("the events the code handles", () => {
   it("declares every event a handler branches on", () => {
-    const declared = new Set<string>([...HANDLED_WEBHOOK_EVENTS, ...INTERNAL_QUEUE_EVENTS]);
+    const declared = new Set<string>([...REQUIRED_WEBHOOK_EVENTS, ...INTERNAL_QUEUE_EVENTS]);
     for (const event of eventsComparedInSource()) {
       expect(declared, `${event} is handled in code but not declared, so nothing asks GitHub to send it`).toContain(
         event,
@@ -77,12 +75,12 @@ describe("the events the code handles", () => {
    * reassuring direction.
    */
   it("keeps the events it mints for itself out of the subscription", () => {
-    const handled = new Set<string>(HANDLED_WEBHOOK_EVENTS);
+    const handled = new Set<string>(REQUIRED_WEBHOOK_EVENTS);
     for (const event of INTERNAL_QUEUE_EVENTS) expect(handled).not.toContain(event);
   });
 
-  it("names the ten the router acts on", () => {
-    expect([...HANDLED_WEBHOOK_EVENTS]).toEqual([
+  it("names the nine the App subscribes to", () => {
+    expect([...REQUIRED_WEBHOOK_EVENTS]).toEqual([
       "check_run",
       "check_suite",
       "member",
@@ -92,7 +90,6 @@ describe("the events the code handles", () => {
       "push",
       "repository",
       "team",
-      "merge_group",
     ]);
   });
 
@@ -104,11 +101,6 @@ describe("the events the code handles", () => {
     expect(APP_MANIFEST_EVENTS).toEqual([...REQUIRED_WEBHOOK_EVENTS]);
     expect(source("index.ts")).toContain("default_events: APP_MANIFEST_EVENTS");
     expect(source("index.ts")).not.toMatch(/default_events:\s*\[/);
-  });
-
-  it("does not require an event GitHub does not offer for this App", () => {
-    expect([...OPTIONAL_WEBHOOK_EVENTS]).toEqual(["merge_group"]);
-    expect(APP_MANIFEST_EVENTS).not.toContain("merge_group");
   });
 });
 
@@ -127,17 +119,8 @@ describe("comparing an installation against the code", () => {
     expect(drift.healthy).toBe(true);
   });
 
-  it("treats merge_group as optional rather than dead or unread", () => {
-    const without = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS]);
-    const withEvent = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS, "merge_group"]);
-    expect(without.deadHandlers).not.toContain("merge_group");
-    expect(withEvent.unreadSubscriptions).not.toContain("merge_group");
-    expect(without.healthy).toBe(true);
-    expect(withEvent.healthy).toBe(true);
-  });
-
   it("names a subscription nothing reads, without calling it unhealthy", () => {
-    const drift = webhookEventDrift([...HANDLED_WEBHOOK_EVENTS, "star"]);
+    const drift = webhookEventDrift([...REQUIRED_WEBHOOK_EVENTS, "star"]);
     expect(drift.unreadSubscriptions).toEqual(["star"]);
     expect(drift.healthy).toBe(true);
   });

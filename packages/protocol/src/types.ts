@@ -140,7 +140,8 @@ export interface ProofVerificationAuditV1 {
   verificationId: string;
   repositoryId: DecimalId;
   repository: string;
-  event: "pull_request" | "merge_group";
+  /** Always "pull_request": the App verifies pull-request heads; the retired native-queue subject never produced a record. */
+  event: "pull_request";
   subjectSha: GitOid;
   baseRef: string;
   policyDigest: Sha256 | null;
