@@ -1,5 +1,5 @@
 name: thwip
-description: Verify a signed thwip local-CI proof for the exact pull-request head.
+description: Verify a signed thwip local-CI proof for the exact pull-request or merge-group head.
 
 runs:
   using: node24
