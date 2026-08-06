@@ -105,7 +105,7 @@ describe("selectNext", () => {
     expect(selectNext([later, earlier], new Map(), NOW)?.entryId).toBe("y");
   });
 
-  it("gives Bob a turn before Alice gets a second one (plan.md §8.3)", () => {
+  it("gives Bob a turn before Alice gets a second one", () => {
     // Alice holds ten entries, Bob one. Serve five rounds.
     const lastServed = new Map<string, bigint>();
     let turn = 0n;

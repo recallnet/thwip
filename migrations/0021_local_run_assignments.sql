@@ -1,7 +1,6 @@
 -- DEPLOY ORDER: before-worker
 --
--- What the queue dispatched to a developer's own machine, and what came back
--- (plan.md 19.3, 21.1).
+-- What the queue dispatched to a developer's own machine, and what came back.
 --
 -- Under fresh and audited the integration runs on the device, so the merge gate
 -- has nothing to read unless the dispatch and the answer are written down. This

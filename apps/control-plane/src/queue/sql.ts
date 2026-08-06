@@ -11,7 +11,7 @@ export interface SqlLike {
 }
 
 /**
- * Authoritative hot tables (plan.md §39.1).
+ * Authoritative hot tables.
  *
  * The event log is the truth; every other table is a derived snapshot that
  * exists so a cold object can answer a read without replaying everything, and
@@ -160,7 +160,7 @@ export const SCHEMA: readonly string[] = [
 
   /**
    * What a pinned verifier observed when it ran the required suites against one
-   * integrated candidate tree (plan.md §16).
+   * integrated candidate tree.
    *
    * Keyed by tree rather than by attempt on purpose. The claim being recorded is
    * about a tree — "these suites, named by this policy, passed against exactly

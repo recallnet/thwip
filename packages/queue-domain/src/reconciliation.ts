@@ -1,7 +1,7 @@
 import type { BranchQueueState } from "./reducer.js";
 
 /**
- * A merge the queue can no longer wait on (plan.md §40.1).
+ * A merge the queue can no longer wait on.
  *
  * `Reconciling` is where an attempt goes when the queue cannot tell whether its
  * merge landed, and it is deliberately patient: it reads and never writes again.

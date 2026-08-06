@@ -1079,7 +1079,7 @@ app.post("/admin/sync", async (c) => {
 });
 
 /**
- * Queue doctor (plan.md §30.4). Reports what the App is actually granted and what
+ * Queue doctor. Reports what the App is actually granted and what
  * the branch actually requires, because setup must never assume that applying a
  * ruleset produced effective enforcement, nor that the App can publish the check
  * the branch will require.

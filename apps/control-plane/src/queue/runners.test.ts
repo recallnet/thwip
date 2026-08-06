@@ -16,7 +16,7 @@ import {
 
 /**
  * Runner liveness, the piece that lets `fresh` ever be offered a turn
- * (plan.md §5.0). A heartbeat row means "a runner said it was here", nothing
+ *. A heartbeat row means "a runner said it was here", nothing
  * more. Eligibility only cares about the absent-to-present and
  * present-to-absent transitions, never every heartbeat in between.
  */
@@ -37,7 +37,7 @@ const REPO = "1315419165";
 const T0 = "2026-07-31T00:00:00.000Z";
 
 describe("the cooldown and the sweep", () => {
-  // plan.md:1208 permits exactly one bounded lost turn to a dead runner, not
+  // The queue tolerates exactly one bounded lost turn to a dead runner, not
   // a repeating one. A dead runner's entry keeps its stale eligibility until
   // the next sweep, so an offer can still reach it inside that window; once
   // that offer expires unclaimed, the cooldown `commands.ts` sets on it has

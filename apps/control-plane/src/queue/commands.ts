@@ -13,7 +13,7 @@ import type { AppendResult, Deadline, QueueStateStore } from "./store.js";
 import { SWEEP_INTERVAL_SECONDS } from "./runners.js";
 
 /**
- * The commands a branch queue accepts (plan.md §39).
+ * The commands a branch queue accepts.
  *
  * Each command turns an outside request into one domain event plus the
  * deadlines and outbox items that event implies. Keeping that mapping here — and
@@ -53,7 +53,7 @@ export const DEFAULT_TIMINGS: QueueTimings = {
   // An offer that expires unclaimed means the runner is probably gone, and the
   // entry must stay in cooldown until the sweep can retire it. Any shorter and
   // the queue hands the same dead machine a second offer, and a third, which is
-  // the repeating lost turn plan.md:1208 rules out. Written as the sweep
+  // the repeating lost turn this cooldown exists to rule out. Written as the sweep
   // interval rather than as `5 * 60` again, so the two cannot be moved apart.
   noClaimCooldownSeconds: SWEEP_INTERVAL_SECONDS,
   mergeConfirmSeconds: 60,
@@ -171,7 +171,7 @@ export class QueueCommands {
     );
   }
 
-  /** A durable request, accepted before reviews finish (plan.md §7.1). */
+  /** A durable request, accepted before reviews finish. */
   requestQueue(input: {
     idempotencyKey: string;
     entryId: string;
@@ -740,7 +740,7 @@ export class QueueCommands {
   }
 
   /**
-   * One alarm, every due deadline (plan.md §39.3). Delivery is at-least-once, so
+   * One alarm, every due deadline. Delivery is at-least-once, so
    * each action carries a deadline-derived idempotency key and a second delivery
    * finds nothing left to do.
    */

@@ -13,7 +13,7 @@ import type {
  * that interprets it.
  *
  * Every event carries an idempotency key supplied by the caller and a
- * repository-local sequence assigned on append (plan.md §6.2 invariant 3), so
+ * repository-local sequence assigned on append, so
  * a duplicated webhook, a retried command, and a replayed alarm all converge
  * on the same state.
  */
@@ -35,7 +35,7 @@ export type QueueEvent = EventEnvelope &
         readonly sponsorPrincipalId: string;
         readonly sponsorGithubUserId: string;
         readonly headSha: string;
-        /** Set only when re-requesting after close/reopen (plan.md §8.4). */
+        /** Set only when re-requesting after close/reopen. */
         readonly resetOrdinal?: boolean;
       }
     | {
@@ -67,7 +67,7 @@ export type QueueEvent = EventEnvelope &
         readonly attemptId: string;
         readonly offerDeadline: string;
         readonly decisionDigest: string;
-        /** Present when an administrator expedited this turn (plan.md §8.4). */
+        /** Present when an administrator expedited this turn. */
         readonly expedite?: {
           readonly actorPrincipalId: string;
           readonly reason: string;

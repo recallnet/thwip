@@ -1,5 +1,5 @@
 -- DEPLOY ORDER: before-worker
--- Who is connected to run a queue's turns on their own machine (plan.md §5.0).
+-- Who is connected to run a queue's turns on their own machine.
 --
 -- A row means a runner said it was here at that moment, nothing more: it is
 -- liveness, not a claim and not a lease. The Durable Object that would have

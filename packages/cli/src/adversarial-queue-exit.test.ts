@@ -4,8 +4,8 @@ import { EXIT, exitCodeFor, humanSummary, isRetryable, nextActionFor } from "./q
 import { reactToReason } from "./ship.js";
 
 /**
- * ADVERSARIAL RECONNAISSANCE, experience layer. Expected to FAIL against current
- * behaviour. See .superpowers/sdd/stress-test-report.md.
+ * Adversarial probes of the experience layer. Each failed when it was written;
+ * each now pins the behaviour that fixed it.
  *
  * The queue's authorize endpoint answers with a `reason` string. The CLI turns
  * that string into an exit code and a sentence. The reasons come from

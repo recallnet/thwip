@@ -23,7 +23,7 @@ import {
 } from "./primitives.js";
 
 /**
- * The Merge Intent (plan.md §21.7) is the last thing written before the network
+ * The Merge Intent is the last thing written before the network
  * write that mutates the branch. It exists so that an ambiguous merge response
  * can be reconciled against a durable statement of exactly what was intended,
  * rather than being retried blindly.

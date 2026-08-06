@@ -1,7 +1,7 @@
 import type { BranchQueueState } from "./reducer.js";
 
 /**
- * The invariants the TLA+ model checks (plan.md §53.2), expressed against real
+ * The invariants the queue is built to hold, expressed against real
  * state so the same properties are asserted in unit tests, property tests, and
  * at runtime after every Durable Object command.
  *

@@ -131,7 +131,7 @@ export function buildSnapshot(store: QueueStateStore): QueueSnapshot {
     chainHead: head === undefined ? null : { sequence: head.transitionSequence, digest: head.digest },
     transitions: store.transitionChain(),
     // Projected order only: an exact permanent position would be a lie, because
-    // readiness changes after every GitHub event (plan.md §8.3).
+    // readiness changes after every GitHub event.
     entries: [...state.entries.values()]
       .sort((a, b) => (a.fairnessOrdinal < b.fairnessOrdinal ? -1 : 1))
       .map((entry) => ({
@@ -410,7 +410,7 @@ export async function admit(
 
   // Claim on the server's behalf. In this gate the required check is the
   // consumer, so an unclaimed offer would expire and the branch would be told to
-  // wait forever (plan.md §8.2).
+  // wait forever.
   const state = store.state();
   const attemptId = state.activeAttemptId;
   if (input.serverMayClaim && attemptId !== null && state.entries.get(input.entryId)?.state === "Offered") {

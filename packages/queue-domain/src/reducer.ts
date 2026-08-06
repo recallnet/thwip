@@ -18,10 +18,10 @@ import { PHASE_FOR_EVENT, type QueueEvent } from "./events.js";
  * The only interpreter of the branch queue event log.
  *
  * Everything here is pure and synchronous so the Durable Object, the tests, and
- * the TLA+ model can agree on what a log means. Where the specification says an
- * operation is forbidden, this reducer throws rather than quietly ignoring it:
+ * the model checker can agree on what a log means. Where an operation is
+ * forbidden, this reducer throws rather than quietly ignoring it:
  * a rejected command must be visible to its caller, and an impossible state
- * must never be reachable (plan.md §6.2 invariant 22).
+ * must never be reachable.
  */
 
 export class QueueRuleViolation extends Error {
@@ -360,7 +360,7 @@ function cloneState(state: BranchQueueState): BranchQueueState {
 
 export function applyEvent(previous: BranchQueueState, event: QueueEvent): BranchQueueState {
   // Idempotency and ordering come first: a duplicate or already-consumed event
-  // is a no-op, never an error (plan.md §6.2 invariant 3).
+  // is a no-op, never an error.
   if (previous.appliedKeys.has(event.idempotencyKey)) return previous;
   if (event.sequence <= previous.lastSequence) return previous;
 
@@ -420,7 +420,7 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       entry.primaryReason = primary;
       entry.secondaryReasons = [...event.secondaryReasons];
       // A capability reason suppresses scheduling without unsetting readiness,
-      // so an offline laptop keeps its place (plan.md §7.1).
+      // so an offline laptop keeps its place.
       entry.schedulerEligible = event.schedulerEligible;
       const capabilityOnly = primary !== null && isCapabilityReason(primary);
       if (entry.currentAttemptId === null) {

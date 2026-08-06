@@ -28,7 +28,7 @@ import {
 } from "./merge-intent.js";
 
 /**
- * The Transition Record (plan.md §21.8) is how a branch's history becomes
+ * The Transition Record is how a branch's history becomes
  * auditable: one record per movement of the base, numbered consecutively within
  * an epoch and linked to the digest of the record before it.
  *
