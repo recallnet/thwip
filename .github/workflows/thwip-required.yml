@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   thwip:
-    name: thwip
+    name: thwip / workflow
     runs-on: ubuntu-latest
     steps:
       # Check out the workflow's own pinned revision — never the PR head.

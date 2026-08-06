@@ -65,6 +65,7 @@ import {
   CANDIDATE_CHECK,
   PROOF_CHECK,
   TURN_CHECK,
+  WORKFLOW_CHECK,
   turnCheckRun,
   unplaceableUpdate,
   type TurnCheckUpdate,
@@ -2560,12 +2561,17 @@ const queueDeps = {
     sponsorGithubUserId: string,
   ): Promise<PlatformHealth | null> {
     const project = await env.DB.prepare(
-      `SELECT p.github_name, o.installation_id, o.id AS organization_id
+      `SELECT p.github_name, p.proof_check_mode, o.installation_id, o.id AS organization_id
          FROM projects p JOIN organizations o ON o.id = p.organization_id
         WHERE p.github_repository_id = ?`,
     )
       .bind(repositoryId)
-      .first<{ github_name: string; installation_id: string | null; organization_id: string }>();
+      .first<{
+        github_name: string;
+        proof_check_mode: string;
+        installation_id: string | null;
+        organization_id: string;
+      }>();
     if (project === null || project.installation_id === null) return null;
 
     // The sponsor by the name GitHub's permission endpoint takes. A numeric id
@@ -2607,9 +2613,10 @@ const queueDeps = {
     // stops an unproven one, so a branch that no longer requires both is a
     // branch the queue cannot speak for. Force-push and deletion are the two
     // ways the merged history it signs can be rewritten underneath it.
+    const expectedProofContext = project.proof_check_mode === "enforced" ? PROOF_CHECK : WORKFLOW_CHECK;
     const rulesetEnforced =
       requiredContexts.has(TURN_CHECK) &&
-      requiredContexts.has(PROOF_CHECK) &&
+      requiredContexts.has(expectedProofContext) &&
       ruleTypes.has("non_fast_forward") &&
       ruleTypes.has("deletion");
 
