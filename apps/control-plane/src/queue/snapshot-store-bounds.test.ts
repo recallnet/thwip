@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
+import { cellOf, SnapshotQueueStore, type SnapshotCell } from "./snapshot-store.js";
 import type { SubmittedEvent } from "./store.js";
 
 /**
@@ -55,14 +55,9 @@ describe("what the document keeps", () => {
    * opened over a document that already carries a backlog, which is exactly the
    * position every queue was in on 5 August.
    */
-  function withOutboxBacklog(items: number): SnapshotQueueStore {
-    const cell = cellOf();
-    const seed = SnapshotQueueStore.open(cell, IDENTITY);
-    request(seed, "e1", 1);
-    const doc = JSON.parse(cell.read() ?? "{}") as {
-      outbox: unknown[];
-      nextOutboxId: number;
-    };
+  /** Put a backlog into whatever the cell already holds. */
+  function growOutbox(cell: SnapshotCell, items: number): void {
+    const doc = JSON.parse(cell.read() ?? "{}") as { outbox: unknown[]; nextOutboxId: number };
     for (let i = 0; i < items; i += 1) {
       doc.outbox.push({
         outboxId: doc.nextOutboxId + i,
@@ -77,6 +72,35 @@ describe("what the document keeps", () => {
     }
     doc.nextOutboxId += items;
     cell.write(JSON.stringify(doc));
+  }
+
+  function trackedCell(initial: string | null = null): {
+    cell: SnapshotCell;
+    writes(): number;
+    reset(): void;
+  } {
+    let held = initial;
+    let count = 0;
+    return {
+      cell: {
+        read: () => held,
+        write: (json) => {
+          held = json;
+          count += 1;
+        },
+      },
+      writes: () => count,
+      reset: () => {
+        count = 0;
+      },
+    };
+  }
+
+  function withOutboxBacklog(items: number): SnapshotQueueStore {
+    const cell = cellOf();
+    const seed = SnapshotQueueStore.open(cell, IDENTITY);
+    request(seed, "e1", 1);
+    growOutbox(cell, items);
     return SnapshotQueueStore.open(cell, IDENTITY);
   }
 
@@ -113,6 +137,40 @@ describe("what the document keeps", () => {
     const kept = s.pendingOutbox();
     expect(kept.at(-1)?.attemptId).toBe("a-live");
     expect(kept.some((item) => item.attemptId === "a0")).toBe(false);
+  });
+
+  /**
+   * The trap the first version of this bound walked into.
+   *
+   * Trimming only where an event applies means a queue that is already too
+   * large and has gone quiet keeps its size forever, and being too large is
+   * what makes a queue quiet: the tick stops fitting in an invocation, so no
+   * event applies, so nothing trims. Deployed on 5 August at 17:56Z, the bound
+   * left 1057 outbox items in place because the queue had nothing to apply.
+   *
+   * Opening the document must therefore be enough to pay down the backlog. No
+   * accepted, duplicate, or rejected command is needed to make the repair.
+   */
+  it("pays the backlog down as soon as the document opens", () => {
+    const tracked = trackedCell();
+    const seeded = SnapshotQueueStore.open(tracked.cell, IDENTITY);
+    request(seeded, "e1", 1);
+    growOutbox(tracked.cell, 400);
+    tracked.reset();
+
+    const repaired = SnapshotQueueStore.open(tracked.cell, IDENTITY);
+    expect(repaired.pendingOutbox().length).toBeLessThanOrEqual(200);
+    expect(tracked.writes()).toBe(1);
+  });
+
+  it("keeps an already-bounded open read-only", () => {
+    const tracked = trackedCell();
+    const seeded = SnapshotQueueStore.open(tracked.cell, IDENTITY);
+    request(seeded, "e1", 1);
+    tracked.reset();
+
+    SnapshotQueueStore.open(tracked.cell, IDENTITY);
+    expect(tracked.writes()).toBe(0);
   });
 
   /**
