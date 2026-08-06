@@ -27,10 +27,13 @@ Each evaluation creates an immutable database row and a service-signed audit
 record containing the subject, base, policy digest and version, verifier version,
 individual outcomes, check-run id, and timestamp.
 
-The App requires `checks:write`, `contents:write`, `pull_requests:write`, and
-`statuses:write` for queue operation. Contents write creates the commit object,
-moves the branch, opens the setup pull request, and dispatches the protected
-candidate verifier. Ruleset reads use `metadata:read`.
+The App requires `checks:write`, `contents:write`, `pull_requests:write`,
+`statuses:write`, and `workflows:write` for queue operation. Contents write
+creates ordinary commit objects, moves the branch, opens the setup pull request,
+and dispatches the protected candidate verifier. GitHub additionally requires
+Workflows write when the reviewed commit changes `.github/workflows`; omitting
+it would make CI-definition changes require a second writer. Ruleset reads use
+`metadata:read`.
 
 The runtime does not require `administration:write`. GitHub gates ruleset writes
 behind that coarse permission, so setup instead renders exact ruleset payloads,

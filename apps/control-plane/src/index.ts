@@ -1126,7 +1126,12 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     requiredPermissions: REQUIRED_APP_PERMISSIONS,
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
-    canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    // Workflows is part of merge capability, not setup decoration. GitHub
+    // refuses a ref update whose commit changes `.github/workflows` without it;
+    // reporting the App healthy in that state would hide a second merge path.
+    canMerge: missing.every(
+      ([scope]) => scope !== "contents" && scope !== "pull_requests" && scope !== "workflows",
+    ),
     // Reported on its own, because losing this costs the status comment as well
     // as the merge and an operator reading a bare scope name has to guess that.
     // Read off `pull_requests` rather than `issues`: the App wrote a comment on
@@ -2287,12 +2292,13 @@ const queueDeps = {
   /**
    * Perform the merge, with the App's own installation token.
    *
-   * `contents: write` is what this needs and all it needs: writing a commit
-   * object and moving a branch ref are both Contents, and the ownership
-   * ruleset already names the App as the only actor that may update a managed
-   * branch. Nothing here decides anything about the merge — the base, the
-   * tree and the parents come from the queue document, and the ref update
-   * does not force, which is what makes GitHub refuse a base that moved.
+   * `contents: write` writes an ordinary commit and moves the ref;
+   * `workflows: write` is additionally required when that commit changes an
+   * Actions definition. The ownership ruleset already names the App as the
+   * only actor that may update a managed branch. Nothing here decides anything
+   * about the merge — the base, tree and parents come from the queue document,
+   * and the ref update does not force, which is what makes GitHub refuse a base
+   * that moved.
    */
   async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
     const project = await env.DB.prepare(
