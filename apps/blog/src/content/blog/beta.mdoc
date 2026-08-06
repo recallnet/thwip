@@ -35,12 +35,12 @@ GitHub to trust an unexplained report.
 The opportunity is to let local work travel with the code as evidence, so remote
 CI does not need to rediscover everything from scratch.
 
-{% mermaid label="Local checks produce a proof that GitHub can verify" %}
+{% mermaid label="Local checks produce a proof that the Thwip App can verify" %}
 ```mermaid
 flowchart LR
   A["Agent edits a pull request"] --> B["Local machine runs<br/>required checks"]
   B --> C["Sign proof for<br/>exact Git tree"]
-  C --> D["GitHub checks only<br/>the signed proof"]
+  C --> D["Thwip App verifies<br/>the signed proof"]
   D --> E["Merge decision"]
 ```
 {% /mermaid %}
@@ -54,10 +54,10 @@ post](/blog/merge-queue/) explains how thwip builds and pins that integrated
 candidate.
 
 That is the bridge thwip is trying to build: local work produces a clear, signed
-claim about exactly what it checked, and GitHub compares that claim with the
-code under review. If the team wants a second execution, GitHub can still run
-the checks itself. The code and its evidence can move together, while the policy
-decides how much of that evidence is enough.
+claim about exactly what it checked, and the Thwip App compares that claim with
+the code under review. If the team wants a second execution, GitHub Actions can
+still run the checks itself. The code and its evidence can move together, while
+the policy decides how much of that evidence is enough.
 
 ## What the proof says
 
@@ -87,15 +87,15 @@ standard building blocks:
   and the identifier of the key that signed them. If somebody edits the claim,
   signature verification fails.
 
-To verify the claim, GitHub needs more than a tree digest and a pass/fail word.
-The proof names the tree and the base it was built from, so GitHub can tell which
-code and which version of `main` were involved. It names the policy, which says
-what checks were required. It names the pipeline—the instructions for running
-those checks, similar to a GitHub Actions workflow definition—and records a
-cryptographic digest of those instructions. It also records the runner and
-timing, the individual suite results, and the signing key's identity.
+To verify the claim, the App needs more than a tree digest and a pass/fail word.
+The proof names the tree and the base it was built from, so the App can tell
+which code and which version of `main` were involved. It names the policy, which
+says what checks were required. It names the pipeline by a cryptographic digest
+of the instructions for running those checks, similar to pinning a GitHub
+Actions workflow definition. It also records the runner and timing, the
+individual suite results, and the signing key's identity.
 
-While a proof cannot remove every trust assumption, it lets GitHub compare the
+While a proof cannot remove every trust assumption, it lets the App compare the
 claim with the change, the active policy, and the required checks instead of
 treating local output as authoritative.
 
@@ -104,15 +104,15 @@ treating local output as authoritative.
 flowchart TD
   A["Local machine runs<br/>required checks"] --> B["Proof names<br/>tree and results"]
   B --> C["Device key signs<br/>the proof"]
-  C --> D["GitHub checks only<br/>the signed proof"]
+  C --> D["Thwip App verifies<br/>the signed proof"]
   D --> E{"Tree, signer, policy,<br/>and results match?"}
   E -- "no" --> F["Required check fails"]
   E -- "yes" --> G["Required check passes"]
-  G --> H["Queue or GitHub may merge"]
+  G --> H["Queue may merge"]
 ```
 {% /mermaid %}
 
-## How GitHub verifies it
+## How the GitHub App verifies it
 
 The thwip GitHub App does not run repository code to make this decision. It
 reads the commit and GitHub's view of the pull request, verifies the DSSE
@@ -122,10 +122,21 @@ GitHub user with enough repository permission.
 It then compares the claim with the change under review: the tree digest, the
 base, the active policy, the check recipe, and the required suite results. A
 proof for one tree cannot satisfy a check for another. If the pull request head
-has changed since the proof was made, the mismatch is visible and the required
-`thwip` check fails. When a queue asks a device to check an integrated
-candidate, it first gives the device the candidate tree and required checks.
-thwip accepts the device's result only when it names that same tree.
+has changed since the proof was made, the mismatch is visible and the App's
+proof check fails. Once enforcement is active, that required check is `thwip`.
+During onboarding, the App instead publishes `thwip / proof (observe)`, while
+the setup workflow publishes the distinct `thwip / workflow` check. The queue's
+moving authorization is `thwip / turn`; none of those publishers share a name.
+
+The App does not need `Administration: write`. Repository administrators apply
+the rulesets it renders. It does need `Workflows: write`, because GitHub will not
+let the sole App writer land a reviewed change under `.github/workflows`
+without that permission. That permission lets it write CI definitions; the
+control plane still does not execute repository code.
+
+When a queue asks a device to check an integrated candidate, it first gives the
+device the candidate tree and required checks. thwip accepts the device's result
+only when it names that same tree.
 
 The App can verify who signed the bytes and what those bytes claim. It can
 verify that the claim names the code and checks the expected policy. It cannot,
@@ -136,12 +147,13 @@ condition behind a local run.
 
 To see what the signature adds, start with hashing. A cryptographic hash turns
 the bytes of a statement into a fixed-size digest. Change the statement and the
-digest changes. A device signs that statement with a private key; GitHub uses
-the matching public key to check the signature. That check tells GitHub that the
-unchanged bytes were signed by the enrolled key associated with that identity.
+digest changes. A device signs that statement with a private key; the App uses
+the matching public key to check the signature. That check tells the App that
+the unchanged bytes were signed by the enrolled key associated with that
+identity.
 
 Inside those signed bytes is an assertion: named checks passed on a named Git
-tree under a named policy and pipeline. GitHub can verify that assertion before
+tree under a named policy and pipeline. The App can verify that assertion before
 it allows the required check to pass.
 
 The signature does not prove that the checks really ran or that the local
@@ -180,10 +192,10 @@ independent execution.
 
 GitHub also bills runner time by runner class and rounds jobs up to whole
 minutes. [Its published rates](https://docs.github.com/en/billing/reference/actions-minute-multipliers)
-show the cloud cost. `fresh` avoids that rerun but asks the project to trust a
-device. `remote` pays for a shared execution environment. `audited` pays for
-both. thwip makes that choice explicit instead of hiding it inside a green
-check.
+show the cloud cost. `fresh` avoids that cloud rerun but asks the project to
+trust a device. `remote` pays for a shared execution environment. `audited`
+pays for both. thwip makes that choice explicit instead of hiding it inside a
+green check.
 
 ## The remaining tradeoffs
 
