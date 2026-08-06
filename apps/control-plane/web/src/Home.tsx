@@ -89,7 +89,7 @@ export function Home({
 
         <main>
           <section className="mq-hero">
-            <p className="mq-kicker">Merge queue for AI-native teams</p>
+            <p className="mq-kicker">The fastest merge queue for AI-native teams.</p>
             <h1>
               <span className="mq-hero__line">Your agents ran CI.</span>
               <span className="mq-hero__line">Your merge queue</span>

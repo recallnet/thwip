@@ -12,6 +12,7 @@ describe("Home", () => {
       }),
     );
 
+    expect(html).toContain("The fastest merge queue for AI-native teams.");
     expect(html).toContain("Your agents ran CI.");
     expect(html).toContain('<span class="mq-hero__line">Your merge queue</span>');
     expect(html).toContain('<span class="mq-hero__line">should use it.</span>');
