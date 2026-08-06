@@ -11,19 +11,19 @@ const METRICS = [
 const PROFILES = [
   {
     name: "Fast",
-    body: "Fast reuses the proof the pull request already carries. The queue moves the branch without starting a cloud run.",
+    body: "Reuse the proof on the pull request. No extra cloud run.",
   },
   {
     name: "Fresh",
-    body: "Fresh pins the integration candidate. A device claims the turn, runs that candidate, and returns a signed receipt.",
+    body: "Run the pinned candidate on an agent. Return a signed receipt.",
   },
   {
     name: "Remote",
-    body: "Remote runs the required suites in GitHub Actions for repositories that require a cloud result.",
+    body: "Run required suites in GitHub Actions.",
   },
   {
     name: "Audited",
-    body: "Audited requires the device receipt and the GitHub result before the merge moves the branch.",
+    body: "Require both the agent receipt and the GitHub result.",
   },
 ] as const;
 
@@ -68,9 +68,6 @@ function QueueDiagram() {
         <span className="mq-lane__arrow" aria-hidden="true">→</span>
         <span className="mq-lane__main">main</span>
       </div>
-      <figcaption>
-        Agents run CI in parallel. The queue carries their proof through the merge point.
-      </figcaption>
     </figure>
   );
 }
@@ -96,8 +93,8 @@ export function Home({
               <span className="mq-hero__line">should use it.</span>
             </h1>
             <p className="mq-hero__lede">
-              Each coding agent tests its branch before its pull request joins the line. Thwip carries that work into
-              a protected merge lane, so completed runs move <code>main</code> instead of becoming a cloud CI queue.
+              Your agents test branches before they queue. Thwip uses those runs to move pull requests through a
+              protected lane instead of starting a cloud job for every turn.
             </p>
             <div className="nt-actions mq-hero__actions">
               <SetupAction me={me} signIn={signIn} />
@@ -124,12 +121,8 @@ export function Home({
             <div className="nt-body">
               <h2>Agent work arrives in parallel. Cloud queues put it back in series.</h2>
               <p>
-                Your agents finish branches at the same time. Each pull request reaches the merge lane with a passing
-                run behind it. A cloud queue creates an integrated candidate and starts another CI job for each turn.
-              </p>
-              <p>
-                Thwip keeps the proof with the commit. Fast uses it at the merge point. Fresh uses the same agent
-                capacity to verify the pinned candidate when the pull request reaches the front of the line.
+                Your agents finish in parallel, and each pull request arrives with a passing run. A cloud queue
+                rebuilds a candidate and starts another job every turn.
               </p>
               <QueueDiagram />
             </div>
@@ -142,8 +135,8 @@ export function Home({
             <div className="nt-body">
               <h2>Turn agent-run CI into merge capacity.</h2>
               <p>
-                Thwip gives one pull request a turn, pins its base, head, candidate commit, and candidate tree, then
-                asks for the evidence that policy requires. The GitHub App writes the merge on the protected branch.
+                Thwip pins the candidate and lets your policy choose the evidence: reuse the branch proof, run the
+                candidate on an agent, or require GitHub Actions.
               </p>
               <div className="mq-profiles">
                 {PROFILES.map((profile) => (
@@ -153,10 +146,6 @@ export function Home({
                   </article>
                 ))}
               </div>
-              <p className="nt-note">
-                Pick an organization default in the dashboard. Use <code>thwip.yaml</code> when one repository needs
-                a different merge policy.
-              </p>
             </div>
           </section>
 
@@ -165,12 +154,7 @@ export function Home({
               The branch<b>Stays controlled</b>
             </div>
             <div className="nt-body">
-              <h2>One writer for <code>main</code>. One answer for every pull request.</h2>
-              <p>
-                The queue rejects a candidate when its base moved, required evidence does not match policy, or a
-                required suite failed. Each pull request gets a position, a state, and a reason. Your agents read the
-                same queue state through one authenticated API call.
-              </p>
+              <h2>One writer for <code>main</code>.</h2>
               <div className="mq-ledger" role="list">
                 <div role="listitem">
                   <span>Branch writer</span>
@@ -195,9 +179,8 @@ export function Home({
             <div className="nt-body">
               <h2>The proof sits behind the merge.</h2>
               <p>
-                The queue signs a record for each merge. Fast records the reused proof. Fresh records the candidate
-                receipt. Remote records the verifier result. You can fetch those signed bytes and verify the branch
-                chain without a Thwip account.
+                Each merge carries a signed record. Fetch the bytes and verify the branch chain without a Thwip
+                account.
               </p>
               <div className="nt-actions">
                 <a className="nt-btn nt-btn--ghost" href="/faq">
@@ -214,8 +197,7 @@ export function Home({
             <p className="mq-kicker">Repository setup</p>
             <h2>Put Thwip in front of your protected branch.</h2>
             <p>
-              Start in the dashboard. Thwip opens the setup pull request, your team observes the queue on live pull
-              requests, and a repository administrator enables the App as the branch writer.
+              Thwip opens the setup pull request. A repository admin enables the App as the branch writer.
             </p>
             <div className="nt-actions">
               <SetupAction me={me} signIn={signIn} />
