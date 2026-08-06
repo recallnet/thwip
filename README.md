@@ -87,3 +87,18 @@ so on stderr before it does anything, which is the net under all of the above.
 ```sh
 thwip version
 ```
+
+### Optional proof warning before push
+
+GitHub remains the proof authority, but a missing proof is cheaper to catch
+before a remote check fails. This installs one non-blocking `pre-push` warning
+in the repository's shared Git directory, so it covers every linked worktree:
+
+```sh
+thwip setup --install-push-warning
+```
+
+The hook checks the exact outgoing branch commit, names the current checkout
+and remediation, and always allows the push. For an intentional low-level push,
+set `THWIP_ALLOW_UNPROVEN_PUSH=1`. Thwip refuses to overwrite an existing hook
+that it does not manage; remove the marked Thwip hook to uninstall it.
