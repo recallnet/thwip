@@ -97,6 +97,7 @@ describe("setupPullRequestFiles", () => {
       actionRef: "recallnet/thwip@v1.2.3",
     });
     expect(body).toMatch(/does not request `administration: write`/);
+    expect(body).toMatch(/`workflows: write` when a reviewed merge changes CI definitions/);
     expect(body).toMatch(/No repository merge token is needed/);
   });
 

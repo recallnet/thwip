@@ -1340,7 +1340,8 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
         Setting up opens a pull request on <code>{project.github_name}</code> carrying the two queue workflows. It
         inherits organization policy by default; a repository-specific <code>thwip.yaml</code> is added only when you
         choose that override below. Merge it under the controls this repository already has, then continue. The queue
-        observes a real pull request before setup offers enforcement. The App never receives repository Administration
+        observes a real pull request before setup offers enforcement. The App receives Contents and Workflows write so
+        the one queue path can merge reviewed source and CI changes; it never receives repository Administration
         permission.
       </p>
       {failure && <p className="thwip-error">{failure}</p>}

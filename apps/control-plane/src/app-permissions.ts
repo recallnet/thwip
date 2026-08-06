@@ -2,14 +2,18 @@
  * What the App has to be granted, in one place.
  *
  * There were two lists. `queueDoctor` checked an installation against `checks`,
- * `contents`, `pull_requests` and `statuses`, all write, while the App manifest
- * asked for `contents: read`, `pull_requests: read` and no `statuses`. A fresh
- * registration therefore failed the diagnostic written beside its manifest.
+ * `contents`, `pull_requests`, `statuses`, and `workflows`, all write, while the
+ * App manifest asked for `contents: read`, `pull_requests: read` and no
+ * `statuses`. A fresh registration therefore failed the diagnostic written
+ * beside its manifest.
  *
- * `contents: write` is what performs the merge: writing the commit object and
+ * `contents: write` performs ordinary merges: writing the commit object and
  * moving the branch ref are both Contents, and `appOwnershipRuleset` already
  * names the App as the only actor allowed to update the queued branch. The
- * candidate verifier dispatch is Contents: write too.
+ * candidate verifier dispatch is Contents: write too. GitHub additionally
+ * requires `workflows: write` when the commit being landed changes a file in
+ * `.github/workflows`; without it, the sole writer can merge source changes but
+ * not reviewed CI changes. That would be a hidden second merge path.
  *
  * `issues: write` is deliberately absent, and the reason is worth keeping. The
  * status comment goes to `/issues/{n}/comments`, which reads as an Issues
@@ -32,6 +36,7 @@ export const REQUIRED_APP_PERMISSIONS: Readonly<Record<string, string>> = {
   contents: "write",
   pull_requests: "write",
   statuses: "write",
+  workflows: "write",
 };
 
 /**

@@ -23,13 +23,14 @@ describe("what the App asks for against what it needs", () => {
   });
 
   /**
-   * Writing the merge commit and moving the branch ref are both Contents, and
-   * the ownership ruleset already names the App as the only actor that may
-   * update the queued branch.
+   * Writing an ordinary merge commit and moving the branch ref are Contents.
+   * GitHub additionally requires Workflows when that exact commit changes an
+   * Actions definition; the sole writer must be able to land both shapes.
    */
   it("asks for the write on contents the merge needs", () => {
     expect(REQUIRED_APP_PERMISSIONS["contents"]).toBe("write");
     expect(REQUIRED_APP_PERMISSIONS["pull_requests"]).toBe("write");
+    expect(REQUIRED_APP_PERMISSIONS["workflows"]).toBe("write");
   });
 
   /**
@@ -60,6 +61,7 @@ describe("what the App asks for against what it needs", () => {
     expect(source("index.ts")).toContain("default_permissions: APP_MANIFEST_PERMISSIONS");
     expect(source("index.ts")).not.toMatch(/default_permissions:\s*\{/);
     expect(source("index.ts")).toContain("requiredPermissions: REQUIRED_APP_PERMISSIONS");
+    expect(source("index.ts")).toContain('scope !== "workflows"');
     expect(source("index.ts")).toContain("canConfigureRulesets");
     expect(source("index.ts")).toContain("canInspectRulesets");
   });

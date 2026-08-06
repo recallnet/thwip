@@ -194,7 +194,8 @@ for things only I can do.
    hides bypass actors from an App that cannot edit rulesets, so I must verify
    that one field explicitly. The App does not request the broad
    "administration: write" permission. The installed App performs authorized
-   merges with repository-scoped contents permission; setup needs no personal
+   merges with repository-scoped Contents write and the narrower Workflows write
+   needed when a reviewed commit changes CI definitions; setup needs no personal
    access token or repository merge secret.
 
 7. Prove it before enforcing it. Enrolment enables the queue in observe mode while
