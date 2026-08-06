@@ -1,15 +1,15 @@
 /**
- * Shared primitives and the hard carrier bounds from plan.md §21.1 and §21.9.
+ * Shared primitives and the hard carrier bounds the protocol sets.
  *
  * Bounds are applied to UTF-8 bytes after NFC normalization and before
  * allocation or signing. Oversize caller input is rejected; a signed field is
  * never truncated, because a truncated signed field is a different claim.
  *
- * The validator style here matches @thwip/protocol deliberately. The plan
- * recommends Effect Schema, but this repository already validates its
+ * The validator style here matches @thwip/protocol deliberately. The v1 design
+ * recommended Effect Schema, but this repository already validates its
  * attestations with hand-written strict decoders, and adding a second
- * validation library is the "parallel validators" failure the same table warns
- * against. One style, one place to audit.
+ * validation library is the "parallel validators" failure mode. One style, one
+ * place to audit.
  */
 
 export type DecimalId = string;

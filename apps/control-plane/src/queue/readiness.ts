@@ -2,7 +2,7 @@ import type { BlockingReason } from "@thwip/queue-domain";
 import { TURN_CHECK } from "./turn-check.js";
 
 /**
- * Deriving readiness (plan.md §7.1).
+ * Deriving readiness.
  *
  * A queue request is durable; readiness is not. It is a conjunction of many
  * current facts, so it is re-derived from scratch on every relevant GitHub event
@@ -124,7 +124,7 @@ function collect(facts: ReadinessFacts): BlockingReason[] {
   if (facts.headProof === "missing") reasons.push("LOCAL_RECEIPT_MISSING");
   if (facts.headProof === "rejected") reasons.push("LOCAL_RECEIPT_REJECTED");
   // The active policy judges the work, never the policy the pull request
-  // proposes (plan.md §6.2 invariant 14). What it judges is the pipeline and
+  // proposes. What it judges is the pipeline and
   // the required suites, which `proofShortfall` compares with the same two
   // tests the merge gate uses. The merge gate refuses this after the pull
   // request has spent its turn; here it is refused before the offer goes out.
@@ -166,7 +166,7 @@ function hasCapability(facts: CapabilityFacts): boolean {
  * Every writer of it — `/authorize`, the pull-request webhook, the heartbeat
  * route, and the scheduled tick — calls this rather than each carrying its own
  * copy of "and is a runner connected", which is how eligibility ended up
- * written by whichever of them ran last instead of derived (plan.md §452).
+ * written by whichever of them ran last instead of derived.
  *
  * `deriveReadiness` used to answer the same question a second time, off two
  * fields sitting inside `ReadinessFacts`. Those fields are gone and the answer

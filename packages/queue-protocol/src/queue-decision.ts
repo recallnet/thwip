@@ -17,7 +17,7 @@ import {
 } from "./primitives.js";
 
 /**
- * The Queue Decision (plan.md §21.2) makes one scheduling choice explainable to
+ * The Queue Decision makes one scheduling choice explainable to
  * authorized repository members: who was selected, and what the scheduler could
  * see when it chose.
  *

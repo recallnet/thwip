@@ -1,7 +1,7 @@
 import { SITE } from "./index.js";
 
 /**
- * Generated repository instructions and the bounded pointer (plan.md §31).
+ * Generated repository instructions and the bounded pointer.
  *
  * These are read by coding agents, so precision matters more than tone. The
  * prohibitions are absolute and stated as such: an agent that merges through the
@@ -137,7 +137,7 @@ export function withQueuePointer(existing: string): string {
   return `${existing}${separator}${pointer}\n`;
 }
 
-/** The agent prompt for adding the queue to a repository (plan.md §31.3). */
+/** The agent prompt for adding the queue to a repository. */
 export function queueSetupPrompt(repositoryName: string): string {
   return `Add Thwip Queue to ${repositoryName}.
 

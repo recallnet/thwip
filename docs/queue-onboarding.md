@@ -1,13 +1,10 @@
-# Queue single-path onboarding and cutover
+# Queue onboarding and steady state
 
 This is the operator runbook for the App-native Queue described in
-[ADR 0001](adr/0001-app-native-proof-checks.md). It has two purposes:
+[ADR 0001](adr/0001-app-native-proof-checks.md). Every new repository follows
+one supported setup path.
 
-1. give every new repository one supported setup path; and
-2. move the Thwip service and already-enrolled repositories onto that path
-   without building a second migration runtime.
-
-The cutover is deliberately human-guided. Repository rulesets are sensitive
+Setup is deliberately human-guided. Repository rulesets are sensitive
 administrative state, and the runtime App does not hold `Administration: write`.
 The dashboard renders exact changes, a repository administrator applies them,
 and Thwip reads back everything GitHub exposes before advancing.
@@ -113,92 +110,16 @@ context with App-owned `thwip` while the policy remains disabled. Reversing that
 order creates a required check with no publisher; activating before the
 replacement makes the queue depend on the workflow job that is calling it.
 
-## Existing repositories
-
-There is no legacy bridge or automated migration engine. Convert each existing
-repository in a short, reviewed maintenance window:
-
-1. Drain or pause the old queue and stop new merges.
-2. Record its current rulesets, required checks, bypass actors, active pull
-   requests, and automatic merge workflows.
-3. Make the App permission and webhook preflight pass.
-4. Remove competing merge mechanisms such as GitHub's `merge_queue` rule,
-   `.github/workflows/thwip-merge.yml`, and
-   `.github/workflows/thwip-drain.yml`. Remove `THWIP_ENQUEUE_TOKEN` after the
-   workflow that used it is gone.
-5. Follow the new-repository path above. Existing proof and verifier workflows
-   may make the setup pull request a small or no-op content change; it still
-   supplies the reviewed bootstrap boundary and must use the expected branch
-   and title.
-6. Re-enable merging only after observation, ruleset readback, bypass
-   confirmation, and one App-authored test merge all pass.
-
-Do not delete or rewrite historical attestations. Do not translate old selector
-values into new options: the new runtime has no writer, backend, or merge-method
-selector.
-
-## Cutting over the Thwip service itself
-
-Thwip is the special case because the repository being protected also ships
-the service performing the protection. It must not depend on an unproven new
-writer to merge the change that introduces that writer.
-
-Treat the combined cutover pull request as the last merge made through the old
-path, then use this order:
-
-1. Before merging, update the live GitHub App registration and approve the
-   installation permission upgrade. Run both doctor commands against every
-   actively queued repository. In particular, prove the App has
-   `Contents: write`, `Workflows: write`, and receives `pull_request`, `push`,
-   and `check_run`.
-2. Drain the Thwip queue so the cutover pull request is the only remaining
-   writer operation. Freeze other merges and keep a repository-administrator
-   session available as break-glass access to disable a ruleset.
-3. Merge the cutover pull request through the currently deployed path. As soon
-   as it lands, pause the Thwip lane and deploy the new Worker from `main`.
-   Expect a maintenance window: the pull request removes the old repository
-   merge workflows, and the new Worker does not call their callback routes.
-4. Do **not** apply migration 0023 yet. The new Worker ignores the old selector
-   columns, so leaving them in place preserves the option to roll back the
-   deployment while the App writer is being proved.
-5. Put the Thwip repository through the same dashboard bootstrap as any other
-   existing repository. If the old required-check ruleset prevents the setup
-   pull request from merging while the lane is paused, a repository
-   administrator may temporarily disable that old ruleset, merge the reviewed
-   setup pull request, and immediately continue the staged replacement. This is
-   one-time break-glass work, not a runtime fallback.
-6. Keep Thwip in `observe` and validate a real pull request. Then begin
-   enforcement, apply ownership before policy, confirm bypass actors, enforce
-   the App proof publisher, reconcile open heads, and apply the final source
-   repin.
-7. Resume the lane and prove one Thwip pull request is merged and recorded by
-   the App. Also complete the same generic proof on a non-self-hosted repository
-   before declaring the rollout healthy.
-8. Only after the new Worker and both repository proofs are healthy, run:
-
-   ```sh
-   pnpm --filter @thwip/control-plane run migrate:staging
-   ```
-
-   Migration 0023 drops `merge_writer`, `backend`, and `merge_method` from
-   `queue_projects`. It is marked `after-worker` for this reason. Applying it is
-   the rollback boundary: an older Worker that still reads those columns cannot
-   be redeployed afterward without a forward schema repair.
+The completion evidence is a healthy doctor report, exact live ruleset and
+bypass readback, a recent App proof PASS, and an App-authored merge with a valid
+signed transition record. A green setup response by itself is not sufficient.
 
 ## Failure handling
 
-- Before migration 0023, pause affected lanes, disable the generated ownership
-  and policy rulesets with repository-admin authority, and roll back the Worker
-  if necessary. Restoring the old repository workflows requires reverting the
-  cutover commit; do not recreate tokens or add a hidden fallback path.
-- After migration 0023, fix forward. Do not deploy a Worker that reads the
-  removed columns.
 - If ownership is active and the App cannot write, pause the lane and disable
   ownership before attempting any branch recovery.
 - If a required check has no publisher, disable the Thwip policy ruleset first,
   correct the publisher or source pin, observe a real pull request, and repeat
   the enforcement handoff.
-
-The completion evidence is a healthy doctor report, exact live ruleset and
-bypass readback, a recent App proof PASS, and an App-authored merge with a valid
-signed transition record. A green setup response by itself is not sufficient.
+- Schema changes fix forward. Do not deploy a Worker that reads columns a
+  migration has already dropped.

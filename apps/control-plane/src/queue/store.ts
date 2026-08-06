@@ -20,7 +20,7 @@ import { initSchema, type SqlLike } from "./sql.js";
  *
  * Every accepted command writes the snapshot change, the event, any outbox item,
  * and the earliest deadline in one pass, and nothing is written when the reducer
- * rejects the command (plan.md §39.1).
+ * rejects the command.
  */
 
 export type DeadlineKind = "offer" | "execution" | "grace" | "merge-confirm" | "readiness";
@@ -93,7 +93,7 @@ export interface AppendOptions {
   /**
    * Set when the command changes a fact the active attempt depends on: base,
    * head, candidate, policy, runner authorization, reviews, pause state,
-   * assignment, receipt, or chain head (plan.md §39.2).
+   * assignment, receipt, or chain head.
    */
   readonly bumpAttemptRevision?: boolean;
 }
@@ -625,7 +625,7 @@ export class BranchQueueStore {
 
   /* ---------------- scheduler ---------------- */
 
-  /** Entries the scheduler may consider right now (plan.md §7.1). */
+  /** Entries the scheduler may consider right now. */
   eligibleEntries(): EligibleEntry[] {
     const state = this.state();
     return [...state.entries.values()]
@@ -673,7 +673,7 @@ export class BranchQueueStore {
       .map((row) => ({ kind: row.kind as DeadlineKind, attemptId: row.attempt_id, dueAt: row.due_at }));
   }
 
-  /** The single alarm time: the earliest deadline, or null (plan.md §39.3). */
+  /** The single alarm time: the earliest deadline, or null. */
   earliestDeadline(): string | null {
     const rows = this.sql
       .exec<{ due_at: string }>("SELECT due_at FROM deadlines ORDER BY due_at LIMIT 1")
@@ -721,7 +721,7 @@ export class BranchQueueStore {
   /**
    * Record the intent to write before the network call. If this row exists, a
    * mutation may already have reached GitHub, and no retry may send another
-   * (plan.md §40.1).
+   *.
    */
   beginMergeOperation(op: {
     operationId: string;
@@ -918,7 +918,7 @@ export class BranchQueueStore {
   /* ---------------- callback staleness ---------------- */
 
   /**
-   * Classify a callback that names an attempt and a revision (plan.md §39.2).
+   * Classify a callback that names an attempt and a revision.
    * A callback for an older attempt is stale and harmless; one for the current
    * attempt whose facts disagree is an invariant conflict that pauses the lane.
    */

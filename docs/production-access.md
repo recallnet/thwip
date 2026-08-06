@@ -157,10 +157,6 @@ The deploy gate refuses while a `before-worker` migration it needs is missing,
 and names it. 0020 and 0021 sat unapplied under a Worker that read their tables
 for four deploys, and every `/authorize` under `fresh` answered 500.
 
-Migration 0023 is the irreversible end of the App-native Queue cutover. Follow
-the deployment, repository proof, and rollback order in
-[`queue-single-path-cutover.md`](queue-single-path-cutover.md) before applying it.
-
 ## When the live Worker predates `/v1/schema`
 
 The gate refuses with a 404 and says to deploy once with

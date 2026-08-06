@@ -1,7 +1,7 @@
 import { EXIT, type ExitCode } from "./queue-exit.js";
 
 /**
- * `thwip queue work --watch` (plan.md §5.0, Task 5.0).
+ * `thwip queue work --watch`.
  *
  * Under `fresh` and `audited` there is no GitHub Actions fallback: a turn goes
  * to a connected developer machine or it goes nowhere. This is the client half

@@ -1,7 +1,7 @@
 import { EXIT, exitCodeFor, isRetryable, nextActionFor, type ExitCode, type Outcome } from "./queue-exit.js";
 
 /**
- * `thwip ship` (plan.md §30.1, §30.4.1).
+ * `thwip ship`.
  *
  * One command for the whole path: run the required suites, sign a proof, push,
  * request a queue turn, execute the turn when it arrives, and wait for the merge.
@@ -117,7 +117,7 @@ export function nextShipStep(state: ShipState): ShipDecision {
 /**
  * How to react when a step reports a reason code. The queue distinguishes losing
  * a turn from losing your place, so ship keeps waiting in the first case and stops
- * in the second (plan.md §30.7).
+ * in the second.
  */
 export type ShipReaction =
   | { readonly kind: "keep-waiting"; readonly reasonCode: string; readonly why: string }
@@ -142,7 +142,7 @@ export function reactToReason(reasonCode: string, options: { wait: boolean }): S
 }
 
 /**
- * What an interrupt means (plan.md §30.6). Detaching is always safe; the durable
+ * What an interrupt means. Detaching is always safe; the durable
  * entry survives, and an in-flight turn is released rather than abandoned so the
  * lane does not stay held until its deadline.
  */

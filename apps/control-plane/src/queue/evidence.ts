@@ -29,7 +29,7 @@ import {
  * a caller mistake into an unexplainable failure at merge time.
  *
  * A record's digest is taken over the exact signed bytes, never over JSON
- * rebuilt from a parsed object (plan.md §21.8). So `signRecord` returns the
+ * rebuilt from a parsed object. So `signRecord` returns the
  * bytes it signed alongside the digest, and callers pass those bytes on rather
  * than re-serializing.
  */
@@ -172,7 +172,7 @@ export async function buildAssignment(input: {
 /**
  * Build the merge intent. The commit message is digested rather than embedded, so
  * a long message cannot push the signed envelope past its carrier bound
- * (plan.md §21.9).
+ *.
  */
 export async function buildMergeIntent(input: {
   readonly operationId: string;
@@ -566,7 +566,7 @@ export async function buildGenesisRecord(input: {
   };
 }
 
-/** The three digests a fast-path reuse claim binds (plan.md §21.5). */
+/** The three digests a fast-path reuse claim binds. */
 export interface ReuseEquivalence {
   readonly policyDigest: Sha256;
   readonly pipelineDigest: Sha256;
@@ -574,7 +574,7 @@ export interface ReuseEquivalence {
 }
 
 /**
- * The equivalence digests a fast-path reuse claim binds (plan.md §21.5).
+ * The equivalence digests a fast-path reuse claim binds.
  *
  * One producer, so the record and the check that lets the record be signed
  * cannot compute the triple differently. It took a pipeline document before,

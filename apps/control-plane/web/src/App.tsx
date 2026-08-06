@@ -2055,7 +2055,7 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
  * The queue tab. One queue exists per repository and base branch, so this lists
  * the enabled projects and shows the queue for each project's default branch —
  * a single combined view would hide that `main` and `release` are independent
- * protected resources (plan.md §6.1).
+ * protected resources.
  */
 function QueueTab() {
   const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");

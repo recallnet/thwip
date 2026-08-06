@@ -14,9 +14,7 @@ use thwip.
 - Product: https://recall.network
 - Control plane (staging): https://thwip.recall.net
 - Current Queue architecture: `docs/adr/0001-app-native-proof-checks.md`
-- Queue onboarding and cutover: `docs/queue-single-path-cutover.md`
-- Historical v1 proposal: `plan.md`
-- Historical deviations from the original v1 slice: `DEVIATIONS.md`
+- Queue onboarding and steady state: `docs/queue-onboarding.md`
 
 ## Effective policy and first activation
 

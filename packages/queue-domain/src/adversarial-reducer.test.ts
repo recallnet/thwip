@@ -4,12 +4,9 @@ import { applyEvents } from "./test/apply-events.js";
 import type { QueueEvent } from "./events.js";
 
 /**
- * ADVERSARIAL RECONNAISSANCE. These tests are expected to FAIL against current
- * behaviour. Each one describes a sequence a real repository can produce and
- * asserts what the queue should do, not what it does today. A failure here is a
- * finding, not a regression.
- *
- * Read the report at .superpowers/sdd/stress-test-report.md for severity.
+ * Adversarial probes of the reducer. Each one describes a sequence a real
+ * repository can produce and asserts what the queue must do. Each failed when
+ * it was written; each now pins the behaviour that fixed it.
  */
 
 let seq = 0;
