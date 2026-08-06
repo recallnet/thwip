@@ -119,11 +119,12 @@ The thwip GitHub App evaluates the exact pull-request head and publishes the
 `thwip / proof (observe)` check, and an administrator enforces it once that
 check has passed.
 
-A branch running Thwip Queue requires `thwip` from whoever publishes it. While
-the repository is observing that is GitHub Actions, satisfied by the
-`thwip-required.yml` the setup pull request adds, and both checks appear on the
-commit running the same verifier. Once an administrator enforces the App's proof
-check, setup moves the requirement to the App and one publisher satisfies it.
+The repository workflow and the App use different names. During the staged
+handoff, GitHub Actions publishes `thwip / workflow`, satisfied by the
+`thwip-required.yml` the setup pull request adds. Once an administrator enforces
+the App's proof check, setup replaces that requirement with the App-owned
+`thwip` context. GitHub therefore never has to evaluate two same-named checks
+while the App writes the protected branch.
 
 Every evaluation produces a service-signed audit record containing the exact
 subject, base, policy, verifier version, signer outcomes, and GitHub check-run
@@ -133,8 +134,9 @@ id. A rerun creates another record instead of overwriting history.
 
 They answer different questions and change at different times.
 
-`thwip` says the proof is good for this exact tree. That is a fact about the
-commit, and it stays true until the commit changes.
+The active proof gate says the proof is good for this exact tree. It is
+`thwip / workflow` during the staged Actions handoff and the App-owned `thwip`
+after enforcement. That fact stays true until the commit changes.
 
 `thwip / turn` says it is this pull request's turn to merge. Only one pull
 request holds the lane at a time, so this one moves whenever the queue offers

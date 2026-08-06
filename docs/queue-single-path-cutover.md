@@ -18,9 +18,9 @@ A correctly enrolled repository has all of these properties:
 
 | Area | Required state |
 | --- | --- |
-| GitHub App permissions | Checks, Contents, Pull requests, and Commit statuses: write; Metadata: read |
+| GitHub App permissions | Checks, Contents, Pull requests, Commit statuses, and Workflows: write; Metadata: read |
 | GitHub App events | `check_run`, `check_suite`, `member`, `membership`, `organization`, `pull_request`, `push`, `repository`, and `team` |
-| Queue writer | The installed Thwip App, using `Contents: write` |
+| Queue writer | The installed Thwip App, using `Contents: write` and `Workflows: write` for CI-definition changes |
 | Merge shape | A merge commit whose first parent is the base the queue verified |
 | Queue rulesets | `Thwip Queue Ownership` and `Thwip Repository Policy` |
 | Required checks | `thwip` for the proof and `thwip / turn` for the queue turn |
@@ -42,7 +42,9 @@ audit compatibility, not an available setup or runtime option.
 1. Install the Thwip GitHub App on the repository.
 2. Approve any pending permission upgrade. Installing the App in the past is
    not enough when the registration has since gained `Contents: write`,
-   `Pull requests: write`, or `Commit statuses: write`.
+   `Pull requests: write`, `Commit statuses: write`, or `Workflows: write`.
+   Workflows write is narrower than Administration and exists so the sole App
+   writer can merge reviewed changes to `.github/workflows` without a bypass.
 3. Confirm the live App registration subscribes to every event in the table
    above. Updating the manifest does not update an existing registration or
    installation by itself.
@@ -78,19 +80,20 @@ for a coding agent. The product flow is:
 5. Select **Continue setup**. Apply the generated disabled policy payload, then
    continue again. Thwip publishes bootstrap checks, adds their source pins
    while the policy remains disabled, and reads the stored pins back.
-6. Open a real pull request. Confirm that `thwip / proof (observe)` and the queue
-   checks describe the expected decision while the repository still merges
-   under its existing controls.
-7. Check the explicit observation confirmation and select **Begin enforcement**.
+6. Open a real pull request. Confirm that `thwip / workflow`,
+   `thwip / proof (observe)`, and the queue checks describe the expected
+   decision while the repository still merges under its existing controls.
+7. After a recent observed proof passes, enforce the App proof check in the
+   dashboard. Reconcile open pull requests so their current heads carry the App
+   check. Continue setup, replace `thwip / workflow` with App-owned `thwip` in
+   the still-disabled policy, and let Thwip verify the stored source pin.
+8. Check the explicit observation confirmation and select **Begin enforcement**.
    Apply the generated changes in the displayed order: ownership first, active
    policy second. The queue enters `canary` before this handoff and becomes
    `enforced` only after both live rulesets match.
-8. Compare the live bypass lists with the exact expected lists displayed by the
+9. Compare the live bypass lists with the exact expected lists displayed by the
    dashboard. The policy has no bypass actors. Only the Thwip App bypasses the
    ownership rule. Confirm the comparison and continue.
-9. After a recent observed proof passes, enforce the App proof check in the
-   dashboard. Reconcile open pull requests so their current heads carry the App
-   check, apply the final generated source-pin update, and continue once more.
 10. Verify one real pull request reaches `queue.merge_confirmed` and that the
     resulting base commit is the App-authored merge commit recorded by Thwip.
 
@@ -102,10 +105,13 @@ The activation states mean exactly this:
 | `canary` | The administrator explicitly began the ownership handoff; the App writer is enabled, but setup is not yet complete. |
 | `enforced` | The active ownership and policy rulesets were read back and accepted. |
 
-Do not apply the final proof source pin before the App publishes `thwip`.
-Observe mode publishes `thwip / proof (observe)` instead, so reversing that
-order creates a required check with no publisher and blocks every open pull
-request.
+Do not apply the proof-gate replacement before the App publishes `thwip`, and do
+not activate queue ownership before that replacement is verified.
+Observe mode publishes `thwip / workflow` from Actions and
+`thwip / proof (observe)` from the App; the final policy replaces the workflow
+context with App-owned `thwip` while the policy remains disabled. Reversing that
+order creates a required check with no publisher; activating before the
+replacement makes the queue depend on the workflow job that is calling it.
 
 ## Existing repositories
 
@@ -143,7 +149,8 @@ path, then use this order:
 1. Before merging, update the live GitHub App registration and approve the
    installation permission upgrade. Run both doctor commands against every
    actively queued repository. In particular, prove the App has
-   `Contents: write` and receives `pull_request`, `push`, and `check_run`.
+   `Contents: write`, `Workflows: write`, and receives `pull_request`, `push`,
+   and `check_run`.
 2. Drain the Thwip queue so the cutover pull request is the only remaining
    writer operation. Freeze other merges and keep a repository-administrator
    session available as break-glass access to disable a ruleset.

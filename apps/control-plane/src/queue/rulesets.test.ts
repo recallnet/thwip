@@ -11,7 +11,7 @@ import {
   policyRuleset,
   type Ruleset,
 } from "./rulesets.js";
-import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
+import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 /** The Thwip App. Distinct from GitHub Actions, which sources the proof check. */
 const INTEGRATION_ID = 4419870;
@@ -45,7 +45,14 @@ describe("appOwnershipRuleset", () => {
 describe("policyRuleset", () => {
   it("requires the two checks something actually publishes, each from its own source", () => {
     expect(requiredChecks(policy())).toEqual([
-      { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+      { context: WORKFLOW_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+      { context: TURN_CHECK, integration_id: INTEGRATION_ID },
+    ]);
+  });
+
+  it("requires the App proof under its own name after enforcement", () => {
+    expect(requiredChecks(policy({ proofCheckMode: "enforced" }))).toEqual([
+      { context: PROOF_CHECK, integration_id: INTEGRATION_ID },
       { context: TURN_CHECK, integration_id: INTEGRATION_ID },
     ]);
   });
@@ -62,7 +69,7 @@ describe("policyRuleset", () => {
     const contexts = requiredChecks(ruleset).map((c) => c.context);
     expect(contexts).toContain("build");
     expect(contexts).toContain("e2e");
-    expect(contexts).toContain(PROOF_CHECK);
+    expect(contexts).toContain(WORKFLOW_CHECK);
     expect(contexts).toContain(TURN_CHECK);
   });
 
@@ -71,10 +78,17 @@ describe("policyRuleset", () => {
     expect(requiredChecks(ruleset)).toContainEqual({ context: "build", integration_id: 99 });
   });
 
-  it("re-pins a Thwip context a repository had left unsourced", () => {
-    const ruleset = policy({ existingRequiredChecks: [{ context: PROOF_CHECK }] });
-    expect(requiredChecks(ruleset).filter((c) => c.context === PROOF_CHECK)).toEqual([
-      { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+  it("re-pins the workflow context a repository had left unsourced", () => {
+    const ruleset = policy({ existingRequiredChecks: [{ context: WORKFLOW_CHECK }] });
+    expect(requiredChecks(ruleset).filter((c) => c.context === WORKFLOW_CHECK)).toEqual([
+      { context: WORKFLOW_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+    ]);
+  });
+
+  it("replaces the inactive managed proof context instead of carrying both names", () => {
+    expect(requiredChecks(policy({ existingRequiredChecks: [{ context: PROOF_CHECK }] }))).toEqual([
+      { context: WORKFLOW_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+      { context: TURN_CHECK, integration_id: INTEGRATION_ID },
     ]);
   });
 
@@ -85,7 +99,7 @@ describe("policyRuleset", () => {
 
   it("omits the source pin during bootstrap, when GitHub cannot accept one yet", () => {
     expect(requiredChecks(policy({ pinCheckSource: false }))).toEqual([
-      { context: PROOF_CHECK },
+      { context: WORKFLOW_CHECK },
       { context: TURN_CHECK },
     ]);
   });
@@ -112,7 +126,7 @@ describe("diffRuleset", () => {
     const diff = diffRuleset(null, policy());
     expect(diff.removedRules).toEqual([]);
     expect(diff.addedRequiredChecks).toContain(TURN_CHECK);
-    expect(diff.addedRequiredChecks).toContain(PROOF_CHECK);
+    expect(diff.addedRequiredChecks).toContain(WORKFLOW_CHECK);
     expect(diff.safe).toBe(true);
   });
 
@@ -146,6 +160,15 @@ describe("diffRuleset", () => {
     const next = policy({ existingRequiredChecks: [{ context: "build" }] });
     expect(diffRuleset(current, next).safe).toBe(true);
   });
+
+  it("treats the managed workflow-to-App proof cutover as a safe replacement", () => {
+    const current = policy({ proofCheckMode: "observe" });
+    const next = policy({ proofCheckMode: "enforced", existingRequiredChecks: requiredChecks(current) });
+    const diff = diffRuleset(current, next);
+    expect(diff.removedRequiredChecks).toEqual([WORKFLOW_CHECK]);
+    expect(diff.addedRequiredChecks).toEqual([PROOF_CHECK]);
+    expect(diff.safe).toBe(true);
+  });
 });
 
 describe("bootstrap sequence", () => {
@@ -171,9 +194,27 @@ describe("bootstrap sequence", () => {
     const blocked = mayActivate(almost);
     expect(blocked).toMatchObject({ ok: false });
     if (!blocked.ok) expect(blocked.reason).toMatch(/canary-negative-test/);
-    expect(mayActivate({ ...almost, "canary-negative-test": true, "record-genesis": true })).toEqual({
-      ok: true,
-    });
+    expect(
+      mayActivate({
+        ...almost,
+        "canary-negative-test": true,
+        "record-genesis": true,
+        "pin-proof-check-to-app": true,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("refuses activation until the App proof context has replaced the workflow context", () => {
+    expect(
+      mayActivate({
+        "merge-setup-pr": true,
+        "create-disabled-policy-without-source": true,
+        "publish-bootstrap-check": true,
+        "attach-integration-id-while-disabled": true,
+        "canary-negative-test": true,
+        "record-genesis": true,
+      }),
+    ).toMatchObject({ ok: false, reason: "pin-proof-check-to-app has not been completed" });
   });
 
   it("refuses activation when the source was never attached", () => {

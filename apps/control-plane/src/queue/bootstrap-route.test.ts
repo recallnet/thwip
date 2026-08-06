@@ -36,10 +36,10 @@ function env(): BootstrapRouteEnv {
 }
 
 /**
- * The App publishes `thwip` only where the proof check is enforced, and setup's
- * last step will not pin the context to the App until it does. A repository that
- * has not enforced is enrolled, enabled and merging, with that one step still
- * waiting, which is a 202.
+ * The App publishes `thwip` only where the proof check is enforced. Setup will
+ * not replace the Actions-owned workflow context or activate ownership until it
+ * does. A repository that has not enforced is enrolled and observing under its
+ * existing controls, with that handoff still waiting, which is a 202.
  */
 function enforceAppProofCheck(): void {
   d1.raw.prepare("UPDATE projects SET proof_check_mode = 'enforced' WHERE id = 'proj_1'").run();
@@ -264,6 +264,16 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(observing).toMatchObject({ status: 202, body: { activationState: "observe" } });
     const outcomes = (observing.body as { outcomes: Array<Record<string, unknown>> }).outcomes;
     expect(outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "pin-proof-check-to-app",
+    });
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+
+    enforceAppProofCheck();
+    const readyToEnforce = await postThroughManualSetup("admin", false);
+    expect(readyToEnforce).toMatchObject({ status: 202, body: { activationState: "observe" } });
+    const readyOutcomes = (readyToEnforce.body as { outcomes: Array<Record<string, unknown>> }).outcomes;
+    expect(readyOutcomes.at(-1)).toMatchObject({
       kind: "waiting",
       step: "activate-policy-and-ownership",
       confirmationRequired: "queue-enforcement",

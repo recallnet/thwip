@@ -65,6 +65,7 @@ import {
   CANDIDATE_CHECK,
   PROOF_CHECK,
   TURN_CHECK,
+  WORKFLOW_CHECK,
   turnCheckRun,
   unplaceableUpdate,
   type TurnCheckUpdate,
@@ -1125,7 +1126,12 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     requiredPermissions: REQUIRED_APP_PERMISSIONS,
     missingPermissions: Object.fromEntries(missing),
     canPublishMergeCheck: missing.every(([scope]) => scope !== "checks"),
-    canMerge: missing.every(([scope]) => scope !== "contents" && scope !== "pull_requests"),
+    // Workflows is part of merge capability, not setup decoration. GitHub
+    // refuses a ref update whose commit changes `.github/workflows` without it;
+    // reporting the App healthy in that state would hide a second merge path.
+    canMerge: missing.every(
+      ([scope]) => scope !== "contents" && scope !== "pull_requests" && scope !== "workflows",
+    ),
     // Reported on its own, because losing this costs the status comment as well
     // as the merge and an operator reading a bare scope name has to guess that.
     // Read off `pull_requests` rather than `issues`: the App wrote a comment on
@@ -2286,12 +2292,13 @@ const queueDeps = {
   /**
    * Perform the merge, with the App's own installation token.
    *
-   * `contents: write` is what this needs and all it needs: writing a commit
-   * object and moving a branch ref are both Contents, and the ownership
-   * ruleset already names the App as the only actor that may update a managed
-   * branch. Nothing here decides anything about the merge — the base, the
-   * tree and the parents come from the queue document, and the ref update
-   * does not force, which is what makes GitHub refuse a base that moved.
+   * `contents: write` writes an ordinary commit and moves the ref;
+   * `workflows: write` is additionally required when that commit changes an
+   * Actions definition. The ownership ruleset already names the App as the
+   * only actor that may update a managed branch. Nothing here decides anything
+   * about the merge — the base, tree and parents come from the queue document,
+   * and the ref update does not force, which is what makes GitHub refuse a base
+   * that moved.
    */
   async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
     const project = await env.DB.prepare(
@@ -2560,12 +2567,17 @@ const queueDeps = {
     sponsorGithubUserId: string,
   ): Promise<PlatformHealth | null> {
     const project = await env.DB.prepare(
-      `SELECT p.github_name, o.installation_id, o.id AS organization_id
+      `SELECT p.github_name, p.proof_check_mode, o.installation_id, o.id AS organization_id
          FROM projects p JOIN organizations o ON o.id = p.organization_id
         WHERE p.github_repository_id = ?`,
     )
       .bind(repositoryId)
-      .first<{ github_name: string; installation_id: string | null; organization_id: string }>();
+      .first<{
+        github_name: string;
+        proof_check_mode: string;
+        installation_id: string | null;
+        organization_id: string;
+      }>();
     if (project === null || project.installation_id === null) return null;
 
     // The sponsor by the name GitHub's permission endpoint takes. A numeric id
@@ -2607,9 +2619,10 @@ const queueDeps = {
     // stops an unproven one, so a branch that no longer requires both is a
     // branch the queue cannot speak for. Force-push and deletion are the two
     // ways the merged history it signs can be rewritten underneath it.
+    const expectedProofContext = project.proof_check_mode === "enforced" ? PROOF_CHECK : WORKFLOW_CHECK;
     const rulesetEnforced =
       requiredContexts.has(TURN_CHECK) &&
-      requiredContexts.has(PROOF_CHECK) &&
+      requiredContexts.has(expectedProofContext) &&
       ruleTypes.has("non_fast_forward") &&
       ruleTypes.has("deletion");
 

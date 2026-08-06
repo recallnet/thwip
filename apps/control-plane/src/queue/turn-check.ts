@@ -36,17 +36,28 @@ import type { QueueSnapshot } from "./queue-operations.js";
  * resolve on its own.
  */
 
-/** The check GitHub requires for the turn, alongside `thwip` for the proof. */
+/** The check GitHub requires for the turn, alongside the active proof gate. */
 export const TURN_CHECK = "thwip / turn";
 
 /**
- * The required check that verifies the proof on a pull request head.
+ * The App-owned required check that verifies the proof on a pull request head.
  *
- * Published by .github/workflows/thwip-required.yml, whose job is named `thwip`.
- * A reuse merge rests on this check having passed, so the signed record cites it
- * by run id.
+ * This is the final enforced gate. A reuse merge rests on this check having
+ * passed, so the signed record cites it by run id.
  */
 export const PROOF_CHECK = "thwip";
+
+/**
+ * The repository workflow's proof-verification job.
+ *
+ * It deliberately has a different name from the App proof. GitHub can consider
+ * every same-named check while deciding whether a protected ref may move, even
+ * when the ruleset pins one Integration. Giving the workflow the App's `thwip`
+ * name let an in-progress Actions run refuse an otherwise authorized App write.
+ * Observe mode can require this Actions-owned context; enforced mode replaces it
+ * with the App-owned `thwip` context.
+ */
+export const WORKFLOW_CHECK = "thwip / workflow";
 
 /**
  * The verdict on the integrated candidate, published on the pull request head.
