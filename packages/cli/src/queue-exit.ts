@@ -1,5 +1,5 @@
 /**
- * Exit codes and machine output for the queue commands (plan.md §30.5, §30.7).
+ * Exit codes and machine output for the queue commands.
  *
  * The contract is deliberately two-layer. The JSON `reasonCode` is authoritative
  * for automation, and the exit code is a broad handling class, so an agent can
@@ -49,7 +49,7 @@ export const EXIT = {
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 
-/** Terminal outcomes that mean success (plan.md §30.7 code 0). */
+/** Terminal outcomes that mean success. */
 export const OUTCOMES = [
   "PR_UPDATED",
   "LOCAL_RECEIPT_ACCEPTED",
@@ -283,7 +283,7 @@ export function isRetryable(reasonCode: string): boolean {
 /* ------------------------------------------------------------------ */
 
 /**
- * NDJSON events (plan.md §30.5). One object per line, each self-describing, so a
+ * NDJSON events. One object per line, each self-describing, so a
  * consumer can be interrupted at any point and still have understood everything
  * it read. No field is ever removed from an event type without a version bump.
  */

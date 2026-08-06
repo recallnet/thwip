@@ -2,12 +2,12 @@ import type { D1Like } from "./projection.js";
 import { sha256Fingerprint } from "../sshsig-verify.js";
 
 /**
- * Runner liveness: is a connected machine here to take a `fresh` turn (plan.md §5.0).
+ * Runner liveness: is a connected machine here to take a `fresh` turn.
  *
  * There is no fallback to GitHub Actions under `fresh` or `audited`. A device
  * heartbeats into a row here; `readiness.ts` reads that presence as
  * `compatibleRunnerConnected`. Absence keeps an entry's fairness ordinal and
- * simply withholds an offer, per the specification (plan.md §452) — it must
+ * simply withholds an offer, per the specification — it must
  * never freeze the branch behind a closed laptop.
  *
  * This file holds the grace window and the sweep interval. The heartbeat
@@ -32,7 +32,7 @@ import { sha256Fingerprint } from "../sshsig-verify.js";
  * `commands.ts`'s `noClaimCooldownSeconds` puts the entry in cooldown — and
  * that cooldown has to last at least until the next sweep retires the
  * runner, or a second offer can reach the same dead machine before it is
- * ever retired, and a third, unboundedly. plan.md:1208 permits exactly one
+ * ever retired, and a third, unboundedly. The queue tolerates exactly one
  * bounded lost turn, not a repeating one. `commands.ts` sets
  * `noClaimCooldownSeconds` to `SWEEP_INTERVAL_SECONDS` below rather than
  * writing `5 * 60` a second time, so the two cannot be moved apart, and
@@ -74,7 +74,7 @@ function cutoff(now: string): string {
 
 /**
  * Security profiles that run only on a connected developer's own machine, with
- * no fallback to GitHub Actions (plan.md §5.0).
+ * no fallback to GitHub Actions.
  *
  * A held lane under either one must never cause a `repository_dispatch`.
  * There is nothing for Actions to do — the runner claims the offer itself,

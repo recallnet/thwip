@@ -3,7 +3,7 @@ import type { DecisionRecorder } from "./commands.js";
 import type { D1Like } from "./projection.js";
 
 /**
- * Digest-addressed evidence storage (plan.md §39.4, §41).
+ * Digest-addressed evidence storage.
  *
  * Signed evidence is immutable and named by the digest of its own bytes, which
  * gives two properties worth having. A reader can verify what they fetched
@@ -135,7 +135,7 @@ export async function getEvidence(
 
 /**
  * Write the scheduling decision an offer is about to bind, and hand back its
- * digest (plan.md §21.2).
+ * digest.
  *
  * The digest is taken over the same canonical bytes that are stored, so the
  * assignment a device checks names bytes a reader can fetch and hash for

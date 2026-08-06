@@ -263,10 +263,9 @@ policy:
 /**
  * What each profile derives, so a profile cannot be a name with no consequence.
  *
- * plan.md §19.3 is the source: Fresh "always issues a new assignment and
- * requires a post-assignment local integration receipt", and Audited is
- * "fresh local receipt plus a full Dagger rerun in GitHub Actions before
- * merge". The lease is the proof-layer form of the first: a window this
+ * The profile contract is the source: Fresh always issues a new assignment
+ * and requires a post-assignment local integration receipt, and Audited is
+ * fresh local receipt plus a full rerun in GitHub Actions before merge. The lease is the proof-layer form of the first: a window this
  * service opened for this exact tree, which the run has to sit inside. The
  * rerun is the second, and it is full rather than sampled, so every required
  * suite has to be proven by GitHub's own checks as well as by the signer.

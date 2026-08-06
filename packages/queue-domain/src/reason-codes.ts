@@ -3,10 +3,10 @@ import type { TransitionRecordKind } from "@thwip/queue-protocol";
 /**
  * Stable vocabulary for the branch queue. Every list here is closed: an
  * unrecognized value fails closed rather than being treated as benign
- * (plan.md §6.2 invariant 22).
+ *.
  */
 
-/** Why an entry is not currently mergeable (plan.md §7.2). */
+/** Why an entry is not currently mergeable. */
 export const BLOCKING_REASONS = [
   "PROJECT_DISABLED",
   "QUEUE_PAUSED",
@@ -51,7 +51,7 @@ export type BlockingReason = (typeof BLOCKING_REASONS)[number];
 /**
  * Reasons that suppress scheduling without making the entry unready. An
  * offline laptop must not freeze the branch, and must not lose its place
- * either (plan.md §7.1).
+ * either.
  */
 export const CAPABILITY_REASONS = ["AGENT_OFFLINE", "NO_COMPATIBLE_RUNNER"] as const;
 
@@ -61,7 +61,7 @@ export function isCapabilityReason(reason: BlockingReason): reason is Capability
   return (CAPABILITY_REASONS as readonly string[]).includes(reason);
 }
 
-/** Entry lifecycle (plan.md §9.3). */
+/** Entry lifecycle. */
 export const ENTRY_STATES = [
   "Requested",
   "Blocked",
@@ -84,7 +84,7 @@ export type EntryState = (typeof ENTRY_STATES)[number];
 export const TERMINAL_ENTRY_STATES = ["Merged", "Cancelled"] as const;
 
 /**
- * Attempt phases, in the only order they may advance (plan.md §9.4).
+ * Attempt phases, in the only order they may advance.
  * Attempts never move backward, so the index in this array is the guard.
  */
 export const ATTEMPT_PHASES = [
@@ -108,7 +108,7 @@ export function phaseRank(phase: AttemptPhase): number {
   return ATTEMPT_PHASES.indexOf(phase);
 }
 
-/** Terminal non-merge outcomes (plan.md §9.4). */
+/** Terminal non-merge outcomes. */
 export const ATTEMPT_OUTCOMES = [
   "EXPIRED_UNCLAIMED",
   "EXPIRED_EXECUTION",
@@ -136,7 +136,7 @@ export type AttemptOutcome = (typeof ATTEMPT_OUTCOMES)[number];
 /**
  * Reconciliation is a phase of an unfinished attempt, not an outcome. Only a
  * confirmed merge, a confirmed non-merge, or operator resolution may end it
- * (plan.md §9.4).
+ *.
  */
 export const RECONCILING_RESOLUTIONS = [
   "MERGED",
@@ -148,7 +148,7 @@ export const RECONCILING_RESOLUTIONS = [
 export type ReconcilingResolution = (typeof RECONCILING_RESOLUTIONS)[number];
 
 /**
- * How a transition entered the canonical chain (plan.md §21.8, §24).
+ * How a transition entered the canonical chain.
  *
  * The protocol's record kinds are the source. They are what gets signed, so
  * they are what a reader auditing the chain actually sees; this list is the
@@ -197,7 +197,7 @@ export function transitionKindOf(record: TransitionRecordKind): TransitionKind {
   return KIND_OF_RECORD[record];
 }
 
-/** Who executed the integration run for an attempt (plan.md §8.2, §10). */
+/** Who executed the integration run for an attempt. */
 export const EXECUTION_MODES = ["device", "fast-reuse", "remote"] as const;
 
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];

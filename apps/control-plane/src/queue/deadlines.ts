@@ -11,7 +11,7 @@ import type { D1Like } from "./projection.js";
 import type { QueueRouteEnv } from "./routes.js";
 
 /**
- * Ending a reconciliation the queue can no longer wait on (plan.md §40.1).
+ * Ending a reconciliation the queue can no longer wait on.
  *
  * `Reconciling` is where an attempt goes when the queue cannot tell whether its
  * merge landed. It reads and never writes again, and that patience is correct:

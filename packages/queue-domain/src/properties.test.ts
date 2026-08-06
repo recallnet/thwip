@@ -7,7 +7,7 @@ import { selectNext, type EligibleEntry } from "./scheduler.js";
 import type { QueueEvent } from "./events.js";
 
 /**
- * The properties from plan.md §53.1. These are the statements the product is
+ * These are the statements the product is
  * selling — fairness, one lane, a place in line that survives failure — so they
  * are checked against generated histories rather than hand-picked ones.
  */

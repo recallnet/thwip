@@ -2,7 +2,7 @@ import { canonicalRecordBytes, recordDigest } from "@thwip/queue-protocol";
 import type { CandidateSuite, CandidateVerdict } from "./store.js";
 
 /**
- * Whether a verifier's verdict may back a merge (plan.md §16, §18.3).
+ * Whether a verifier's verdict may back a merge.
  *
  * Until this existed the merge-preparation path walked an attempt to merge-ready
  * with a constant standing in for the verifier's result. The queue then recorded
@@ -31,7 +31,7 @@ export function requiresIntegratedRun(securityProfile: string): boolean {
  * GitHub Actions.
  *
  * `fresh` runs the integration on the developer's own machine and has no
- * fallback to Actions (plan.md §5.0), so asking a pinned verifier for a verdict
+ * fallback to Actions, so asking a pinned verifier for a verdict
  * would refuse every `fresh` merge for want of a workflow the profile does not
  * use. `audited` is `fresh` plus that second execution, so it wants both, and
  * `remote` is the second execution alone.

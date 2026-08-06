@@ -2,7 +2,7 @@
  * `principal-round-robin-v1`.
  *
  * Fairness is per person, not per pull request, per key, or per device
- * (plan.md §8). Ten PRs from one author must not precede one PR from someone
+ *. Ten PRs from one author must not precede one PR from someone
  * else, so only a principal's oldest eligible entry ever competes, and the
  * principal served least recently wins the round.
  *
@@ -22,7 +22,7 @@ export interface EligibleEntry {
 const QUEUE_KEY_DOMAIN = "thwip-branch-queue-v1";
 
 /**
- * Branch-scoped queue identity (plan.md §6.1). `main` and `release` are
+ * Branch-scoped queue identity. `main` and `release` are
  * separate protected resources and must not share a lane.
  */
 export async function queueKey(decimalRepositoryId: string, exactBaseRef: string): Promise<string> {
@@ -58,7 +58,7 @@ function compareBy(keys: readonly Key[]): (a: EligibleEntry, b: EligibleEntry) =
 /**
  * Within a principal, Ready entries are FIFO by fairness ordinal, so a blocked
  * entry cannot head-of-line block that principal's other independent work
- * (plan.md §8.3).
+ *.
  */
 function oldestEligibleEntryByPrincipal(entries: readonly EligibleEntry[]): EligibleEntry[] {
   const oldest = new Map<string, EligibleEntry>();
@@ -88,7 +88,7 @@ function lexicalKey(value: string): bigint {
  *
  * `heads` is what competed: each principal's oldest entry that was not still
  * serving a cooldown, in the order the round ranked them, so `selected` is
- * always `heads[0]`. The queue decision record (plan.md §21.2) is built from
+ * always `heads[0]`. The queue decision record is built from
  * this, which is what keeps the explanation and the choice the same event. A
  * record assembled by a second pass over the same entries would be a second
  * scheduler, and two schedulers agreeing today is not a property anybody can

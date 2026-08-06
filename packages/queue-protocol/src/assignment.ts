@@ -24,7 +24,7 @@ import {
 import { SECURITY_PROFILES, type SecurityProfile } from "./merge-intent.js";
 
 /**
- * The Integration Assignment (plan.md §21.3) is the service's signed
+ * The Integration Assignment is the service's signed
  * instruction: run exactly this candidate, under exactly this policy, before
  * exactly this deadline, and report under this nonce.
  *

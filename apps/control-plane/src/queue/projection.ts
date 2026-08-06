@@ -1,5 +1,5 @@
 /**
- * D1 projection of queue state (plan.md §41.3).
+ * D1 projection of queue state.
  *
  * The Durable Object is live authority. D1 exists for reads that span
  * organizations — a dashboard listing every queue, an export, an audit — and it is

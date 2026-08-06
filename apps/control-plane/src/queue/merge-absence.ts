@@ -1,5 +1,5 @@
 /**
- * Proving that a merge did not happen (plan.md §40.1).
+ * Proving that a merge did not happen.
  *
  * Saying a merge landed needs evidence, and so does saying it did not. GitHub's
  * reads are eventually consistent with GitHub's own writes: a pull request that

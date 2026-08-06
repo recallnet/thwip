@@ -1,7 +1,7 @@
 import { EXIT, type ExitCode } from "./queue-exit.js";
 
 /**
- * Argument parsing and request planning for `thwip queue …` (plan.md §30.4).
+ * Argument parsing and request planning for `thwip queue …`.
  *
  * Parsing is separated from execution because this is where the damaging mistakes
  * live. A destructive command that ran with a missing argument silently defaulted,

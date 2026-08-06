@@ -315,7 +315,7 @@ export async function deriveProjectConfig(
 
   const pipelineDigest = await canonicalDigest(pipeline);
   // Audited is "fresh local receipt plus a full Dagger rerun in GitHub Actions
-  // before merge" (plan.md §19.3). Full, not sampled: every required suite has
+  // before merge". Full, not sampled: every required suite has
   // to be proven a second time by GitHub's own checks, on top of the signer's
   // account of running it locally. Suites a project already names remote stay
   // remote, so choosing Audited never subtracts a requirement.

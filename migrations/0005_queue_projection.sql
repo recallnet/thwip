@@ -1,5 +1,5 @@
 -- DEPLOY ORDER: before-worker
--- Thwip Queue projection (plan.md §41.1).
+-- Thwip Queue projection.
 -- The Durable Object is live authority; these tables serve organization-wide
 -- reads, the dashboard, and exports, and may lag behind the object.
 
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS queue_projects (
   base_ref TEXT NOT NULL,
   backend TEXT NOT NULL DEFAULT 'managed',
   enabled INTEGER NOT NULL DEFAULT 0,
-  -- 'configured' | 'observe' | 'canary' | 'enforced' (plan.md §4.8)
+  -- 'configured' | 'observe' | 'canary' | 'enforced'
   activation_state TEXT NOT NULL DEFAULT 'configured',
   merge_method TEXT NOT NULL DEFAULT 'squash',
   -- The pinned verifier identity. A verdict is only accepted from this exact

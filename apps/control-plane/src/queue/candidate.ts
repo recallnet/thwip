@@ -1,7 +1,7 @@
 import type { GitSubject } from "@thwip/queue-protocol";
 
 /**
- * Candidate preparation (plan.md §16).
+ * Candidate preparation.
  *
  * GitHub's `refs/pull/N/merge` is mutable and read-only, so the value is not the
  * ref but the objects it pointed at: the candidate commit, its parents, and its

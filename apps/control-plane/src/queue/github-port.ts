@@ -58,7 +58,7 @@ interface CommitResponse {
 }
 
 /**
- * Candidate resolution (plan.md §16.1). GitHub computes mergeability
+ * Candidate resolution. GitHub computes mergeability
  * asynchronously, so a null answer is polled for a short bound and then given up
  * on rather than waited out — an entry that is not ready yet keeps its place and
  * will be offered another turn.

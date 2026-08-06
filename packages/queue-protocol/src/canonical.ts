@@ -3,7 +3,7 @@ import { bytesDigest, canonicalDigest, canonicalJson, dssePae, utf8Encode, type 
 /**
  * Canonicalization and digest rules for queue evidence.
  *
- * The rule that matters (plan.md §21.8): a record's digest is the SHA-256 of
+ * The rule that matters: a record's digest is the SHA-256 of
  * the exact signed envelope bytes, never of JSON reconstructed from a parsed
  * object. Reconstruction would let two different byte strings share a digest
  * and turn a signature into a statement about something nobody signed.
