@@ -2,8 +2,26 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { installPushWarning, PUSH_WARNING_MARKER } from "./push-hook.js";
+
+/**
+ * Cut the throwaway repositories off from whoever is running the suite.
+ *
+ * The hook path comes from `git rev-parse --git-path`, which honours
+ * `core.hooksPath`. A developer who sets that globally, which is how a shared
+ * hook directory is normally configured, had every repository built here
+ * resolve to their own `~/.config/git/hooks` instead of its own. The suite then
+ * wrote a pre-push hook into it and cleaned up only the temporary directories,
+ * so the file stayed, and every later run found an unmanaged hook and refused.
+ *
+ * These two variables are read by git itself, and the subprocesses started here
+ * inherit them, so both the in-process calls and the spawned hook see them.
+ */
+beforeAll(() => {
+  process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
+  process.env["GIT_CONFIG_SYSTEM"] = "/dev/null";
+});
 
 const roots: string[] = [];
 
