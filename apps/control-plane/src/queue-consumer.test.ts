@@ -13,13 +13,13 @@ async function runMessages(messages: Parameters<typeof processQueueMessage>[0][]
 import type { AppProofRequest } from "./app-proof-verification.js";
 
 const REQUEST: AppProofRequest = {
-  event: "pull_request",
   repositoryId: "repo-1",
   repository: "acme/widgets",
   ownerId: "owner-1",
   installationId: "42",
   subjectSha: "a".repeat(40),
   baseRef: "main",
+  pullRequestNumber: 53,
 };
 
 describe("queue consumer", () => {
