@@ -2,9 +2,10 @@
  * Performing the merge the queue authorized, from the Worker.
  *
  * The App owns the write. Writing a commit object and moving a ref are both
- * covered by `contents: write`, and `appOwnershipRuleset` names the App as the
- * only actor that may update the queued branch, so the fast-forward guard is
- * code this repository tests directly.
+ * covered by `contents: write`; GitHub additionally requires `workflows: write`
+ * when the tree changes `.github/workflows`. `appOwnershipRuleset` names the
+ * App as the only actor that may update the queued branch, so the fast-forward
+ * guard is code this repository tests directly.
  *
  * The guard is one sentence. GitHub accepts a ref update without force only
  * where the branch is an ancestor of the new commit, and the only branch that is

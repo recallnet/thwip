@@ -7,15 +7,15 @@
  * supported writer, so a merge-queue rule is always a conflicting control.
  */
 
-import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
+import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 /*
  * `Thwip / Merge` is gone.
  *
  * plan.md §44 named one App-published gate by that name. The queue that got
- * built publishes three checks and none of them is called that: `thwip` from
- * the workflow in `.github/workflows/thwip-required.yml`, and `thwip / turn`
- * and `thwip / candidate` from the App. A repository provisioned from the old
+ * built publishes distinct workflow and App checks and none of them is called
+ * that: `thwip / workflow` from `.github/workflows/thwip-required.yml`, and
+ * `thwip`, `thwip / turn`, and `thwip / candidate` from the App. A repository provisioned from the old
  * generator required a check no source would ever post, so its branch could not
  * merge and no amount of waiting would change that.
  *
@@ -27,15 +27,10 @@ import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
 /**
  * GitHub Actions' own Integration id, which is the same everywhere.
  *
- * Where `thwip` comes out of `.github/workflows/thwip-required.yml`, GitHub
- * attributes it to Actions rather than to the Thwip App, and pinning it to the
- * App's id would produce a requirement the workflow can never satisfy. Read off
- * the live ruleset on `recallnet/thwip`.
- *
- * The App publishes a check by the same name, and where it does, this is the
- * wrong source: it lets any workflow in the repository publish a green `thwip`
- * and satisfy the requirement. `proofIntegrationFor` decides which of the two
- * the pin names, from whether the App is the one publishing.
+ * Observe mode uses the repository workflow's `thwip / workflow` context and
+ * pins it to Actions. Enforced mode uses the App's `thwip` context and pins it
+ * to the App. The names differ as well as the sources so GitHub never has to
+ * choose between two same-named checks while the App advances the branch.
  */
 export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
 
@@ -48,7 +43,12 @@ export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
  */
 export type ProofCheckMode = "observe" | "enforced";
 
-/** Which Integration may satisfy the required `thwip` context. */
+/** The proof context that actually exists in this stage of setup. */
+export function proofContextFor(mode: ProofCheckMode): typeof WORKFLOW_CHECK | typeof PROOF_CHECK {
+  return mode === "enforced" ? PROOF_CHECK : WORKFLOW_CHECK;
+}
+
+/** Which Integration may satisfy the active proof context. */
 export function proofIntegrationFor(input: {
   mode: ProofCheckMode;
   integrationId: number;
@@ -80,7 +80,7 @@ export interface PolicyOptions {
   readonly baseRef: string;
   /** The Thwip App, which publishes the turn check. */
   readonly integrationId: number;
-  /** GitHub Actions, which publishes the proof check while the App observes. */
+  /** GitHub Actions, which publishes the workflow proof gate while the App observes. */
   readonly actionsIntegrationId?: number;
   /** Whether the App publishes `thwip` itself yet. Defaults to observing. */
   readonly proofCheckMode?: ProofCheckMode;
@@ -127,23 +127,24 @@ export function appOwnershipRuleset(input: { baseRef: string; integrationId: num
  * which GitHub layers with this one; setup must not invent approvals, dismissal
  * behavior, last-push approval, or thread-resolution requirements.
  *
- * `thwip` answers whether the proof is good for this tree. `thwip / turn`
+ * The active proof context answers whether the proof is good for this tree. `thwip / turn`
  * answers whose turn it is and is published by the App the moment it offers the
- * lane, so the App is its source. The proof check has two possible publishers
- * and the pin names whichever one is actually posting it, because a source that
- * names the wrong publisher makes the context unsatisfiable and wedges the
- * branch.
+ * lane, so the App is its source. The proof gate changes both name and source at
+ * enforcement: Actions owns `thwip / workflow`, while the App owns `thwip`.
+ * Naming the wrong stage makes the context unsatisfiable and wedges the branch.
  *
  * Existing required checks are carried through, deduplicated by context, with
- * the caller's own source pin winning for the two Thwip contexts only.
+ * the caller's own source pin winning for the managed Thwip contexts only.
  */
 export function policyRuleset(input: PolicyOptions): Ruleset {
+  const proofMode = input.proofCheckMode ?? "observe";
+  const proofContext = proofContextFor(proofMode);
   const proofIntegrationId = proofIntegrationFor({
-    mode: input.proofCheckMode ?? "observe",
+    mode: proofMode,
     integrationId: input.integrationId,
     ...(input.actionsIntegrationId === undefined ? {} : { actionsIntegrationId: input.actionsIntegrationId }),
   });
-  const thwipContexts = new Set<string>([PROOF_CHECK, TURN_CHECK]);
+  const thwipContexts = new Set<string>([PROOF_CHECK, WORKFLOW_CHECK, TURN_CHECK]);
   const existing = input.existingRequiredChecks ?? [];
   const merged: Array<{ context: string; integration_id?: number }> = [];
   const seen = new Set<string>();
@@ -154,10 +155,10 @@ export function policyRuleset(input: PolicyOptions): Ruleset {
     merged.push(check.integration_id === undefined ? { context: check.context } : { ...check });
   }
   if (input.pinCheckSource === false) {
-    merged.push({ context: PROOF_CHECK }, { context: TURN_CHECK });
+    merged.push({ context: proofContext }, { context: TURN_CHECK });
   } else {
     merged.push(
-      { context: PROOF_CHECK, integration_id: proofIntegrationId },
+      { context: proofContext, integration_id: proofIntegrationId },
       { context: TURN_CHECK, integration_id: input.integrationId },
     );
   }
@@ -226,10 +227,19 @@ export function diffRuleset(current: Ruleset | null, next: Ruleset): RulesetDiff
   const removedRules = [...currentTypes].filter((t) => !nextTypes.has(t));
   const removedRequiredChecks = [...currentChecks].filter((c) => !nextChecks.has(c));
   const warnings: string[] = [];
+  const managedProofContexts = new Set<string>([PROOF_CHECK, WORKFLOW_CHECK]);
+  const nextHasManagedProof = [...managedProofContexts].some((context) => nextChecks.has(context));
 
   // Dropping a protection is the outcome this diff exists to make visible.
   for (const rule of removedRules) warnings.push(`this would remove the ${rule} rule`);
-  for (const check of removedRequiredChecks) warnings.push(`this would stop requiring ${check}`);
+  for (const check of removedRequiredChecks) {
+    // Observe and enforced mode deliberately use different proof contexts.
+    // Replacing one with the other is the setup protocol's source cutover, not
+    // the removal of a repository-owned protection. Dropping either without a
+    // managed proof gate replacing it remains unsafe.
+    if (managedProofContexts.has(check) && nextHasManagedProof) continue;
+    warnings.push(`this would stop requiring ${check}`);
+  }
   if (current !== null && current.enforcement === "active" && next.enforcement === "disabled") {
     warnings.push("this would disable enforcement");
   }
@@ -267,8 +277,8 @@ export const BOOTSTRAP_STEPS = [
   "attach-integration-id-while-disabled",
   "canary-negative-test",
   "record-genesis",
-  "activate-policy-and-ownership",
   "pin-proof-check-to-app",
+  "activate-policy-and-ownership",
 ] as const;
 
 export type BootstrapStep = (typeof BOOTSTRAP_STEPS)[number];
@@ -295,6 +305,7 @@ export function mayActivate(progress: BootstrapProgress): ActivationCheck {
     "attach-integration-id-while-disabled",
     "canary-negative-test",
     "record-genesis",
+    "pin-proof-check-to-app",
   ];
   for (const step of required) {
     if (progress[step] !== true) return { ok: false, reason: `${step} has not been completed` };
@@ -310,9 +321,10 @@ export function mayActivate(progress: BootstrapProgress): ActivationCheck {
  * GitHub offers an App as the expected source of a context only where the App
  * has recently posted a check by that name, so the App posts one for each
  * context the policy is about to pin to it. `thwip / turn` has always been one
- * of them. `thwip` joined it when the required proof check moved off GitHub
- * Actions: without a posting under that name, GitHub answers the pin with a
- * refusal and setup stops with the branch requiring an unpinned context.
+ * of them. `thwip` joins it because setup eventually pins the enforced proof
+ * gate to the App. The Actions-owned `thwip / workflow` context is never posted
+ * by the App; keeping the publishers disjoint is the invariant this setup is
+ * establishing.
  */
 export function bootstrapCheckRuns(input: { headSha: string; policyEnforcement: "active" | "disabled" }):
   | { readonly ok: true; readonly checkRuns: ReadonlyArray<{ name: string; head_sha: string; status: string; conclusion: string; external_id: string; output: { title: string; summary: string } }> }

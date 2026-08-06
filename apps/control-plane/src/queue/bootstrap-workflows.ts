@@ -94,7 +94,7 @@ permissions:
 
 jobs:
   thwip:
-    name: thwip
+    name: thwip / workflow
     runs-on: ubuntu-latest
     steps:
       - name: Verify thwip proof for the exact PR head commit
@@ -409,8 +409,8 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
     "",
     "This pull request adds what the queue needs and nothing else:",
     "",
-    "- `.github/workflows/thwip-required.yml` publishes the `thwip` check, which says whether the proof is good for the tree, and places the pull request in the queue.",
-    "- The installed Thwip App performs the merge with its repository-scoped `contents: write` permission. A repository administrator applies the generated rulesets; the App does not request `administration: write`. No repository merge token is needed.",
+    "- `.github/workflows/thwip-required.yml` publishes `thwip / workflow`, which verifies the proof during the staged handoff and places the pull request in the queue. Enforcement later replaces that requirement with the App-owned `thwip` check; the two publishers never share a name.",
+    "- The installed Thwip App performs the merge with repository-scoped `contents: write`, plus `workflows: write` when a reviewed merge changes CI definitions. A repository administrator applies the generated rulesets; the App does not request `administration: write`. No repository merge token is needed.",
     "- `.github/workflows/thwip-queue-verify.yml` runs the required suites against the integrated candidate when the queue asks for it. The `remote` and `audited` profiles need it; `fast` and `fresh` never dispatch to it.",
     ...(input.includeRepositoryConfig === true
       ? ["- `thwip.yaml` is the repository-specific policy override selected for this setup. Edit it before merging if these are not the right suites."]

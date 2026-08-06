@@ -125,9 +125,9 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
 
 3. Cut over the gate. After at least one observe-mode PASS, ask me to switch
    this project to "Enforce App check" in the dashboard. Update the GitHub
-   ruleset so the required "thwip" context is expected from the thwip GitHub
-   App, then confirm the App-owned check passes on a fresh commit before
-   removing any verifier workflow. Do not leave an unprotected interval.
+   ruleset so the Actions-owned "thwip / workflow" requirement is replaced by
+   the App-owned "thwip" context, then confirm the App-owned check passes on a
+   fresh commit before removing any verifier workflow. Do not leave an unprotected interval.
 
 4. Retire duplicated remote CI. Read .github/workflows/*. List every job and
    sort it into:

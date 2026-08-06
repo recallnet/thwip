@@ -19,7 +19,7 @@ import {
   POLICY_RULESET_NAME,
   type Ruleset,
 } from "./rulesets.js";
-import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
+import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 const REPOSITORY_ID = "987654321";
 const BASE_REF = "refs/heads/main";
@@ -357,7 +357,7 @@ describe("advanceBootstrap", () => {
 
     const policy = github.rulesets.get(POLICY_RULESET_NAME);
     expect(policy?.ruleset.enforcement).toBe("disabled");
-    expect(github.requiredChecks()).toEqual([{ context: PROOF_CHECK }, { context: TURN_CHECK }]);
+    expect(github.requiredChecks()).toEqual([{ context: WORKFLOW_CHECK }, { context: TURN_CHECK }]);
   });
 
   it("refuses to drop a control the repository already had", async () => {
@@ -428,14 +428,16 @@ describe("runBootstrap", () => {
     // Still Actions: this repository has not enforced the App's proof check, so
     // the App does not publish `thwip` and a pin on it would block the branch.
     expect(github.requiredChecks()).toEqual([
-      { context: PROOF_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
+      { context: WORKFLOW_CHECK, integration_id: GITHUB_ACTIONS_INTEGRATION_ID },
       { context: TURN_CHECK, integration_id: APP_INTEGRATION_ID },
     ]);
-    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("active");
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+    expect(github.rulesets.has(OWNERSHIP_RULESET_NAME)).toBe(false);
   });
 
   it("gives the installed App ownership of the branch", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
+    enforceAppProofCheck();
     await enrolled();
     await runAsRepositoryAdministrator(github);
 
@@ -448,23 +450,18 @@ describe("runBootstrap", () => {
   it("requires a human confirmation when read-only ruleset access hides bypass actors", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     github.hideBypassActors = true;
+    enforceAppProofCheck();
     await enrolled();
 
     const waiting = await runAsRepositoryAdministrator(github, false);
     expect(waiting.outcomes.at(-1)).toMatchObject({
       kind: "waiting",
-      step: "activate-policy-and-ownership",
+      step: "pin-proof-check-to-app",
       confirmationRequired: "ruleset-bypass-actors",
     });
     expect(waiting.enabled).toBe(true);
     expect(waiting.outcomes.at(-1)).toMatchObject({
       expectedBypassActors: [
-        {
-          ruleset: OWNERSHIP_RULESET_NAME,
-          bypassActors: [
-            { actor_id: APP_INTEGRATION_ID, actor_type: "Integration", bypass_mode: "always" },
-          ],
-        },
         { ruleset: POLICY_RULESET_NAME, bypassActors: [] },
       ],
     });
@@ -474,25 +471,50 @@ describe("runBootstrap", () => {
       (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
     );
     expect(continued.enabled).toBe(true);
-    expect(continued.status.activationState).toBe("enforced");
-    expect(continued.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+    expect(continued.status.activationState).toBe("canary");
+    const changes = continued.outcomes.at(-1);
+    expect(changes).toMatchObject({
+      kind: "waiting",
+      step: "activate-policy-and-ownership",
+      manualRulesets: [{ operation: "create" }, { operation: "update" }],
+    });
+    if (changes?.kind !== "waiting") throw new Error("expected the enforcement rulesets");
+    await applyManualRulesets(github, changes.manualRulesets ?? []);
+
+    const completed = await runBootstrap(
+      deps(github, true),
+      (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
+    );
+    expect(completed.status.activationState).toBe("enforced");
+    expect(completed.outcomes.at(-1)).toEqual({ kind: "complete" });
   });
 
   it("accepts GitHub read-back that omits the false update-rule parameter", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     github.omitFalseUpdateParameters = true;
+    enforceAppProofCheck();
     await enrolled();
 
     const run = await runAsRepositoryAdministrator(github);
 
     expect(run.status.activationState).toBe("enforced");
-    expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+    expect(run.outcomes.at(-1)).toEqual({ kind: "complete" });
   });
 
   it("observes before an explicit, recoverable enforcement handoff", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     await enrolled();
 
+    const proofObservation = await runAsRepositoryAdministrator(github, true, false);
+    expect(proofObservation.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "pin-proof-check-to-app",
+    });
+    expect(proofObservation.status.activationState).toBe("observe");
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+    expect(github.rulesets.has(OWNERSHIP_RULESET_NAME)).toBe(false);
+
+    enforceAppProofCheck();
     const observing = await runAsRepositoryAdministrator(github, true, false);
     expect(observing.outcomes.at(-1)).toMatchObject({
       kind: "waiting",
@@ -522,7 +544,7 @@ describe("runBootstrap", () => {
       (await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))!,
     );
     expect(enforced.status.activationState).toBe("enforced");
-    expect(enforced.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+    expect(enforced.outcomes.at(-1)).toEqual({ kind: "complete" });
   });
 
   it("refuses to pin an integration the check did not come from", async () => {
@@ -605,18 +627,18 @@ describe("runBootstrap", () => {
 });
 
 /**
- * Moving the required `thwip` context from GitHub Actions to the App.
+ * Replacing the required workflow proof context with the App proof context.
  *
- * Any workflow in an adopter's repository can publish a green check named
- * `thwip`, and while the context is sourced from Actions that satisfies the
- * requirement. Sourcing it from the App narrows that to one publisher.
+ * The two publishers have distinct names so an in-progress workflow check
+ * cannot be mistaken for, or interfere with, the App gate. Setup must still
+ * move the requirement from one publisher to the other without a gap.
  *
  * The order is the whole problem. The App publishes `thwip` only where
  * `proof_check_mode` is `enforced`; in `observe` it publishes
- * `thwip / proof (observe)` and never the enforced name. Moving the pin first
- * would leave the branch requiring a check nothing publishes, and every open
- * pull request in the repository stuck. So the publisher moves first and the
- * pin follows it, which is the property every test below holds.
+ * `thwip / proof (observe)` and never the enforced name. The publisher moves,
+ * the disabled policy replaces `thwip / workflow` with `thwip`, and only then
+ * do ownership and policy enforcement activate. No active queue ever waits on
+ * the workflow job that is currently calling it.
  */
 describe("the required proof check moving to the App", () => {
   async function enrolled() {
@@ -632,12 +654,15 @@ describe("the required proof check moving to the App", () => {
     const run = await runAsRepositoryAdministrator(github);
 
     expect(github.requiredChecks()).toContainEqual({
-      context: PROOF_CHECK,
+      context: WORKFLOW_CHECK,
       integration_id: GITHUB_ACTIONS_INTEGRATION_ID,
     });
-    // Enabled and merging. Nothing about an unfinished pin blocks the branch.
+    // Enabled only for observation. Existing controls still own merging.
     expect(run.enabled).toBe(true);
     expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+    expect(run.status.activationState).toBe("observe");
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
+    expect(github.rulesets.has(OWNERSHIP_RULESET_NAME)).toBe(false);
   });
 
   it("says what an administrator has to do before the pin can move", async () => {
@@ -740,40 +765,14 @@ describe("the required proof check moving to the App", () => {
     });
   });
 
-  /**
-   * A repository enrolled before this step existed has every earlier step
-   * recorded and an active policy. Re-running setup has to reach the new step
-   * and nothing else, because everything before it is already done.
-   */
-  it("reaches a repository that finished setup before the step existed", async () => {
+  it("does not activate ownership before the proof contexts have been replaced", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     await enrolled();
-    await runAsRepositoryAdministrator(github);
-    d1.raw
-      .prepare("UPDATE queue_projects SET bootstrap_progress_json = ? WHERE github_repository_id = ?")
-      .run(
-        JSON.stringify({
-          "merge-setup-pr": true,
-          "create-disabled-policy-without-source": true,
-          "publish-bootstrap-check": true,
-          "attach-integration-id-while-disabled": true,
-          "canary-negative-test": true,
-          "activate-policy-and-ownership": true,
-          "record-genesis": true,
-        }),
-        REPOSITORY_ID,
-      );
-
-    enforceAppProofCheck();
     const run = await runAsRepositoryAdministrator(github);
-    expect(run.outcomes.map((o) => ("step" in o ? o.step : "complete"))).toEqual([
-      "pin-proof-check-to-app",
-      "complete",
-    ]);
-    expect(github.requiredChecks()).toContainEqual({
-      context: PROOF_CHECK,
-      integration_id: APP_INTEGRATION_ID,
-    });
+
+    expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "pin-proof-check-to-app" });
+    expect(github.rulesets.has(OWNERSHIP_RULESET_NAME)).toBe(false);
+    expect(github.rulesets.get(POLICY_RULESET_NAME)?.ruleset.enforcement).toBe("disabled");
   });
 
   /**

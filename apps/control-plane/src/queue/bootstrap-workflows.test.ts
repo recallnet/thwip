@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { setupPullRequestBody, setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
-import { PROOF_CHECK } from "./turn-check.js";
+import { PROOF_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
@@ -66,7 +66,7 @@ describe("setupPullRequestFiles", () => {
       jobs: Record<string, { name: string }>;
     };
     expect(workflow.name).toBe(PROOF_CHECK);
-    expect(workflow.jobs[PROOF_CHECK]?.name).toBe(PROOF_CHECK);
+    expect(workflow.jobs["thwip"]?.name).toBe(WORKFLOW_CHECK);
   });
 
   it("produces workflows GitHub can parse and will run", () => {
@@ -97,6 +97,7 @@ describe("setupPullRequestFiles", () => {
       actionRef: "recallnet/thwip@v1.2.3",
     });
     expect(body).toMatch(/does not request `administration: write`/);
+    expect(body).toMatch(/`workflows: write` when a reviewed merge changes CI definitions/);
     expect(body).toMatch(/No repository merge token is needed/);
   });
 
@@ -155,7 +156,8 @@ describe("drift against this repository's own workflows", () => {
     };
     expect(generated.name).toBe(live.name);
     expect(Object.keys(generated.jobs)).toEqual(Object.keys(live.jobs));
-    expect(generated.jobs[PROOF_CHECK]?.name).toBe(live.jobs[PROOF_CHECK]?.name);
+    expect(generated.jobs["thwip"]?.name).toBe(WORKFLOW_CHECK);
+    expect(generated.jobs["thwip"]?.name).toBe(live.jobs["thwip"]?.name);
   });
 
   it.each([".github/workflows/thwip-queue-verify.yml"])(

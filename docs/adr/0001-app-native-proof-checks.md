@@ -27,10 +27,13 @@ Each evaluation creates an immutable database row and a service-signed audit
 record containing the subject, base, policy digest and version, verifier version,
 individual outcomes, check-run id, and timestamp.
 
-The App requires `checks:write`, `contents:write`, `pull_requests:write`, and
-`statuses:write` for queue operation. Contents write creates the commit object,
-moves the branch, opens the setup pull request, and dispatches the protected
-candidate verifier. Ruleset reads use `metadata:read`.
+The App requires `checks:write`, `contents:write`, `pull_requests:write`,
+`statuses:write`, and `workflows:write` for queue operation. Contents write
+creates ordinary commit objects, moves the branch, opens the setup pull request,
+and dispatches the protected candidate verifier. GitHub additionally requires
+Workflows write when the reviewed commit changes `.github/workflows`; omitting
+it would make CI-definition changes require a second writer. Ruleset reads use
+`metadata:read`.
 
 The runtime does not require `administration:write`. GitHub gates ruleset writes
 behind that coarse permission, so setup instead renders exact ruleset payloads,
@@ -84,16 +87,21 @@ Fresh repositories follow one path:
 3. Merge that pull request under the repository's existing controls.
 4. Apply the generated disabled policy ruleset and source-pinning update. Thwip
    reads both back before continuing.
-5. Run in `observe`, validate the proof and queue checks on a real pull request,
-   then explicitly begin enforcement.
-6. Apply the App ownership and active-policy payloads, confirm their bypass
-   actors, and let Thwip verify the live rulesets.
-7. Enforce the App proof publisher and apply the final source pin after open
-   pull-request heads already carry that App check.
+5. Run in `observe` with policy and ownership disabled, and validate the proof
+   and queue checks on a real pull request.
+6. Enforce the App proof publisher, then replace `thwip / workflow` with
+   App-owned `thwip` in the still-disabled policy and verify the stored pin.
+7. Explicitly begin queue enforcement. Apply the App ownership and active-policy
+   payloads, confirm their bypass actors, and let Thwip verify the live rulesets.
 
 The order prevents a no-publisher gap. In observe mode the repository workflow
-publishes `thwip`, while the App publishes `thwip / proof (observe)`. Enforcement
-makes the App publish `thwip` before the ruleset source pin moves to the App.
+publishes `thwip / workflow`, while the App publishes
+`thwip / proof (observe)`. The App begins publishing `thwip`, then the disabled
+ruleset replaces the Actions-owned workflow context with the App-owned context,
+and only after that does queue enforcement activate.
+The names are distinct because GitHub can refuse a protected-ref update while
+an unrelated same-named check is still running, even when the required context
+is pinned to the App.
 
 Setup is intentionally not a migration engine. A repository with conflicting
 branch automation or old protection must be cleaned up by an administrator

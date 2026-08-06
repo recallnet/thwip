@@ -30,12 +30,11 @@ Projects begin with the distinct `thwip / proof (observe)` App check. After a
 recent PASS under the active policy, an administrator can enforce it, and the
 App publishes `thwip` from then on.
 
-On a queue-enrolled branch the required `thwip` context follows whoever
-publishes it. A repository still observing has it sourced from GitHub Actions
-and satisfied by the `thwip-required.yml` the setup pull request adds. Once an
-administrator enforces the App's proof check, setup's last step moves the pin to
-the App, and from then on one publisher satisfies it instead of any workflow in
-the repository. `docs/adr/0001-app-native-proof-checks.md` has the order and why
+The setup workflow and App never publish the same check name. During the staged
+handoff the Actions-owned proof gate is `thwip / workflow`, satisfied by the
+`thwip-required.yml` the setup pull request adds. Once an administrator enforces
+the App's proof check, setup replaces that requirement with the App-owned
+`thwip` context. `docs/adr/0001-app-native-proof-checks.md` has the order and why
 it cannot run the other way round.
 
 ## Contributing (this repo eats its own dogfood)
