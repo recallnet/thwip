@@ -601,7 +601,7 @@
 .mq-diagram {
   max-width: 760px;
   margin: 34px 0 0;
-  padding: 24px 24px 17px;
+  padding: 24px;
   border: 1px solid var(--ink);
   background: var(--paper);
 }
@@ -636,16 +636,6 @@
 .mq-lane__detail { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 .mq-lane__arrow { font-size: 20px; line-height: 0.75; }
 .mq-lane__main { color: var(--civic); font-size: 14px; font-weight: 600; }
-.mq-diagram figcaption {
-  margin-top: 20px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  line-height: 1.5;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 .mq-profiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -653,7 +643,7 @@
   border-top: 1px solid var(--ink);
 }
 .mq-profile {
-  min-height: 154px;
+  min-height: 124px;
   padding: 17px 24px 20px 0;
   border-bottom: 1px solid var(--rule);
 }
