@@ -76,8 +76,8 @@ writeFileSync(
 
 // The package README must be written for someone who has just installed the
 // CLI. Falling back to the repository's README once published an internal
-// engineering document to npm, naming the staging control plane, plan.md and
-// how internal pull requests merge. A missing README is a build failure now,
+// engineering document to npm, naming the staging control plane, the design
+// documents, and how internal pull requests merge. A missing README is a build failure now,
 // because the quiet fallback is worse than stopping.
 const readme = join(root, "packages/cli/README.md");
 if (!existsSync(readme)) {

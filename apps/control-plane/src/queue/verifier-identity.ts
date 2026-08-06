@@ -1,5 +1,5 @@
 /**
- * Who is allowed to say "verified" (plan.md §17).
+ * Who is allowed to say "verified".
  *
  * The existing control plane accepts a GitHub Actions OIDC token from the right
  * repository. That is not enough for a merge decision: any workflow in the

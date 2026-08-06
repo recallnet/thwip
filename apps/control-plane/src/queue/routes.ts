@@ -173,7 +173,7 @@ async function healPlans<TEnv extends QueueRouteEnv>(
 }
 
 /**
- * The queue's HTTP surface (plan.md §37.1).
+ * The queue's HTTP surface.
  *
  * Every route resolves the Durable Object for one repository and base ref and
  * hands it a command. Nothing decides anything here: this layer authenticates,
@@ -962,7 +962,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /**
    * Join the queue. Durable: accepted before reviews finish, and the entry keeps
-   * its place through failure (plan.md §7.1).
+   * its place through failure.
    *
    * Which queue the entry lands on comes from GitHub, never from the request:
    * the branch was the caller's to name once, so a pull request could be placed
@@ -1084,7 +1084,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * A runner says it is here (plan.md §5.0).
+   * A runner says it is here.
    *
    * The principal comes from the session, never the body, so a runner cannot
    * claim to be somebody else. Upserts the heartbeat row; only on the
@@ -1177,7 +1177,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * A device takes the turn it was offered, and is told what to run (plan.md §19.3).
+   * A device takes the turn it was offered, and is told what to run.
    *
    * This is the half of `fresh` that had never been built. The queue holds the
    * integrated candidate, signs an assignment naming that exact tree, this
@@ -1464,7 +1464,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * The device's account of what it ran (plan.md §19.3).
+   * The device's account of what it ran.
    *
    * Accepted only when it answers the assignment this queue issued, is about the
    * tree that assignment named, comes from the device that was assigned it, and
@@ -1618,7 +1618,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     return c.json({ accepted: true });
   });
 
-  /** Administrative pause, resume, and rebaseline (plan.md §28.5). */
+  /** Administrative pause, resume, and rebaseline. */
   app.post("/v1/queue/:repositoryId/pause", async (c) => {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
@@ -1698,7 +1698,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * The verifier's callback. Authenticated by GitHub Actions OIDC and then held
    * to the pinned workflow identity, because any workflow in the repository can
-   * obtain a valid token (plan.md §17, §39.2).
+   * obtain a valid token.
    */
   app.post("/api/github-actions/queue-result", async (c) => {
     const claims = await deps.verifyOidc(c, c.env);
@@ -1763,7 +1763,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
   /**
    * A pinned verifier reports what the required suites did against one integrated
-   * candidate (plan.md §16).
+   * candidate.
    *
    * This is the evidence the merge gate was missing. Before it existed the gate
    * walked an attempt to merge-ready with a constant standing in for a verifier
@@ -1982,7 +1982,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * Operator reconciliation (plan.md §30.4, §68.1).
+   * Operator reconciliation.
    *
    * An attempt whose merge outcome is unknown holds the lane until something
    * resolves it, and only two things can: a confirmation, or a person who has
@@ -2708,7 +2708,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   });
 
   /**
-   * Why one turn went to the pull request it went to (plan.md §21.2).
+   * Why one turn went to the pull request it went to.
    *
    * This is the record every assignment and every `TurnOffered` binds by digest,
    * and until it could be fetched the binding proved nothing. The bytes are

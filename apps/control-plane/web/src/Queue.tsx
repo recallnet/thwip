@@ -16,10 +16,10 @@ import {
 } from "./vocabulary.js";
 
 /**
- * The queue surfaces (plan.md §28.2, §28.3).
+ * The queue surfaces.
  *
- * Two rules from the specification shape this view and are worth stating because
- * they are easy to break by accident.
+ * Two rules shape this view and are worth stating because they are easy to
+ * break by accident.
  *
  * Order is projected, never promised. Readiness changes after every GitHub event,
  * so a number presented as a fixed position would be a lie the user notices the

@@ -73,7 +73,7 @@ export interface EvidenceRefusal {
  * could add a required suite, keep the green check the old proof earned, and
  * merge under a signed record stamping the new policy's digests over work that
  * never satisfied it. Reuse skips a Dagger run, never a current-authorization
- * check (plan.md §21.5), so the proof has to bind the policy in force here or
+ * check, so the proof has to bind the policy in force here or
  * there is nothing to sign.
  */
 export async function reuseEvidenceFor(

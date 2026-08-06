@@ -3,8 +3,8 @@ import { candidateResultDigest, decideCandidate } from "./candidate-verdict.js";
 import type { CandidateVerdict } from "./store.js";
 
 /**
- * ADVERSARIAL RECONNAISSANCE. Expected to FAIL against current behaviour, except
- * the last block. See .superpowers/sdd/stress-test-report.md.
+ * Adversarial probes of the candidate verdict. Each failed when it was written;
+ * each now pins the behaviour that fixed it.
  */
 
 const TREE = "4".repeat(40);

@@ -12,7 +12,7 @@ import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 /*
  * `Thwip / Merge` is gone.
  *
- * plan.md §44 named one App-published gate by that name. The queue that got
+ * The v1 design named one App-published gate by that name. The queue that got
  * built publishes distinct workflow and App checks and none of them is called
  * that: `thwip / workflow` from `.github/workflows/thwip-required.yml`, and
  * `thwip`, `thwip / turn`, and `thwip / candidate` from the App. A repository provisioned from the old

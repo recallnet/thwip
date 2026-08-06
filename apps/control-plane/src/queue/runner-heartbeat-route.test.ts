@@ -7,7 +7,7 @@ import { withQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
 
 /**
- * `POST /v1/queue/:repositoryId/runners/heartbeat` (plan.md §5.0).
+ * `POST /v1/queue/:repositoryId/runners/heartbeat`.
  *
  * The scheduler withholds an offer from a Ready entry until a compatible
  * runner is connected; this is the transport that tells it one just showed

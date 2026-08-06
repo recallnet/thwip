@@ -1,7 +1,7 @@
 import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 /**
- * The chaos suite from plan.md §53.3 runs in workerd, against the real Durable
+ * The chaos suite runs in workerd, against the real Durable
  * Object runtime. Everything the pure tests cannot reach lives here: actual
  * eviction, actual alarms, actual SQLite storage, actual concurrency.
  *

@@ -434,7 +434,7 @@ export class SnapshotQueueStore {
 
   /* ---------------- scheduler ---------------- */
 
-  /** Entries the scheduler may consider right now (plan.md §7.1). */
+  /** Entries the scheduler may consider right now. */
   eligibleEntries(): EligibleEntry[] {
     return [...this.state().entries.values()]
       // Same rule as BranchQueueStore, and for the same reason: a Deferred entry
@@ -464,7 +464,7 @@ export class SnapshotQueueStore {
     return this.doc.deadlines.filter((d) => d.dueAt <= now).sort((a, b) => a.dueAt.localeCompare(b.dueAt));
   }
 
-  /** The single alarm time: the earliest deadline, or null (plan.md §39.3). */
+  /** The single alarm time: the earliest deadline, or null. */
   earliestDeadline(): string | null {
     let earliest: string | null = null;
     for (const deadline of this.doc.deadlines) {
@@ -545,7 +545,7 @@ export class SnapshotQueueStore {
   /**
    * Record the intent to write before the network call. If this record exists, a
    * mutation may already have reached GitHub, and no retry may send another
-   * (plan.md §40.1).
+   *.
    */
   beginMergeOperation(op: {
     operationId: string;
@@ -701,7 +701,7 @@ export class SnapshotQueueStore {
   /* ---------------- callback staleness ---------------- */
 
   /**
-   * Classify a callback that names an attempt and a revision (plan.md §39.2).
+   * Classify a callback that names an attempt and a revision.
    * A callback for an older attempt is stale and harmless; one for the current
    * attempt whose facts disagree is an invariant conflict that pauses the lane.
    */

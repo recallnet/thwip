@@ -7,7 +7,7 @@ import type { QueueEvent } from "./events.js";
 /**
  * Exhaustive bounded model checking of the branch queue.
  *
- * plan.md §53.2 asks for a small TLA+ model. This checks the same properties by
+ * The design called for a small TLA+ model. This checks the same properties by
  * exhaustively exploring the state space of the *actual reducer* instead, which
  * is stronger in the way that matters: a TLA+ model is a second description of
  * the system and can pass while the code it describes differs. Here the thing

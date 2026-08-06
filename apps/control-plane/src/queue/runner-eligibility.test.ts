@@ -18,7 +18,7 @@ const { queueFromPullRequest } = await import("../index.js");
 
 /**
  * Eligibility, derived rather than written by whichever writer ran last
- * (plan.md §452).
+ *.
  *
  * Under `fresh`/`audited` a queue entry offers the lane only to a connected
  * developer's own machine, with no fallback to GitHub Actions. The defining
