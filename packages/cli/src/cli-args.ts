@@ -54,10 +54,10 @@ COMMANDS
   queue <subcommand>        Inspect or operate the branch queue.
   init                      Write thwip.yaml for this repository.
   keys status               Show the signing key and GitHub registration.
-  setup                     Print the machine setup prompt.
+  setup                     Machine setup and optional local push warning.
   run                       Run approved suites and attach a proof.
   doctor                    Check this project can produce and verify a proof.
-  verify                    Parse and print the proof on HEAD.
+  verify                    Parse and check a commit's proof.
   verify-chain              Fetch and verify a branch's merge chain.
   policy digest             Print policy and pipeline digests.
   version                   Print this build's version, commit, and path.
@@ -73,7 +73,9 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
   init:
     `Usage: thwip init --required "lint,typecheck,test" [--profile PROFILE] [--sign-commits]\n\n` +
     `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
-  verify: `Usage: thwip verify [--json]\n\nParse and print the proof carried by HEAD.\n`,
+  verify:
+    `Usage: thwip verify [--commit OID] [--json]\n\n` +
+    `Parse the proof on HEAD, or on one exact commit, and check it binds that tree.\n`,
   "verify-chain":
     `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH] [--epoch N]\n` +
     `       thwip verify-chain --repository-id ID [--branch BRANCH] [--epoch N]\n\n` +
@@ -86,7 +88,10 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `value the server reports.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,
-  setup: `Usage: thwip setup\n\nPrint the human-guided machine setup prompt.\n`,
+  setup:
+    `Usage: thwip setup [--install-push-warning]\n\n` +
+    `Print the human-guided machine setup prompt. --install-push-warning adds a\n` +
+    `non-blocking pre-push warning shared by this repository's linked worktrees.\n`,
   run:
     `Usage: thwip run [--base REF]\n\n` +
     `Run approved suites against the committed tree and attach a signed proof to HEAD.\n`,
@@ -298,7 +303,7 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
         value: ["--required", "--profile"],
       });
     case "verify":
-      return simpleCommand("verify", rest, { boolean: ["--json"] });
+      return simpleCommand("verify", rest, { boolean: ["--json"], value: ["--commit"] });
     case "verify-chain":
       return simpleCommand("verify-chain", rest, { value: ["--repo", "--branch", "--repository-id", "--epoch"] });
     case "keys": {
@@ -308,7 +313,7 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
       return simpleCommand("keys-status", rest.slice(1));
     }
     case "setup":
-      return simpleCommand("setup", rest);
+      return simpleCommand("setup", rest, { boolean: ["--install-push-warning"] });
     case "version":
       return simpleCommand("version", rest);
     case "run":
