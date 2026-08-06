@@ -34,6 +34,22 @@ export const TICK_INTERVAL_SECONDS = 300;
  */
 export const TICK_STALE_SECONDS = 900;
 
+/**
+ * How long a started tick is assumed to still be running.
+ *
+ * This is the only thing `started_at` should ever be compared against, and it
+ * is a different question from staleness. Whether a tick is in flight is
+ * answered in minutes; whether the queue has stopped is answered in quarter
+ * hours, from `finished_at`.
+ *
+ * Asking both of `started_at` is what starved the traffic clock on 5 August.
+ * The cron claimed every five minutes and died every time, so `started_at` was
+ * never older than the fifteen minutes the traffic claim demanded, and for
+ * thirty minutes every request through the door was refused the work it existed
+ * to pick up. A healthy tick on this queue finishes in under a minute.
+ */
+export const TICK_RUN_TIMEOUT_SECONDS = 240;
+
 export function secondsBefore(now: string, seconds: number): string {
   return new Date(Date.parse(now) - seconds * 1000).toISOString();
 }
@@ -103,8 +119,12 @@ export interface TrafficClockPorts {
  */
 export async function tickOwedByTraffic(ports: TrafficClockPorts, now: string): Promise<void> {
   const clock = await ports.readClock();
+  // Has the queue stopped? That is `finished_at`, which `tickAgeSeconds` reads.
   if (tickAgeSeconds(clock, now) < TICK_STALE_SECONDS) return;
-  if (!(await ports.claim(now, secondsBefore(now, TICK_STALE_SECONDS)))) return;
+  // Is one already running? That is `started_at`, and it is a shorter question.
+  // Handing it the staleness threshold instead let a cron that claimed every
+  // five minutes and finished none of them hold traffic off indefinitely.
+  if (!(await ports.claim(now, secondsBefore(now, TICK_RUN_TIMEOUT_SECONDS)))) return;
   try {
     await ports.run();
     await ports.finish(now);
