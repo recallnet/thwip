@@ -43,10 +43,12 @@ const noop = async (): Promise<void> => {};
 /**
  * Tell the queue the verdict on this head has moved.
  *
- * Failing here must not retry the verification, which has already been stored
- * and published.
+ * A merge-group subject is a commit GitHub composed and no pull request is on
+ * it, so there is nothing to walk. Failing here must not retry the
+ * verification, which has already been stored and published.
  */
 async function considered(deps: Required<QueueConsumerDeps>, request: AppProofRequest): Promise<void> {
+  if (request.event !== "pull_request") return;
   try {
     await deps.reconsiderHead(request.repositoryId, request.subjectSha);
   } catch {

@@ -67,28 +67,23 @@ describe("webhookWork", () => {
     }
   });
 
-  it("skips an event the consumer has no branch for", () => {
-    expect(webhookWork("star", { action: "created" }, base)).toBeNull();
+  it("keeps a merge group asking for checks, because the proof check is one of them", () => {
+    const work = webhookWork(
+      "merge_group",
+      {
+        action: "checks_requested",
+        repository: { id: 1315419165, full_name: "recallnet/thwip", owner: { id: 1 } },
+        installation: { id: 42 },
+        merge_group: { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" },
+      },
+      base,
+    );
+    expect(work).not.toBeNull();
+    expect(work!.appProofTask).not.toBeNull();
   });
 
-  /**
-   * GitHub's own merge queue is retired: the App is the sole queue writer, its
-   * registration subscribes to no `merge_group` event, and a well-formed
-   * delivery of one must still produce no work rather than a proof check on a
-   * commit no pull request is on.
-   */
-  it("skips a merge group asking for checks, because the App is the only queue writer", () => {
-    expect(
-      webhookWork(
-        "merge_group",
-        {
-          action: "checks_requested",
-          repository: { id: 1315419165, full_name: "recallnet/thwip", owner: { id: 1 } },
-          merge_group: { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" },
-        },
-        base,
-      ),
-    ).toBeNull();
+  it("skips an event the consumer has no branch for", () => {
+    expect(webhookWork("star", { action: "created" }, base)).toBeNull();
   });
 
   /**

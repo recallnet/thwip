@@ -6,7 +6,7 @@
  * `queueFromPullRequest`, `externalPushFromWebhook`, policy-push sync, and the
  * App-native proof check could not run in that deployment.
  *
- * The App manifest declared all nine from the start, and that was no help: a
+ * The App manifest declared all ten from the start, and that was no help: a
  * manifest describes a fresh registration and says nothing about an App already
  * installed. So the subscription is compared against this list, from the live
  * installation, in the doctor an operator already runs. A test beside this file
@@ -24,6 +24,18 @@ export const REQUIRED_WEBHOOK_EVENTS = [
   "repository",
   "team",
 ] as const;
+
+/**
+ * GitHub can send `merge_group` to Actions, but does not offer it in this App's
+ * event-subscription UI. The App-owned queue does not use GitHub merge groups, so
+ * its absence must not make an otherwise-correct App installation unhealthy.
+ * The handler remains useful if GitHub exposes the event to Apps later.
+ */
+export const OPTIONAL_WEBHOOK_EVENTS = ["merge_group"] as const;
+
+export const HANDLED_WEBHOOK_EVENTS = [...REQUIRED_WEBHOOK_EVENTS, ...OPTIONAL_WEBHOOK_EVENTS] as const;
+
+export type HandledWebhookEvent = (typeof HANDLED_WEBHOOK_EVENTS)[number];
 
 // The control plane also mints events for its own queue, which GitHub never
 // sends. They are declared in the test beside this file, which is the only
@@ -48,20 +60,21 @@ export interface WebhookEventDrift {
 }
 
 export function webhookEventDrift(subscribed: readonly string[] | undefined | null): WebhookEventDrift {
-  const handled = [...REQUIRED_WEBHOOK_EVENTS];
+  const handled = [...HANDLED_WEBHOOK_EVENTS];
+  const required = [...REQUIRED_WEBHOOK_EVENTS];
   if (subscribed === undefined || subscribed === null) {
     return {
       known: false,
       subscribed: [],
       handled,
-      deadHandlers: handled,
+      deadHandlers: required,
       unreadSubscriptions: [],
       healthy: false,
     };
   }
   const delivered = new Set(subscribed);
   const read = new Set<string>(handled);
-  const deadHandlers = handled.filter((event) => !delivered.has(event));
+  const deadHandlers = required.filter((event) => !delivered.has(event));
   return {
     known: true,
     subscribed: [...subscribed],

@@ -26,14 +26,16 @@ export const APP_PROOF_OBSERVE_CHECK = "thwip / proof (observe)";
 const EXTERNAL_ID_PREFIX = "proof-verification:";
 
 export interface AppProofRequest {
+  event: "pull_request" | "merge_group";
   repositoryId: string;
   repository: string;
   ownerId: string;
   installationId: string;
   subjectSha: string;
   baseRef: string;
-  pullRequestNumber: number;
+  pullRequestNumber?: number;
   prAuthorGithubUserId?: string;
+  mergeGroupBaseSha?: string;
   /**
    * Set on the work a finished check schedules. Verification runs only when a
    * verification on this commit is still waiting for evidence, so a repository
@@ -59,6 +61,7 @@ interface ProofWebhookPayload {
   installation?: { id?: number };
   repository?: { id?: number; full_name?: string; owner?: { id?: number } };
   pull_request?: PullRequestPayload;
+  merge_group?: { head_sha?: string; base_sha?: string; base_ref?: string };
   check_run?: {
     name?: string;
     external_id?: string;
@@ -131,6 +134,7 @@ function verifyPullFromChecks(
   return {
     kind: "verify",
     request: {
+      event: "pull_request",
       ...repository,
       subjectSha,
       baseRef: `refs/heads/${base}`,
@@ -186,11 +190,30 @@ export function appProofTaskFromWebhook(event: string, payload: ProofWebhookPayl
     return {
       kind: "verify",
       request: {
+        event: "pull_request",
         ...repository,
         subjectSha,
         baseRef: `refs/heads/${base}`,
         pullRequestNumber: pullRequestNumber!,
         ...(author !== null ? { prAuthorGithubUserId: author } : {}),
+      },
+    };
+  }
+  if (event === "merge_group" && payload.action === "checks_requested") {
+    const subjectSha = gitOid(payload.merge_group?.head_sha);
+    const baseSha = gitOid(payload.merge_group?.base_sha);
+    const baseRef = payload.merge_group?.base_ref;
+    if (subjectSha === null || baseSha === null || typeof baseRef !== "string" || !baseRef.startsWith("refs/heads/")) {
+      return null;
+    }
+    return {
+      kind: "verify",
+      request: {
+        event: "merge_group",
+        ...repository,
+        subjectSha,
+        baseRef,
+        mergeGroupBaseSha: baseSha,
       },
     };
   }
@@ -227,7 +250,7 @@ export interface AppProofEvaluation {
 }
 
 export interface AppProofEvaluationDependencies {
-  loadTarget(request: AppProofRequest): Promise<AppProofTarget>;
+  loadTargets(request: AppProofRequest): Promise<AppProofTarget[]>;
   resolveBundle(input: VerificationBundleInput): Promise<VerificationBundleResolution>;
   remoteCheckConclusions(headSha: string): Promise<Map<string, string>>;
   /** Waiting between reads of GitHub. Injected so tests spend no backoff. */
@@ -272,69 +295,104 @@ function targetResult(target: AppProofTarget, result: VerifyResult): AppProofTar
   };
 }
 
-/** Evaluate the exact head of the one pull request this verification is for. */
+/** Evaluate all exact PR heads represented by a PR or merge-group subject. */
 export async function evaluateAppProof(
   request: AppProofRequest,
   dependencies: AppProofEvaluationDependencies,
 ): Promise<AppProofEvaluation> {
-  const target = await dependencies.loadTarget(request);
-  const resolution = await dependencies.resolveBundle({
-    repositoryId: request.repositoryId,
-    ...proofHints(target.message),
-  });
-  if (resolution.kind === "bootstrap_pending") {
+  const targets = await dependencies.loadTargets(request);
+  if (targets.length === 0) {
     return {
-      outcome: resolution.code,
-      detail: "no active policy is available",
+      outcome: "MERGE_GROUP_EMPTY",
+      detail: "merge group contains no pull-request heads",
       policyDigest: null,
       policyVersion: null,
       configSource: "unavailable",
-      targets: [
-        {
-          headSha: target.sha,
-          treeOid: target.treeOid,
-          outcome: resolution.code,
-          detail: "no active policy is available",
-        },
-      ],
+      targets: [],
     };
   }
-  const configSource: ProofVerificationAuditV1["configSource"] =
-    resolution.configSource === "global" || resolution.configSource === "repository-override"
-      ? resolution.configSource
-      : "unavailable";
-  const facts: GithubFacts = {
-    ownerId: request.ownerId,
-    repositoryId: request.repositoryId,
-    headSha: target.sha,
-    treeOid: target.treeOid,
-    parentOids: target.parentOids,
-    baseRef: request.baseRef,
-    baseSha: target.baseSha,
-    objectFormat: target.sha.length === 64 ? "sha256" : "sha1",
-    ...(target.prAuthorGithubUserId !== undefined ? { prAuthorGithubUserId: target.prAuthorGithubUserId } : {}),
-  };
-  const result = await verifyProof(
-    {
-      commitMessage: target.message,
-      facts,
-      bundle: resolution.bundle,
-      now: dependencies.now(),
-    },
-    {
-      verifySshSignature: dependencies.verifySshSignature,
-      remoteCheckConclusions: dependencies.remoteCheckConclusions,
-      ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
-    },
-  );
-  const evaluated = targetResult(target, result);
+
+  let policyDigest: ProofVerificationAuditV1["policyDigest"] = null;
+  let policyVersion: ProofVerificationAuditV1["policyVersion"] = null;
+  let configSource: ProofVerificationAuditV1["configSource"] = "unavailable";
+  let resolutionIdentity: string | null = null;
+  const results: AppProofTargetResult[] = [];
+  for (const target of targets) {
+    const resolution = await dependencies.resolveBundle({
+      repositoryId: request.repositoryId,
+      ...proofHints(target.message),
+    });
+    if (resolution.kind === "bootstrap_pending") {
+      if (resolutionIdentity !== null && resolutionIdentity !== "bootstrap_pending") {
+        throw new Error("active policy changed during verification");
+      }
+      resolutionIdentity = "bootstrap_pending";
+      results.push({
+        headSha: target.sha,
+        treeOid: target.treeOid,
+        outcome: resolution.code,
+        detail: "no active policy is available",
+      });
+      continue;
+    }
+    const nextConfigSource =
+      resolution.configSource === "global" || resolution.configSource === "repository-override"
+        ? resolution.configSource
+        : "unavailable";
+    const nextIdentity = [
+      "active",
+      resolution.bundle.activePolicyDigest,
+      resolution.bundle.policy.version,
+      nextConfigSource,
+    ].join(":");
+    if (resolutionIdentity !== null && resolutionIdentity !== nextIdentity) {
+      throw new Error("active policy changed during verification");
+    }
+    resolutionIdentity = nextIdentity;
+    policyDigest = resolution.bundle.activePolicyDigest;
+    policyVersion = resolution.bundle.policy.version;
+    configSource = nextConfigSource;
+    const facts: GithubFacts = {
+      ownerId: request.ownerId,
+      repositoryId: request.repositoryId,
+      headSha: target.sha,
+      treeOid: target.treeOid,
+      parentOids: target.parentOids,
+      baseRef: request.baseRef,
+      baseSha: target.baseSha,
+      objectFormat: target.sha.length === 64 ? "sha256" : "sha1",
+      ...(target.prAuthorGithubUserId !== undefined
+        ? { prAuthorGithubUserId: target.prAuthorGithubUserId }
+        : {}),
+    };
+    const result = await verifyProof(
+      {
+        commitMessage: target.message,
+        facts,
+        bundle: resolution.bundle,
+        now: dependencies.now(),
+      },
+      {
+        verifySshSignature: dependencies.verifySshSignature,
+        remoteCheckConclusions: dependencies.remoteCheckConclusions,
+        ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
+      },
+    );
+    results.push(targetResult(target, result));
+  }
+
+  // A target whose evidence has not settled outranks a target that failed. The
+  // failure keeps until the pending one settles, and nothing is published red
+  // while any part of the answer is still unknown.
+  const unsettled = results.find((result) => result.outcome === PENDING_OUTCOME);
+  const failed = unsettled ?? results.find((result) => result.outcome !== "PASS");
   return {
-    outcome: evaluated.outcome,
-    ...(evaluated.detail !== undefined ? { detail: evaluated.detail } : {}),
-    policyDigest: resolution.bundle.activePolicyDigest,
-    policyVersion: resolution.bundle.policy.version,
+    outcome: failed?.outcome ?? "PASS",
+    ...(failed?.detail !== undefined ? { detail: failed.detail } : {}),
+    policyDigest,
+    policyVersion,
     configSource,
-    targets: [evaluated],
+    targets: results,
   };
 }
 
@@ -496,7 +554,7 @@ export async function processAppProofVerification(
 ): Promise<{ verificationId: string; checkRunId: string; evaluation: AppProofEvaluation }> {
   const project = await dependencies.loadProject(env, request);
   if (project === null) throw new Error(`repository ${request.repositoryId} is not synchronized`);
-  if (await dependencies.pullRequestMerged(project, request)) {
+  if (request.event === "pull_request" && (await dependencies.pullRequestMerged(project, request))) {
     // Do not create a verification row or a check run. The successful check
     // that authorized the merge remains the final verdict on this head.
     return {
@@ -570,7 +628,7 @@ export async function processAppProofVerification(
     verificationId: id,
     repositoryId: request.repositoryId,
     repository: request.repository,
-    event: "pull_request",
+    event: request.event,
     subjectSha: request.subjectSha,
     baseRef: request.baseRef,
     policyDigest: evaluation.policyDigest,
@@ -665,7 +723,7 @@ interface PullRequestDetails {
 
 async function pullRequestHeadCommit(
   token: string,
-  request: AppProofRequest,
+  request: AppProofRequest & { pullRequestNumber: number },
   pullDetails?: PullRequestDetails,
 ): Promise<GitCommit & { prAuthorGithubUserId?: string }> {
   const pull =
@@ -688,18 +746,64 @@ async function pullRequestHeadCommit(
   };
 }
 
-export async function loadGithubProofTarget(
+async function commitAuthor(token: string, request: AppProofRequest, sha: string): Promise<string | undefined> {
+  const pulls = await github<Array<{ user?: { id?: number }; base?: { repo?: { id?: number } } }>>(
+    token,
+    request.repository,
+    `/commits/${encodeURIComponent(sha)}/pulls`,
+  );
+  const pull = pulls.find((candidate) => decimal(candidate.base?.repo?.id) === request.repositoryId) ?? pulls[0];
+  return decimal(pull?.user?.id) ?? undefined;
+}
+
+export async function loadGithubProofTargets(
   token: string,
   request: AppProofRequest,
   pullDetails?: PullRequestDetails,
-): Promise<AppProofTarget> {
-  const commit = await pullRequestHeadCommit(token, request, pullDetails);
-  const prAuthorGithubUserId = request.prAuthorGithubUserId ?? commit.prAuthorGithubUserId;
-  return {
-    ...commit,
-    baseSha: await mergeBase(token, request, commit.sha),
-    ...(prAuthorGithubUserId !== undefined ? { prAuthorGithubUserId } : {}),
-  };
+): Promise<AppProofTarget[]> {
+  if (request.event === "pull_request") {
+    if (request.pullRequestNumber === undefined) throw new Error("pull request number missing");
+    const commit = await pullRequestHeadCommit(token, {
+      ...request,
+      pullRequestNumber: request.pullRequestNumber,
+    }, pullDetails);
+    const prAuthorGithubUserId = request.prAuthorGithubUserId ?? commit.prAuthorGithubUserId;
+    return [
+      {
+        ...commit,
+        baseSha: await mergeBase(token, request, commit.sha),
+        ...(prAuthorGithubUserId !== undefined ? { prAuthorGithubUserId } : {}),
+      },
+    ];
+  }
+
+  if (request.mergeGroupBaseSha === undefined) throw new Error("merge group base SHA missing");
+  const targets: AppProofTarget[] = [];
+  let cursor = request.subjectSha;
+  for (let hops = 0; cursor !== request.mergeGroupBaseSha && hops < 100; hops++) {
+    const groupCommit = normalizeGitCommit(
+      await github(token, request.repository, `/git/commits/${encodeURIComponent(cursor)}`),
+    );
+    const targetSha = groupCommit.parentOids[1];
+    if (targetSha !== undefined) {
+      const target = normalizeGitCommit(
+        await github(token, request.repository, `/git/commits/${encodeURIComponent(targetSha)}`),
+      );
+      const author = await commitAuthor(token, request, target.sha);
+      targets.push({
+        ...target,
+        baseSha: await mergeBase(token, request, target.sha),
+        ...(author !== undefined ? { prAuthorGithubUserId: author } : {}),
+      });
+    }
+    const next = groupCommit.parentOids[0];
+    if (next === undefined) break;
+    cursor = next;
+  }
+  if (cursor !== request.mergeGroupBaseSha) {
+    throw new Error("merge group first-parent history did not reach its declared base");
+  }
+  return targets;
 }
 
 /**
@@ -794,7 +898,7 @@ const defaultStorageDependencies: Pick<
       .bind(
         input.id,
         input.project.id,
-        "pull_request",
+        input.request.event,
         input.request.subjectSha,
         input.request.baseRef,
         input.verifierVersion,
@@ -882,6 +986,7 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
     return pending;
   };
   const pull = (project: ProofProject, request: AppProofRequest): Promise<PullRequestDetails> => {
+    if (request.pullRequestNumber === undefined) throw new Error("pull request number missing");
     let pending = pullByRequest.get(request);
     if (pending === undefined) {
       pending = token(project).then((value) =>
@@ -894,6 +999,7 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
   return {
     ...defaultStorageDependencies,
     async pullRequestMerged(project, request) {
+      if (request.event !== "pull_request") return false;
       return (await pull(project, request)).merged === true;
     },
     async createCheck(project, request, id, checkName) {
@@ -908,7 +1014,7 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
           details_url: `${env.PUBLIC_ORIGIN}/v1/proof-verifications/${encodeURIComponent(id)}`,
           output: {
             title: "Verifying signed proof",
-            summary: `Thwip is verifying the exact pull request subject \`${request.subjectSha}\`.`,
+            summary: `Thwip is verifying the exact ${request.event.replace("_", " ")} subject \`${request.subjectSha}\`.`,
           },
         }),
       });
@@ -950,8 +1056,12 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
     },
     evaluationDependencies(project) {
       return {
-        loadTarget: async (request) =>
-          loadGithubProofTarget(await token(project), request, await pull(project, request)),
+        loadTargets: async (request) =>
+          loadGithubProofTargets(
+            await token(project),
+            request,
+            request.event === "pull_request" ? await pull(project, request) : undefined,
+          ),
         resolveBundle: (input) => resolveVerificationBundle(env, input),
         remoteCheckConclusions: async (headSha) => {
           const runs = await github<{
@@ -1009,6 +1119,7 @@ function requestFromOpenPull(project: ProofProject, pull: OpenPullRequest): AppP
   if (!Number.isInteger(number) || (number ?? 0) < 1 || subjectSha === null || typeof base !== "string") return null;
   const author = decimal(pull.user?.id);
   return {
+    event: "pull_request",
     repositoryId: project.repositoryId,
     repository: project.repository,
     ownerId: project.ownerId,

@@ -1845,6 +1845,38 @@ function parseBundleResolutionBody(value) {
   throw new Error("BUNDLE_UNAVAILABLE: resolver returned neither an active bundle nor bootstrap state");
 }
 
+// src/merge-group-targets.ts
+var MAX_HOPS = 50;
+async function collectMergeGroupTargets(group, read) {
+  const heads = [];
+  let cursor = group.headSha;
+  let hops = 0;
+  while (cursor !== group.baseSha && hops < MAX_HOPS) {
+    const commit = await read.commit(cursor);
+    if (commit.parents.length >= 2) heads.push(commit.parents[1].sha);
+    if (commit.parents.length === 0) break;
+    cursor = commit.parents[0].sha;
+    hops++;
+  }
+  return Promise.all(
+    heads.map(async (prHeadSha) => {
+      const prAuthorId = await authorOf(prHeadSha, read);
+      return { prHeadSha, ...prAuthorId !== void 0 ? { prAuthorId } : {} };
+    })
+  );
+}
+async function authorOf(headSha, read) {
+  let pulls;
+  try {
+    pulls = await read.pullsForCommit(headSha);
+  } catch {
+    return void 0;
+  }
+  const authors = new Set(pulls.filter((pull) => pull.head.sha === headSha).map((pull) => String(pull.user.id)));
+  if (authors.size !== 1) return void 0;
+  return [...authors][0];
+}
+
 // src/main.ts
 var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
 var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
@@ -1916,29 +1948,32 @@ async function mergeBase(repoFullName, base, head) {
   );
   return cmp.merge_base_commit.sha;
 }
-async function requireBootstrapPrerequisites(fullName, ownerId, repositoryId, commit) {
-  const carrier = extractCarrier(commit.message);
-  if (!carrier.ok) {
-    throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no parseable proof (${carrier.error.code})`);
-  }
-  let parsed;
-  try {
-    parsed = parseStatement(JSON.parse(utf8Decode(b64stdDecode(carrier.envelope.payload))));
-  } catch {
-    throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has a malformed proof payload`);
-  }
-  if (!parsed.ok) {
-    throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof payload ${parsed.detail}`);
-  }
-  const predicate = parsed.value.predicate;
-  const objectFormat = commit.sha.length === 64 ? "sha256" : "sha1";
-  if (predicate.repository.ownerId !== ownerId || predicate.repository.repositoryId !== repositoryId || predicate.git.treeOid !== commit.tree.sha || predicate.git.parentOids.length !== commit.parents.length || predicate.git.parentOids.some((parent, index) => parent !== commit.parents[index]?.sha) || parsed.value.subject[0]?.digest[objectFormat] !== commit.tree.sha) {
-    throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof is not bound to this repository tree`);
-  }
-  try {
-    await gh(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
-  } catch {
-    throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no committed thwip.yaml`);
+async function requireBootstrapPrerequisites(fullName, ownerId, repositoryId, targets, firstCommit) {
+  for (const target of targets) {
+    const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
+    const carrier = extractCarrier(commit.message);
+    if (!carrier.ok) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no parseable proof (${carrier.error.code})`);
+    }
+    let parsed;
+    try {
+      parsed = parseStatement(JSON.parse(utf8Decode(b64stdDecode(carrier.envelope.payload))));
+    } catch {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has a malformed proof payload`);
+    }
+    if (!parsed.ok) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof payload ${parsed.detail}`);
+    }
+    const predicate = parsed.value.predicate;
+    const objectFormat = commit.sha.length === 64 ? "sha256" : "sha1";
+    if (predicate.repository.ownerId !== ownerId || predicate.repository.repositoryId !== repositoryId || predicate.git.treeOid !== commit.tree.sha || predicate.git.parentOids.length !== commit.parents.length || predicate.git.parentOids.some((parent, index) => parent !== commit.parents[index]?.sha) || parsed.value.subject[0]?.digest[objectFormat] !== commit.tree.sha) {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof is not bound to this repository tree`);
+    }
+    try {
+      await gh(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
+    } catch {
+      throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no committed thwip.yaml`);
+    }
   }
 }
 async function main() {
@@ -1948,72 +1983,97 @@ async function main() {
   const repositoryId = String(repo["id"]);
   const ownerId = String(repo["owner"]["id"]);
   const fullName = repo["full_name"];
-  if (eventName !== "pull_request" && eventName !== "pull_request_target") {
+  const targets = [];
+  let baseRefName;
+  if (eventName === "pull_request" || eventName === "pull_request_target") {
+    const pr = event["pull_request"];
+    baseRefName = pr["base"]["ref"];
+    targets.push({ prHeadSha: pr["head"]["sha"], prAuthorId: String(pr["user"]["id"]) });
+  } else if (eventName === "merge_group") {
+    const mg = event["merge_group"];
+    baseRefName = mg["base_ref"].replace(/^refs\/heads\//, "");
+    targets.push(
+      ...await collectMergeGroupTargets(
+        { headSha: mg["head_sha"], baseSha: mg["base_sha"] },
+        {
+          commit: (sha) => gh(`/repos/${fullName}/git/commits/${sha}`),
+          pullsForCommit: (sha) => gh(
+            `/repos/${fullName}/commits/${sha}/pulls?per_page=100`
+          )
+        }
+      )
+    );
+    if (targets.length === 0) {
+      summary("thwip: FAIL \u2014 merge group contains no mergeable PR entries");
+      process.exit(1);
+    }
+  } else {
     summary(`thwip: FAIL \u2014 unsupported event ${eventName}`);
     process.exit(1);
   }
-  const pr = event["pull_request"];
-  const baseRefName = pr["base"]["ref"];
-  const prHeadSha = pr["head"]["sha"];
-  const prAuthorId = String(pr["user"]["id"]);
-  const commit = await gh(`/repos/${fullName}/git/commits/${prHeadSha}`);
-  const resolution = await fetchBundle(repositoryId, prHeadSha, proofHints(commit.message));
+  const firstCommit = await gh(`/repos/${fullName}/git/commits/${targets[0].prHeadSha}`);
+  const resolution = await fetchBundle(repositoryId, targets[0].prHeadSha, proofHints(firstCommit.message));
   if (resolution.kind === "bootstrap_pending") {
-    await requireBootstrapPrerequisites(fullName, ownerId, repositoryId, commit);
+    await requireBootstrapPrerequisites(fullName, ownerId, repositoryId, targets, firstCommit);
     summary("## \u{1F7E1} `BOOTSTRAP_PENDING` \u2014 waiting for the first canonical policy");
     summary("");
     summary(
-      `${resolution.repository} is enabled, but has no active policy yet. This successful bootstrap result lets the onboarding change merge while the first canonical policy is derived.`
+      `${resolution.repository} is enabled, but has no active policy yet. This successful bootstrap result keeps onboarding eligible for the native merge queue.`
     );
     summary("");
     summary(
       `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`
     );
-    await recordObservation(repositoryId, commit.sha, "BOOTSTRAP_PENDING");
+    await recordObservation(repositoryId, firstCommit.sha, "BOOTSTRAP_PENDING");
     process.exit(0);
   }
   const bundle = resolution.bundle;
-  const baseSha = await mergeBase(fullName, baseRefName, prHeadSha);
-  const facts = {
-    ownerId,
-    repositoryId,
-    headSha: commit.sha,
-    treeOid: commit.tree.sha,
-    parentOids: commit.parents.map((p) => p.sha),
-    baseRef: `refs/heads/${baseRefName}`,
-    baseSha,
-    objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
-    prAuthorGithubUserId: prAuthorId
-  };
-  const result = await verifyProof(
-    { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
-    {
-      verifySshSignature,
-      // Remote suites are proven by GitHub's own checks on this commit.
-      remoteCheckConclusions: async (headSha) => {
-        const runs = await gh(
-          `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`
-        );
-        const map = /* @__PURE__ */ new Map();
-        for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
-        return map;
+  let allPass = true;
+  for (const target of targets) {
+    const commit = target.prHeadSha === firstCommit.sha ? firstCommit : await gh(`/repos/${fullName}/git/commits/${target.prHeadSha}`);
+    const baseSha = await mergeBase(fullName, baseRefName, target.prHeadSha);
+    const facts = {
+      ownerId,
+      repositoryId,
+      headSha: commit.sha,
+      treeOid: commit.tree.sha,
+      parentOids: commit.parents.map((p) => p.sha),
+      baseRef: `refs/heads/${baseRefName}`,
+      baseSha,
+      objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
+      ...target.prAuthorId !== void 0 ? { prAuthorGithubUserId: target.prAuthorId } : {}
+    };
+    const result = await verifyProof(
+      { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
+      {
+        verifySshSignature,
+        // Remote suites are proven by GitHub's own checks on this commit.
+        remoteCheckConclusions: async (headSha) => {
+          const runs = await gh(
+            `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`
+          );
+          const map = /* @__PURE__ */ new Map();
+          for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
+          return map;
+        }
       }
-    }
-  );
-  renderRichSummary(result, commit, facts);
-  if (result.code === "VERIFICATION_PENDING") {
-    console.log(
-      `[thwip] ${commit.sha.slice(0, 12)}: waiting for evidence. ${result.detail ?? ""} Nothing failed. Re-run this job once the checks it names have finished.`
     );
+    renderRichSummary(result, commit, facts);
+    if (result.code === "VERIFICATION_PENDING") {
+      console.log(
+        `[thwip] ${commit.sha.slice(0, 12)}: waiting for evidence. ${result.detail ?? ""} Nothing failed. Re-run this job once the checks it names have finished.`
+      );
+    }
+    if (result.code !== "PASS") allPass = false;
+    if (result.code === "PASS" && result.statement) {
+      await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
+      });
+    }
+    if (result.code !== "VERIFICATION_PENDING") {
+      await recordObservation(repositoryId, commit.sha, result.code);
+    }
   }
-  if (result.code === "PASS" && result.statement) {
-    await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
-    });
-  }
-  if (result.code !== "VERIFICATION_PENDING") {
-    await recordObservation(repositoryId, commit.sha, result.code);
-  }
-  process.exit(result.code === "PASS" ? 0 : 1);
+  process.exit(allPass ? 0 : 1);
 }
 async function recordObservation(repositoryId, headSha, outcome) {
   try {

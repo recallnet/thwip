@@ -16,7 +16,7 @@ import {
   MERGED_OUTCOME,
   appProofTaskFromWebhook,
   evaluateAppProof,
-  loadGithubProofTarget,
+  loadGithubProofTargets,
   pendingCheckOutput,
   processAppProofVerification,
   proofHints,
@@ -45,6 +45,7 @@ afterEach(() => {
 
 function request(overrides: Partial<AppProofRequest> = {}): AppProofRequest {
   return {
+    event: "pull_request",
     repositoryId: REPOSITORY_ID,
     repository: "recallnet/thwip",
     ownerId: OWNER_ID,
@@ -154,9 +155,9 @@ function bundle(keyId = "key_test", signerId = SIGNER_ID): VerificationBundleV1 
   };
 }
 
-function evaluationDependencies(target: AppProofTarget) {
+function evaluationDependencies(targets: AppProofTarget[]) {
   return {
-    loadTarget: vi.fn(async () => target),
+    loadTargets: vi.fn(async () => targets),
     resolveBundle: vi.fn(async () => ({
       kind: "active" as const,
       projectId: "project_1",
@@ -211,6 +212,24 @@ describe("App-native webhook planning", () => {
     ).toBeNull();
   });
 
+  it("plans the exact merge-group SHA", () => {
+    expect(
+      appProofTaskFromWebhook("merge_group", {
+        ...repository,
+        action: "checks_requested",
+        merge_group: { head_sha: HEAD, base_sha: BASE, base_ref: "refs/heads/main" },
+      }),
+    ).toEqual({
+      kind: "verify",
+      request: request({
+        event: "merge_group",
+        mergeGroupBaseSha: BASE,
+        pullRequestNumber: undefined,
+        prAuthorGithubUserId: undefined,
+      }),
+    });
+  });
+
   it("accepts rerequests only for a Thwip-owned external id", () => {
     expect(
       appProofTaskFromWebhook("check_run", {
@@ -251,7 +270,7 @@ describe("App-native webhook planning", () => {
 
 describe("App-native exact-subject evaluation", () => {
   it("passes a valid proof using the shared verifier", async () => {
-    const dependencies = evaluationDependencies(target());
+    const dependencies = evaluationDependencies([target()]);
     const result = await evaluateAppProof(request(), dependencies);
 
     expect(result).toMatchObject({
@@ -269,12 +288,75 @@ describe("App-native exact-subject evaluation", () => {
   });
 
   it("classifies a missing proof without signing or executing repository code", async () => {
-    const dependencies = evaluationDependencies(target({ message: "no proof" }));
+    const dependencies = evaluationDependencies([target({ message: "no proof" })]);
     const result = await evaluateAppProof(request(), dependencies);
 
     expect(result.outcome).toBe("PROOF_MISSING");
     expect(result.targets[0]).toMatchObject({ outcome: "PROOF_MISSING", headSha: HEAD, treeOid: TREE });
     expect(dependencies.verifySshSignature).not.toHaveBeenCalled();
+  });
+
+  it("resolves signer facts separately for every merge-group target", async () => {
+    const secondHead = "e".repeat(40);
+    const secondTree = "f".repeat(40);
+    const secondSigner = "300";
+    const secondStatement = statement((value) => {
+      value.subject[0]!.digest.sha1 = secondTree;
+      value.predicate.git.treeOid = secondTree;
+      value.predicate.signer = { keyId: "key_second", githubUserId: secondSigner };
+    });
+    const dependencies = evaluationDependencies([
+      target(),
+      target({ sha: secondHead, treeOid: secondTree, message: commitMessage(secondStatement) }),
+    ]);
+    dependencies.resolveBundle.mockImplementation(async (input) => ({
+      kind: "active",
+      projectId: "project_1",
+      repository: "recallnet/thwip",
+      defaultBranch: "main",
+      configSource: "global",
+      bundle:
+        input.signerGithubUserId === secondSigner ? bundle("key_second", secondSigner) : bundle(),
+    }));
+
+    const result = await evaluateAppProof(request({ event: "merge_group" }), dependencies);
+
+    expect(result.outcome).toBe("PASS");
+    expect(result.targets.map((value) => value.signerKeyId)).toEqual(["key_test", "key_second"]);
+    expect(dependencies.resolveBundle).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed if the active policy changes between merge-group members", async () => {
+    const secondHead = "e".repeat(40);
+    const dependencies = evaluationDependencies([target(), target({ sha: secondHead })]);
+    let call = 0;
+    dependencies.resolveBundle.mockImplementation(async () => {
+      const resolved = bundle();
+      if (call++ === 1) resolved.activePolicyDigest = `sha256:${"9".repeat(64)}`;
+      return {
+        kind: "active",
+        projectId: "project_1",
+        repository: "recallnet/thwip",
+        defaultBranch: "main",
+        configSource: "repository-override",
+        bundle: resolved,
+      };
+    });
+
+    await expect(evaluateAppProof(request({ event: "merge_group" }), dependencies)).rejects.toThrow(
+      "active policy changed during verification",
+    );
+  });
+
+  it("reports an empty merge group explicitly", async () => {
+    await expect(evaluateAppProof(request({ event: "merge_group" }), evaluationDependencies([]))).resolves.toEqual({
+      outcome: "MERGE_GROUP_EMPTY",
+      detail: "merge group contains no pull-request heads",
+      policyDigest: null,
+      policyVersion: null,
+      configSource: "unavailable",
+      targets: [],
+    });
   });
 
   it("extracts only selector hints and leaves malformed proofs to the verifier", () => {
@@ -309,9 +391,9 @@ describe("App-native exact-subject evaluation", () => {
       }),
     );
 
-    const loaded = await loadGithubProofTarget("installation-token", request());
+    const targets = await loadGithubProofTargets("installation-token", request());
 
-    expect(loaded).toEqual(target());
+    expect(targets).toEqual([target()]);
     expect(requested).toHaveLength(3);
     expect(requested.every((url) => url.startsWith("https://api.github.com/repos/recallnet/thwip/"))).toBe(true);
     expect(requested.some((url) => url.includes("/contents/"))).toBe(false);
@@ -320,7 +402,7 @@ describe("App-native exact-subject evaluation", () => {
 
 /** A project whose policy names a remote suite GitHub has not concluded yet. */
 function unsettledRemoteSuiteDependencies() {
-  const dependencies = evaluationDependencies(target());
+  const dependencies = evaluationDependencies([target()]);
   dependencies.resolveBundle = vi.fn(async () => {
     const resolved = bundle();
     resolved.policy.pipeline.remoteSuites = ["build-darwin"];
@@ -370,11 +452,11 @@ function processDependencies(options: {
       completed.push({ checkRunId, conclusion, evaluation });
     }),
     evaluationDependencies: () => {
-      const dependencies = evaluationDependencies(target());
+      const dependencies = evaluationDependencies([target()]);
       if (options.evaluation !== undefined) {
-        dependencies.loadTarget = vi.fn(async () => {
-          if (options.evaluation!.outcome === "PASS") return target();
-          return target({ message: "no proof" });
+        dependencies.loadTargets = vi.fn(async () => {
+          if (options.evaluation!.outcome === "PASS") return [target()];
+          return [target({ message: "no proof" })];
         });
       }
       return dependencies;
@@ -421,7 +503,7 @@ describe("App-native check publication", () => {
    */
   it("does not publish a check when a queued verification starts after the pull request merged", async () => {
     const state = processDependencies({ mode: "enforced" });
-    const evaluator = vi.fn(() => evaluationDependencies(target()));
+    const evaluator = vi.fn(() => evaluationDependencies([target()]));
     state.dependencies.pullRequestMerged = vi.fn(async () => true);
     state.dependencies.evaluationDependencies = evaluator;
 
@@ -440,7 +522,7 @@ describe("App-native check publication", () => {
 
   it("fails the required App check when enforcement is enabled", async () => {
     const state = processDependencies({ mode: "enforced" });
-    state.dependencies.evaluationDependencies = () => evaluationDependencies(target({ message: "no proof" }));
+    state.dependencies.evaluationDependencies = () => evaluationDependencies([target({ message: "no proof" })]);
     const result = await processAppProofVerification(env, request(), state.dependencies);
 
     expect(result.evaluation.outcome).toBe("PROOF_MISSING");
@@ -453,7 +535,7 @@ describe("App-native check publication", () => {
 
   it("reports disabled projects loudly without reading proof targets", async () => {
     const state = processDependencies({ mode: "observe", enabled: false });
-    const evaluator = vi.fn(() => evaluationDependencies(target()));
+    const evaluator = vi.fn(() => evaluationDependencies([target()]));
     state.dependencies.evaluationDependencies = evaluator;
 
     const result = await processAppProofVerification(env, request(), state.dependencies);
@@ -471,11 +553,11 @@ describe("App-native check publication", () => {
     const completions: string[] = [];
     const make = (wait: boolean): AppProofProcessDependencies => {
       const state = processDependencies({ mode: "enforced" }).dependencies;
-      const base = evaluationDependencies(target());
+      const base = evaluationDependencies([target()]);
       if (wait) {
-        base.loadTarget = vi.fn(async () => {
+        base.loadTargets = vi.fn(async () => {
           await oldGate;
-          return target({ message: "no proof" });
+          return [target({ message: "no proof" })];
         });
       }
       state.evaluationDependencies = () => base;
@@ -543,11 +625,11 @@ describe("evidence that has not settled", () => {
     const state = processDependencies({ mode: "enforced" });
     let attempts = 0;
     state.dependencies.evaluationDependencies = () => {
-      const dependencies = evaluationDependencies(target());
-      dependencies.loadTarget = vi.fn(async () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("GitHub recallnet/thwip/pulls/53 -> 502");
-        return target();
+        return [target()];
       });
       return dependencies;
     };
@@ -563,8 +645,8 @@ describe("evidence that has not settled", () => {
   it("never stores a failed read as a verdict", async () => {
     const state = processDependencies({ mode: "enforced" });
     state.dependencies.evaluationDependencies = () => {
-      const dependencies = evaluationDependencies(target());
-      dependencies.loadTarget = vi.fn(async () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
         throw new Error("GitHub recallnet/thwip/pulls/53 -> 502");
       });
       return dependencies;
@@ -581,8 +663,8 @@ describe("evidence that has not settled", () => {
   it("still records the outcomes a bundle failure decides", async () => {
     const state = processDependencies({ mode: "enforced" });
     state.dependencies.evaluationDependencies = () => {
-      const dependencies = evaluationDependencies(target());
-      dependencies.loadTarget = vi.fn(async () => {
+      const dependencies = evaluationDependencies([target()]);
+      dependencies.loadTargets = vi.fn(async () => {
         throw new VerificationBundleError(503, "BUNDLE_UNAVAILABLE", "no bundle");
       });
       return dependencies;
@@ -640,7 +722,7 @@ describe("evidence that has not settled", () => {
   it("does no work when nothing on that commit is waiting", async () => {
     const state = processDependencies({ mode: "enforced" });
     state.dependencies.pendingVerificationExists = vi.fn(async () => false);
-    const evaluator = vi.fn(() => evaluationDependencies(target()));
+    const evaluator = vi.fn(() => evaluationDependencies([target()]));
     state.dependencies.evaluationDependencies = evaluator;
 
     const result = await processAppProofVerification(env, request({ settleIfPending: true }), state.dependencies);
