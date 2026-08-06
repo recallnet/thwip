@@ -78,19 +78,20 @@ for a coding agent. The product flow is:
 5. Select **Continue setup**. Apply the generated disabled policy payload, then
    continue again. Thwip publishes bootstrap checks, adds their source pins
    while the policy remains disabled, and reads the stored pins back.
-6. Open a real pull request. Confirm that `thwip / proof (observe)` and the queue
-   checks describe the expected decision while the repository still merges
-   under its existing controls.
-7. Check the explicit observation confirmation and select **Begin enforcement**.
+6. Open a real pull request. Confirm that `thwip / workflow`,
+   `thwip / proof (observe)`, and the queue checks describe the expected
+   decision while the repository still merges under its existing controls.
+7. After a recent observed proof passes, enforce the App proof check in the
+   dashboard. Reconcile open pull requests so their current heads carry the App
+   check. Continue setup, replace `thwip / workflow` with App-owned `thwip` in
+   the still-disabled policy, and let Thwip verify the stored source pin.
+8. Check the explicit observation confirmation and select **Begin enforcement**.
    Apply the generated changes in the displayed order: ownership first, active
    policy second. The queue enters `canary` before this handoff and becomes
    `enforced` only after both live rulesets match.
-8. Compare the live bypass lists with the exact expected lists displayed by the
+9. Compare the live bypass lists with the exact expected lists displayed by the
    dashboard. The policy has no bypass actors. Only the Thwip App bypasses the
    ownership rule. Confirm the comparison and continue.
-9. After a recent observed proof passes, enforce the App proof check in the
-   dashboard. Reconcile open pull requests so their current heads carry the App
-   check, apply the final generated source-pin update, and continue once more.
 10. Verify one real pull request reaches `queue.merge_confirmed` and that the
     resulting base commit is the App-authored merge commit recorded by Thwip.
 
@@ -102,10 +103,13 @@ The activation states mean exactly this:
 | `canary` | The administrator explicitly began the ownership handoff; the App writer is enabled, but setup is not yet complete. |
 | `enforced` | The active ownership and policy rulesets were read back and accepted. |
 
-Do not apply the final proof source pin before the App publishes `thwip`.
-Observe mode publishes `thwip / proof (observe)` instead, so reversing that
-order creates a required check with no publisher and blocks every open pull
-request.
+Do not apply the proof-gate replacement before the App publishes `thwip`, and do
+not activate queue ownership before that replacement is verified.
+Observe mode publishes `thwip / workflow` from Actions and
+`thwip / proof (observe)` from the App; the final policy replaces the workflow
+context with App-owned `thwip` while the policy remains disabled. Reversing that
+order creates a required check with no publisher; activating before the
+replacement makes the queue depend on the workflow job that is calling it.
 
 ## Existing repositories
 

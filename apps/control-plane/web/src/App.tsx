@@ -205,11 +205,10 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <dd>
             The thwip GitHub App evaluates the exact pull-request head and publishes the{" "}
             <code>thwip</code> check directly. Projects start with a distinct{" "}
-            <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. A branch running
-            Thwip Queue requires <code>thwip</code> from whoever publishes it. While the repository observes that is
-            GitHub Actions, satisfied by the <code>thwip-required.yml</code> the setup pull request adds. Once you
-            enforce the App's proof check, setup moves the requirement to the App and one publisher satisfies it.
-            Every evaluation has a service-signed, immutable audit record.
+            <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. The setup workflow
+            publishes <code>thwip / workflow</code>. During the staged handoff setup requires that Actions-owned
+            context; once you enforce the App proof, setup replaces it with App-owned <code>thwip</code>. The two
+            publishers never share a check name. Every evaluation has a service-signed, immutable audit record.
           </dd>
           <dt>What data does the control plane hold?</dt>
           <dd>

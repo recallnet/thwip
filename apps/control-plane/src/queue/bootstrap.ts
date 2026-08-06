@@ -11,13 +11,14 @@ import {
   nextBootstrapStep,
   policyRuleset,
   POLICY_RULESET_NAME,
+  proofContextFor,
   proofIntegrationFor,
   type ProofCheckMode,
   type BootstrapProgress,
   type BootstrapStep,
   type Ruleset,
 } from "./rulesets.js";
-import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
+import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 /**
  * Enrolling a repository, through the product.
@@ -97,7 +98,7 @@ export interface BootstrapDeps {
   readonly github: BootstrapGitHub;
   /** The Thwip App's Integration id, which sources the turn check. */
   readonly integrationId: number;
-  /** GitHub Actions, which sources the proof check. Defaulted. */
+  /** GitHub Actions, which sources the workflow proof gate. Defaulted. */
   readonly actionsIntegrationId?: number;
   readonly endpoint: string;
   readonly actionRef: string;
@@ -455,11 +456,12 @@ async function confirmSourcePins(
   step: BootstrapStep,
 ): Promise<StepOutcome | null> {
   const stored = requiredChecksOf(ruleset);
+  const proofMode = await proofCheckMode(deps, project);
   const expected: Array<[string, number]> = [
     [
-      PROOF_CHECK,
+      proofContextFor(proofMode),
       proofIntegrationFor({
-        mode: await proofCheckMode(deps, project),
+        mode: proofMode,
         integrationId: deps.integrationId,
         ...(deps.actionsIntegrationId === undefined
           ? {}
@@ -817,33 +819,34 @@ async function performStep(
     }
 
     case "pin-proof-check-to-app": {
-      // The last thing setup does, and the only one that happens after the
-      // branch is already protected and merging.
+      // The last disabled-policy change, after a real pull request has proved
+      // the observe path and before the App becomes the protected branch's only
+      // writer.
       //
-      // While `thwip` is sourced from GitHub Actions, any workflow in the
-      // repository can publish a green check by that name and satisfy the
-      // requirement. Sourcing it from the App narrows that to one publisher.
+      // While setup observes, the policy names the Actions-owned
+      // `thwip / workflow` context. Enforcement replaces that context with the
+      // App-owned `thwip` context; the two publishers never share a name.
       //
       // It cannot happen earlier. The App publishes `thwip` only where
       // `proof_check_mode` is `enforced`; in `observe` it publishes
       // `thwip / proof (observe)` and never the enforced name. Moving the pin
-      // first would leave the branch requiring a check with no publisher, and
-      // every open pull request in the repository stuck behind it. So this
-      // waits, the repository goes on merging on the workflow's check, and
-      // enrolment is simply not finished until an administrator enforces.
+      // first would prepare an unsatisfiable policy. Keeping that policy
+      // disabled means the repository remains under its existing controls while
+      // the publisher and pin change, and ownership is activated only after
+      // both are verified.
       if ((await proofCheckMode(deps, project)) !== "enforced") {
         return {
           kind: "waiting",
           step,
           detail:
-            `${PROOF_CHECK} is still sourced from GitHub Actions, which any workflow in this ` +
-            "repository can satisfy. Enforce the App's proof check to move it to the App; the " +
-            "branch keeps merging on the workflow's check until then.",
+            `${WORKFLOW_CHECK} is still the Actions-owned proof gate. Enforce the App's ` +
+            `${PROOF_CHECK} proof check to replace it; the policy remains disabled and ` +
+            "the repository keeps its existing merge controls until then.",
         };
       }
 
       const written = await verifyPolicy(deps, project, step, {
-        enforcement: "active",
+        enforcement: "disabled",
         pinCheckSource: true,
         proofCheckMode: "enforced",
       });
@@ -864,7 +867,11 @@ async function performStep(
           expectedBypassActors: [{ ruleset: policy.ruleset.name, bypassActors: [] }],
         };
       }
-      return { kind: "advanced", step, detail: `${PROOF_CHECK} is sourced from the Thwip App` };
+      return {
+        kind: "advanced",
+        step,
+        detail: `${WORKFLOW_CHECK} was replaced by ${PROOF_CHECK}, sourced from the Thwip App`,
+      };
     }
 
     case "record-genesis":
