@@ -23,6 +23,7 @@ import {
   showFileAtHead,
   tryGit,
 } from "./git.js";
+import { proofStateAtCommit } from "./commit-proof.js";
 import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead, loadProjectConfigForRun } from "./config.js";
@@ -52,6 +53,7 @@ import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
 import { runFreshTurn, type FreshTurnResult } from "./fresh-turn.js";
 import { flag } from "./cli-flags.js";
 import { realHeartbeat, runQueueWork } from "./queue-work.js";
+import { installPushWarning } from "./push-hook.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -257,9 +259,22 @@ async function cmdRun(argv: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdVerifyLocal(): Promise<number> {
+async function cmdVerifyLocal(argv: string[]): Promise<number> {
   const cwd = process.cwd();
-  const message = await headMessage(cwd);
+  const asked = flag(argv, "--commit");
+  if (asked !== undefined && !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(asked)) {
+    process.stderr.write("[thwip] --commit must be one exact lowercase git object id\n");
+    return EXIT.usage;
+  }
+  const revision = asked ?? "HEAD";
+  let proof;
+  try {
+    proof = await proofStateAtCommit(cwd, revision);
+  } catch {
+    process.stderr.write(`[thwip] COMMIT_UNREADABLE ${revision}\n`);
+    return 1;
+  }
+  const { message } = proof;
   const carrier = extractCarrier(message);
   if (!carrier.ok) {
     process.stderr.write(`[thwip] ${carrier.error.code}\n`);
@@ -276,7 +291,7 @@ async function cmdVerifyLocal(): Promise<number> {
   // Parsing is not the question. A proof binds one tree, and a rebase leaves the
   // proof behind on a commit whose tree has moved, so reporting "it parses" for
   // one of those would be true and useless.
-  const state = headProofState(message, await currentTree(cwd));
+  const { state } = proof;
   if (state === "stale") {
     process.stderr.write(
       "[thwip] PROOF_STALE this proof names a different tree, which is what a rebase leaves behind; run thwip ship to sign again\n",
@@ -284,6 +299,24 @@ async function cmdVerifyLocal(): Promise<number> {
     return 1;
   }
   process.stderr.write(`[thwip] proof parses; signer key ${carrier.envelope.signatures[0]!.keyid}\n`);
+  return 0;
+}
+
+async function cmdSetup(argv: string[]): Promise<number> {
+  if (!argv.includes("--install-push-warning")) {
+    process.stdout.write(developerSetupPrompt() + "\n");
+    return 0;
+  }
+
+  const result = await installPushWarning(process.cwd());
+  if (result.status === "refused") {
+    process.stderr.write(`[thwip] ${result.detail}: ${result.path}\n`);
+    return 1;
+  }
+  process.stderr.write(
+    `[thwip] ${result.status} non-blocking push warning at ${result.path}\n` +
+      "[thwip] it applies to every linked worktree; remove that marked hook to undo it\n",
+  );
   return 0;
 }
 
@@ -1235,14 +1268,13 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
     case "init":
       return cmdInit([...invocation.argv]);
     case "verify":
-      return cmdVerifyLocal();
+      return cmdVerifyLocal([...invocation.argv]);
     case "verify-chain":
       return cmdVerifyChain([...invocation.argv]);
     case "keys-status":
       return cmdKeysStatus();
     case "setup":
-      process.stdout.write(developerSetupPrompt() + "\n");
-      return 0;
+      return cmdSetup([...invocation.argv]);
     case "policy-digest":
       return cmdPolicyDigest();
     case "version":
