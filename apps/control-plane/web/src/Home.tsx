@@ -105,7 +105,6 @@ export function Home({
                 Read the queue research
               </a>
             </div>
-            <p className="mq-hero__note">Thwip runs its own merge queue this way.</p>
           </section>
 
           <section className="mq-measures" aria-label="Queue operating measurements">

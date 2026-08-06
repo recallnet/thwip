@@ -19,5 +19,6 @@ describe("Home", () => {
     expect(html).toContain("Fast reuses the proof the pull request already carries.");
     expect(html).toContain('href="/dashboard"');
     expect(html).not.toContain("The proof commits to the tree");
+    expect(html).not.toContain("Thwip runs its own merge queue this way.");
   });
 });
