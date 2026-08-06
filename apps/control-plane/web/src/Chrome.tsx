@@ -48,7 +48,7 @@ export function SiteFoot() {
         <a href="/rss.xml">RSS</a>
         <a href="/llms.txt">llms.txt</a>
       </span>
-      <span>thwip · verified local CI · recall.net</span>
+      <span>thwip · merge fast. ship more. · recall.net</span>
     </footer>
   );
 }
