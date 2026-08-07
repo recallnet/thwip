@@ -13,7 +13,6 @@
   --rule: #dfe1e2;
   --hair: #eceef0;
   --civic: #005ea2;
-  --civic-dark: #00436d;
   --pass: #00a91c;
   --fail: #b50909;
 
@@ -153,7 +152,8 @@ textarea {
    Quiet is a safe alternative or a control. Danger takes something away or
    locks something in. Enable was solid on one page while Disable was solid on
    another, so the same word carried two weights depending on where you stood. */
-.gp-btn {
+.gp-btn,
+.nt-btn {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 400;
@@ -169,8 +169,16 @@ textarea {
   box-shadow: none;
   transition: background-color 0.12s, border-color 0.12s, color 0.12s;
 }
-.gp-btn:hover { background: var(--civic-dark); border-color: var(--civic-dark); color: var(--paper); }
+/* Hover lands on ink. The darker blue this reached for was an eighth colour,
+   and the palette is seven. */
+.gp-btn:hover,
+.nt-btn:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .gp-btn--sm { padding: var(--s2) var(--s3); font-size: 10px; }
+
+/* The marketing pages' secondary: a civic outline, still an invitation. Quiet
+   below is the tertiary control, and grey on purpose. */
+.nt-btn--ghost { background: transparent; color: var(--civic); }
+.nt-btn--ghost:hover { background: transparent; border-color: var(--ink); color: var(--ink); }
 .gp-btn[disabled] { opacity: 0.4; cursor: default; }
 .gp-btn[disabled]:hover { background: var(--civic); border-color: var(--civic); }
 

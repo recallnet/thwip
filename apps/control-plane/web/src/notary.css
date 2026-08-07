@@ -482,24 +482,10 @@
 /* ---------- actions ---------- */
 
 .nt-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.nt-btn {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  padding: 11px 18px;
-  border: 1px solid var(--civic);
-  background: var(--civic);
-  color: var(--paper);
-  cursor: pointer;
-  text-decoration: none;
-  display: inline-block;
-}
-/* Hover lands on ink. The darker blue it used to reach for was an eighth
-   colour, and the palette is seven. */
-.nt-btn:hover { background: var(--ink); border-color: var(--ink); }
-.nt-btn--ghost { background: transparent; color: var(--civic); }
-.nt-btn--ghost:hover { background: transparent; border-color: var(--ink); color: var(--ink); }
+/* `.nt-btn` is drawn in skin.css, beside `.gp-btn`, because they are one
+   button. Declared in both files they had already drifted to two paddings and
+   two hover colours. skin.css is loaded last, so the family has to live there
+   whole or the base would outrank its own modifier. */
 
 .nt-cmd {
   max-width: 640px;
