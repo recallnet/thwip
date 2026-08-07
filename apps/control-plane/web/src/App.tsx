@@ -2089,6 +2089,46 @@ function QueueTab() {
 
 /* ---------- router ---------- */
 
+/**
+ * The frame every dashboard state is drawn inside.
+ *
+ * A state that returns its own markup instead lands in the top-left corner of
+ * an empty page with no header and no width. That happened to the loading
+ * state, was fixed there, and went on happening to the signed-out one, which
+ * is the state a visitor arriving from the homepage sees first. One frame, so
+ * the next state added cannot repeat it.
+ */
+function DashboardFrame({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="thwip-shell gp-workspace">
+      <nav className="thwip-nav" aria-label="Dashboard">
+        <a className="thwip-brand" href="/">
+          thwip<small>DASHBOARD</small>
+        </a>
+      </nav>
+      <main className="gp-workspace__content">{children}</main>
+    </div>
+  );
+}
+
+export function SignedOutDashboard() {
+  return (
+    <DashboardFrame>
+      <div className="gp-panel thwip-device-card">
+        <div className="gp-panel__header">
+          <h3 className="gp-panel__title">Sign in to thwip</h3>
+        </div>
+        <div className="gp-panel__body">
+          <p>The dashboard mirrors your GitHub organizations. Sign in with the account that belongs to them.</p>
+          <button className="gp-btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
+            Sign in with GitHub
+          </button>
+        </div>
+      </div>
+    </DashboardFrame>
+  );
+}
+
 export function App() {
   const me = useMe();
   const path = usePath();
@@ -2099,37 +2139,14 @@ export function App() {
   if (path.startsWith("/faq")) return <FaqPage me={me} />;
   if (path.startsWith("/install")) return <InstallPage me={me} />;
   if (dashMatch) {
-    // Keep the frame while the session loads. Returning a bare paragraph here
-    // dropped the header and the tabs on every cold load of a dashboard page.
     if (me === undefined) {
       return (
-        <div className="thwip-shell gp-workspace">
-          <nav className="thwip-nav" aria-label="Dashboard">
-            <a className="thwip-brand" href="/">
-              thwip<small>DASHBOARD</small>
-            </a>
-          </nav>
-          <main className="gp-workspace__content">
-            <p className="gp-panel__meta thwip-loading">Loading your organization…</p>
-          </main>
-        </div>
+        <DashboardFrame>
+          <p className="gp-panel__meta thwip-loading">Loading your organization…</p>
+        </DashboardFrame>
       );
     }
-    if (me === null) {
-      return (
-        <div className="gp-panel thwip-device-card">
-          <div className="gp-panel__header">
-            <h3 className="gp-panel__title">Sign in to thwip</h3>
-          </div>
-          <div className="gp-panel__body">
-            <p>The dashboard mirrors your GitHub organizations. Sign in with the account that belongs to them.</p>
-            <button className="gp-btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
-              Sign in with GitHub
-            </button>
-          </div>
-        </div>
-      );
-    }
+    if (me === null) return <SignedOutDashboard />;
     if (projectMatch) {
       return (
         <Dashboard
