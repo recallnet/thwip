@@ -175,6 +175,37 @@ textarea {
 .nt-btn:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .gp-btn--sm { padding: var(--s2) var(--s3); font-size: 10px; }
 
+/* The one card on an otherwise empty page: sign-in, and the device code. It
+   asked to be centred from styles.css and never was, because `.gp-panel` sets
+   its own margin, weighs exactly as much, and was declared after it. */
+.thwip-device-card { max-width: 448px; margin: var(--s7) auto; }
+.thwip-device-card input {
+  width: 100%;
+  margin: var(--s3) 0;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 19px;
+  letter-spacing: 0.18em;
+  text-align: center;
+}
+
+.thwip-add-repos {
+  display: flex;
+  gap: var(--s3);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.thwip-add-repos .gp-btn { flex-shrink: 0; }
+.thwip-add-repos .gp-panel__meta { flex: 1; min-width: 288px; }
+
+/* Graphics Press indents run-on paragraphs for prose; inside a panel or a
+   table every paragraph starts flush. */
+.gp-panel p,
+.gp-data-table p { text-indent: 0; max-width: none; }
+
 /* The marketing pages' secondary: a civic outline, still an invitation. Quiet
    below is the tertiary control, and grey on purpose. */
 .nt-btn--ghost { background: transparent; color: var(--civic); }
@@ -294,8 +325,19 @@ select.gp-btn:hover {
 
 /* ---------- page furniture ---------- */
 
-.thwip-nav { border-bottom: 1px solid var(--ink); padding: 20px 0 14px; }
+.thwip-shell { max-width: var(--gp-page-width); margin: 0 auto; padding: 0 var(--s5); }
+.thwip-nav {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s3) var(--s5);
+  padding: 20px 0 14px;
+  border-bottom: 1px solid var(--ink);
+}
+.thwip-nav .links { display: flex; gap: var(--s5); align-items: baseline; flex-wrap: wrap; }
 .thwip-brand {
+  text-decoration: none;
   font-family: var(--num);
   font-style: normal;
   font-variation-settings: "wdth" 118, "wght" 700;
@@ -304,14 +346,15 @@ select.gp-btn:hover {
   color: var(--ink);
 }
 .thwip-brand small {
+  margin-left: var(--s2);
   font-family: var(--mono);
+  font-style: normal;
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--muted);
 }
-.thwip-nav .links a,
-.thwip-footer a {
+.thwip-nav .links a {
   font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 0.14em;
@@ -319,33 +362,10 @@ select.gp-btn:hover {
   text-decoration: none;
   color: var(--muted);
 }
-.thwip-nav .links a:hover,
-.thwip-footer a:hover { color: var(--civic); }
+.thwip-nav .links a:hover { color: var(--civic); }
 /* A button in the nav is still a button; the link colour must not win. */
 .thwip-nav .links a.gp-btn { color: var(--paper); }
 .thwip-nav .links a.gp-btn:hover { color: var(--paper); }
-
-.thwip-section { border-top: 1px solid var(--rule); padding: 44px 0; }
-.thwip-eyebrow {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.thwip-section h2 { font-size: 24px; }
-.thwip-section .lede { color: var(--muted); max-width: 58ch; }
-
-.thwip-footer {
-  border-top: 1px solid var(--ink);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  padding: 18px 0 40px;
-}
-
 /* ---------- dashboard furniture ---------- */
 
 .metric-strip {
@@ -394,33 +414,6 @@ select.gp-btn:hover {
   color: var(--ink);
   border-bottom: 2px solid var(--civic);
 }
-
-/* Numerals are the one place this site gets loud. */
-.thwip-plan__price {
-  font-family: var(--num);
-  font-style: normal;
-  font-variation-settings: "wdth" 125, "wght" 640;
-  font-variant-numeric: tabular-nums;
-  font-size: 52px;
-  letter-spacing: -0.03em;
-}
-.thwip-plan {
-  border: 1px solid var(--rule);
-  border-top: 2px solid var(--ink);
-  background: var(--paper);
-}
-.thwip-plan--pro { border-top-color: var(--civic); }
-.thwip-plan__name,
-.thwip-step .k {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.thwip-step { border-left: 1px solid var(--ink); }
-.thwip-step .k { color: var(--civic); }
-
 .ok,
 .bad,
 .wait,
@@ -465,7 +458,6 @@ select.gp-btn:hover {
 .thwip-page-title { margin: 0 0 var(--s1); font-size: 20px; }
 .thwip-page-subtitle { margin: 0 0 var(--s4); }
 .thwip-loading { padding: var(--s7) 0; }
-.thwip-note { margin-top: var(--s3); }
 .thwip-code-block {
   white-space: pre-wrap;
   font-family: var(--mono);
@@ -485,24 +477,6 @@ select.gp-btn:hover {
   background: var(--paper);
   color: var(--ink);
 }
-
-.thwip-slip {
-  font-family: var(--mono);
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  box-shadow: none;
-}
-.thwip-slip::after { display: none; }
-.thwip-slip .trailer { color: var(--muted); }
-.thwip-stamp {
-  border: 2px solid var(--civic);
-  color: var(--civic);
-  font-family: var(--mono);
-  font-weight: 500;
-  opacity: 1;
-  transform: rotate(-1.6deg);
-}
-
 /* ---------- a finding on the branch's record ---------- */
 
 /* Each finding is its own block with a rule above it, because two of them

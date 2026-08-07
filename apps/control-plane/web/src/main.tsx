@@ -2,7 +2,6 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import "@andrewxhill/graphics-press-css";
-import "./styles.css";
 import "./skin.css";
 
 createRoot(document.getElementById("root")!).render(
