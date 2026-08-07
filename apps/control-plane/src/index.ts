@@ -4,6 +4,7 @@ import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
 import { projectsInReach } from "./dashboard-scope.js";
+import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
 import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
@@ -590,6 +591,19 @@ app.get("/v1/dashboard/projects", async (c) => {
     githubUserId: viewer.githubUserId,
   });
   return c.json({ projects });
+});
+
+/**
+ * One line of queue per repository, so the project list can say which of them
+ * needs somebody. Read from the projection, which is what it is for: one query
+ * for the whole organization instead of one Durable Object request per
+ * repository per page view.
+ */
+app.get("/v1/dashboard/queues", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const summaries = await queueSummaries(c.env.DB as unknown as D1Like, viewer.organizationId);
+  return c.json({ queues: summaries });
 });
 
 app.post("/v1/dashboard/projects/:id/enable", async (c) => {
