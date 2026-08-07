@@ -93,7 +93,8 @@ import type { BranchQueueState, Entry } from "@thwip/queue-domain";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
 import type { QueueSnapshot } from "./queue/queue-operations.js";
-import { CandidatePathCache, changedCandidatePaths, githubHttp, resolveCandidate } from "./queue/github-port.js";
+import { CandidatePathCache, changedCandidatePaths, githubHttp } from "./queue/github-port.js";
+import { resolveOrDeriveCandidate } from "./queue/derive-candidate.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
 import { finalizeCandidateReports } from "./queue/candidate-finalizer.js";
@@ -2950,7 +2951,12 @@ const queueDeps = {
     const [owner, repo] = project.github_name.split("/");
     if (owner === undefined || repo === undefined) return null;
     const token = await installationToken(env, project.installation_id, undefined, repositoryId);
-    const pinned = await resolveCandidate(
+    // A stale synthetic merge ref no longer rebuilds itself on any schedule the
+    // queue controls (a base move no longer regenerates it), so a stale verdict
+    // falls through to deriving the candidate against the base read now.
+    // Anything that cannot be derived keeps the stale verdict and its bounded
+    // retry, unchanged.
+    const pinned = await resolveOrDeriveCandidate(
       githubHttp(token),
       { owner, repo, repositoryId, baseRef },
       pullRequestNumber,
