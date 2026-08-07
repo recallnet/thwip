@@ -2107,6 +2107,7 @@ function DashboardFrame({ children }: { children: React.ReactNode }) {
         </a>
       </nav>
       <main className="gp-workspace__content">{children}</main>
+      <SiteFoot />
     </div>
   );
 }
