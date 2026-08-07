@@ -11,6 +11,7 @@ import {
   ownerGithubUrl,
   ownerName,
   outcome,
+  humanise,
   transitionKindText,
 } from "./vocabulary.js";
 
@@ -93,6 +94,35 @@ describe("transition kinds", () => {
     for (const kind of TRANSITION_KINDS) {
       expect(transitionKindText(kind), kind).not.toBe(kind);
     }
+  });
+
+  /**
+   * The queue's own transition kinds are PascalCase, and nothing writes a
+   * sentence for them, so they fall through to `humanise`. That lowercased the
+   * whole word and shipped `Mergerecorded`, `Turnoffered` and `Queuerequested`
+   * to the history table on every dashboard.
+   *
+   * The test above did not catch it: it asserted only that the output differed
+   * from the input, and `Mergerecorded` differs from `MergeRecorded`.
+   */
+  it("splits a name written in capitals into words a reader can say", () => {
+    expect(transitionKindText("MergeRecorded")).toBe("Merge recorded");
+    expect(transitionKindText("TurnOffered")).toBe("Turn offered");
+    expect(transitionKindText("QueueRequested")).toBe("Queue requested");
+  });
+});
+
+describe("codes nobody has written a sentence for", () => {
+  it("reads a screaming code as words", () => {
+    expect(humanise("SUBJECT_BASE_MISMATCH")).toBe("Subject base mismatch");
+  });
+
+  it("reads a capitalised name as words", () => {
+    expect(humanise("MergeGuard")).toBe("Merge guard");
+  });
+
+  it("leaves an acronym whole rather than spelling it out letter by letter", () => {
+    expect(humanise("CIFailed")).toBe("CI failed");
   });
 });
 
