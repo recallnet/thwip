@@ -1911,7 +1911,6 @@ function Billing() {
 function Operations({ me }: { me: Me }) {
   const { data, error, reload } = useFetch<{
     deliveries: Array<{ provider: string; delivery_id: string; event: string; received_at: string }>;
-    observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
   }>("/v1/dashboard/operations");
   const [syncing, setSyncing] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -1945,27 +1944,6 @@ function Operations({ me }: { me: Me }) {
             <code>{note}</code>
           </p>
         )}
-      </Panel>
-      <Panel title="Recent verifications">
-        {data.observations.length === 0 && <p>No verifications recorded yet.</p>}
-        <table className="gp-data-table">
-          <tbody>
-            {data.observations.map((o, i) => (
-              <tr key={i}>
-                <td>
-                  <code>{o.github_name}</code>
-                </td>
-                <td>
-                  <code>{o.head_sha.slice(0, 12)}</code>
-                </td>
-                <td>
-                  <OutcomeText code={o.outcome} />
-                </td>
-                <td className="gp-panel__meta">{whenText(o.observed_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </Panel>
       <Panel title="Webhook deliveries">
         {data.deliveries.length === 0 && <p>No deliveries yet.</p>}
