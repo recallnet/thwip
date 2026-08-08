@@ -1662,13 +1662,27 @@ function Profile({ me }: { me: Me }) {
                     </td>
                     <td>
                       {cached && !cached.revoked_at && (
-                        <button
-                          className="gp-btn gp-btn--sm gp-btn--danger"
-                          onClick={() => void deny(cached.key_id)}
-                          title="Stop accepting proofs signed by this key in this organization."
-                        >
-                          Deny in this org
-                        </button>
+                        <ConfirmAction
+                          label="Deny in this org"
+                          title="Stop accepting proofs signed by this key?"
+                          consequence={
+                            <>
+                              <p>
+                                Every proof signed with this key stops verifying in this organization,
+                                including proofs already on open pull requests. Removing the key from GitHub
+                                is the general revocation; this is the organization-local kill switch for
+                                yours.
+                              </p>
+                              <p>
+                                The key itself stays on GitHub and on the device it lives on. This action
+                                cannot be undone from the dashboard.
+                              </p>
+                            </>
+                          }
+                          confirmLabel="Deny it"
+                          busy={false}
+                          onConfirm={() => void deny(cached.key_id)}
+                        />
                       )}
                     </td>
                   </tr>
