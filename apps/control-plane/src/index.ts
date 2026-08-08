@@ -525,6 +525,9 @@ app.get("/v1/dashboard/summary", async (c) => {
     activatedUsers: activated?.n ?? 0,
     teams: teams?.n ?? 0,
     activeKeys: keys?.n ?? 0,
+    // The viewer's own machine state, so the overview can show the setup
+    // prompt only to people who have not set up a machine yet.
+    viewerActivated: viewer.activated,
   });
 });
 

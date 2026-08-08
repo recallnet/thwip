@@ -416,6 +416,7 @@ function Overview() {
     activatedUsers: number;
     teams: number;
     activeKeys: number;
+    viewerActivated: boolean;
   }>("/v1/dashboard/summary");
   const ops = useFetch<{
     observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
@@ -511,7 +512,22 @@ function Overview() {
         )}
       </Panel>
 
-      <StartUsingThwip />
+      {data.viewerActivated ? (
+        /*
+          The full setup prompt belongs to someone who has not set up a machine.
+          Once your own device can sign, the overview says so in one line and
+          sends device management to the Profile page instead of repeating the
+          whole block on every visit.
+        */
+        <Panel title="Your machine" meta="developer setup">
+          <p>
+            This machine is set up to sign proofs. Manage devices and keys on the{" "}
+            <a href="/dashboard/profile">Profile page</a>.
+          </p>
+        </Panel>
+      ) : (
+        <StartUsingThwip />
+      )}
       <Panel title="Ship a change">
         <p className="gp-mono">
           git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
