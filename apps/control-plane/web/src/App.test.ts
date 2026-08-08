@@ -32,6 +32,8 @@ describe("the FAQ page", () => {
       let prefix = rendered.slice(0, 24);
       const close = rendered.indexOf(">", 24);
       if (prefix.includes("<") && close !== -1) prefix = rendered.slice(0, close + 1);
+      // React escapes these; the comparison must too.
+      prefix = prefix.replace(/'/g, "&#x27;").replace(/"/g, "&quot;");
       expect(html, item.id).toContain(prefix);
     }
   });

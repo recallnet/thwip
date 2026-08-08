@@ -49,7 +49,7 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
   {
     id: "profiles",
     q: "Which security profiles can I pick?",
-    a: "Four. **fast**: a signed local proof with no pre-run contact with the control plane. Works fully offline before push. **remote**: the pipeline runs in GitHub for every required check (conventional remote CI). **fresh**: the required suites run on your own machine. The queue signs an assignment naming the candidate tree and the suites to run, your machine runs them and signs a receipt naming what ran and against what tree, and the control plane checks the receipt against the assignment before it merges. **audited**: fresh plus a second, independent run of the same suites in GitHub Actions. The merge waits on both the local receipt and that remote verdict. Pick organization defaults in the dashboard; use `thwip.yaml` only where a repository needs to override them.",
+    a: "Four. **fast**: the required suites run on the machine where the code lives and the CLI signs the proof locally. Nothing is leased or approved in advance, and the queue can merge on the proof already attached to the branch. The CLI does read the policy it runs under — the repository's own `thwip.yaml`, or the organization defaults from the dashboard — so a run that never contacts the control plane needs a complete local `thwip.yaml` and a repository the CLI has already resolved once. **remote**: the pipeline runs in GitHub for every required check (conventional remote CI). **fresh**: the required suites run on your own machine. The queue signs an assignment naming the candidate tree and the suites to run, your machine runs them and signs a receipt naming what ran and against what tree, and the control plane checks the receipt against the assignment before it merges. **audited**: fresh plus a second, independent run of the same suites in GitHub Actions. The merge waits on both the local receipt and that remote verdict. Pick organization defaults in the dashboard; use `thwip.yaml` only where a repository needs to override them.",
   },
   {
     id: "what-proof-proves",
@@ -69,7 +69,7 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
   {
     id: "signing-keys",
     q: "Where do signing keys come from?",
-    a: "GitHub. thwip does not issue, store, or enroll keys — it reads the signing keys you have registered on your GitHub account, and a proof names a key by its OpenSSH fingerprint, which anyone can compute from the public key. Run `thwip keys status` to see which key on your machine would sign and whether GitHub lists it. Removing a key from GitHub stops it verifying; an organization can also deny a key from the dashboard for faster revocation.",
+    a: "GitHub. thwip does not issue, store, or enroll keys — it reads the signing keys you have registered on your GitHub account, and a proof names a key by its OpenSSH fingerprint, which anyone can compute from the public key. Run `thwip keys status` to see which key on your machine would sign and whether GitHub lists it. Removing a key from GitHub stops it verifying. You can also deny one of your own keys from the dashboard: it stops verifying in this organization immediately, without touching your GitHub account.",
   },
   {
     id: "signed-commits",
