@@ -1,9 +1,10 @@
 /**
- * Agent prompts, shared by the dashboard, the CLI, and the published
- * markdown so the three cannot drift. Two distinct jobs:
+ * Agent prompts and site copy, shared by the dashboard, the CLI, and the
+ * published markdown so they cannot drift. The jobs:
  *
  *   developerSetupPrompt — prepare a machine to sign proofs
  *   projectSetupPrompt   — put one repository on thwip
+ *   FAQ_ITEMS            — the FAQ, rendered by the page and /faq.md
  */
 
 export const SITE = "https://thwip.recall.net";
@@ -146,4 +147,5 @@ Rules: never move a private key anywhere outside my ~/.ssh or ~/.config/thwip;
 never skip or weaken a failing check to get a green proof; the default branch
 here is ${p.defaultBranch}.`;
 }
+export * from "./faq.js";
 export * from "./queue.js";
