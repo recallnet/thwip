@@ -1,0 +1,151 @@
+---
+title: "Every merge carries a receipt. Here's how to read it."
+description: "A thwip proof is a signed claim attached to the commit, and every queue merge writes a signed record into an append-only chain. This guide opens both: what the bytes say, and how to verify them yourself without a thwip account."
+author: thwip
+pubDate: 2026-08-08T12:00:00.000Z
+tags:
+  - verification
+  - provenance
+  - supply-chain
+  - security
+heroImage: /blog/queue-hero.svg
+heroAlt: A signed record being checked against a branch chain
+draft: true
+---
+
+A green check on a pull request is a claim. It says the tests passed — it does
+not say who ran them, on what code, or how we know. That distinction gets
+louder when the checks were run by an agent on a laptop instead of a named
+cloud runner.
+
+Thwip answers with bytes instead of trust. Every proof is a signed claim
+attached to the commit, and every queue merge writes a signed record into an
+append-only chain. This guide opens both: what the bytes actually say, and how
+to verify them yourself — no thwip account, no dashboard.
+
+## The claim lives in the commit message
+
+The proof travels as one git trailer:
+
+```
+thwip-Proof: v1.<base64url-encoded DSSE envelope>
+```
+
+The envelope is self-contained. It carries an in-toto statement, a signature
+over it, and the fingerprint of the key that signed. It does not point at a
+thwip server for the interesting parts, because a pointer would only move the
+trust question. Everything the claim asserts is in the signed bytes.
+
+## What the signed bytes say
+
+The statement's predicate is `urn:thwip:attestation:ci-run:v1`, and it names
+the things a claim can lie about:
+
+- **The repository**: provider, owner, and GitHub repository id.
+- **The tree**: the exact Git tree, the parent commits, the base branch, and
+  the base commit the work sat on. "The tree" is the honest unit here — a
+  commit message or a diff can be rewritten, but the tree is what the checks
+  actually ran against.
+- **The policy**: the digest and version of the policy the run was approved
+  under. A run under an old policy is a different claim than a run under
+  today's.
+- **The pipeline**: a digest of the pipeline definition, and whether it ran as
+  commands or through a Dagger module.
+- **The run**: start and finish times, and every suite with its status and a
+  digest of its report. "Lint passed" is not the claim; "this exact suite
+  produced a report with this digest" is.
+
+## The three questions every proof answers
+
+Verification reduces to three questions, and all three are answered from
+public facts:
+
+**1. Does the claim name exactly this commit?** The verifier derives the
+repository facts from GitHub — the tree, the ancestry, the base, the policy
+version — and compares them to the statement. A rebase changes the tree, so a
+rebase leaves the old proof behind: the claim no longer matches, and the
+check refuses. That is not a judgment call, it is arithmetic.
+
+**2. Who signed, and are they still allowed to?** The signer is an OpenSSH
+key registered on GitHub as a signing key. The fingerprint in the envelope
+maps to a public key, the public key maps to a GitHub account, and the
+verifier checks that the account still has access to the repository — at
+verification time, not at signing time. Remove the key from GitHub, or remove
+the person, and every proof they signed stops verifying. The FAQ calls this
+out in one line: *Removing someone on GitHub removes their standing here
+too*.
+
+**3. Did the run really happen?** This is where the profiles differ. Under
+**remote**, GitHub Actions ran the required suites and GitHub signed the
+provenance; the verifier trusts GitHub's signature, the way it trusts the
+rest of the platform. Under **fast**, the execution claim is the signer's own
+assertion — so what carries the weight is the *next* question: does the claim
+keep agreeing with every other machine that runs the same code? The pipeline
+is a content-addressed graph, so identical inputs must produce identical
+digests. A fabricated claim disagrees with teammates' runs, later commits,
+and any cloud rerun — permanently and attributably. That is detection by
+reproducibility rather than surveillance: thwip never watches anyone run
+anything.
+
+## Reading one yourself
+
+From a checkout of the repository:
+
+```bash
+thwip verify
+```
+
+prints the parsed predicate as JSON and the signer's key fingerprint, and
+refuses with `PROOF_STALE` if the commit's tree has moved since the proof was
+signed. The same command works against any commit with `--commit <sha>`.
+
+Refusals speak in reason codes, and each one is a sentence when it reaches a
+human: `SUBJECT_TREE_MISMATCH` says the claim does not name this tree,
+`SUBJECT_BASE_MISMATCH` says the base moved, `SIGNER_KEY_REVOKED` says the
+key is gone or denied, `SIGNER_PERMISSION_INSUFFICIENT` says the signer no
+longer holds access to the repository. The dashboard prints the sentence;
+the code is there if you want the code.
+
+## The merge chain is the audit trail
+
+The proof covers one commit. The queue's job is to move the branch, and its
+audit trail is a **chain**: every merge writes a signed transition record
+that names the candidate, the base it verified, the policy version, the
+evidence, and the digest of the record that came before it. Each link binds
+the next, so the chain is append-only in the sense that matters — rewriting
+one record breaks every record after it.
+
+Two endpoints make the chain checkable by anyone:
+
+- `GET /v1/queue/records/<digest>` returns the signed record bytes for a
+  given digest.
+- `GET /.well-known/thwip-keys` publishes the keys that sign those records.
+  Public and unauthenticated on purpose: a record is only evidence if
+  somebody who does not run the service can check it.
+
+And the CLI does the walking:
+
+```bash
+thwip verify-chain
+```
+
+fetches the links and the keys, checks each signature, and reports how many
+links it verified — or exactly which link failed and why. Nothing is taken on
+trust except the one thing that has to be: that the digest in a link names
+the bytes beside it, which is the first thing the check verifies.
+
+## What this buys
+
+For a reviewer, the question stops being "do we trust the bot?" and becomes
+"do the bytes check out?" — answerable with public keys, public records, and
+a couple of commands. For an auditor, the chain is a complete, signed history
+of how the branch moved. For a skeptic, the reproducibility argument means a
+fabricated fast proof has to keep agreeing with everyone else's runs forever,
+and the first time it doesn't, the signed claim is the evidence.
+
+The dashboard is a convenience. The receipts are the product.
+
+{% cta-row %}
+{% cta href="/faq" label="Read the trust model" /%}
+{% cta href="/install" label="Sign your first proof" variant="ghost" /%}
+{% /cta-row %}
