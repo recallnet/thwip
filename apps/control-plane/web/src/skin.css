@@ -478,6 +478,29 @@ select.gp-btn:hover {
   color: var(--ink);
 }
 
+/* A labelled form field, as used by the proof-defaults form. */
+.thwip-form-field {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  align-items: center;
+  gap: var(--s3);
+  margin: 0 0 var(--s3);
+  max-width: 34rem;
+}
+.thwip-form-field span {
+  font-size: 13px;
+  color: var(--ink);
+}
+.thwip-form-field select,
+.thwip-form-field input {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+
 .thwip-slip {
   font-family: var(--mono);
   border: 1px solid var(--rule);

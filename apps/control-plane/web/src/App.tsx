@@ -553,11 +553,17 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
   const { data, error, reload } = useFetch<{ defaults: Record<string, unknown> | null }>(
     "/v1/dashboard/proof-defaults",
   );
+  const [profile, setProfile] = useState("fast");
+  const [requiredText, setRequiredText] = useState("");
+  const [advanced, setAdvanced] = useState(false);
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     if (!data) return;
+    const defaults = data.defaults ?? {};
+    if (typeof defaults.profile === "string") setProfile(defaults.profile);
+    if (Array.isArray(defaults.required)) setRequiredText(defaults.required.join(", "));
     setText(
       JSON.stringify(
         data.defaults ?? {
@@ -585,42 +591,97 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
       setSaving(false);
     }
   };
+  // The form edits the two fields every organization sets, and merges them
+  // into whatever else the stored defaults hold (policy constraints, suites,
+  // remote-only paths). Writing the whole object keeps those fields alive.
+  const saveForm = () => {
+    const required = requiredText
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    void save({ ...(data?.defaults ?? {}), version: 1, profile, required });
+  };
   return (
     <Panel
       title="Organization proof defaults"
       meta="repositories inherit these settings; committed thwip.yaml fields override them after protected merge"
     >
       {error && <p className="thwip-error">{error}</p>}
-      <textarea
-        className="thwip-json-field"
-        aria-label="Organization proof defaults"
-        value={text}
-        disabled={!canEdit || saving}
-        onChange={(event) => setText(event.target.value)}
-        rows={9}
-      />
       {saveError && <p className="thwip-error">{saveError}</p>}
-      {canEdit ? (
-        <div className="thwip-actions">
-          <button
-            className="gp-btn gp-btn--sm"
-            disabled={saving}
-            onClick={() => {
-              try {
-                void save(JSON.parse(text) as Record<string, unknown>);
-              } catch {
-                setSaveError("defaults must be valid JSON");
-              }
-            }}
-          >
-            Save defaults
-          </button>
-          <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => void save(null)}>
-            Clear defaults
-          </button>
-        </div>
+      {advanced ? (
+        <>
+          <textarea
+            className="thwip-json-field"
+            aria-label="Organization proof defaults JSON"
+            value={text}
+            disabled={!canEdit || saving}
+            onChange={(event) => setText(event.target.value)}
+            rows={9}
+          />
+          {canEdit ? (
+            <div className="thwip-actions">
+              <button
+                className="gp-btn gp-btn--sm"
+                disabled={saving}
+                onClick={() => {
+                  try {
+                    void save(JSON.parse(text) as Record<string, unknown>);
+                  } catch {
+                    setSaveError("defaults must be valid JSON");
+                  }
+                }}
+              >
+                Save JSON
+              </button>
+              <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => setAdvanced(false)}>
+                Back to the form
+              </button>
+            </div>
+          ) : (
+            <p className="gp-panel__meta">Only a GitHub organization owner can change these defaults.</p>
+          )}
+        </>
       ) : (
-        <p className="gp-panel__meta">Only a GitHub organization owner can change these defaults.</p>
+        <>
+          <label className="thwip-form-field">
+            <span>Profile</span>
+            <select
+              value={profile}
+              disabled={!canEdit || saving}
+              onChange={(event) => setProfile(event.target.value)}
+            >
+              {(["fast", "fresh", "remote", "audited"] as const).map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="thwip-form-field">
+            <span>Required suites</span>
+            <input
+              value={requiredText}
+              disabled={!canEdit || saving}
+              onChange={(event) => setRequiredText(event.target.value)}
+              placeholder="lint, typecheck, test"
+            />
+          </label>
+          {canEdit ? (
+            <div className="thwip-actions">
+              <button className="gp-btn gp-btn--sm" disabled={saving} onClick={() => void saveForm()}>
+                Save defaults
+              </button>
+              <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => setAdvanced(true)}>
+                Advanced: edit JSON
+              </button>
+              <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => void save(null)}>
+                Clear defaults
+              </button>
+            </div>
+          ) : (
+            <p className="gp-panel__meta">Only a GitHub organization owner can change these defaults.</p>
+          )}
+        </>
       )}
     </Panel>
   );
