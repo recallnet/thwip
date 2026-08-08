@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { api, ApiError, useFetch } from "./api.js";
+import { api, ApiError, useFetch, withOrg } from "./api.js";
 import { ConfirmAction, Panel } from "./ui.js";
 import {
   blockedNextAction,
@@ -270,14 +270,110 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
   );
 }
 
+/**
+ * Pause and resume, for organization administrators.
+ *
+ * The panel reported "An administrator can resume it" and stopped there: the
+ * only way to actually pause or resume was the CLI. The server routes have
+ * always been there (admin-only, and a pause requires a reason, so every
+ * pause is explainable later), so the controls are the missing half of a
+ * sentence the panel was already saying. Non-administrators see none of this.
+ */
+function QueueControls({
+  repositoryId,
+  baseRef,
+  paused,
+  onChanged,
+}: {
+  repositoryId: string;
+  baseRef: string;
+  paused: boolean;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const act = async (path: string, body: unknown) => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      // These routes answer refusals with { result: { detail } } rather than
+      // { error }, so the shared api() helper would reduce a real explanation
+      // to a bare status code. Read both shapes.
+      const res = await fetch(withOrg(path), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const read = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          result?: { detail?: string };
+        };
+        throw new Error(read.error ?? read.result?.detail ?? `${res.status}`);
+      }
+      onChanged();
+    } catch (e) {
+      setFailure((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="thwip-actions">
+      {failure !== null && <p className="thwip-error">{failure}</p>}
+      {paused ? (
+        <button
+          className="gp-btn gp-btn--sm"
+          disabled={busy}
+          onClick={() => void act(`/v1/queue/${repositoryId}/resume?ref=${encodeURIComponent(baseRef)}`, {})}
+        >
+          {busy ? "Resuming…" : "Resume merging"}
+        </button>
+      ) : (
+        <>
+          <label className="thwip-finding__reason">
+            Why you are pausing
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="why the lane is stopping"
+            />
+          </label>
+          <ConfirmAction
+            label="Pause merging"
+            title="Pause this queue?"
+            consequence={
+              <p>
+                The lane stops offering turns until an administrator resumes it. Pull requests keep their
+                places. The reason you give is recorded with the pause.
+              </p>
+            }
+            confirmLabel="Pause it"
+            busy={busy || reason.trim() === ""}
+            onConfirm={() => {
+              void act(`/v1/queue/${repositoryId}/pause?ref=${encodeURIComponent(baseRef)}`, { reason: reason.trim() });
+              setReason("");
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 export function QueuePanel({
   repositoryId,
   baseRef,
   repositoryName,
+  canAdminister = false,
 }: {
   repositoryId: string;
   baseRef: string;
   repositoryName: string;
+  canAdminister?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -377,6 +473,15 @@ export function QueuePanel({
               ? " The branch moved outside the queue, so an administrator has to rebaseline before merging resumes."
               : " An administrator can resume it."}
           </p>
+        )}
+
+        {canAdminister && !snapshot.rebaselineRequired && (
+          <QueueControls
+            repositoryId={repositoryId}
+            baseRef={baseRef}
+            paused={snapshot.paused}
+            onChanged={load}
+          />
         )}
 
         {snapshot.entries.length === 0 && (

@@ -369,7 +369,7 @@ function Dashboard({
           ) : (
             <Projects me={me} />
           ))}
-        {tab === "queue" && <QueueTab />}
+        {tab === "queue" && <QueueTab me={me} />}
         {tab === "people" && <People me={me} />}
         {tab === "profile" && <Profile me={me} />}
         {tab === "policies" && <Policies />}
@@ -954,6 +954,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           repositoryId={project.github_repository_id}
           baseRef={`refs/heads/${project.default_branch}`}
           repositoryName={project.github_name}
+          canAdminister={me.viewer.githubOrgRole === "admin" || me.viewer.githubOrgRole === "owner"}
         />
       )}
       {section === "access" && <ProjectAccess projectId={project.id} me={me} />}
@@ -2057,7 +2058,7 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
  * a single combined view would hide that `main` and `release` are independent
  * protected resources.
  */
-function QueueTab() {
+function QueueTab({ me }: { me: Me }) {
   const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
@@ -2081,6 +2082,7 @@ function QueueTab() {
           repositoryId={project.github_repository_id}
           baseRef={`refs/heads/${project.default_branch}`}
           repositoryName={project.github_name}
+          canAdminister={me.viewer.githubOrgRole === "admin" || me.viewer.githubOrgRole === "owner"}
         />
       ))}
     </>
