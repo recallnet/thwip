@@ -17,22 +17,33 @@ import { outcome, whenText, type Tone } from "./vocabulary.js";
  *           red under the cursor so the commitment is felt before the click.
  */
 
+/**
+ * A section of a page: a rule, its name in the margin voice, and the thing.
+ *
+ * This drew a bordered box, and a page of them stacked into a column of framed
+ * rectangles that all claimed the same weight, around content that already had
+ * an edge of its own. The name and the note keep their places; the frame is
+ * gone, and the rule between sections does the separating.
+ */
 export function Panel({
   title,
   meta,
+  tone,
   children,
 }: {
   title: string;
   meta?: string;
+  /** A section whose subject is a problem says so in its own name. */
+  tone?: "finding";
   children: React.ReactNode;
 }) {
   return (
-    <section className="gp-panel">
-      <div className="gp-panel__header">
-        <h3 className="gp-panel__title">{title}</h3>
-        {meta && <span className="gp-panel__meta">{meta}</span>}
+    <section className={tone === undefined ? "thwip-section" : `thwip-section thwip-section--${tone}`}>
+      <div className="thwip-section__head">
+        {title}
+        {meta && <span>{meta}</span>}
       </div>
-      <div className="gp-panel__body">{children}</div>
+      <div className="thwip-section__body">{children}</div>
     </section>
   );
 }
