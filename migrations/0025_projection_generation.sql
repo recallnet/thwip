@@ -1,0 +1,30 @@
+-- DEPLOY ORDER: before-worker
+--
+-- Which projection message last wrote each entry row.
+--
+-- The projection only ever upserts, which is right: a message carries one
+-- queue's snapshot, and a projection that deleted whatever a lagging message did
+-- not mention would erase live entries on the first message that arrived out of
+-- order. But the authority compacts settled entries out of its document, so an
+-- entry that leaves the live set stops appearing in every later message and its
+-- row keeps whatever state it was last seen in, for good.
+--
+-- `entry_1315419165_184` sat in `Merging` from 5 August 2026. Pull request 184
+-- merged that afternoon; the queue stopped before it recorded the outcome, and
+-- by the time it came back the entry had been compacted away. Four days later
+-- the dashboard still named it the head of the queue, because `Merging` is not a
+-- terminal state and it held the lowest ordinal. Everybody was being told that a
+-- pull request merged the previous week was integrating now.
+--
+-- A row cannot be settled on a guess. Nothing knows whether 184 merged or was
+-- abandoned, and writing `Merged` to tidy the page is the invention this product
+-- exists to refuse. What is knowable is that the entry is not in the authority's
+-- live set, because the projection has since written a later generation without
+-- it. So each row records the generation that wrote it, and a reader takes only
+-- the rows belonging to the newest generation projected for that queue.
+--
+-- Existing rows get 0, which is below every real generation. A queue nobody has
+-- projected since this ran has no mark at the new generation either, and readers
+-- trust such a queue whole rather than emptying the dashboard on the deploy that
+-- adds the column; the first message after it corrects the set.
+ALTER TABLE queue_entries_index ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
