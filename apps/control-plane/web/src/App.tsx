@@ -451,31 +451,6 @@ function JumpToProject() {
   );
 }
 
-function StartUsingThwip() {
-  const [copied, setCopied] = useState(false);
-  const prompt = developerSetupPrompt();
-  return (
-    <Panel title="Start using thwip" meta="developer setup · paste into your coding agent">
-      <p>
-        Before you can sign a proof, this machine needs the CLI, a signed-in session, and an ed25519 key that GitHub
-        lists as a <b>signing</b> key for your account. The prompt below walks an agent through all three and hands
-        you the browser and terminal steps rather than doing them for you. Your private key is never read.
-      </p>
-      <div className="thwip-actions">
-        <button
-          className="gp-btn gp-btn--sm"
-          onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
-        >
-          {copied ? "Copied" : "Copy setup prompt"}
-        </button>
-        <a className="gp-btn gp-btn--sm gp-btn--quiet" href="/install">
-          Read it first
-        </a>
-      </div>
-    </Panel>
-  );
-}
-
 interface ProjectRow {
   id: string;
   github_repository_id: string;
@@ -521,6 +496,7 @@ function OrgHome({ me }: { me: Me }) {
     limits: { projects: number; users: number };
     enabledProjects: number;
     activatedUsers: number;
+    viewerHasSigningKey: boolean;
   }>("/v1/dashboard/summary");
   const queues = useFetch<{ queues: QueueSummary[] }>("/v1/dashboard/queues");
   const lastVerification = useLastVerifications();
@@ -625,6 +601,12 @@ function OrgHome({ me }: { me: Me }) {
                 ))}
               </tbody>
             </table>
+          )}
+          {summary.data?.viewerHasSigningKey === false && (
+            <p className="thwip-note">
+              You hold no signing key, so nothing you push can carry a proof yet.{" "}
+              <a href="/dashboard/profile">Set this machine up</a>
+            </p>
           )}
           {installUrl && (
             <p className="thwip-note">
