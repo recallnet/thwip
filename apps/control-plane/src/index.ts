@@ -5,6 +5,7 @@ import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
 import { projectsInReach } from "./dashboard-scope.js";
+import { dashboardCounts } from "./dashboard-counts.js";
 import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
@@ -515,24 +516,11 @@ app.get("/v1/dashboard/summary", async (c) => {
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const orgId = viewer.organizationId;
   const plan = await orgPlan(c.env, orgId);
-  const [projects, enabled, members, activated, teams, keys] = await Promise.all([
-    c.env.DB.prepare("SELECT COUNT(*) n FROM projects WHERE organization_id = ?").bind(orgId).first<{ n: number }>(),
-    c.env.DB.prepare("SELECT COUNT(*) n FROM projects WHERE organization_id = ? AND enabled = 1").bind(orgId).first<{ n: number }>(),
-    c.env.DB.prepare("SELECT COUNT(*) n FROM principals WHERE organization_id = ?").bind(orgId).first<{ n: number }>(),
-    c.env.DB.prepare("SELECT COUNT(*) n FROM principals WHERE organization_id = ? AND activated_at IS NOT NULL").bind(orgId).first<{ n: number }>(),
-    c.env.DB.prepare("SELECT COUNT(*) n FROM github_teams WHERE organization_id = ?").bind(orgId).first<{ n: number }>(),
-    c.env.DB.prepare("SELECT COUNT(*) n FROM device_keys WHERE revoked_at IS NULL").first<{ n: number }>(),
-  ]);
-  return c.json({
-    plan,
-    limits: PLAN_LIMITS[plan],
-    projects: projects?.n ?? 0,
-    enabledProjects: enabled?.n ?? 0,
-    members: members?.n ?? 0,
-    activatedUsers: activated?.n ?? 0,
-    teams: teams?.n ?? 0,
-    activeKeys: keys?.n ?? 0,
+  const counts = await dashboardCounts(c.env.DB as unknown as D1Like, {
+    organizationId: orgId,
+    githubUserId: viewer.githubUserId,
   });
+  return c.json({ plan, limits: PLAN_LIMITS[plan], ...counts });
 });
 
 app.get("/v1/dashboard/proof-defaults", async (c) => {
