@@ -592,6 +592,47 @@ select.gp-btn:hover {
   background: var(--paper);
   max-width: none;
 }
+/* ---------- a labelled field ---------- */
+
+/* The label sits in a fixed column so a stack of fields reads down one edge,
+   which is what makes two of them look like one form rather than two controls
+   that happen to be adjacent. It folds to stacked rows where that column would
+   leave the input too narrow to read what you typed. */
+.thwip-field {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  align-items: baseline;
+  gap: var(--s2) var(--s3);
+  margin: var(--s3) 0;
+}
+.thwip-field label {
+  font: 500 12px/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.thwip-field input,
+.thwip-field select {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  max-width: 32rem;
+}
+.thwip-field input:disabled,
+.thwip-field select:disabled {
+  color: var(--ghost);
+  background: var(--hair);
+}
+@media (max-width: 640px) {
+  .thwip-field {
+    grid-template-columns: 1fr;
+    gap: var(--s1);
+  }
+}
+
 .thwip-json-field {
   width: 100%;
   font-family: var(--mono);
