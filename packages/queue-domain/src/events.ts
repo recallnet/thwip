@@ -160,7 +160,19 @@ export type QueueEvent = EventEnvelope &
     | { readonly type: "ExternalTransitionObserved"; readonly observedBaseSha: string }
     | { readonly type: "QueuePaused"; readonly actorPrincipalId: string; readonly reason: string }
     | { readonly type: "QueueResumed"; readonly actorPrincipalId: string }
-    | { readonly type: "Rebaselined"; readonly actorPrincipalId: string; readonly baseSha: string }
+    | {
+        readonly type: "Rebaselined";
+        readonly actorPrincipalId: string;
+        readonly baseSha: string;
+        /**
+         * Why this commit was accepted, in the administrator's words.
+         *
+         * The CLI has always asked for one and the route dropped it on the
+         * floor, so the single moment a person overrides the queue's refusal
+         * left no record of what they had checked.
+         */
+        readonly reason: string;
+      }
     | {
         readonly type: "EntryCancelled";
         readonly entryId: string;

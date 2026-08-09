@@ -31,6 +31,7 @@ export function encodeState(state: BranchQueueState): SerializedState {
     paused: state.paused,
     pauseReason: state.pauseReason,
     rebaselineRequired: state.rebaselineRequired,
+    rebaselineReason: state.rebaselineReason,
     baseSha: state.baseSha,
     activeAttemptId: state.activeAttemptId,
     entries: [...state.entries].map(([id, e]) => [id, { ...e, fairnessOrdinal: e.fairnessOrdinal.toString() }]),
@@ -56,6 +57,8 @@ export function decodeState(raw: SerializedState): BranchQueueState {
     paused: raw["paused"] as boolean,
     pauseReason: raw["pauseReason"] as string | null,
     rebaselineRequired: raw["rebaselineRequired"] as boolean,
+    // Absent from every document written before a rebaseline had to say why.
+    rebaselineReason: (raw["rebaselineReason"] as string | null | undefined) ?? null,
     baseSha: raw["baseSha"] as string | null,
     activeAttemptId: raw["activeAttemptId"] as string | null,
     entries: new Map(entries.map(([id, e]) => [id, { ...e, fairnessOrdinal: BigInt(e.fairnessOrdinal) }])),

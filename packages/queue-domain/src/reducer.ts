@@ -109,6 +109,8 @@ export interface BranchQueueState {
   pauseReason: string | null;
   /** Set when the base moved outside the queue; cleared by a rebaseline (§6.2 invariant 21). */
   rebaselineRequired: boolean;
+  /** Why the last accepted base was accepted. Null until somebody has. */
+  rebaselineReason: string | null;
   baseSha: string | null;
   activeAttemptId: string | null;
   entries: Map<string, Entry>;
@@ -131,6 +133,7 @@ export function emptyState(queueKey: string, repositoryId: string, baseRef: stri
     paused: false,
     pauseReason: null,
     rebaselineRequired: false,
+    rebaselineReason: null,
     baseSha: null,
     activeAttemptId: null,
     entries: new Map(),
@@ -864,8 +867,18 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
     }
 
     case "Rebaselined": {
+      // The compare-and-set. An administrator reads the panel, goes to look at
+      // the commit, and comes back to confirm; if somebody pushed again while
+      // they were reading, the queue observed the newer commit and the
+      // confirmation in their hand is about one that is no longer the branch.
+      // Applying it would move the base to a commit nobody looked at.
+      if (state.baseSha !== null && event.baseSha !== state.baseSha) {
+        fail(`the branch has moved since: the queue now observes ${state.baseSha}`);
+      }
+      if (event.reason.trim() === "") fail("a rebaseline requires a reason");
       state.rebaselineRequired = false;
       state.baseSha = event.baseSha;
+      state.rebaselineReason = event.reason;
       break;
     }
 
