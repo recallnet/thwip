@@ -82,10 +82,32 @@ const BOOTSTRAP_PENDING_DETAIL =
  * Turn a code nobody has written a sentence for into words anyway.
  * `SUBJECT_BASE_MISMATCH` becomes "Subject base mismatch": still terse, but a
  * reader can say it out loud, and it will not be mistaken for a database key.
+ *
+ * Two shapes reach here, and for a long time only one of them came out right.
+ * The verifier's codes are screaming snake, and the queue's transition kinds
+ * and entry states are PascalCase. Lowercasing a PascalCase name runs it
+ * together, and `MergeRecorded` was printed as `Mergerecorded` in the history
+ * table of every dashboard. So the seam between a lower-case letter and a
+ * capital is a word break, the same as an underscore.
+ *
+ * `CIFailed` splits after the acronym rather than in the middle of it, and the
+ * acronym keeps its capitals: a reader who sees `Ci failed` reads a typo.
  */
 export function humanise(code: string): string {
-  const words = code.toLowerCase().replace(/[_-]+/g, " ").trim();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  // A code written entirely in capitals has no case left to read, so every
+  // word in it is a word. Only a mixed-case name can carry an acronym.
+  const shouting = /^[A-Z0-9_-]+$/.test(code);
+  const spaced = code
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .trim();
+  const words = spaced
+    .split(/\s+/)
+    .map((word) => (!shouting && /^[A-Z]{2,}$/.test(word) ? word : word.toLowerCase()));
+  const [first = "", ...rest] = words;
+  const lead = /^[A-Z]{2,}$/.test(first) ? first : first.charAt(0).toUpperCase() + first.slice(1);
+  return [lead, ...rest].join(" ");
 }
 
 export function outcome(code: string): Outcome {

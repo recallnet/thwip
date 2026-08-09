@@ -5,7 +5,7 @@
  * string only the database can read. The same row already carries
  * `github_name` — the repository's real `owner/repo` — so that is what
  * addresses the page instead. The two owner/repo segments have to be told
- * apart from an optional trailing section (`queue`, `access`, `setup`), and a
+ * apart from an optional trailing section (`access`, `settings`), and a
  * cold load has to parse the same path a client navigation would produce.
  */
 
@@ -25,7 +25,7 @@ export function parseProjectPath(path: string): ParsedProjectPath | null {
   const owner = decodeURIComponent(match[1]!);
   const repo = decodeURIComponent(match[2]!);
   if (!owner || !repo) return null;
-  return { githubName: `${owner}/${repo}`, section: match[3] ?? "overview" };
+  return { githubName: `${owner}/${repo}`, section: match[3] ?? "queue" };
 }
 
 /** Builds the address for a project, or one of its sections. */
@@ -34,7 +34,7 @@ export function projectPath(githubName: string, section?: string): string {
   const owner = slash === -1 ? githubName : githubName.slice(0, slash);
   const repo = slash === -1 ? "" : githubName.slice(slash + 1);
   const base = `/dashboard/projects/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-  return section && section !== "overview" ? `${base}/${section}` : base;
+  return section && section !== "queue" ? `${base}/${section}` : base;
 }
 
 /**

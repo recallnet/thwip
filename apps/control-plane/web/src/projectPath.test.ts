@@ -10,10 +10,10 @@ import { findProjectByGithubName, parseProjectPath, projectPath } from "./projec
  */
 
 describe("parseProjectPath", () => {
-  it("parses owner/repo with no section as overview", () => {
+  it("parses owner/repo with no section as the queue", () => {
     expect(parseProjectPath("/dashboard/projects/o/r")).toEqual({
       githubName: "o/r",
-      section: "overview",
+      section: "queue",
     });
   });
 
@@ -33,7 +33,7 @@ describe("parseProjectPath", () => {
   it("decodes percent-encoded segments", () => {
     expect(parseProjectPath("/dashboard/projects/re%2Ecall/th-wip")).toEqual({
       githubName: "re.call/th-wip",
-      section: "overview",
+      section: "queue",
     });
   });
 
@@ -47,12 +47,14 @@ describe("parseProjectPath", () => {
 });
 
 describe("projectPath", () => {
-  it("omits the section for overview", () => {
+  it("omits the section for the queue, which is where a project opens", () => {
     expect(projectPath("recallnet/thwip")).toBe("/dashboard/projects/recallnet/thwip");
+    expect(projectPath("recallnet/thwip", "queue")).toBe("/dashboard/projects/recallnet/thwip");
   });
 
-  it("appends a non-overview section", () => {
-    expect(projectPath("recallnet/thwip", "queue")).toBe("/dashboard/projects/recallnet/thwip/queue");
+  it("appends every other section", () => {
+    expect(projectPath("recallnet/thwip", "access")).toBe("/dashboard/projects/recallnet/thwip/access");
+    expect(projectPath("recallnet/thwip", "settings")).toBe("/dashboard/projects/recallnet/thwip/settings");
   });
 });
 

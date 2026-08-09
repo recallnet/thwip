@@ -1,0 +1,151 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { testD1 } from "../test/d1.js";
+import { queueSummaries } from "./queue-summaries.js";
+import type { D1Like } from "./queue/projection.js";
+
+/**
+ * One line of queue per repository, for the page that lists them all.
+ *
+ * The dashboard's project list is where somebody arrives asking which of their
+ * repositories needs them, and it could not answer: the queue was a separate
+ * tab that stacked a full panel per repository, in arbitrary order, with no way
+ * to see across them. Reading each queue's Durable Object to fill that list
+ * would be one object request per repository per page view, which is the
+ * spending the thirty-second refresh in `Queue.tsx` already exists to avoid.
+ *
+ * The projection is what this is for. `queue_projects.md` says so in the
+ * migration itself: D1 serves "reads that span organizations — a dashboard
+ * listing every queue". One query, no object reads, and it may lag, which is
+ * the correct trade for a summary that links to the live view.
+ */
+
+const open: Array<{ close(): void }> = [];
+let raw: import("better-sqlite3").Database;
+let db: D1Like;
+
+function database(): void {
+  const t = testD1();
+  open.push(t);
+  raw = t.raw;
+  db = t.db;
+}
+
+afterEach(() => {
+  while (open.length > 0) open.pop()!.close();
+});
+
+function seedOrg(): void {
+  raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run("org_1", "10", "acme");
+  raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run("org_2", "20", "other");
+  for (const [id, org, repositoryId, name] of [
+    ["p_1", "org_1", "111", "acme/one"],
+    ["p_2", "org_1", "222", "acme/two"],
+    ["p_3", "org_2", "333", "other/three"],
+  ] as const) {
+    raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
+      )
+      .run(id, org, repositoryId, name);
+  }
+}
+
+let entryOrdinal = 0;
+function entry(repositoryId: string, pullRequestNumber: number, state: string, primaryReason: string | null): void {
+  entryOrdinal += 1;
+  raw
+    .prepare(
+      `INSERT INTO queue_entries_index
+         (id, github_repository_id, base_ref, entry_id, pull_request_number, sponsor_principal_id,
+          state, primary_reason, fairness_ordinal)
+       VALUES (?, ?, 'refs/heads/main', ?, ?, 'prn_1', ?, ?, ?)`,
+    )
+    .run(
+      `qei_${repositoryId}_${pullRequestNumber}`,
+      repositoryId,
+      `ent_${pullRequestNumber}`,
+      pullRequestNumber,
+      state,
+      primaryReason,
+      String(entryOrdinal).padStart(4, "0"),
+    );
+}
+
+describe("one line of queue per repository", () => {
+  it("counts what is waiting and names the entry at the head", async () => {
+    database();
+    seedOrg();
+    entry("111", 273, "Ready", null);
+    entry("111", 271, "Blocked", "REQUIRED_CHECK_FAILED");
+
+    const [summary] = await queueSummaries(db, "org_1");
+
+    expect(summary).toEqual({
+      githubRepositoryId: "111",
+      waiting: 2,
+      head: { pullRequestNumber: 273, state: "Ready", primaryReason: null },
+    });
+  });
+
+  /**
+   * The projection never deletes. Every entry the repository has ever had keeps
+   * its row with whatever state it settled in, so counting rows would report a
+   * repository that merged forty pull requests as forty waiting forever.
+   */
+  it("ignores entries that have already settled", async () => {
+    database();
+    seedOrg();
+    entry("111", 100, "Merged", null);
+    entry("111", 101, "Cancelled", "WITHDRAWN");
+    entry("111", 273, "Ready", null);
+
+    const [summary] = await queueSummaries(db, "org_1");
+
+    expect(summary?.waiting).toBe(1);
+    expect(summary?.head?.pullRequestNumber).toBe(273);
+  });
+
+  it("says nothing is at the head when every entry has settled", async () => {
+    database();
+    seedOrg();
+    entry("111", 100, "Merged", null);
+
+    expect(await queueSummaries(db, "org_1")).toEqual([]);
+  });
+
+  /** The head is the queue's own order, which is the ordinal the lane reads. */
+  it("takes the head from the fairness order rather than the pull request number", async () => {
+    database();
+    seedOrg();
+    entry("111", 300, "Ready", null);
+    entry("111", 12, "Requested", null);
+
+    expect((await queueSummaries(db, "org_1"))[0]?.head?.pullRequestNumber).toBe(300);
+  });
+
+  it("keeps repositories apart and answers for several at once", async () => {
+    database();
+    seedOrg();
+    entry("111", 273, "Ready", null);
+    entry("222", 88, "Active", null);
+
+    const summaries = await queueSummaries(db, "org_1");
+
+    expect(summaries.map((s) => [s.githubRepositoryId, s.waiting])).toEqual([
+      ["111", 1],
+      ["222", 1],
+    ]);
+  });
+
+  /**
+   * The org parameter is the whole authorisation on this read. A summary that
+   * leaked across organizations would name another company's pull requests.
+   */
+  it("never reaches a repository belonging to another organization", async () => {
+    database();
+    seedOrg();
+    entry("333", 5, "Ready", null);
+
+    expect(await queueSummaries(db, "org_1")).toEqual([]);
+  });
+});

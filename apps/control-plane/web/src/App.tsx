@@ -6,7 +6,15 @@ import { QueuePanel } from "./Queue.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
 import { api, selectedOrg, useFetch, withOrg } from "./api.js";
 import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
-import { activationText, configSourceText, policyStatusText, proofCheckModeText, whenText } from "./vocabulary.js";
+import {
+  activationText,
+  configSourceText,
+  entryStateText,
+  outcome,
+  policyStatusText,
+  proofCheckModeText,
+  whenText,
+} from "./vocabulary.js";
 
 async function signInWithGitHub(callbackURL: string): Promise<void> {
   const res = await api<{ url?: string }>("/api/auth/sign-in/social", {
@@ -267,14 +275,26 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
 
 /* ---------- dashboard ---------- */
 
-const TABS = [
-  ["overview", "Overview"],
-  ["projects", "Projects"],
-  ["queue", "Queue"],
-  ["people", "People & Teams"],
+/**
+ * Two tab rows, and which one is drawn says which scope you are in.
+ *
+ * One flat row listed the organization's sections and a project's queue side by
+ * side, so a project page and the organization page had the same header and the
+ * same tabs, and nothing on the screen said which of the two you were looking
+ * at. The breadcrumb names the place; these name what there is to read there.
+ */
+const ORG_TABS = [
+  ["", "Projects"],
+  ["people", "People & teams"],
   ["policies", "Policies"],
-  ["billing", "Billing"],
   ["operations", "Operations"],
+  ["settings", "Settings"],
+] as const;
+
+const PROJECT_TABS = [
+  ["queue", "Queue"],
+  ["access", "Access"],
+  ["settings", "Settings"],
 ] as const;
 
 const ADD_ORG = "__add__";
@@ -306,31 +326,51 @@ function OrgSwitcher({ me }: { me: Me }) {
   );
 }
 
-function Dashboard({
+/**
+ * The frame every signed-in page is drawn in.
+ *
+ * The header says where you are as a path, and the tab row says what there is
+ * to read in that place. Which tab row appears is the only thing that
+ * distinguishes an organization page from a project page, so the two rows are
+ * never on screen together.
+ */
+function DashboardShell({
   me,
-  tab,
-  projectName,
-  projectSection,
+  project,
+  tabs,
+  base,
+  active,
+  children,
 }: {
   me: Me;
-  tab: string;
-  projectName?: string;
-  projectSection?: string;
+  project?: ProjectRow | undefined;
+  tabs: ReadonlyArray<readonly [string, string]>;
+  base: string;
+  active: string;
+  children: React.ReactNode;
 }) {
-  const org = me.organization;
+  const org = me.organization?.github_login ?? selectedOrg() ?? "";
   return (
     <div className="thwip-shell gp-workspace">
-      <nav className="thwip-nav" aria-label="Dashboard">
-        <a className="thwip-brand" href="/">
-          thwip<small>DASHBOARD</small>
-        </a>
+      <header className="thwip-nav">
         <span className="links">
+          <a className="thwip-brand" href="/">
+            thwip
+          </a>
+          <span className="thwip-crumb">
+            <i aria-hidden="true">/</i>
+            <NavLink to="/dashboard">{org}</NavLink>
+            {project && (
+              <>
+                <i aria-hidden="true">/</i>
+                <NavLink to={projectPath(project.github_name)}>{repoPart(project.github_name)}</NavLink>
+              </>
+            )}
+          </span>
+        </span>
+        <span className="links">
+          <JumpToProject />
           <OrgSwitcher me={me} />
-          {org && (
-            <a className="gp-chip" href="/dashboard/billing" title="Plan and limits">
-              {org.plan}
-            </a>
-          )}
           <a href="/dashboard/profile" className="gp-panel__meta" title="Your keys and access">
             {me.principal?.github_login ?? me.viewer.githubUserId}
           </a>
@@ -343,44 +383,74 @@ function Dashboard({
             Sign out
           </button>
         </span>
-      </nav>
-      <ul className="tab-nav" role="tablist">
-        {TABS.map(([key, label]) => (
-          <li key={key}>
-            <NavLink to={`/dashboard/${key}`} className={tab === key ? "is-active" : ""}>
-              {label}
-            </NavLink>
-          </li>
+      </header>
+      <nav className="thwip-tabs" aria-label={project ? "Project" : "Organization"}>
+        {tabs.map(([key, label]) => (
+          <NavLink key={key} to={key === "" ? base : `${base}/${key}`} className={active === key ? "is-active" : ""}>
+            {label}
+          </NavLink>
         ))}
-      </ul>
+      </nav>
       <main className="gp-workspace__content">
-        {!org && (
-          <Panel title="Connect your GitHub organization">
-            <p>
-              Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
-              the organization, then run a sync from Operations.
-            </p>
-          </Panel>
+        {!me.organization && (
+          <section className="thwip-section">
+            <div className="thwip-section__head">Connect your GitHub organization</div>
+            <div className="thwip-section__body">
+              <p>
+                Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
+                the organization, then run a sync from Operations.
+              </p>
+            </div>
+          </section>
         )}
-        {tab === "overview" && <Overview />}
-        {tab === "projects" &&
-          (projectName ? (
-            <ProjectPage githubName={projectName} section={projectSection ?? "overview"} me={me} />
-          ) : (
-            <Projects me={me} />
-          ))}
-        {tab === "queue" && <QueueTab />}
-        {tab === "people" && <People me={me} />}
-        {tab === "profile" && <Profile me={me} />}
-        {tab === "policies" && <Policies />}
-        {tab === "billing" && <Billing />}
-        {tab === "operations" && <Operations me={me} />}
+        {children}
       </main>
+      <SiteFoot />
     </div>
   );
 }
 
-/** First thing a developer needs: a machine that can sign. */
+function repoPart(githubName: string): string {
+  const slash = githubName.indexOf("/");
+  return slash === -1 ? githubName : githubName.slice(slash + 1);
+}
+
+/**
+ * Reach a project by typing its name.
+ *
+ * An organization with thirty repositories had one way in: read the table until
+ * you find the row. The list is already loaded to draw that table, so this
+ * costs a datalist and nothing else.
+ */
+function JumpToProject() {
+  const { data } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  const projects = data?.projects ?? [];
+  const jump = (value: string) => {
+    const match = projects.find((p) => p.github_name === value || repoPart(p.github_name) === value);
+    if (match) navigate(projectPath(match.github_name));
+  };
+  return (
+    <>
+      <input
+        className="thwip-search"
+        type="search"
+        list="thwip-projects"
+        placeholder="jump to a project"
+        aria-label="Jump to a project"
+        onChange={(e) => jump(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") jump((e.target as HTMLInputElement).value);
+        }}
+      />
+      <datalist id="thwip-projects">
+        {projects.map((p) => (
+          <option key={p.id} value={p.github_name} />
+        ))}
+      </datalist>
+    </>
+  );
+}
+
 function StartUsingThwip() {
   const [copied, setCopied] = useState(false);
   const prompt = developerSetupPrompt();
@@ -406,132 +476,6 @@ function StartUsingThwip() {
   );
 }
 
-function Overview() {
-  const { data, error } = useFetch<{
-    plan: string;
-    limits: { projects: number; users: number };
-    projects: number;
-    enabledProjects: number;
-    members: number;
-    activatedUsers: number;
-    teams: number;
-    activeKeys: number;
-  }>("/v1/dashboard/summary");
-  const ops = useFetch<{
-    observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
-  }>("/v1/dashboard/operations");
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-
-  // Six equal numbers and no next step is what this was. Two of them are limits
-  // that decide what you can do next, and the rest are counts nobody acts on, so
-  // the limits lead and link to where they change.
-  const atProjectLimit = data.enabledProjects >= data.limits.projects;
-  const atUserLimit = data.activatedUsers >= data.limits.users;
-  const recent = (ops.data?.observations ?? []).slice(0, 8);
-
-  return (
-    <>
-      <div className="metric-strip">
-        <a className="metric-strip__item" href="/dashboard/billing" title="Projects you may verify on this plan">
-          <span className="metric-strip__label">enabled projects</span>
-          {/*
-            At the limit changes the colour of the number and nothing else. It
-            used to also take the `bad` utility, which retyped a 26px numeral as
-            11.5px mono, so the number that mattered read smallest in the row.
-          */}
-          <span className={`metric-strip__value${atProjectLimit ? " is-limit" : ""}`}>
-            {data.enabledProjects}/{data.limits.projects}
-          </span>
-        </a>
-        <a className="metric-strip__item" href="/dashboard/billing" title="People who may sign proofs on this plan">
-          <span className="metric-strip__label">signers</span>
-          <span className={`metric-strip__value${atUserLimit ? " is-limit" : ""}`}>
-            {data.activatedUsers}/{data.limits.users}
-          </span>
-        </a>
-        <a className="metric-strip__item" href="/dashboard/billing">
-          <span className="metric-strip__label">plan</span>
-          <span className="metric-strip__value">{data.plan}</span>
-        </a>
-      </div>
-
-      {(atProjectLimit || atUserLimit) && (
-        <Panel title="You are at your plan limit">
-          <p>
-            {atProjectLimit ? "Every project slot is in use. " : ""}
-            {atUserLimit ? "Every signer seat is in use. " : ""}
-            Enabling another needs a larger plan, or disabling one you no longer verify.
-          </p>
-          <div className="thwip-actions">
-            <a className="gp-btn gp-btn--sm" href="/dashboard/billing">
-              See plans
-            </a>
-          </div>
-        </Panel>
-      )}
-
-      <Panel title="Latest verifications">
-        {recent.length === 0 ? (
-          <p className="gp-panel__meta">
-            Nothing verified yet. Run <code>thwip run</code> on a commit and push it.
-          </p>
-        ) : (
-          <table className="gp-data-table">
-            <thead>
-              <tr>
-                <th>Repository</th>
-                <th>Commit</th>
-                <th>Result</th>
-                <th>When</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((o, i) => (
-                <tr key={i}>
-                  <td>{o.github_name}</td>
-                  <td>
-                    <a
-                      className="gp-mono"
-                      href={`https://github.com/${o.github_name}/commit/${o.head_sha}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {o.head_sha.slice(0, 8)}
-                    </a>
-                  </td>
-                  <td>
-                    <OutcomeText code={o.outcome} />
-                  </td>
-                  <td className="gp-panel__meta">{whenText(o.observed_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
-
-      <StartUsingThwip />
-      <Panel title="Ship a change">
-        <p className="gp-mono">
-          git checkout -b change · edit · commit · <b>thwip run</b> · git push · gh pr create
-        </p>
-        {/*
-          This said "under a profile stronger than fast", which described a rung
-          on a ladder that does not exist. Two profiles ship: fast reuses the
-          proof already on the head, remote runs the required suites in GitHub
-          Actions against the merge candidate. Naming the one that does the work
-          is both shorter and true.
-        */}
-        <p className="gp-panel__meta">
-          The queue verifies the proof on your head commit. Under the remote profile it also runs the required
-          suites in GitHub Actions against the merge commit before anything lands.
-        </p>
-      </Panel>
-    </>
-  );
-}
-
 interface ProjectRow {
   id: string;
   github_repository_id: string;
@@ -547,6 +491,222 @@ interface ProjectRow {
   collaborators: number;
   last_outcome: string | null;
   last_observed_at: string | null;
+}
+
+interface QueueSummary {
+  githubRepositoryId: string;
+  waiting: number;
+  head: { pullRequestNumber: number; state: string; primaryReason: string | null } | null;
+}
+
+/**
+ * The one page somebody arrives at, and the one question they arrive with.
+ *
+ * This was three screens. An overview led with three figures, one of which was
+ * a plan name standing in a row of limits, and buried the only actionable thing
+ * on it — the repository whose last verification failed — in an eight-row
+ * table. Beside it a project list said which repositories existed, and a queue
+ * tab stacked a full panel per repository in arbitrary order, so the answer to
+ * "which of these needs me" was assembled by reading three places.
+ *
+ * One table now, ordered by what needs attention, carrying the queue's own head
+ * and backlog on each row. The limits keep their place above it because they
+ * decide what you may do next, and the plan is set as the word it is rather
+ * than as a third ratio.
+ */
+function OrgHome({ me }: { me: Me }) {
+  const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+  const summary = useFetch<{
+    plan: string;
+    limits: { projects: number; users: number };
+    enabledProjects: number;
+    activatedUsers: number;
+  }>("/v1/dashboard/summary");
+  const queues = useFetch<{ queues: QueueSummary[] }>("/v1/dashboard/queues");
+  const lastVerification = useLastVerifications();
+  const installUrl = me.organization?.installation_id
+    ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
+    : null;
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const act = async (p: ProjectRow, action: "enable" | "disable") => {
+    setBusy(p.id);
+    setActionError(null);
+    try {
+      await api(`/v1/dashboard/projects/${p.id}/${action}`, { method: "POST", body: "{}" });
+      reload();
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  if (error) return <p className="thwip-error">{error}</p>;
+  if (!data) return <p className="gp-panel__meta">Loading…</p>;
+
+  const queueOf = new Map((queues.data?.queues ?? []).map((q) => [q.githubRepositoryId, q]));
+  const rows = data.projects
+    .map((project) => describeRow(project, lastVerification(project), queueOf.get(project.github_repository_id)))
+    .sort((a, b) => a.rank - b.rank || a.project.github_name.localeCompare(b.project.github_name));
+
+  return (
+    <>
+      {summary.data && (
+        <div className="thwip-limits">
+          <Limit label="Enabled projects" used={summary.data.enabledProjects} of={summary.data.limits.projects} />
+          <Limit label="Signers" used={summary.data.activatedUsers} of={summary.data.limits.users} />
+          <span className="thwip-limit">
+            Plan <b>{summary.data.plan}</b>
+          </span>
+        </div>
+      )}
+      <section className="thwip-section">
+        <div className="thwip-section__head">
+          Projects<span>ordered by what needs attention</span>
+        </div>
+        <div className="thwip-section__body">
+          {actionError && <p className="thwip-error">{actionError}</p>}
+          {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
+          {data.projects.length > 0 && (
+            <table className="thwip-table">
+              <thead>
+                <tr>
+                  <th scope="col" className="st">
+                    State
+                  </th>
+                  <th scope="col">Project</th>
+                  <th scope="col" className="why">
+                    Why
+                  </th>
+                  <th scope="col">At the head</th>
+                  <th scope="col" className="n">
+                    Waiting
+                  </th>
+                  <th scope="col" className="n">
+                    Last
+                  </th>
+                  <th scope="col" className="n">
+                    <span className="thwip-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.project.id}>
+                    <td className={`st st--${row.tone}`}>{row.state}</td>
+                    <td>
+                      <NavLink to={projectPath(row.project.github_name)} className="m">
+                        {row.project.github_name}
+                      </NavLink>
+                      <span className="thwip-sub">
+                        {row.project.default_branch} · {row.project.collaborators} with access ·{" "}
+                        {proofCheckModeText(row.project.proof_check_mode)}
+                      </span>
+                    </td>
+                    <td className="why">{row.why}</td>
+                    <td className="q">{row.head}</td>
+                    <td className="n num">{row.waiting}</td>
+                    <td className="n q w">{row.last}</td>
+                    <td className="n">
+                      <ConfirmAction
+                        label={row.project.enabled === 1 ? "Disable" : "Enable"}
+                        title={row.project.enabled === 1 ? "Stop verifying this project?" : "Enable this project?"}
+                        consequence={
+                          row.project.enabled === 1
+                            ? "The App check stops publishing and the queue stops running for it."
+                            : "It consumes plan quota, and enabling needs repository admin on GitHub."
+                        }
+                        confirmLabel={row.project.enabled === 1 ? "Disable it" : "Enable it"}
+                        busy={busy === row.project.id}
+                        onConfirm={() => void act(row.project, row.project.enabled === 1 ? "disable" : "enable")}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {installUrl && (
+            <p className="thwip-note">
+              Grant the thwip App access to a repository on GitHub; it imports here automatically, then you enable it.{" "}
+              <a href={installUrl} target="_blank" rel="noreferrer">
+                Add repositories on GitHub
+              </a>
+            </p>
+          )}
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** A ratio approaching a ceiling. The bar is the only thing a plan name cannot have. */
+function Limit({ label, used, of }: { label: string; used: number; of: number }) {
+  const pct = of === 0 ? 0 : Math.min(100, Math.round((used / of) * 100));
+  return (
+    <span className={used >= of ? "thwip-limit thwip-limit--full" : "thwip-limit"}>
+      {label}
+      <b>
+        {used}/{of}
+      </b>
+      <i aria-hidden="true">
+        <span style={{ width: `${pct}%` }} />
+      </i>
+    </span>
+  );
+}
+
+interface OrgRow {
+  project: ProjectRow;
+  tone: "ok" | "bad" | "wait" | "off";
+  state: string;
+  why: string;
+  head: string;
+  waiting: string;
+  last: string;
+  /** Lower sorts first: what needs a person leads, what is quiet trails. */
+  rank: number;
+}
+
+/**
+ * One repository as a line somebody can scan.
+ *
+ * The state carries the answer and the tone, and the why is the sentence under
+ * it. Both come from the same vocabulary the project page reads, so a failure
+ * is worded identically in both places.
+ */
+function describeRow(project: ProjectRow, last: LastVerification, queue: QueueSummary | undefined): OrgRow {
+  // A disabled project has no lane, so whatever the projection still holds for
+  // it is history rather than a queue, and naming a pull request at its head
+  // would read as work in progress on a repository thwip has stopped watching.
+  const live = project.enabled === 1 ? queue : undefined;
+  const waiting = live?.waiting ?? 0;
+  const head =
+    live?.head == null
+      ? project.enabled === 1
+        ? "nothing queued"
+        : "not enabled"
+      : `#${live.head.pullRequestNumber} ${entryStateText(live.head.state).toLowerCase()}`;
+  const when = whenText(last.at);
+  const row = { project, head, waiting: String(waiting), last: when };
+
+  if (project.enabled !== 1) {
+    return { ...row, tone: "off", state: "Disabled", why: "Not verified here.", rank: 5 };
+  }
+  if (project.activation_state === "awaiting_policy") {
+    return { ...row, tone: "wait", state: "Awaiting policy", why: "Enabled, with no policy activated yet.", rank: 2 };
+  }
+  if (last.outcome === null) {
+    return { ...row, tone: "wait", state: "Nothing verified", why: "Waiting for a first proof.", rank: 3 };
+  }
+  const said = outcome(last.outcome);
+  return {
+    ...row,
+    tone: said.tone,
+    state: said.label,
+    why: said.tone === "ok" ? `Verified ${when}.` : said.detail,
+    rank: said.tone === "bad" ? 0 : said.tone === "wait" ? 1 : 4,
+  };
 }
 
 function ProofDefaults({ canEdit }: { canEdit: boolean }) {
@@ -658,136 +818,6 @@ function useLastVerifications(): (project: ProjectRow) => LastVerification {
   };
 }
 
-function Projects({ me }: { me: Me }) {
-  const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
-  const lastVerification = useLastVerifications();
-  const installUrl = me.organization?.installation_id
-    ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
-    : null;
-  const [busy, setBusy] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const act = async (p: ProjectRow, action: "enable" | "disable") => {
-    setBusy(p.id);
-    setActionError(null);
-    try {
-      await api(`/v1/dashboard/projects/${p.id}/${action}`, { method: "POST", body: "{}" });
-      reload();
-    } catch (e) {
-      setActionError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  return (
-    <>
-      <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
-      <Panel title="Projects" meta="enabling consumes plan quota; requires repository admin on GitHub">
-      {installUrl && (
-        <div className="thwip-add-repos">
-          <a className="gp-btn gp-btn--sm" href={installUrl} target="_blank" rel="noreferrer">
-            Add repositories on GitHub
-          </a>
-          <span className="gp-panel__meta">
-            Grant the thwip App access to a repository there; it imports here automatically, then you enable it.
-          </span>
-        </div>
-      )}
-      {actionError && <p className="thwip-error">{actionError}</p>}
-      {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
-      <table className="gp-data-table">
-        <thead>
-          <tr>
-            <th>Repository</th>
-            <th>Status</th>
-            <th>Active policy</th>
-            <th>Last verification</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.projects.map((p) => {
-            const last = lastVerification(p);
-            return (
-              <tr key={p.id}>
-                <td>
-                  <a href={projectPath(p.github_name)}>
-                    <code>{p.github_name}</code>
-                  </a>
-                  <Facts
-                    items={[
-                      `${p.collaborators} with access`,
-                      p.default_branch,
-                      proofCheckModeText(p.proof_check_mode),
-                    ]}
-                  />
-                </td>
-                <td>
-                  <StatusChip
-                    tone={
-                      p.activation_state === "active" ? "ok" : p.activation_state === "awaiting_policy" ? "wait" : "off"
-                    }
-                  >
-                    {activationText(p.activation_state)}
-                  </StatusChip>
-                </td>
-                <td title={p.active_policy_digest ?? undefined}>
-                  {p.policy_version ? (
-                    <>
-                      v{p.policy_version} · {p.policy_profile ?? "fast"}
-                      <div className="gp-panel__meta">{configSourceText(p.config_source)}</div>
-                    </>
-                  ) : (
-                    <span className="gp-panel__meta">
-                      {p.activation_state === "awaiting_policy"
-                        ? `add organization defaults, or activate from canonical ${p.default_branch}`
-                        : "none activated"}
-                    </span>
-                  )}
-                </td>
-                <td>
-                  <OutcomeText code={last.outcome} at={last.at} />
-                </td>
-                <td>
-                  {/*
-                    One way in, and the one action worth doing from a list.
-                    Everything else about a project — its queue, who can reach
-                    it, how to set it up — lives on its own page rather than as
-                    another button in a table cell.
-
-                    Enable gives something and is solid; Disable takes it away
-                    and is danger. The same two words carry the same two weights
-                    on the project's own page.
-                  */}
-                  <div className="thwip-row-actions">
-                    <a className="gp-btn gp-btn--sm gp-btn--quiet" href={projectPath(p.github_name)}>
-                      Open
-                    </a>
-                    <button
-                      className={`gp-btn gp-btn--sm${p.enabled ? " gp-btn--danger" : ""}`}
-                      disabled={busy === p.id}
-                      title={
-                        p.enabled
-                          ? "Stop verifying this repository. The check stops gating merges."
-                          : "Start verifying this repository. Uses one of your plan's project slots."
-                      }
-                      onClick={() => void act(p, p.enabled ? "disable" : "enable")}
-                    >
-                      {p.enabled ? "Disable" : "Enable"}
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      </Panel>
-    </>
-  );
-}
-
 function People({ me }: { me: Me }) {
   const orgLogin = me.organization?.github_login ?? "";
   const { data, error } = useFetch<{
@@ -805,7 +835,7 @@ function People({ me }: { me: Me }) {
   return (
     <>
       <Panel title="Members" meta="imported from GitHub; roles and permissions are GitHub's">
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <thead>
             <tr>
               <th>Member</th>
@@ -841,7 +871,7 @@ function People({ me }: { me: Me }) {
       </Panel>
       <Panel title="Teams">
         {data.teams.length === 0 && <p>No GitHub teams synced.</p>}
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <tbody>
             {data.teams.map((t) => (
               <tr key={t.team_id}>
@@ -879,24 +909,13 @@ function buildSetupPrompt(p: {
     hasActivePolicy: p.policy_version !== null,
   });
 }
-const PROJECT_SECTIONS = [
-  ["overview", "Overview"],
-  ["queue", "Queue"],
-  ["access", "Access"],
-  ["setup", "Set up"],
-] as const;
-
 /**
- * One page per project.
+ * One page per project, and the queue is what it opens on.
  *
- * A project used to be a row in a table with three buttons in it, and everything
- * about that project lived somewhere else: who could reach it behind a link, its
- * queue on an organization-wide tab stacked with every other project's, its setup
- * behind a button. Anyone asking "what is going on with this repository" had to
- * assemble the answer from four places.
- *
- * The organization tabs keep what is genuinely organization-wide — people,
- * policies, billing, plan limits. What belongs to one repository lives here.
+ * The first section used to be an overview: four facts and two buttons, with
+ * the queue a click away. Those facts are what a project is rather than what it
+ * is doing, so they moved into the header strip, where they are on screen for
+ * every section, and the page opens on the thing somebody came to read.
  */
 function ProjectPage({ githubName, section, me }: { githubName: string; section: string; me: Me }) {
   const { data, error, reload } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
@@ -906,79 +925,87 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
   const project = findProjectByGithubName(data.projects, githubName);
   if (!project) {
     return (
-      <>
-        <p className="thwip-back">
-          <a href="/dashboard/projects">← Projects</a>
-        </p>
-        <p className="thwip-error">
-          No project at <code>{githubName}</code>. Check the spelling, or it may have been removed from the
-          organization.
-        </p>
-      </>
+      <DashboardShell me={me} tabs={[]} base="/dashboard" active="">
+        <section className="thwip-section">
+          <div className="thwip-section__head">Unknown project</div>
+          <div className="thwip-section__body">
+            <p className="thwip-error">
+              No project at <code>{githubName}</code>. Check the spelling, or it may have been removed from the
+              organization.
+            </p>
+          </div>
+        </section>
+      </DashboardShell>
     );
   }
 
+  const active = section === "setup" || section === "overview" ? "settings" : section;
   return (
-    <>
-      <p className="thwip-back">
-        <a href="/dashboard/projects">← Projects</a>
-      </p>
-      <h2 className="thwip-page-title">
-        <a href={`https://github.com/${project.github_name}`} target="_blank" rel="noreferrer">
-          {project.github_name}
-        </a>
-      </h2>
-      {/*
-        Written as one string this line broke wherever the box ended, which put
-        the word "App" alone on a second line. Each fact is now its own
-        unbreakable run, so it can only break between facts.
-      */}
-      <div className="gp-panel__meta thwip-page-subtitle">
-        <Facts items={describeProject(project)} />
-      </div>
-      <ul className="tab-nav" role="tablist">
-        {PROJECT_SECTIONS.map(([key, label]) => (
-          <li key={key}>
-            <NavLink
-              to={projectPath(project.github_name, key)}
-              className={section === key ? "is-active" : ""}
-            >
-              {label}
-            </NavLink>
-          </li>
+    <DashboardShell
+      me={me}
+      project={project}
+      tabs={PROJECT_TABS}
+      base={projectPath(project.github_name)}
+      active={active}
+    >
+      <dl className="thwip-facts">
+        {projectFacts(project).map((fact) => (
+          <div key={fact.label}>
+            <dt>{fact.label}</dt>
+            <dd className={fact.tone ?? ""}>{fact.value}</dd>
+          </div>
         ))}
-      </ul>
-      {section === "overview" && <ProjectOverview project={project} reload={reload} />}
-      {section === "queue" && (
+      </dl>
+      {active === "queue" && (
         <QueuePanel
           repositoryId={project.github_repository_id}
           baseRef={`refs/heads/${project.default_branch}`}
           repositoryName={project.github_name}
         />
       )}
-      {section === "access" && <ProjectAccess projectId={project.id} me={me} />}
-      {section === "setup" && <ProjectSetup projectId={project.id} me={me} />}
-    </>
+      {active === "access" && <ProjectAccess projectId={project.id} me={me} />}
+      {active === "settings" && (
+        <>
+          <ProjectVerification project={project} reload={reload} />
+          <ProjectSetup projectId={project.id} me={me} />
+        </>
+      )}
+    </DashboardShell>
   );
 }
 
-/** Where this project stands, one short fact at a time, for the page header. */
-function describeProject(p: ProjectRow): string[] {
-  const facts: string[] = [];
-  // Enabled and disabled are the same fact, so it is stated once.
-  if (p.activation_state === "active") {
-    facts.push("verifying", `policy v${p.policy_version ?? "?"}`, p.policy_profile ?? "unknown profile");
-  } else if (p.activation_state === "awaiting_policy") {
-    facts.push("enabled, waiting for a policy");
-  } else {
-    facts.push("not enabled");
+interface ProjectFact {
+  label: string;
+  value: string;
+  tone?: "ok" | "bad";
+}
+
+/**
+ * What this project is, on screen for every section of it.
+ *
+ * Written as one sentence these broke wherever the line ended, which put the
+ * word "App" alone on a row of its own. Each is its own labelled fact, so it
+ * can only break between them.
+ */
+function projectFacts(p: ProjectRow): ProjectFact[] {
+  const facts: ProjectFact[] = [{ label: "State", value: activationText(p.activation_state) }];
+  if (p.policy_version !== null) {
+    facts.push({ label: "Policy", value: `v${p.policy_version} · ${p.policy_profile ?? "unknown profile"}` });
   }
-  facts.push(`default branch ${p.default_branch}`);
-  facts.push(proofCheckModeText(p.proof_check_mode));
+  facts.push({ label: "Default branch", value: p.default_branch });
+  facts.push({ label: "App check", value: p.proof_check_mode === "enforced" ? "enforcing" : "observing" });
+  if (p.last_outcome !== null) {
+    const said = outcome(p.last_outcome);
+    facts.push({
+      label: "Last verification",
+      value: `${said.label} ${whenText(p.last_observed_at)}`,
+      ...(said.tone === "ok" || said.tone === "bad" ? { tone: said.tone } : {}),
+    });
+  }
   return facts;
 }
 
-function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () => void }) {
+function ProjectVerification({ project, reload }: { project: ProjectRow; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const lastVerification = useLastVerifications();
@@ -1016,7 +1043,7 @@ function ProjectOverview({ project, reload }: { project: ProjectRow; reload: () 
   return (
     <>
       <Panel title="Verification" meta="what the queue requires before this repository merges">
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <tbody>
             <tr>
               <td>Active policy</td>
@@ -1525,7 +1552,7 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
   return (
     <>
       <Panel title={`Access · ${data.project.github_name}`} meta="from GitHub; who may sign a proof for this repository">
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <thead>
             <tr>
               <th>Member</th>
@@ -1560,7 +1587,7 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
       </Panel>
       {data.teams.length > 0 && (
         <Panel title="Teams with access">
-          <table className="gp-data-table">
+          <table className="thwip-table">
             <tbody>
               {data.teams.map((t) => (
                 <tr key={t.slug}>
@@ -1635,7 +1662,7 @@ function Profile({ me }: { me: Me }) {
           </p>
         )}
         {data.registered.length > 0 && (
-          <table className="gp-data-table">
+          <table className="thwip-table">
             <thead>
               <tr>
                 <th>Device</th>
@@ -1708,7 +1735,7 @@ function Profile({ me }: { me: Me }) {
 
       {data.seen.some((k) => k.source !== "github") && (
         <Panel title="Superseded" meta="keys from before GitHub became the authority; kept so old proofs stay explainable">
-          <table className="gp-data-table">
+          <table className="thwip-table">
             <tbody>
               {data.seen
                 .filter((k) => k.source !== "github")
@@ -1729,7 +1756,7 @@ function Profile({ me }: { me: Me }) {
       )}
 
       <Panel title="Your access" meta="from GitHub; this is what your proofs may cover">
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <tbody>
             {data.access.map((g, i) => (
               <tr key={i}>
@@ -1769,7 +1796,7 @@ function Policies() {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <Panel title="Policy history" meta="immutable, content-addressed; a PR can never approve its own policy change">
-      <table className="gp-data-table">
+      <table className="thwip-table">
         <thead>
           <tr>
             <th>Repository</th>
@@ -1798,6 +1825,15 @@ function Policies() {
         </tbody>
       </table>
     </Panel>
+  );
+}
+
+function OrgSettings({ me }: { me: Me }) {
+  return (
+    <>
+      <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
+      <Billing />
+    </>
   );
 }
 
@@ -1865,26 +1901,26 @@ function Billing() {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <Panel title="Billing" meta="checkout and the customer portal are hosted by Stripe">
-      <div className="metric-strip">
-        <div className="metric-strip__item">
-          <span className="metric-strip__label">plan</span>
-          <span className="metric-strip__value">{data.plan}</span>
+      <dl className="thwip-pairs">
+        <div>
+          <dt>Plan</dt>
+          <dd className="big">{data.plan}</dd>
         </div>
-        <div className="metric-strip__item">
-          <span className="metric-strip__label">project limit</span>
-          <span className="metric-strip__value">{data.limits.projects}</span>
+        <div>
+          <dt>Project limit</dt>
+          <dd className="big">{data.limits.projects}</dd>
         </div>
-        <div className="metric-strip__item">
-          <span className="metric-strip__label">user limit</span>
-          <span className="metric-strip__value">{data.limits.users}</span>
+        <div>
+          <dt>User limit</dt>
+          <dd className="big">{data.limits.users}</dd>
         </div>
         {data.subscription && (
-          <div className="metric-strip__item">
-            <span className="metric-strip__label">subscription</span>
-            <span className="metric-strip__value">{data.subscription.status}</span>
+          <div>
+            <dt>Subscription</dt>
+            <dd className="big">{data.subscription.status}</dd>
           </div>
         )}
-      </div>
+      </dl>
       {note && <p className="thwip-error">{note}</p>}
       {data.isOwner ? (
         data.plan === "free" ? (
@@ -1948,7 +1984,7 @@ function Operations({ me }: { me: Me }) {
       </Panel>
       <Panel title="Recent verifications">
         {data.observations.length === 0 && <p>No verifications recorded yet.</p>}
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <tbody>
             {data.observations.map((o, i) => (
               <tr key={i}>
@@ -1969,7 +2005,7 @@ function Operations({ me }: { me: Me }) {
       </Panel>
       <Panel title="Webhook deliveries">
         {data.deliveries.length === 0 && <p>No deliveries yet.</p>}
-        <table className="gp-data-table">
+        <table className="thwip-table">
           <tbody>
             {data.deliveries.map((d) => (
               <tr key={d.delivery_id}>
@@ -2089,6 +2125,66 @@ function QueueTab() {
 
 /* ---------- router ---------- */
 
+/**
+ * The frame every dashboard state is drawn inside.
+ *
+ * A state that returns its own markup instead lands in the top-left corner of
+ * an empty page with no header and no width. That happened to the loading
+ * state, was fixed there, and went on happening to the signed-out one, which
+ * is the state a visitor arriving from the homepage sees first. One frame, so
+ * the next state added cannot repeat it.
+ */
+function DashboardFrame({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="thwip-shell gp-workspace">
+      <nav className="thwip-nav" aria-label="Dashboard">
+        <a className="thwip-brand" href="/">
+          thwip<small>DASHBOARD</small>
+        </a>
+      </nav>
+      <main className="gp-workspace__content">{children}</main>
+      <SiteFoot />
+    </div>
+  );
+}
+
+export function SignedOutDashboard() {
+  return (
+    <DashboardFrame>
+      <div className="gp-panel thwip-device-card">
+        <div className="gp-panel__header">
+          <h3 className="gp-panel__title">Sign in to thwip</h3>
+        </div>
+        <div className="gp-panel__body">
+          <p>The dashboard mirrors your GitHub organizations. Sign in with the account that belongs to them.</p>
+          <button className="gp-btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
+            Sign in with GitHub
+          </button>
+        </div>
+      </div>
+    </DashboardFrame>
+  );
+}
+
+/**
+ * Where a path that no longer exists goes.
+ *
+ * Overview and the organization-wide queue were folded into the project list,
+ * and billing into settings. A reader with either bookmarked lands on the page
+ * that answers what they went there for rather than on an empty tab.
+ */
+const MOVED: Record<string, string> = {
+  overview: "",
+  projects: "",
+  queue: "",
+  billing: "settings",
+};
+
+function orgTab(segment: string | undefined): string {
+  const key = segment ?? "";
+  return MOVED[key] ?? key;
+}
+
 export function App() {
   const me = useMe();
   const path = usePath();
@@ -2099,48 +2195,34 @@ export function App() {
   if (path.startsWith("/faq")) return <FaqPage me={me} />;
   if (path.startsWith("/install")) return <InstallPage me={me} />;
   if (dashMatch) {
-    // Keep the frame while the session loads. Returning a bare paragraph here
-    // dropped the header and the tabs on every cold load of a dashboard page.
     if (me === undefined) {
       return (
-        <div className="thwip-shell gp-workspace">
-          <nav className="thwip-nav" aria-label="Dashboard">
-            <a className="thwip-brand" href="/">
-              thwip<small>DASHBOARD</small>
-            </a>
-          </nav>
-          <main className="gp-workspace__content">
-            <p className="gp-panel__meta thwip-loading">Loading your organization…</p>
-          </main>
-        </div>
+        <DashboardFrame>
+          <p className="gp-panel__meta thwip-loading">Loading your organization…</p>
+        </DashboardFrame>
       );
     }
-    if (me === null) {
-      return (
-        <div className="gp-panel thwip-device-card">
-          <div className="gp-panel__header">
-            <h3 className="gp-panel__title">Sign in to thwip</h3>
-          </div>
-          <div className="gp-panel__body">
-            <p>The dashboard mirrors your GitHub organizations. Sign in with the account that belongs to them.</p>
-            <button className="gp-btn" onClick={() => void signInWithGitHub(window.location.pathname)}>
-              Sign in with GitHub
-            </button>
-          </div>
-        </div>
-      );
-    }
+    if (me === null) return <SignedOutDashboard />;
+
     if (projectMatch) {
       return (
-        <Dashboard
+        <ProjectPage
+          githubName={projectMatch.githubName}
+          section={projectMatch.section ?? "queue"}
           me={me}
-          tab="projects"
-          projectName={projectMatch.githubName}
-          projectSection={projectMatch.section}
         />
       );
     }
-    return <Dashboard me={me} tab={dashMatch[1] ?? "overview"} />;
+    return (
+      <DashboardShell me={me} tabs={ORG_TABS} base="/dashboard" active={orgTab(dashMatch[1])}>
+        {orgTab(dashMatch[1]) === "" && <OrgHome me={me} />}
+        {orgTab(dashMatch[1]) === "people" && <People me={me} />}
+        {orgTab(dashMatch[1]) === "policies" && <Policies />}
+        {orgTab(dashMatch[1]) === "operations" && <Operations me={me} />}
+        {orgTab(dashMatch[1]) === "settings" && <OrgSettings me={me} />}
+        {orgTab(dashMatch[1]) === "profile" && <Profile me={me} />}
+      </DashboardShell>
+    );
   }
   return <Home me={me} signIn={() => void signInWithGitHub("/dashboard")} />;
 }

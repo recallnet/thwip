@@ -10,6 +10,7 @@ import {
   readMigrationNumberCollisions,
 } from "./migration-numbers.mjs";
 import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs";
+import { describe as renderUnrendered, unrenderedClassesInRepo } from "./unrendered-classes.mjs";
 import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
 import { validateWorkflow } from "./workflow-lint.mjs";
 
@@ -138,6 +139,24 @@ for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
 {
   for (const line of renderUnwritten(unwrittenFields({ root }))) {
     console.error(`lint: ${line}`);
+    failures++;
+  }
+}
+
+// And the same family again, one layer out: classes this repository styles and
+// no markup it ships ever renders.
+//
+// The two checks above read JavaScript, so a rule reachable by nothing was the
+// one place the family could still hide. It was hiding in quantity. Fifty-three
+// classes on the day this ran first, two thirds of `styles.css`, including a
+// pricing block that had been carried through the palette migration and set in
+// Archivo with tabular numerals for a price no page has ever drawn.
+//
+// No allowlist, for the reason written above. A class that must exist without
+// markup does not exist; delete the rule and let git keep it.
+{
+  for (const line of renderUnrendered(unrenderedClassesInRepo({ root }))) {
+    console.error(`lint: ${line} is styled and no markup renders it`);
     failures++;
   }
 }
