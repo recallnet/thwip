@@ -45,18 +45,56 @@ export interface QueueTimings {
   readonly mergeConfirmSeconds: number;
 }
 
+/**
+ * Every window the sweep ends, in sweeps.
+ *
+ * Nothing here watches a queue continuously. These windows are ended by the
+ * five-minute sweep, so one written in seconds is not a short window: it is a
+ * window the queue gets a single look at. `offerSeconds` was 90. The sweep
+ * offers a turn and drives it in the same invocation, and if that drive does
+ * not reach a merge — a slow GitHub read, a candidate not yet resolved, a rate
+ * limit — the next sweep arrives 300 seconds later, finds the offer 210 seconds
+ * overdue and expires it before anything drives it again. One transient failure
+ * cost the entire turn, every time. On 9 August 2026 the queue spent the day
+ * cycling offer, expire, cool down, offer, and merged only when a webhook
+ * happened to drive it synchronously.
+ *
+ * Two sweeps is the floor: one to see the state, one to act on it, so a single
+ * missed firing does not lose a turn. `timings.test.ts` holds the relation and
+ * refuses a window that arrives in bare seconds.
+ *
+ * `noClaimCooldownSeconds` has said this since somebody was bitten by it. This
+ * is the rest of the family.
+ */
 export const DEFAULT_TIMINGS: QueueTimings = {
-  offerSeconds: 90,
-  executionSeconds: 20 * 60,
+  offerSeconds: 2 * SWEEP_INTERVAL_SECONDS,
+  executionSeconds: 4 * SWEEP_INTERVAL_SECONDS,
+  /**
+   * Held by the connected device against its own clock, not by the sweep, so
+   * the sweep interval does not bound it and seconds are the right unit.
+   */
   heartbeatSeconds: 20,
-  graceSeconds: 60,
+  graceSeconds: 2 * SWEEP_INTERVAL_SECONDS,
   // An offer that expires unclaimed means the runner is probably gone, and the
   // entry must stay in cooldown until the sweep can retire it. Any shorter and
   // the queue hands the same dead machine a second offer, and a third, which is
   // the repeating lost turn this cooldown exists to rule out. Written as the sweep
   // interval rather than as `5 * 60` again, so the two cannot be moved apart.
+  //
+  // One sweep is right here, and it is not an exception to the rule above: a
+  // cooldown says "not before", so a sweep that arrives after it has elapsed is
+  // simply the next chance to act and nothing is lost by being late.
   noClaimCooldownSeconds: SWEEP_INTERVAL_SECONDS,
-  mergeConfirmSeconds: 60,
+  // A trigger for a read, not a window work has to finish inside. When it
+  // fires, the queue stops guessing and starts asking GitHub what became of
+  // the write, so a sweep that arrives after it elapsed simply asks then, and
+  // nothing is lost by being late. One sweep, for the same reason the cooldown
+  // above is one: this is a "not before", not a "must be done by".
+  //
+  // Two sweeps here would also push a re-armed confirmation window past the
+  // execution deadline, so an attempt still legitimately reconciling would be
+  // terminated for overrunning.
+  mergeConfirmSeconds: SWEEP_INTERVAL_SECONDS,
 };
 
 function plusSeconds(iso: string, seconds: number): string {
