@@ -21,6 +21,9 @@ export interface TickClock {
   readonly startedAt: string;
   readonly finishedAt: string | null;
   readonly source: string;
+  /** Why the last tick that threw, threw. Null once one has finished cleanly. */
+  readonly lastError: string | null;
+  readonly lastErrorAt: string | null;
 }
 
 /** How often the cron may claim: one firing of the five minute trigger. */
@@ -70,17 +73,49 @@ export async function claimTick(db: D1Like, now: string, notBefore: string, sour
   return (result.meta?.changes ?? 0) === 1;
 }
 
-/** Record that the work finished. Liveness is read from this, never from the claim. */
+/**
+ * Record that the work finished.
+ *
+ * Liveness is read from this, never from the claim. A clean finish also clears
+ * the last failure: keeping it would leave `/health` reporting a cause for a
+ * queue that has since recovered, which is the same lie as a stale comment.
+ */
 export async function finishTick(db: D1Like, now: string): Promise<void> {
-  await db.prepare("UPDATE queue_clock SET finished_at = ? WHERE id = 'tick'").bind(now).run();
+  await db
+    .prepare("UPDATE queue_clock SET finished_at = ?, last_error = NULL, last_error_at = NULL WHERE id = 'tick'")
+    .bind(now)
+    .run();
+}
+
+/**
+ * Record why a tick did not finish.
+ *
+ * `queue_clock` used to answer one question — has the queue stopped — and every
+ * diagnostic anybody had gave the same answer: an age. Twelve firings an hour
+ * died for an hour on 5 August and finding out why meant reading invocation
+ * analytics against webhook rows by hand. The watchdog that already notices a
+ * stopped clock can now say what stopped it.
+ */
+export async function failTick(db: D1Like, now: string, error: unknown): Promise<void> {
+  const said = error instanceof Error ? error.message : String(error);
+  await db
+    .prepare("UPDATE queue_clock SET last_error = ?, last_error_at = ? WHERE id = 'tick'")
+    .bind(said.slice(0, 500), now)
+    .run();
 }
 
 export async function readClock(db: D1Like): Promise<TickClock> {
   const row = await db
-    .prepare("SELECT started_at AS startedAt, finished_at AS finishedAt, source FROM queue_clock WHERE id = 'tick'")
+    .prepare(
+      `SELECT started_at AS startedAt, finished_at AS finishedAt, source,
+              last_error AS lastError, last_error_at AS lastErrorAt
+         FROM queue_clock WHERE id = 'tick'`,
+    )
     .bind()
     .first<TickClock>();
-  return row ?? { startedAt: "1970-01-01T00:00:00.000Z", finishedAt: null, source: "none" };
+  return (
+    row ?? { startedAt: "1970-01-01T00:00:00.000Z", finishedAt: null, source: "none", lastError: null, lastErrorAt: null }
+  );
 }
 
 /**
