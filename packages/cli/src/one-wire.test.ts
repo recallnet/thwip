@@ -44,7 +44,7 @@ function required(slice: string): string[] {
 
 describe("thwip queue join, against the route that answers it", () => {
   const slice = handler("/v1/queue/:repositoryId/entries");
-  const plan = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7"]);
+  const plan = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7"], { nonce: "test-nonce" });
   if (!plan.ok) throw new Error(plan.message);
   const sent = Object.keys(plan.plan.body ?? {});
 
@@ -67,7 +67,7 @@ describe("who sponsors an entry", () => {
     // The same pull request queued through the route and through the webhook
     // was getting two entries with two different sponsors, so the author is now
     // derived server-side. A flag that quietly does nothing is worse than none.
-    const refused = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--sponsor", "someone"]);
+    const refused = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--sponsor", "someone"], { nonce: "test-nonce" });
     expect(refused.ok).toBe(false);
     expect(refused.ok === false && refused.message).toContain("author");
   });
@@ -75,14 +75,14 @@ describe("who sponsors an entry", () => {
 
 describe("the head sha join queues", () => {
   it("is carried in the body, resolved by the caller when it is not given", () => {
-    const plan = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7"]);
+    const plan = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7"], { nonce: "test-nonce" });
     expect(plan.ok && plan.plan.body?.["headSha"]).toBe("{headSha}");
   });
 
   it("is taken as given when it is, and refused when it is not an object id", () => {
     const sha = "0".repeat(40);
-    const given = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--head-sha", sha]);
+    const given = planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--head-sha", sha], { nonce: "test-nonce" });
     expect(given.ok && given.plan.body?.["headSha"]).toBe(sha);
-    expect(planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--head-sha", "HEAD"]).ok).toBe(false);
+    expect(planQueueCommand(["join", "--repo", "acme/widgets", "--pr", "7", "--head-sha", "HEAD"], { nonce: "test-nonce" }).ok).toBe(false);
   });
 });

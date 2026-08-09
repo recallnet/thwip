@@ -107,7 +107,34 @@ function key(parts: readonly (string | number)[]): string {
   return parts.join(":");
 }
 
-export function planQueueCommand(argv: readonly string[]): ParseResult {
+/**
+ * One command, run once.
+ *
+ * An idempotency key exists so a request that was sent twice is applied once.
+ * These keys were built from the command and its arguments, which makes every
+ * later run of the same command look like a retry of the first one. Resuming a
+ * queue is the case that bit: `key(["resume", repo, ref])` never changed, so the
+ * second time anybody resumed that lane the control plane answered
+ * `{"status":"duplicate"}` and left it paused. On 5 August a resume during the
+ * App-native cutover did exactly that, and the lane only moved when the same
+ * route was called by hand with a fresh key.
+ *
+ * A key has to identify the intent, and two runs of `thwip queue resume` are two
+ * intents: the operator meant it the second time as much as the first. So the
+ * nonce comes in from the caller, once per invocation, and `planQueueCommand`
+ * stays a pure function of its inputs.
+ *
+ * Commands that name a target state rather than an action keep deterministic
+ * keys, because for those a repeat really is the same intent: rebaselining to a
+ * given commit, or reconciling a given merge, asks for a state that either has
+ * been reached or has not.
+ */
+export interface PlanContext {
+  /** Distinct per invocation of the CLI. */
+  readonly nonce: string;
+}
+
+export function planQueueCommand(argv: readonly string[], context: PlanContext): ParseResult {
   const [subcommand, ...rest] = argv;
   if (subcommand === undefined) return usage("thwip queue <status|explain|list|join|leave|pause|resume|reconcile|doctor|…>");
   const flags = parseFlags(rest);
@@ -160,7 +187,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
           method: "POST",
           path: `/v1/queue/{repositoryId}/entries?ref=${encodeURIComponent(requireRef(flags))}`,
           body: { pullRequestNumber: pr, headSha: given ?? "{headSha}" },
-          idempotencyKey: key(["join", repo, requireRef(flags), pr]),
+          idempotencyKey: key(["join", repo, requireRef(flags), pr, context.nonce]),
           requiresAdmin: false,
         },
       };
@@ -179,7 +206,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
         plan: {
           method: "DELETE",
           path: `/v1/queue/{repositoryId}/entries/entry_{repositoryId}_${pr}?ref=${encodeURIComponent(ref)}&reason=withdrawn`,
-          idempotencyKey: key(["leave", repo, ref, pr]),
+          idempotencyKey: key(["leave", repo, ref, pr, context.nonce]),
           requiresAdmin: false,
         },
       };
@@ -199,7 +226,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
           method: "POST",
           path: `/v1/queue/{repositoryId}/pause?ref=${encodeURIComponent(ref)}`,
           body: { reason },
-          idempotencyKey: key(["pause", repo, ref, reason]),
+          idempotencyKey: key(["pause", repo, ref, context.nonce]),
           requiresAdmin: true,
         },
       };
@@ -216,7 +243,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
         plan: {
           method: "POST",
           path: `/v1/queue/{repositoryId}/resume?ref=${encodeURIComponent(ref)}`,
-          idempotencyKey: key(["resume", repo, ref]),
+          idempotencyKey: key(["resume", repo, ref, context.nonce]),
           requiresAdmin: true,
         },
       };
@@ -263,7 +290,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
         plan: {
           method: "DELETE",
           path: `/v1/queue/{repositoryId}/entries/entry_{repositoryId}_${pr}?ref=${encodeURIComponent(ref)}&reason=${encodeURIComponent(reason)}`,
-          idempotencyKey: key(["eject", repo, ref, pr, reason]),
+          idempotencyKey: key(["eject", repo, ref, pr, context.nonce]),
           requiresAdmin: true,
         },
       };
@@ -292,7 +319,7 @@ export function planQueueCommand(argv: readonly string[]): ParseResult {
           method: "POST",
           path: `/v1/queue/{repositoryId}/bypass?ref=${encodeURIComponent(requireRef(flags))}`,
           body: { pullRequestNumber: pr, reason },
-          idempotencyKey: key(["bypass", repo, pr, reason]),
+          idempotencyKey: key(["bypass", repo, pr, context.nonce]),
           requiresAdmin: true,
         },
       };

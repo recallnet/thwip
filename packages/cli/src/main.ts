@@ -856,7 +856,7 @@ async function resolveRepositoryId(endpoint: string, auth: string, repo: string)
 
 /** `thwip queue …`. Parsing, authority, and confirmations live in queue-commands.ts. */
 async function cmdQueue(argv: string[]): Promise<number> {
-  const parsed = planQueueCommand(argv);
+  const parsed = planQueueCommand(argv, { nonce: crypto.randomUUID() });
   if (!parsed.ok) {
     process.stderr.write(parsed.message + "\n");
     return parsed.exitCode;
@@ -922,7 +922,7 @@ async function cmdQueue(argv: string[]): Promise<number> {
  * makes the ones below it meaningless.
  */
 async function cmdQueueDoctor(argv: string[]): Promise<number> {
-  const parsed = planQueueCommand(["doctor", ...argv]);
+  const parsed = planQueueCommand(["doctor", ...argv], { nonce: crypto.randomUUID() });
   if (!parsed.ok) {
     process.stderr.write(parsed.message + "\n");
     return parsed.exitCode;
@@ -1207,7 +1207,7 @@ async function cmdQueueSetup(argv: string[]): Promise<number> {
  * into the loop.
  */
 async function cmdQueueWork(argv: string[]): Promise<number> {
-  const parsed = planQueueCommand(["work", ...argv]);
+  const parsed = planQueueCommand(["work", ...argv], { nonce: crypto.randomUUID() });
   if (!parsed.ok) {
     process.stderr.write(parsed.message + "\n");
     return parsed.exitCode;

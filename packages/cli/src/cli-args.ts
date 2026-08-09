@@ -246,7 +246,10 @@ function queueCommand(argv: readonly string[]): CliAction {
     const invalid = validateOptions(rest, { boolean: ["--write"], value: ["--repo", "--branch"] });
     return invalid === null ? command("queue", argv) : error(invalid);
   }
-  const planned = planQueueCommand(argv);
+  // Planned only to find out whether the arguments parse; the plan itself is
+  // thrown away and the request is planned again when it is about to be sent.
+  // Nothing reads the key, so the nonce here names what this call is for.
+  const planned = planQueueCommand(argv, { nonce: "validation-only" });
   return planned.ok ? command("queue", argv) : error(planned.message);
 }
 
