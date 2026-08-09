@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { testD1 } from "../../test/d1.js";
 import {
   claimTick,
+  failTick,
   finishTick,
   readClock,
   tickAgeSeconds,
@@ -217,5 +219,50 @@ describe("tickOwedByTraffic", () => {
       ),
     ).resolves.toBeUndefined();
     expect(finish).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A stopped clock that says only how long it has been stopped.
+ *
+ * Twelve firings an hour died for an hour on 5 August, and every diagnostic
+ * anybody had reported an age. Finding the cause meant reading invocation
+ * analytics against webhook rows minute by minute, by hand.
+ */
+describe("why the last tick did not finish", () => {
+  const held: Array<{ close(): void }> = [];
+  const database = (): D1Like => {
+    const t = testD1();
+    held.push(t);
+    return t.db as unknown as D1Like;
+  };
+  afterEach(() => {
+    while (held.length > 0) held.pop()!.close();
+  });
+
+  it("keeps the reason a tick threw", async () => {
+    const db = database();
+
+    await failTick(db, "2026-08-09T12:00:00.000Z", new Error("Worker exceeded resource limits"));
+
+    const clock = await readClock(db);
+    expect(clock.lastError).toContain("exceeded resource limits");
+    expect(clock.lastErrorAt).toBe("2026-08-09T12:00:00.000Z");
+  });
+
+  /** A cause left standing for a queue that has recovered is the same lie as a stale comment. */
+  it("forgets it once a tick finishes cleanly", async () => {
+    const db = database();
+
+    await failTick(db, "2026-08-09T12:00:00.000Z", new Error("Worker exceeded resource limits"));
+    await finishTick(db, "2026-08-09T12:05:00.000Z");
+
+    const clock = await readClock(db);
+    expect(clock.lastError).toBeNull();
+    expect(clock.lastErrorAt).toBeNull();
+  });
+
+  it("says nothing about a clock that has never failed", async () => {
+    expect((await readClock(database())).lastError).toBeNull();
   });
 });

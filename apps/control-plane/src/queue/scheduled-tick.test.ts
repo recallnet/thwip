@@ -199,6 +199,40 @@ describe("the queue heartbeat", () => {
   });
 
   /** A lane nobody holds needs no App continuation. */
+  /**
+   * The condition under which the clock stopped and nobody could say why.
+   *
+   * Every lane was paused for the App-native cutover on 5 August, so no queue
+   * had eligible work and none was driven. A pass that only recorded itself when
+   * it moved something would have reported an idle fleet as a stopped clock,
+   * which is exactly the reading that cost eleven hours: the health clock said
+   * "stale" and the cause was a paused fleet doing nothing wrong.
+   */
+  it("ticks a paused queue, so a quiet fleet is not read as a stopped clock", async () => {
+    const e = env();
+    queue("1", 1);
+    queue("2", 1);
+    for (const repositoryId of ["1", "2"]) {
+      await withQueueState(e.DB as unknown as D1Like, repositoryId, "refs/heads/main", (store) => {
+        commandsFor(store).pause({
+          idempotencyKey: `pause:${repositoryId}`,
+          actorPrincipalId: "operator",
+          reason: "the cutover is under way",
+        });
+      });
+    }
+
+    const result = await tickAllQueues(e, {
+      driveQueue: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0, publishStatusComments: async () => {}, retireStatusComments: async () => {},
+    });
+
+    expect(result.ticked).toBe(2);
+    expect(result.failed).toBe(0);
+  });
+
   it("drives nobody when no lane is held", async () => {
     const e = env();
     queue("1", 1);
