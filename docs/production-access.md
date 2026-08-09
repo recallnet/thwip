@@ -157,10 +157,42 @@ The deploy gate refuses while a `before-worker` migration it needs is missing,
 and names it. 0020 and 0021 sat unapplied under a Worker that read their tables
 for four deploys, and every `/authorize` under `fresh` answered 500.
 
-## When the live Worker predates `/v1/schema`
+## Deploying past the gate
 
-The gate refuses with a 404 and says to deploy once with
-`THWIP_DEPLOY_ANYWAY=1`. That is the bootstrap, and it is needed exactly once.
+The gate refuses for five separate reasons: a checkout behind main, a tree that
+is not main, a missing `/v1/schema`, a schema answer it could not read, and
+migrations the code needs. One variable used to excuse all five together, so
+reaching for it to ship from a branch also waved through the schema checks
+nobody was thinking about.
+
+An exception now names the guard it excuses and says why:
+
+```
+THWIP_BREAK_GLASS="unmerged-tree: the queue cannot merge its own repair" pnpm deploy:staging
+```
+
+Every other guard still refuses. The guards that can be named are
+`behind-main`, `unmerged-tree`, `schema-endpoint-missing`, `schema-unreadable`
+and `pending-migrations`.
+
+The reason is not paperwork. The deploy stamps the worker with it, `/health`
+publishes it for as long as that worker is running, and the `queue clock`
+watchdog fails every ten minutes while an exception is live. A deploy from main
+clears it, so the alarm stops when the work has merged and shipped the ordinary
+way, not when somebody remembers to silence it.
+
+### When the queue cannot merge its own repair
+
+This is the case the mechanism exists for. Deploying needs main, writing main
+needs the queue, and a queue that is down cannot merge the fix that would revive
+it. Break the deadlock with `unmerged-tree`, then merge and deploy from main as
+soon as the queue is moving again.
+
+### When the live Worker predates `/v1/schema`
+
+The gate refuses with a 404. Deploy once with
+`THWIP_BREAK_GLASS="schema-endpoint-missing: bootstrapping the endpoint the gate
+reads"`, and the check works from then on.
 
 ## Rotation and revocation
 
