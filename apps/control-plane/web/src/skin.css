@@ -13,7 +13,6 @@
   --rule: #dfe1e2;
   --hair: #eceef0;
   --civic: #005ea2;
-  --civic-dark: #00436d;
   --pass: #00a91c;
   --fail: #b50909;
 
@@ -87,16 +86,7 @@ a:focus-visible,
 button:focus-visible,
 input:focus-visible { outline: 2px solid var(--civic); outline-offset: 3px; }
 
-/* Nothing on this site has a rounded corner. */
-.gp-panel,
-.gp-btn,
-.gp-chip,
-.gp-data-table,
-.gp-data-table th,
-.gp-data-table td,
-input,
-select,
-textarea {
+.gp-panel,.gp-btn,.gp-chip,input,select,textarea {
   border-radius: 0;
 }
 
@@ -143,8 +133,6 @@ textarea {
    neighbour by an accident of which element happened to be first. */
 .gp-panel__body > * { margin-top: 0; margin-bottom: 0; }
 .gp-panel__body > * + * { margin-top: var(--s3); }
-.gp-panel__body > .gp-data-table + p,
-.gp-panel__body > p + .gp-data-table,
 .gp-panel__body > .thwip-actions { margin-top: var(--s4); }
 
 /* ---------- buttons: three weights, and only three ---------- */
@@ -153,7 +141,8 @@ textarea {
    Quiet is a safe alternative or a control. Danger takes something away or
    locks something in. Enable was solid on one page while Disable was solid on
    another, so the same word carried two weights depending on where you stood. */
-.gp-btn {
+.gp-btn,
+.nt-btn {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 400;
@@ -169,8 +158,34 @@ textarea {
   box-shadow: none;
   transition: background-color 0.12s, border-color 0.12s, color 0.12s;
 }
-.gp-btn:hover { background: var(--civic-dark); border-color: var(--civic-dark); color: var(--paper); }
+/* Hover lands on ink. The darker blue this reached for was an eighth colour,
+   and the palette is seven. */
+.gp-btn:hover,
+.nt-btn:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .gp-btn--sm { padding: var(--s2) var(--s3); font-size: 10px; }
+
+/* The one card on an otherwise empty page: sign-in, and the device code. It
+   asked to be centred from styles.css and never was, because `.gp-panel` sets
+   its own margin, weighs exactly as much, and was declared after it. */
+.thwip-device-card { max-width: 448px; margin: var(--s7) auto; }
+.thwip-device-card input {
+  width: 100%;
+  margin: var(--s3) 0;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 19px;
+  letter-spacing: 0.18em;
+  text-align: center;
+}
+.gp-panel p { text-indent: 0; max-width: none; }
+
+/* The marketing pages' secondary: a civic outline, still an invitation. Quiet
+   below is the tertiary control, and grey on purpose. */
+.nt-btn--ghost { background: transparent; color: var(--civic); }
+.nt-btn--ghost:hover { background: transparent; border-color: var(--ink); color: var(--ink); }
 .gp-btn[disabled] { opacity: 0.4; cursor: default; }
 .gp-btn[disabled]:hover { background: var(--civic); border-color: var(--civic); }
 
@@ -248,46 +263,251 @@ select.gp-btn:hover {
 .gp-chip--status.is-ok { border-left-color: var(--pass); color: var(--ink); }
 .gp-chip--status.is-wait { border-left-color: var(--civic); color: var(--ink); }
 .gp-chip--status.is-bad { border-left-color: var(--fail); color: var(--fail); }
-.gp-chip--status.is-off { border-left-color: var(--rule); color: var(--muted); }
+.gp-chip--status.is-off { border-left-color: var(--rule); color: var(--muted); }.gp-mono { font-family: var(--mono); font-size: 12.5px; }
+.gp-workspace { background: var(--paper); }
+
+/* ---------- the record, laid out ---------- */
+
+/* The dashboard is a document about a queue, not a set of cards.
+   A section is a rule, a name in the margin voice, and the thing itself. The
+   panel boxes that used to wrap every one of these drew four borders around
+   content that already had an edge, and stacked them into a column of framed
+   rectangles that read as equally important. */
+.thwip-section { padding: 26px 0; border-bottom: 1px solid var(--rule); }
+.thwip-section:last-child { border-bottom: 0; padding-bottom: 40px; }
+.thwip-section__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s5);
+  padding-bottom: 11px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.thwip-section__head span {
+  letter-spacing: 0.1em;
+  text-transform: none;
+  color: var(--muted);
+}
+/* A section whose subject is a problem says so in its own name. */
+.thwip-section--finding .thwip-section__head { color: var(--fail); }
+.thwip-section__body { min-width: 0; }
 
 /* ---------- tables ---------- */
 
-.gp-data-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-  background: var(--paper);
-}
-.gp-data-table th {
+/* The library sets `table { max-width: var(--gp-text-width) }`, which is right
+   for a table inside an essay and wrong for one that is the page. Same leak as
+   the two rems of padding it puts on a bare `section`. */
+.thwip-table { border-collapse: collapse; width: 100%; max-width: none; margin: 0; }
+.thwip-table thead tr {
+  border-bottom: 1px solid var(--ink);
   font-family: var(--mono);
   font-size: 10.5px;
-  font-weight: 400;
-  letter-spacing: 0.13em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
   text-align: left;
-  padding: var(--s3) var(--s4) var(--s3) 0;
-  border-bottom: 1px solid var(--ink);
-  background: var(--paper);
 }
-.gp-data-table td {
-  padding: var(--s3) var(--s4) var(--s3) 0;
-  border-bottom: 1px solid var(--rule);
-  vertical-align: top;
-}
-.gp-data-table td:last-child,
-.gp-data-table th:last-child { padding-right: 0; }
-.gp-data-table tr:hover td { background: transparent; }
-.gp-mono { font-family: var(--mono); font-size: 12.5px; }
-/* Actions in a row sit on one line, at the row's own rhythm. */
-.gp-data-table .thwip-row-actions { display: flex; gap: var(--s2); white-space: nowrap; }
+.thwip-table th { padding: 0 var(--s3) 7px 0; font-weight: 400; }
+.thwip-table td { padding: 10px var(--s3) 10px 0; }
+.thwip-table tbody tr { border-bottom: 1px solid var(--rule); }
+.thwip-table th:last-child,
+.thwip-table td:last-child { padding-right: 0; }
+.thwip-table .n { text-align: right; font-variant-numeric: tabular-nums; }
+.thwip-table .m { font-family: var(--mono); font-size: 12px; }
+.thwip-table .q { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.thwip-table .num { font-family: var(--num); font-size: 15px; font-variant-numeric: tabular-nums; }
+.thwip-table .w { white-space: nowrap; }
+/* The reason is the column somebody reads, so it gets the room. */
+.thwip-table .why { min-width: 26ch; max-width: 44ch; }
 
-.gp-workspace { background: var(--paper); }
+/* The state a row is in, carried on the row's own left edge.
+   The homepage made the merge lane the page's left edge; a table of things
+   moving through that lane reads the same way, and a reader scanning for the
+   one repository that needs them is scanning one column of colour. */
+.thwip-table .st {
+  padding-left: 14px;
+  border-left: 2px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.thwip-table .st--ok { border-left-color: var(--pass); color: var(--pass); }
+.thwip-table .st--bad { border-left-color: var(--fail); color: var(--fail); }
+.thwip-table .st--wait { border-left-color: var(--rule); color: var(--muted); }
+.thwip-table .st--off { border-left-color: var(--rule); color: var(--muted); }
+
+/* A second line under a name in a table cell: the same fact, quieter. */
+.thwip-sub {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.thwip-note { margin: var(--s4) 0 0; font-size: 14px; color: var(--muted); max-width: 72ch; }
+/* A column that needs a name for a screen reader and none on the page. */
+.thwip-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- the limits strip ---------- */
+
+/* Two ratios and a plan name. Only the ratios are limits, so only they get a
+   bar; the plan is a word and is set as one. */
+.thwip-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s3) var(--s7);
+  padding: 18px 0 16px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.thwip-limit { display: flex; align-items: baseline; gap: 9px; }
+.thwip-limit b {
+  font-family: var(--num);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.thwip-limit i { display: block; width: 54px; height: 3px; background: var(--rule); }
+.thwip-limit i span { display: block; height: 3px; background: var(--ink); }
+.thwip-limit--full i span { background: var(--fail); }
+
+/* ---------- facts ---------- */
+
+.thwip-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s6);
+  margin: 0;
+  padding: var(--s5) 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.thwip-facts > div { display: flex; flex-direction: column; gap: 4px; min-width: 12ch; }
+.thwip-facts dt { letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.thwip-facts dd { margin: 0; font-size: 12px; }
+.thwip-facts dd.ok { color: var(--pass); }
+.thwip-facts dd.bad { color: var(--fail); }
+
+.thwip-pairs { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s7); margin: 0; }
+.thwip-pairs dt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.thwip-pairs dd { margin: 5px 0 0; font-family: var(--mono); font-size: 13px; }
+.thwip-pairs dd.big {
+  font-family: var(--num);
+  font-variation-settings: "wdth" 116, "wght" 620;
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- a finding on the branch's record ---------- */
+
+.thwip-finding { border-left: 2px solid var(--fail); padding-left: 14px; }
+.thwip-finding h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.thwip-finding p { margin: 6px 0 0; max-width: 66ch; }
+.thwip-finding ul {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.thwip-finding li { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.thwip-finding code { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
 /* ---------- page furniture ---------- */
 
-.thwip-nav { border-bottom: 1px solid var(--ink); padding: 20px 0 14px; }
+.thwip-shell { max-width: var(--gp-page-width); margin: 0 auto; padding: 0 var(--s5); }
+.thwip-nav {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s3) var(--s5);
+  padding: 20px 0 14px;
+  border-bottom: 1px solid var(--ink);
+}
+.thwip-nav .links { display: flex; gap: var(--s5); align-items: baseline; flex-wrap: wrap; }
+
+/* Where you are, as a path. The organization switcher was a select beside the
+   wordmark, which named the current organization but not the project inside
+   it, so a project page and the organization page had identical headers. */
+.thwip-crumb {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+.thwip-crumb i { color: var(--rule); font-style: normal; }
+.thwip-crumb a { text-decoration: none; color: var(--civic); }
+.thwip-crumb a:last-child { color: var(--ink); }
+.thwip-crumb a:hover { color: var(--ink); }
+
+.thwip-search {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: var(--s2) 10px;
+  width: 20ch;
+}
+.thwip-search:focus { border-color: var(--ink); }
+
+/* The tab row is scoped: an organization has one set, a project another, and
+   swapping them is what says which of the two you are inside. */
+.thwip-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 26px;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.thwip-tabs a {
+  padding: 12px 0 10px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  text-decoration: none;
+  color: var(--muted);
+}
+.thwip-tabs a:hover { color: var(--ink); }
+.thwip-tabs a.is-active { border-bottom-color: var(--ink); color: var(--ink); }
 .thwip-brand {
+  text-decoration: none;
   font-family: var(--num);
   font-style: normal;
   font-variation-settings: "wdth" 118, "wght" 700;
@@ -296,14 +516,22 @@ select.gp-btn:hover {
   color: var(--ink);
 }
 .thwip-brand small {
+  margin-left: var(--s2);
   font-family: var(--mono);
+  font-style: normal;
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--muted);
 }
-.thwip-nav .links a,
-.thwip-footer a {
+.thwip-nav .links a.thwip-brand {
+  font-family: var(--num);
+  font-size: 21px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--ink);
+}
+.thwip-nav .links a {
   font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 0.14em;
@@ -311,109 +539,10 @@ select.gp-btn:hover {
   text-decoration: none;
   color: var(--muted);
 }
-.thwip-nav .links a:hover,
-.thwip-footer a:hover { color: var(--civic); }
+.thwip-nav .links a:hover { color: var(--civic); }
 /* A button in the nav is still a button; the link colour must not win. */
 .thwip-nav .links a.gp-btn { color: var(--paper); }
-.thwip-nav .links a.gp-btn:hover { color: var(--paper); }
-
-.thwip-section { border-top: 1px solid var(--rule); padding: 44px 0; }
-.thwip-eyebrow {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.thwip-section h2 { font-size: 24px; }
-.thwip-section .lede { color: var(--muted); max-width: 58ch; }
-
-.thwip-footer {
-  border-top: 1px solid var(--ink);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  padding: 18px 0 40px;
-}
-
-/* ---------- dashboard furniture ---------- */
-
-.metric-strip {
-  border-top: 1px solid var(--ink);
-  border-bottom: 1px solid var(--rule);
-  padding: var(--s4) 0;
-  margin: 0 0 var(--s5);
-}
-.metric-strip__item { border: 0; padding: 0 var(--s5) 0 0; }
-.metric-strip__label {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-style: normal;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.metric-strip__value {
-  font-family: var(--num);
-  font-style: normal;
-  font-variation-settings: "wdth" 118, "wght" 620;
-  font-variant-numeric: tabular-nums;
-  font-size: 26px;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-  margin-top: var(--s1);
-  color: var(--ink);
-}
-/* Being at the limit is a fact about the number, not a different kind of text.
-   The `bad` utility retyped it as 11.5px mono, so the number that mattered
-   most in the row was the one the eye reached last. Colour only. */
-.metric-strip__value.is-limit { color: var(--fail); }
-
-.tab-nav { border-bottom: 1px solid var(--rule); margin: var(--s4) 0 var(--s5); }
-.tab-nav a {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--muted);
-  text-decoration: none;
-  padding-bottom: var(--s2);
-}
-.tab-nav a:hover { color: var(--civic); }
-.tab-nav a.is-active {
-  color: var(--ink);
-  border-bottom: 2px solid var(--civic);
-}
-
-/* Numerals are the one place this site gets loud. */
-.thwip-plan__price {
-  font-family: var(--num);
-  font-style: normal;
-  font-variation-settings: "wdth" 125, "wght" 640;
-  font-variant-numeric: tabular-nums;
-  font-size: 52px;
-  letter-spacing: -0.03em;
-}
-.thwip-plan {
-  border: 1px solid var(--rule);
-  border-top: 2px solid var(--ink);
-  background: var(--paper);
-}
-.thwip-plan--pro { border-top-color: var(--civic); }
-.thwip-plan__name,
-.thwip-step .k {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.thwip-step { border-left: 1px solid var(--ink); }
-.thwip-step .k { color: var(--civic); }
-
-.ok,
+.thwip-nav .links a.gp-btn:hover { color: var(--paper); }.ok,
 .bad,
 .wait,
 .thwip-error {
@@ -452,12 +581,7 @@ select.gp-btn:hover {
 .thwip-actions { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: flex-start; }
 /* A question takes the whole row, so the button it replaces is not still
    sitting next to it looking like the alternative answer. */
-.thwip-actions > .thwip-confirm { flex: none; width: 100%; box-sizing: border-box; }
-.thwip-back { margin: 0 0 var(--s3); }
-.thwip-page-title { margin: 0 0 var(--s1); font-size: 20px; }
-.thwip-page-subtitle { margin: 0 0 var(--s4); }
-.thwip-loading { padding: var(--s7) 0; }
-.thwip-note { margin-top: var(--s3); }
+.thwip-actions > .thwip-confirm { flex: none; width: 100%; box-sizing: border-box; }.thwip-loading { padding: var(--s7) 0; }
 .thwip-code-block {
   white-space: pre-wrap;
   font-family: var(--mono);
@@ -477,24 +601,6 @@ select.gp-btn:hover {
   background: var(--paper);
   color: var(--ink);
 }
-
-.thwip-slip {
-  font-family: var(--mono);
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  box-shadow: none;
-}
-.thwip-slip::after { display: none; }
-.thwip-slip .trailer { color: var(--muted); }
-.thwip-stamp {
-  border: 2px solid var(--civic);
-  color: var(--civic);
-  font-family: var(--mono);
-  font-weight: 500;
-  opacity: 1;
-  transform: rotate(-1.6deg);
-}
-
 /* ---------- a finding on the branch's record ---------- */
 
 /* Each finding is its own block with a rule above it, because two of them

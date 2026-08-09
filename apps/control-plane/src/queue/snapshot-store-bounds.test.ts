@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellOf, SnapshotQueueStore, type SnapshotCell } from "./snapshot-store.js";
+import { cellOf, DOCUMENT_BUDGET_BYTES, SnapshotQueueStore, type SnapshotCell } from "./snapshot-store.js";
 import type { SubmittedEvent } from "./store.js";
 
 /**
@@ -196,6 +196,105 @@ describe("what the document keeps", () => {
       if (i > 0) await s.resolveMergeOperation(`merge_${i}`, "merged", "2026-07-29T12:00:01.000Z");
     }
     expect(s.mergeOperations().some((row) => row.operationId === "merge_0")).toBe(true);
+  });
+
+  /**
+   * Every bound above counts rows, and the resource none of them spends is rows.
+   *
+   * A Worker on the free plan gets 10ms of CPU, and what it spends that on is
+   * bytes: parsing the document, folding it, serialising it again. Six caps were
+   * chosen one outage at a time, each modest on its own, and on 9 August 2026
+   * they summed to 398KB across `mergeOperations` (89KB), `state` (89KB),
+   * `events` (80KB), `dedupe` (78KB) and `outbox` (56KB). No cap was exceeded.
+   * The tick stopped fitting anyway and the queue crawled for a day.
+   *
+   * So the document is bounded in the unit that runs out. Counting rows leaves
+   * the budget to be re-divided by hand every time a field is added, and the
+   * seventh field will be added by somebody who never reads this file.
+   */
+  describe("what one invocation can afford", () => {
+    /** A long history: entries that came and went, each leaving its traces. */
+    async function longHistory(entries: number): Promise<SnapshotQueueStore> {
+      const s = store();
+      for (let i = 0; i < entries; i += 1) {
+        request(s, `e${i}`, i + 1);
+        s.append(
+          {
+            idempotencyKey: `cancel-e${i}`,
+            at: "2026-07-29T12:00:00.000Z",
+            type: "EntryCancelled",
+            entryId: `e${i}`,
+            actorPrincipalId: "prn_1",
+            reason: "withdrawn by the sponsor before it took a turn",
+          } as unknown as SubmittedEvent,
+          { outbox: [{ kind: "start-workflow", attemptId: `a${i}`, payload: { attemptId: `a${i}` } }] },
+        );
+        s.beginMergeOperation({
+          operationId: `merge_${i}`,
+          attemptId: `a${i}`,
+          attemptRevision: 0,
+          expectedBaseSha: "b".repeat(40),
+          expectedHeadSha: "c".repeat(40),
+          expectedTreeOid: "d".repeat(40),
+          pullRequestNumber: i,
+          at: "2026-07-29T12:00:00.000Z",
+        });
+        await s.resolveMergeOperation(`merge_${i}`, "merged", "2026-07-29T12:00:01.000Z");
+      }
+      return s;
+    }
+
+    const bytes = (s: SnapshotQueueStore): number => s.documentBytes();
+
+    it("holds the document inside the budget however long the history is", async () => {
+      const s = await longHistory(600);
+      expect(bytes(s)).toBeLessThanOrEqual(DOCUMENT_BUDGET_BYTES);
+    });
+
+    /**
+     * The property that outlives every individual cap: past some history, the
+     * document stops growing. A field added later without a bound breaks this
+     * test, which is the only moment it is cheap to fix.
+     */
+    it("stops growing once the history is long", async () => {
+      const shorter = bytes(await longHistory(200));
+      const longer = bytes(await longHistory(800));
+      expect(longer).toBeLessThanOrEqual(shorter * 1.05);
+    });
+
+    /**
+     * Shedding is for diagnosis. An unsettled merge write is the one thing the
+     * sweep comes back for, and a live entry is the queue itself.
+     */
+    it("sheds diagnosis rather than anything a decision reaches", async () => {
+      const s = await longHistory(600);
+      s.beginMergeOperation({
+        operationId: "merge_unsettled",
+        attemptId: "a-unsettled",
+        attemptRevision: 0,
+        expectedBaseSha: "b".repeat(40),
+        expectedHeadSha: "c".repeat(40),
+        expectedTreeOid: "d".repeat(40),
+        pullRequestNumber: 9999,
+        at: "2026-07-29T12:00:00.000Z",
+      });
+      request(s, "live", 10_000);
+
+      expect(bytes(s)).toBeLessThanOrEqual(DOCUMENT_BUDGET_BYTES);
+      expect(s.mergeOperations().some((row) => row.operationId === "merge_unsettled")).toBe(true);
+      expect(s.state().entries.has("live")).toBe(true);
+    });
+
+    /**
+     * `transitionsRecordedAt` is a sidecar of the chain, keyed by sequence, and
+     * the chain is already compacted to a window. Keeping a timestamp for a link
+     * nothing can name is a map that grows for the life of the repository.
+     */
+    it("forgets when a transition happened once the transition is gone", async () => {
+      const s = await longHistory(200);
+      const kept = new Set(s.transitionChain().map((t) => String(t.transitionSequence)));
+      expect(s.recordedTransitionKeys().every((key) => kept.has(key))).toBe(true);
+    });
   });
 
   it("keeps a bounded tail of settled merge writes", async () => {

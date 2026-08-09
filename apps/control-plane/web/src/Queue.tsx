@@ -196,7 +196,7 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
 
   if (unreadable !== null) {
     return (
-      <Panel title="This branch's record" meta="unread">
+      <Panel tone="finding" title="This branch's record" meta="unread">
         <p className="thwip-error">{unreadable}</p>
       </Panel>
     );
@@ -221,6 +221,7 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
 
   return (
     <Panel
+      tone="finding"
       title="This branch's record"
       meta={plans.length === 1 ? "1 finding" : `${plans.length} findings`}
     >
@@ -390,7 +391,7 @@ export function QueuePanel({
             <p className="gp-panel__meta">
               Projected order, not a reservation: it changes after every review and check.
             </p>
-            <table className="gp-data-table">
+            <table className="thwip-table">
               <thead>
                 <tr>
                   <th>#</th>
@@ -430,7 +431,7 @@ export function QueuePanel({
             <p className="gp-panel__meta">
               Holding a place, not currently schedulable. Nothing here has lost its position.
             </p>
-            <table className="gp-data-table">
+            <table className="thwip-table">
               <thead>
                 <tr>
                   <th>Pull request</th>
@@ -476,7 +477,7 @@ export function QueuePanel({
             <p className="gp-panel__meta">
               How this branch has moved. Every row is a signed record; the queue merged the ones it verified.
             </p>
-            <table className="gp-data-table">
+            <table className="thwip-table">
               <thead>
                 <tr>
                   <th>#</th>

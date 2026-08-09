@@ -107,6 +107,34 @@ const OUTBOX_TAIL = 200;
  */
 const MERGE_OPERATION_TAIL = 200;
 
+/**
+ * What the whole document is allowed to weigh.
+ *
+ * Every cap above counts rows, and rows are not the resource. A Worker on the
+ * free plan gets 10ms of CPU per invocation, and it spends that parsing this
+ * document, folding it and serialising it again. Six caps, each chosen after a
+ * different incident and each modest alone, summed to 398KB on 9 August 2026
+ * with none of them exceeded, and the tick stopped fitting anyway.
+ *
+ * Counting rows also leaves the budget to be re-divided by hand whenever a field
+ * is added, by someone who has no reason to know the other five exist. Bounding
+ * the bytes is the bound that does not need maintaining: a new field spends the
+ * same budget as the old ones and is shed by the same rule.
+ *
+ * 128KB parses and re-serialises in roughly a millisecond, which leaves the rest
+ * of the invocation for the work.
+ */
+export const DOCUMENT_BUDGET_BYTES = 131_072;
+
+/**
+ * What shedding may not take.
+ *
+ * Diagnosis can be cut to a stub and the queue still decides correctly. These
+ * floors are where cutting further would change an answer rather than blur a
+ * record: deduplication that no longer recognises a retry would apply it twice.
+ */
+const FLOORS = { events: 20, outbox: 20, mergeOperations: 20, dedupe: 64 } as const;
+
 interface DedupeRow {
   key: string;
   sequence: number;
@@ -273,7 +301,86 @@ export class SnapshotQueueStore {
     if (this.doc.dedupe.length > DEDUPE_WINDOW) {
       this.doc.dedupe = [...this.doc.dedupe].sort((a, b) => a.sequence - b.sequence).slice(-DEDUPE_WINDOW);
     }
-    this.cell.write(JSON.stringify(this.doc));
+    this.forgetUnreachableTransitionTimes();
+    this.cell.write(this.serialiseWithinBudget());
+  }
+
+  /**
+   * A timestamp for a chain link the document no longer carries.
+   *
+   * `transitionsRecordedAt` is a sidecar of the chain, keyed by sequence, and the
+   * chain itself is compacted to a window. The sidecar was not, so it kept one
+   * key per transition for the life of the repository.
+   */
+  private forgetUnreachableTransitionTimes(): void {
+    const reachable = new Set(this.state().transitions.map((t) => String(t.transitionSequence)));
+    for (const key of Object.keys(this.doc.transitionsRecordedAt)) {
+      if (!reachable.has(key)) delete this.doc.transitionsRecordedAt[key];
+    }
+  }
+
+  /**
+   * Serialise, and if the result is over budget, shed diagnosis until it fits.
+   *
+   * Order matters, and it is the order of what a reader loses. Events go first:
+   * they duplicate the transition chain and the projection holds them. Then the
+   * outbox, whose side effects have already been performed by the routes that
+   * recorded them. Then settled merge writes, which the projection also holds.
+   * Deduplication is last and stops at a floor, because a window too small to
+   * recognise a retry lets the same command apply twice.
+   *
+   * What is never shed is anything a live decision reaches. If the state alone
+   * exceeds the budget the document is written over it: a queue holding that many
+   * open pull requests has a problem shedding cannot fix, and dropping the queue
+   * to make the bytes fit would be the queue lying about itself.
+   */
+  private serialiseWithinBudget(): string {
+    let json = JSON.stringify(this.doc);
+    if (json.length <= DOCUMENT_BUDGET_BYTES) return json;
+
+    const shed: (() => boolean)[] = [
+      () => this.halve("events", FLOORS.events),
+      () => this.halve("outbox", FLOORS.outbox),
+      () => this.shedSettledMergeOperations(FLOORS.mergeOperations),
+      () => this.halve("dedupe", FLOORS.dedupe),
+    ];
+
+    for (const step of shed) {
+      while (json.length > DOCUMENT_BUDGET_BYTES && step()) {
+        json = JSON.stringify(this.doc);
+      }
+      if (json.length <= DOCUMENT_BUDGET_BYTES) break;
+    }
+    return json;
+  }
+
+  /** Drop the older half of a diagnostic tail. Reports whether anything went. */
+  private halve(field: "events" | "outbox" | "dedupe", floor: number): boolean {
+    const rows = this.doc[field];
+    if (rows.length <= floor) return false;
+    const keep = Math.max(floor, Math.floor(rows.length / 2));
+    this.doc[field] = rows.slice(-keep) as never;
+    return true;
+  }
+
+  /** Same, for merge writes, and never for one whose outcome is still unknown. */
+  private shedSettledMergeOperations(floor: number): boolean {
+    const settled = this.doc.mergeOperations.filter((row) => row.outcome !== null);
+    if (settled.length <= floor) return false;
+    const keep = Math.max(floor, Math.floor(settled.length / 2));
+    const dropped = new Set(settled.slice(0, settled.length - keep).map((row) => row.operationId));
+    this.doc.mergeOperations = this.doc.mergeOperations.filter((row) => !dropped.has(row.operationId));
+    return true;
+  }
+
+  /** What the document weighs right now. Diagnosis, and the bound's own test. */
+  documentBytes(): number {
+    return JSON.stringify(this.doc).length;
+  }
+
+  /** Which transitions the document still remembers a time for. */
+  recordedTransitionKeys(): readonly string[] {
+    return Object.keys(this.doc.transitionsRecordedAt);
   }
 
   /**
@@ -479,13 +586,21 @@ export class SnapshotQueueStore {
     if (this.doc.deadlines.length !== before) this.flush();
   }
 
-  /** Whether anything in the document is past the size it is allowed to be. */
+  /**
+   * Whether anything in the document is past the size it is allowed to be.
+   *
+   * The byte budget is checked here as well as at the write, and it is the check
+   * that matters for a queue already in trouble: a document too large to process
+   * has stopped applying events, so a bound that waits for one never runs. This
+   * is what makes opening the document enough to repair it.
+   */
   private overBounds(): boolean {
     return (
       this.doc.outbox.length > OUTBOX_TAIL ||
       this.doc.mergeOperations.filter((row) => row.outcome !== null).length > MERGE_OPERATION_TAIL ||
       this.doc.events.length > EVENT_TAIL ||
-      this.doc.dedupe.length > DEDUPE_WINDOW
+      this.doc.dedupe.length > DEDUPE_WINDOW ||
+      this.documentBytes() > DOCUMENT_BUDGET_BYTES
     );
   }
 
