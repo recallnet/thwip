@@ -422,6 +422,25 @@ function commandDetail(result: { readonly status: string; readonly detail?: stri
 }
 
 /**
+ * Answer a command, refusing in the shape every other route refuses in.
+ *
+ * These three used to answer a rejected command with `{ result }` and a 409,
+ * which is a success body under a failure status. The dashboard's `api()` helper
+ * reads `{ error }` like it does everywhere else, so the queue's explanation was
+ * reduced to "409" on screen and the dashboard grew a second copy of the request
+ * to get at the real words. A client cannot be the place that knows every shape a
+ * server refuses in: the next route to invent one arrives without a client change.
+ */
+function commandOutcome(
+  c: { json: (body: unknown, status?: 409) => Response },
+  result: { readonly status: string; readonly detail?: string },
+  refusalCode: string,
+): Response {
+  if (result.status !== "rejected") return c.json({ result });
+  return c.json({ error: refusalCode, detail: commandDetail(result) }, 409);
+}
+
+/**
  * Turn a thrown error into something a caller can act on.
  *
  * Every one of these used to surface as "Internal Server Error", and diagnosing a
@@ -1063,7 +1082,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // offer expires in ninety seconds, so telling nobody about it wastes a turn
     // and, on a quiet queue, stalls it entirely.
     await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
-    return c.json({ result }, result.status === "rejected" ? 409 : 200);
+    return commandOutcome(c, result, "RESUME_REFUSED");
   });
 
   /**
@@ -1643,7 +1662,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         reason,
       }),
     );
-    return c.json({ result });
+    // Answered 200 whatever the queue said, so a refused pause read as a paused
+    // queue on every client that checks the status.
+    return commandOutcome(c, result, "PAUSE_REFUSED");
   });
 
   app.post("/v1/queue/:repositoryId/resume", async (c) => {
@@ -1665,7 +1686,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         actorPrincipalId: who.principalId,
       }),
     );
-    return c.json({ result }, result.status === "rejected" ? 409 : 200);
+    return commandOutcome(c, result, "RESUME_REFUSED");
   });
 
   app.post("/v1/queue/:repositoryId/rebaseline", async (c) => {
@@ -1692,7 +1713,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         baseSha,
       }),
     );
-    return c.json({ result });
+    return commandOutcome(c, result, "REBASELINE_REFUSED");
   });
 
   /**
