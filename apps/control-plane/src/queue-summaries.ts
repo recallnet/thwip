@@ -37,6 +37,24 @@ export async function queueSummaries(db: D1Like, organizationId: string): Promis
   // The projection only ever upserts, so every entry a repository has ever had
   // keeps its row in the state it settled in. Counting rows would report a
   // repository that merged forty pull requests as forty waiting, forever.
+  //
+  // Settling is not the only way to leave, either. The authority compacts
+  // settled entries out of its document, so an entry that leaves the live set
+  // stops appearing in every later message and its row keeps whatever state it
+  // was last seen in. Pull request 184 merged on 5 August 2026 while the queue
+  // was down, was compacted away before it recorded the outcome, and was still
+  // being reported here as the head four days later — `Merging` is not terminal,
+  // and it held the lowest ordinal.
+  //
+  // So a row also has to belong to the newest generation projected for its
+  // queue. Nothing guesses at what became of a row that does not: a row at an
+  // older generation is one the authority no longer carries, which is all anyone
+  // can say without inventing an outcome.
+  //
+  // `mark.generation IS NULL` is a queue nobody has projected since the column
+  // arrived. Refusing those rows would empty the dashboard on the deploy that
+  // adds it, so an unprojected queue is trusted whole and the first message
+  // after it corrects the set.
   const settled = TERMINAL_ENTRY_STATES.map(() => "?").join(", ");
   const { results } = await db
     .prepare(
@@ -46,8 +64,12 @@ export async function queueSummaries(db: D1Like, organizationId: string): Promis
               e.primary_reason AS primaryReason
          FROM queue_entries_index e
          JOIN projects p ON p.github_repository_id = e.github_repository_id
+         LEFT JOIN queue_projection_marks m
+                ON m.github_repository_id = e.github_repository_id
+               AND m.base_ref = e.base_ref
         WHERE p.organization_id = ?
           AND e.state NOT IN (${settled})
+          AND (m.generation IS NULL OR e.generation >= m.generation)
         ORDER BY e.github_repository_id, e.fairness_ordinal`,
     )
     .bind(organizationId, ...TERMINAL_ENTRY_STATES)

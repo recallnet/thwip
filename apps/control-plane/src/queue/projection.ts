@@ -106,8 +106,8 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           `INSERT INTO queue_entries_index (
              id, github_repository_id, base_ref, entry_id, pull_request_number,
              sponsor_principal_id, state, primary_reason, fairness_ordinal,
-             scheduler_eligible, cooldown_until, last_attempt_id, head_sha, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
            ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
              state = excluded.state,
              primary_reason = excluded.primary_reason,
@@ -117,6 +117,10 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
              cooldown_until = excluded.cooldown_until,
              last_attempt_id = excluded.last_attempt_id,
              head_sha = excluded.head_sha,
+             -- Which message last saw this entry in the queue. A row left at an
+             -- older generation is one the authority no longer carries, and that
+             -- is the only thing anybody can say about it without guessing.
+             generation = excluded.generation,
              updated_at = excluded.updated_at`,
         )
         .bind(
@@ -133,6 +137,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           entry.cooldownUntil,
           entry.lastAttemptId,
           entry.headSha,
+          message.generation,
         ),
     );
   }
