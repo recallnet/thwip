@@ -1701,16 +1701,24 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // session had selected.
     if (!who.isAdmin) return c.json({ error: "repository admin required" }, 403);
 
-    const body = (await c.req.json().catch(() => ({}))) as { baseSha?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { baseSha?: string; reason?: string };
     if (typeof body.baseSha !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(body.baseSha)) {
       return c.json({ error: "baseSha required" }, 400);
     }
+    // The CLI has asked for a reason since the command existed and this route
+    // dropped it, so the one moment a person overrides the queue's refusal left
+    // no record of what they had checked.
+    if (typeof body.reason !== "string" || body.reason.trim() === "") {
+      return c.json({ error: "a rebaseline requires a reason" }, 400);
+    }
     const baseSha = body.baseSha;
+    const reason = body.reason.trim();
     const { result } = await onQueue(c.env, repositoryId, baseRef, ({ commands }) =>
       commands.rebaseline({
         idempotencyKey: idempotencyKey(c.req.header("idempotency-key"), `rebaseline:${baseSha}`),
         actorPrincipalId: who.principalId,
         baseSha,
+        reason,
       }),
     );
     return commandOutcome(c, result, "REBASELINE_REFUSED");

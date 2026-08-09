@@ -715,13 +715,19 @@ export class QueueCommands {
     );
   }
 
-  rebaseline(input: { idempotencyKey: string; actorPrincipalId: string; baseSha: string }): CommandResult {
+  rebaseline(input: {
+    idempotencyKey: string;
+    actorPrincipalId: string;
+    baseSha: string;
+    reason: string;
+  }): CommandResult {
     return this.store.append({
       idempotencyKey: input.idempotencyKey,
       at: this.clock.now(),
       type: "Rebaselined",
       actorPrincipalId: input.actorPrincipalId,
       baseSha: input.baseSha,
+      reason: input.reason,
     });
   }
 
