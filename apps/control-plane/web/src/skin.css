@@ -165,7 +165,8 @@ input:focus-visible { outline: 2px solid var(--civic); outline-offset: 3px; }
 .gp-btn--sm { padding: var(--s2) var(--s3); font-size: 10px; }
 
 /* The one card on an otherwise empty page: sign-in, and the device code. It
-   asked to be centred from styles.css and never was, because `.gp-panel` sets
+   asked to be centred from the deleted signed-in stylesheet and never was,
+   because `.gp-panel` sets
    its own margin, weighs exactly as much, and was declared after it. */
 .thwip-device-card { max-width: 448px; margin: var(--s7) auto; }
 .thwip-device-card input {

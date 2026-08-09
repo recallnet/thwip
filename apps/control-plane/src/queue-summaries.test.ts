@@ -13,7 +13,7 @@ import type { D1Like } from "./queue/projection.js";
  * would be one object request per repository per page view, which is the
  * spending the thirty-second refresh in `Queue.tsx` already exists to avoid.
  *
- * The projection is what this is for. `queue_projects.md` says so in the
+ * The projection is what this is for. `0005_queue_projection.sql` says so in the
  * migration itself: D1 serves "reads that span organizations — a dashboard
  * listing every queue". One query, no object reads, and it may lag, which is
  * the correct trade for a summary that links to the live view.

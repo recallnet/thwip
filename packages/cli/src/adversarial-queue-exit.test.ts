@@ -50,7 +50,7 @@ describe("ADVERSARIAL: what the CLI makes of the answers the service gives", () 
 
   it("says what to do, not only what happened", () => {
     // The control plane has a plain-language next action for every blocking
-    // reason (apps/control-plane/src/queue/check.ts NEXT_ACTION). Someone at a
+    // reason (turn-check.ts NEXT_ACTION). Someone at a
     // terminal gets the bare code and nothing else.
     const summary = humanSummary({ event: "blocked", reasonCode: "REVIEW_REQUIRED" });
     expect(summary.length, `a person reading "${summary}" is not told what to do`).toBeGreaterThan(
