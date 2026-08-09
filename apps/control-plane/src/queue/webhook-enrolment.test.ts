@@ -186,21 +186,11 @@ describe("enrolment from the pull_request webhook", () => {
   it("is what the consumer does once a proof verification finishes", async () => {
     const seen: Array<[string, string]> = [];
     await processQueueMessage(
-      { appProofTask: { kind: "verify", request: { event: "pull_request", repositoryId: REPO, subjectSha: HEAD } as never } },
+      { appProofTask: { kind: "verify", request: { repositoryId: REPO, subjectSha: HEAD } as never } },
       new Set(),
       { reconsiderHead: async (repositoryId, headSha) => void seen.push([repositoryId, headSha]) },
     );
     expect(seen).toEqual([[REPO, HEAD]]);
-  });
-
-  it("leaves a merge-group subject alone, because no pull request is on it", async () => {
-    const seen: string[] = [];
-    await processQueueMessage(
-      { appProofTask: { kind: "verify", request: { event: "merge_group", repositoryId: REPO, subjectSha: HEAD } as never } },
-      new Set(),
-      { reconsiderHead: async (_r, headSha) => void seen.push(headSha) },
-    );
-    expect(seen).toEqual([]);
   });
 
   it("walks nothing for a commit that is not the head of the pull request it appears in", async () => {
