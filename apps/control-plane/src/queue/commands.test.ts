@@ -5,7 +5,7 @@ import { BranchQueueStore } from "./store.js";
 import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueStateStore } from "./store.js";
 import type { SqlLike } from "./sql.js";
-import { QueueCommands } from "./commands.js";
+import { DEFAULT_TIMINGS, QueueCommands } from "./commands.js";
 
 /**
  * The command layer end to end, including the alarm. Time and identifiers are
@@ -43,6 +43,23 @@ class Clock {
 }
 
 const IDENTITY = { queueKey: "qk", repositoryId: "1315419165", baseRef: "refs/heads/main" };
+
+/** When the clock above starts. */
+const START = Date.UTC(2026, 6, 29, 12, 0, 0);
+
+/** An instant this many seconds after the clock started. */
+const atOffset = (seconds: number): string => new Date(START + seconds * 1000).toISOString();
+
+/**
+ * Far enough past an offer for the sweep to end it, taken from the window
+ * rather than written again. A literal here is how the window and the test that
+ * checks it drift apart.
+ */
+const PAST_THE_OFFER = DEFAULT_TIMINGS.offerSeconds + 30;
+
+/** The same, for the other two windows the sweep ends. */
+const PAST_THE_GRACE = DEFAULT_TIMINGS.graceSeconds + 30;
+const PAST_THE_MERGE_CONFIRM = DEFAULT_TIMINGS.mergeConfirmSeconds + 30;
 
 /**
  * The command layer, over both places the state can live.
@@ -127,7 +144,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     ready(commands, "e1", "alice", 7);
     const offered = await commands.tick({ idempotencyKey: "t1"});
     expect(offered.status).toBe("applied");
-    expect(store.earliestDeadline()).toBe("2026-07-29T12:01:30.000Z");
+    expect(store.earliestDeadline()).toBe(atOffset(DEFAULT_TIMINGS.offerSeconds));
     expect(store.pendingOutbox().map((o) => o.kind)).toEqual(["offer-created"]);
   });
 
@@ -217,7 +234,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       await commands.tick({ idempotencyKey: "t1"});
       const ordinal = store.state().entries.get("e1")!.fairnessOrdinal;
 
-      clock.advance(120);
+      clock.advance(PAST_THE_OFFER);
       const first = await commands.runAlarm();
       expect(first.handled.map((d) => d.kind)).toEqual(["offer"]);
       expect(first.results[0]).toMatchObject({ status: "applied" });
@@ -240,7 +257,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const firstHolder = store.state().activeAttemptId;
       expect(firstHolder).not.toBeNull();
 
-      clock.advance(120);
+      clock.advance(PAST_THE_OFFER);
       await commands.runAlarm();
 
       const after = store.state();
@@ -265,7 +282,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const { store, commands, clock } = harness();
       ready(commands, "e1", "alice", 7);
       await commands.tick({ idempotencyKey: "t1"});
-      clock.advance(120);
+      clock.advance(PAST_THE_OFFER);
 
       const first = await commands.runAlarm();
       const generationAfterFirst = store.generation();
@@ -287,7 +304,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const offered = await commands.tick({ idempotencyKey: "t1"}) as {
         attemptId: string;
       };
-      clock.advance(120);
+      clock.advance(PAST_THE_OFFER);
 
       const due = store.dueDeadlines(clock.now());
       expect(due).toHaveLength(1);
@@ -337,7 +354,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       expect(store.state().entries.get("e1")!.state).toBe("ReconnectGrace");
       expect(store.state().activeAttemptId).toBe(attemptId);
 
-      clock.advance(61);
+      clock.advance(PAST_THE_GRACE);
       const alarm = await commands.runAlarm();
       expect(alarm.handled.map((d) => d.kind)).toEqual(["grace"]);
       expect(store.state().attempts.get(attemptId)!.outcome).toBe("SUPERSEDED");
@@ -349,7 +366,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       const { store, commands, clock } = harness();
       const attemptId = await driveToMergeRequested(commands);
 
-      clock.advance(120);
+      clock.advance(PAST_THE_MERGE_CONFIRM);
       const alarm = await commands.runAlarm();
       expect(alarm.handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
       expect(store.state().entries.get("e1")!.state).toBe("Reconciling");
@@ -360,7 +377,7 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
       // The unknown event starts one bounded confirmation window. Once that
       // expires, the row remains due for the caller's read-only reconciliation;
       // repeated clock handling neither writes again nor floods the outbox.
-      clock.advance(61);
+      clock.advance(PAST_THE_MERGE_CONFIRM);
       expect((await commands.runAlarm()).handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
       expect((await commands.runAlarm()).handled.map((d) => d.kind)).toEqual(["merge-confirm"]);
       expect(store.pendingOutbox().filter((o) => o.kind === "reconcile-merge")).toHaveLength(1);
