@@ -50,15 +50,32 @@ function seedOrg(): void {
   }
 }
 
+/** What the projection has caught up to for a queue. */
+function projectedAt(repositoryId: string, generation: number): void {
+  raw
+    .prepare(
+      `INSERT INTO queue_projection_marks (github_repository_id, base_ref, generation)
+       VALUES (?, 'refs/heads/main', ?)
+       ON CONFLICT (github_repository_id, base_ref) DO UPDATE SET generation = excluded.generation`,
+    )
+    .run(repositoryId, generation);
+}
+
 let entryOrdinal = 0;
-function entry(repositoryId: string, pullRequestNumber: number, state: string, primaryReason: string | null): void {
+function entry(
+  repositoryId: string,
+  pullRequestNumber: number,
+  state: string,
+  primaryReason: string | null,
+  generation = 1,
+): void {
   entryOrdinal += 1;
   raw
     .prepare(
       `INSERT INTO queue_entries_index
          (id, github_repository_id, base_ref, entry_id, pull_request_number, sponsor_principal_id,
-          state, primary_reason, fairness_ordinal)
-       VALUES (?, ?, 'refs/heads/main', ?, ?, 'prn_1', ?, ?, ?)`,
+          state, primary_reason, fairness_ordinal, generation)
+       VALUES (?, ?, 'refs/heads/main', ?, ?, 'prn_1', ?, ?, ?, ?)`,
     )
     .run(
       `qei_${repositoryId}_${pullRequestNumber}`,
@@ -68,6 +85,7 @@ function entry(repositoryId: string, pullRequestNumber: number, state: string, p
       state,
       primaryReason,
       String(entryOrdinal).padStart(4, "0"),
+      generation,
     );
 }
 
@@ -147,5 +165,69 @@ describe("one line of queue per repository", () => {
     entry("333", 5, "Ready", null);
 
     expect(await queueSummaries(db, "org_1")).toEqual([]);
+  });
+});
+
+/**
+ * A row for an entry the queue no longer has.
+ *
+ * The projection only ever upserts, which is right: a message carries one
+ * queue's snapshot, and a projection that deleted whatever a lagging message
+ * did not mention would erase live entries. But the authority compacts settled
+ * entries out of its document, so an entry that leaves the live set stops
+ * appearing in every later message and its row keeps whatever state it was last
+ * seen in, for good.
+ *
+ * `entry_1315419165_184` sat in `Merging` from 5 August 2026. Pull request 184
+ * had merged that afternoon; the queue stopped before it recorded the outcome,
+ * and by the time it came back the entry had been compacted away. Four days
+ * later this function still reported it as the head of the queue, because it is
+ * not a state in `TERMINAL_ENTRY_STATES` and it holds the lowest ordinal. The
+ * dashboard told everybody that a pull request merged the previous week was
+ * integrating now.
+ *
+ * A row cannot be settled on a guess. Nothing knows whether 184 merged or was
+ * abandoned, and writing `Merged` to make the page tidy is the invention this
+ * whole product exists to refuse. What is knowable is that the entry is not in
+ * the authority's live set, because the projection has since written a later
+ * generation without it.
+ */
+describe("a row the queue no longer has an entry for", () => {
+  it("does not report an entry left behind by compaction as the head", async () => {
+    database();
+    seedOrg();
+    // Written when the queue still held it, and never touched again.
+    entry("111", 184, "Merging", null, 3);
+    entry("111", 273, "Ready", null, 9);
+    projectedAt("111", 9);
+
+    const [summary] = await queueSummaries(db, "org_1");
+
+    expect(summary?.head?.pullRequestNumber).toBe(273);
+  });
+
+  it("does not count it as waiting either", async () => {
+    database();
+    seedOrg();
+    entry("111", 184, "Merging", null, 3);
+    entry("111", 273, "Ready", null, 9);
+    projectedAt("111", 9);
+
+    expect((await queueSummaries(db, "org_1"))[0]?.waiting).toBe(1);
+  });
+
+  /**
+   * Every row of a queue nobody has projected since the column existed carries
+   * generation 0, and refusing all of them would empty the dashboard on the
+   * deploy that adds it. An unprojected queue is trusted whole, and the first
+   * message after it corrects the set.
+   */
+  it("trusts every row of a queue the new mark has never been written for", async () => {
+    database();
+    seedOrg();
+    entry("111", 273, "Ready", null, 0);
+    entry("111", 271, "Blocked", "REQUIRED_CHECK_FAILED", 0);
+
+    expect((await queueSummaries(db, "org_1"))[0]?.waiting).toBe(2);
   });
 });
