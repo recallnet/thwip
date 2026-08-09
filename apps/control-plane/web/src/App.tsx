@@ -3,6 +3,15 @@ import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
 import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { QueuePanel } from "./Queue.js";
+import {
+  documentOf,
+  formOf,
+  formRefusal,
+  hasFieldsBeyondTheForm,
+  PROFILES,
+  type FormState,
+  type Profile,
+} from "./proofDefaults.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
 import { api, selectedOrg, useFetch, withOrg } from "./api.js";
 import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
@@ -695,22 +704,15 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
   const { data, error, reload } = useFetch<{ defaults: Record<string, unknown> | null }>(
     "/v1/dashboard/proof-defaults",
   );
+  const [form, setForm] = useState<FormState>({ profile: "fast", required: "" });
   const [text, setText] = useState("");
+  const [raw, setRaw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     if (!data) return;
-    setText(
-      JSON.stringify(
-        data.defaults ?? {
-          version: 1,
-          profile: "fast",
-          required: ["lint", "typecheck", "test"],
-        },
-        null,
-        2,
-      ),
-    );
+    setForm(formOf(data.defaults));
+    setText(JSON.stringify(documentOf(formOf(data.defaults), data.defaults), null, 2));
   }, [data]);
   const save = async (defaults: Record<string, unknown> | null) => {
     setSaving(true);
@@ -727,35 +729,83 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
       setSaving(false);
     }
   };
+  const refusal = formRefusal(form);
   return (
     <Panel
       title="Organization proof defaults"
       meta="repositories inherit these settings; committed thwip.yaml fields override them after protected merge"
     >
       {error && <p className="thwip-error">{error}</p>}
-      <textarea
-        className="thwip-json-field"
-        aria-label="Organization proof defaults"
-        value={text}
-        disabled={!canEdit || saving}
-        onChange={(event) => setText(event.target.value)}
-        rows={9}
-      />
+      {raw ? (
+        <textarea
+          className="thwip-json-field"
+          aria-label="Organization proof defaults"
+          value={text}
+          disabled={!canEdit || saving}
+          onChange={(event) => setText(event.target.value)}
+          rows={12}
+        />
+      ) : (
+        <>
+          <div className="thwip-field">
+            <label htmlFor="proof-profile">Profile</label>
+            <select
+              id="proof-profile"
+              value={form.profile}
+              disabled={!canEdit || saving}
+              onChange={(event) => setForm({ ...form, profile: event.target.value as Profile })}
+            >
+              {PROFILES.map((profile) => (
+                <option key={profile} value={profile}>
+                  {profile}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="thwip-field">
+            <label htmlFor="proof-required">Required suites</label>
+            <input
+              id="proof-required"
+              value={form.required}
+              disabled={!canEdit || saving}
+              placeholder="lint, typecheck, test"
+              onChange={(event) => setForm({ ...form, required: event.target.value })}
+            />
+          </div>
+          <p className="gp-panel__meta">
+            Every suite named here has to pass before a proof counts. A repository can add to this in its own
+            thwip.yaml; it cannot take one away.
+          </p>
+          {hasFieldsBeyondTheForm(data?.defaults ?? null) && (
+            <p className="gp-panel__meta">
+              These defaults also carry settings this form does not show. Saving here keeps them as they are.
+            </p>
+          )}
+        </>
+      )}
+      {refusal && !raw && <p className="thwip-error">{refusal}</p>}
       {saveError && <p className="thwip-error">{saveError}</p>}
       {canEdit ? (
         <div className="thwip-actions">
           <button
             className="gp-btn gp-btn--sm"
-            disabled={saving}
+            disabled={saving || (!raw && refusal !== null)}
             onClick={() => {
+              if (!raw) {
+                void save(documentOf(form, data?.defaults ?? null));
+                return;
+              }
               try {
                 void save(JSON.parse(text) as Record<string, unknown>);
               } catch {
-                setSaveError("defaults must be valid JSON");
+                setSaveError("That is not valid JSON, so nothing was sent.");
               }
             }}
           >
             Save defaults
+          </button>
+          <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => setRaw(!raw)}>
+            {raw ? "Back to the form" : "Edit as JSON"}
           </button>
           <button className="gp-btn gp-btn--sm gp-btn--quiet" disabled={saving} onClick={() => void save(null)}>
             Clear defaults
