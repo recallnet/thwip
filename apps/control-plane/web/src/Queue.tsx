@@ -272,6 +272,125 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
 }
 
 /**
+ * Accepting a base the queue did not sign for.
+ *
+ * The panel used to explain this condition and offer nothing to do about it, so
+ * recovery was CLI-only at exactly the point where a person is meant to look
+ * carefully. What makes it safe is not the confirmation dialog: it is that the
+ * commit named here is the commit the queue observed, and the queue refuses the
+ * submission if it has observed a newer one since. An administrator who reads
+ * this, goes to look at the commit, and comes back to a branch that moved again
+ * is told so rather than accepting something nobody read.
+ */
+function RebaselineRecovery({
+  repositoryId,
+  baseRef,
+  repositoryName,
+  observedBaseSha,
+  chainHead,
+  activeAttemptId,
+  onChanged,
+}: {
+  repositoryId: string;
+  baseRef: string;
+  repositoryName: string;
+  observedBaseSha: string | null;
+  chainHead: { readonly sequence: number; readonly digest: string } | null;
+  activeAttemptId: string | null;
+  onChanged: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const branch = baseRef.replace(/^refs\/heads\//, "");
+
+  if (observedBaseSha === null) {
+    return <p className="thwip-error">The queue has not recorded which commit the branch moved to, so there is nothing to accept yet.</p>;
+  }
+
+  const accept = async () => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      await api(`/v1/queue/${repositoryId}/rebaseline?ref=${encodeURIComponent(baseRef)}`, {
+        method: "POST",
+        body: JSON.stringify({ baseSha: observedBaseSha, reason: reason.trim() }),
+      });
+      setReason("");
+      onChanged();
+    } catch (cause) {
+      setFailed((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="thwip-queue-controls">
+      <dl className="thwip-pairs">
+        <div>
+          <dt>Branch</dt>
+          <dd>
+            {repositoryName} · {branch}
+          </dd>
+        </div>
+        <div>
+          <dt>Last signed base</dt>
+          <dd>{chainHead === null ? "nothing signed yet" : `#${chainHead.sequence} · ${chainHead.digest.slice(0, 19)}`}</dd>
+        </div>
+        <div>
+          <dt>Now on GitHub</dt>
+          <dd>
+            <a
+              href={`https://github.com/${repositoryName}/commit/${observedBaseSha}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <code>{observedBaseSha.slice(0, 12)}</code>
+            </a>
+          </dd>
+        </div>
+      </dl>
+      {activeAttemptId !== null && (
+        <p className="thwip-error">
+          Something still holds the lane. Let it finish or end it before moving the base underneath it.
+        </p>
+      )}
+      <div className="thwip-field">
+        <label htmlFor={`rebaseline-reason-${repositoryId}`}>Reason</label>
+        <input
+          id={`rebaseline-reason-${repositoryId}`}
+          value={reason}
+          disabled={busy}
+          placeholder="what you checked, and why this commit is acceptable"
+          onChange={(event) => setReason(event.target.value)}
+        />
+      </div>
+      <ConfirmAction
+        label="Accept this base"
+        title={`Accept ${observedBaseSha.slice(0, 12)} as the base of ${branch}?`}
+        consequence={
+          <>
+            <p>
+              The queue has no signed record of how {branch} reached this commit. Accepting it says you looked at it
+              and vouch for it, and every merge the queue certifies afterwards is built on that.
+            </p>
+            <p>
+              Merging stays paused. Resuming is a separate decision, so you can look at what is queued before anything
+              moves.
+            </p>
+          </>
+        }
+        confirmLabel="Accept it"
+        busy={busy || reason.trim() === "" || activeAttemptId !== null}
+        onConfirm={() => void accept()}
+      />
+      {failed && <p className="thwip-error">{failed}</p>}
+    </div>
+  );
+}
+
+/**
  * Pause and resume, for somebody who can.
  *
  * The panel had said "an administrator can resume it" and offered nothing to do
@@ -472,6 +591,17 @@ export function QueuePanel({
                 ? ""
                 : " An administrator can resume it."}
           </p>
+        )}
+        {canAdminister && snapshot.paused && snapshot.rebaselineRequired && (
+          <RebaselineRecovery
+            repositoryId={repositoryId}
+            baseRef={baseRef}
+            repositoryName={repositoryName}
+            observedBaseSha={snapshot.baseSha}
+            chainHead={snapshot.chainHead}
+            activeAttemptId={snapshot.activeAttemptId}
+            onChanged={load}
+          />
         )}
         {canAdminister && (
           <QueueControls
