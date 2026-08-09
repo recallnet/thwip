@@ -34,6 +34,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { breakGlassRefusal, excuses, parseBreakGlass } from "./break-glass.mjs";
 import { deployIdentity, liveSchemaUrl } from "./deploy-identity.mjs";
 import {
   blockingMigrations,
@@ -66,11 +67,27 @@ if (identity.refusal !== null) {
   process.exit(1);
 }
 
-const allow = process.env.THWIP_DEPLOY_ANYWAY === "1";
-if (behind !== "0" && behind !== "?" && !allow) {
+// One flag used to excuse every refusal below at once, so reaching for it to
+// ship from a branch also waved through the schema checks. An exception names
+// the guard it excuses, says why, and is published by the worker afterwards.
+const declared = parseBreakGlass(process.env.THWIP_BREAK_GLASS);
+if (declared.error !== null) {
+  console.error(`\n${declared.error}`);
+  process.exit(1);
+}
+if (declared.guards.length > 0) {
+  console.warn(`\nbreak-glass: excusing ${declared.guards.join(", ")}`);
+  console.warn(`reason: ${declared.reason}`);
+  console.warn(`This is published at /health for as long as the worker runs it.`);
+}
+
+if (behind !== "0" && behind !== "?" && !excuses(declared, "behind-main")) {
   console.error(
-    `\nRefusing: this checkout is missing ${behind} commit(s) that are on origin/main, so deploying it would\n` +
-      `revert whatever those commits changed. Rebase, or set THWIP_DEPLOY_ANYWAY=1 if that is genuinely intended.`,
+    `\n${breakGlassRefusal(
+      "behind-main",
+      `this checkout is missing ${behind} commit(s) that are on origin/main, so deploying it\n` +
+        `would revert whatever those commits changed. Rebase, or:`,
+    )}`,
   );
   process.exit(1);
 }
@@ -95,10 +112,13 @@ if (branch !== "main") {
     for (const b of others.slice(0, 20)) console.warn(`  ${b}`);
     if (others.length > 20) console.warn(`  ... and ${others.length - 20} more`);
   }
-  if (!allow) {
+  if (!excuses(declared, "unmerged-tree")) {
     console.error(
-      `\nRefusing: deploy from main so the worker matches what has been reviewed and merged.\n` +
-        `Set THWIP_DEPLOY_ANYWAY=1 to deploy this branch anyway, having read the list above.`,
+      `\n${breakGlassRefusal(
+        "unmerged-tree",
+        `deploy from main so the worker matches what has been reviewed and merged.\n` +
+          `Having read the list above:`,
+      )}`,
     );
     process.exit(1);
   }
@@ -136,10 +156,13 @@ try {
   const response = await fetch(schemaUrl, { headers: { accept: "application/json" } });
   if (response.status === 404) {
     console.error(
-      `\nRefusing: ${schemaUrl} answered 404, so the live Worker predates the endpoint this gate reads.\n` +
-        `Deploy once with THWIP_DEPLOY_ANYWAY=1 to put it there, then this check works from now on.`,
+      `\n${breakGlassRefusal(
+        "schema-endpoint-missing",
+        `${schemaUrl} answered 404, so the live Worker predates the endpoint this gate reads.\n` +
+          `Deploying once puts it there and this check works from then on:`,
+      )}`,
     );
-    process.exit(allow ? 0 : 1);
+    process.exit(excuses(declared, "schema-endpoint-missing") ? 0 : 1);
   }
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const body = await response.json();
@@ -153,17 +176,21 @@ try {
 
 if (unapplied === null) {
   // An unreadable answer is not a clean one.
-  if (!allow) {
+  if (!excuses(declared, "schema-unreadable")) {
     console.error(
-      `\nRefusing: ${schemaUrl} could not be read, so nothing here knows whether the schema\n` +
-        `is ahead of or behind this code. Check the live Worker is up, or set THWIP_DEPLOY_ANYWAY=1.`,
+      `\n${breakGlassRefusal(
+        "schema-unreadable",
+        `${schemaUrl} could not be read, so nothing here knows whether the schema is ahead\n` +
+          `of or behind this code. Check the live Worker is up, or:`,
+      )}`,
     );
     process.exit(1);
   }
 } else {
   const blockers = blockingMigrations(migrations, unapplied);
-  if (blockers.length > 0 && !allow) {
+  if (blockers.length > 0 && !excuses(declared, "pending-migrations")) {
     console.error(`\n${formatSchemaRefusal(blockers, targetEnv)}`);
+    console.error(`\n${breakGlassRefusal("pending-migrations", "the schema this code needs is not there yet.")}`);
     process.exit(1);
   }
   const deferred = unapplied.filter((name) => !blockers.includes(name));

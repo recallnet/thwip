@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { readException } from "./deploy-exception.js";
 import { CompactSign, createRemoteJWKSet, jwtVerify } from "jose";
 import { sha256Fingerprint, verifySshSigEd25519 } from "./sshsig-verify.js";
 import { isWorkerOwnedPath } from "./worker-routes.js";
@@ -382,6 +383,11 @@ app.get("/health", async (c) => {
       ageSeconds,
       stale: ageSeconds > TICK_STALE_SECONDS,
     },
+    // Null on an ordinary deploy. When this worker went out past a gate, it says
+    // which gate and why, signed with everything else here, for as long as it is
+    // the worker running. The watchdog reads it, so an exception nobody comes
+    // back to clear is a failing check rather than a forgotten one.
+    exception: readException(c.env.DEPLOY_EXCEPTION),
   };
   const jws = await signPayload(c.env, payload, "thwip-health+jws");
   // Never from a cache. Cloudflare's edge served this route from cache within

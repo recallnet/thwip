@@ -35,3 +35,17 @@ jobs:
             exit 1
           fi
           echo "last tick ${age}s ago, by $(echo "$health" | jq -r '.tick.source')"
+
+          # A break-glass deploy is unreviewed code in production, and the only
+          # thing that reliably ends one is somebody being reminded. On 9 August
+          # the queue could not merge its own repair, the repair went out from a
+          # branch, and nothing outside one terminal knew. An ordinary deploy
+          # from main clears the stamp, so this goes quiet by itself once the
+          # tree it excused has merged and shipped the usual way.
+          exception=$(echo "$health" | jq -r '.exception // empty')
+          if [ -n "$exception" ]; then
+            echo "$exception" | jq .
+            echo "::error::production is running a break-glass deploy: $(echo "$exception" | jq -r '.reason')"
+            echo "::error::deployed from $(echo "$exception" | jq -r '.tree') at $(echo "$exception" | jq -r '.at'), excusing $(echo "$exception" | jq -r '.guards | join(", ")')"
+            exit 1
+          fi
