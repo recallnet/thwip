@@ -460,6 +460,18 @@ function JumpToProject() {
   );
 }
 
+/**
+ * Whether to offer this reader the controls an administrator has.
+ *
+ * A hint, not the answer. The control plane decides per repository — an owner of
+ * the organization can hold no administrator rights on one of its repositories —
+ * and refuses with a reason the panel shows. This only decides whether a button
+ * is worth putting in front of somebody.
+ */
+function isOrgAdmin(me: Me): boolean {
+  return me.viewer.githubOrgRole === "admin" || me.viewer.githubOrgRole === "owner";
+}
+
 interface ProjectRow {
   id: string;
   github_repository_id: string;
@@ -993,6 +1005,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           repositoryId={project.github_repository_id}
           baseRef={`refs/heads/${project.default_branch}`}
           repositoryName={project.github_name}
+          canAdminister={isOrgAdmin(me)}
         />
       )}
       {active === "access" && <ProjectAccess projectId={project.id} me={me} />}
@@ -1560,7 +1573,7 @@ function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
         </button>
         <pre className="thwip-code-block">{prompt}</pre>
       </Panel>
-      <QueueEnrolment project={p} canAdminister={role === "admin" || role === "owner"} />
+      <QueueEnrolment project={p} canAdminister={isOrgAdmin(me)} />
     </>
   );
 }
@@ -2151,35 +2164,6 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
  * a single combined view would hide that `main` and `release` are independent
  * protected resources.
  */
-function QueueTab() {
-  const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-
-  const enabled = data.projects.filter((p) => p.enabled === 1);
-  if (enabled.length === 0) {
-    return (
-      <Panel title="Queue">
-        <p className="gp-panel__meta">
-          No project is enabled yet. Enable one under Projects, then run <code>thwip ship --wait</code>.
-        </p>
-      </Panel>
-    );
-  }
-
-  return (
-    <>
-      {enabled.map((project) => (
-        <QueuePanel
-          key={project.id}
-          repositoryId={project.github_repository_id}
-          baseRef={`refs/heads/${project.default_branch}`}
-          repositoryName={project.github_name}
-        />
-      ))}
-    </>
-  );
-}
 
 /* ---------- router ---------- */
 
