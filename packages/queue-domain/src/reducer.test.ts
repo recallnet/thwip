@@ -639,7 +639,12 @@ describe("reducer", () => {
       );
       state = applyEvent(
         state,
-        ev({ type: "Rebaselined", actorPrincipalId: "admin", baseSha: "x".repeat(40) }),
+        ev({
+          type: "Rebaselined",
+          actorPrincipalId: "admin",
+          baseSha: "x".repeat(40),
+          reason: "inspected the commit and accepted it",
+        }),
       );
       state = applyEvent(state, ev({ type: "QueueResumed", actorPrincipalId: "admin" }));
       expect(state.paused).toBe(false);

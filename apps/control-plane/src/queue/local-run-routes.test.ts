@@ -608,7 +608,15 @@ describe("the receipt the machine signs", () => {
     await withQueueState(db, REPO, REF, (store) => {
       const commands = commandsFor(store);
       commands.observedExternalTransition({ idempotencyKey: `external:${moved}`, observedBaseSha: moved });
-      commands.rebaseline({ idempotencyKey: "rebaseline:1", actorPrincipalId: "alice", baseSha: BASE });
+      // The commit the branch actually moved to. Rebaselining to anything else
+      // would leave the queue's base disagreeing with GitHub, which is the
+      // state this whole condition exists to get out of.
+      commands.rebaseline({
+        idempotencyKey: "rebaseline:1",
+        actorPrincipalId: "alice",
+        baseSha: moved,
+        reason: "inspected the commit and accepted it",
+      });
       commands.resume({ idempotencyKey: "resume:1", actorPrincipalId: "alice" });
     });
 

@@ -445,7 +445,12 @@ describe.each(STORES)("QueueCommands over $name", ({ make }) => {
     expect(commands.resume({ idempotencyKey: "r1", actorPrincipalId: "admin" })).toMatchObject({
       status: "rejected",
     });
-    commands.rebaseline({ idempotencyKey: "rb1", actorPrincipalId: "admin", baseSha: "x".repeat(40) });
+    commands.rebaseline({
+      idempotencyKey: "rb1",
+      actorPrincipalId: "admin",
+      baseSha: "x".repeat(40),
+      reason: "inspected the commit and accepted it",
+    });
     expect(commands.resume({ idempotencyKey: "r1", actorPrincipalId: "admin" })).toMatchObject({
       status: "applied",
     });
