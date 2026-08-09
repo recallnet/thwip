@@ -633,6 +633,15 @@ select.gp-btn:hover {
   }
 }
 
+/* The controls sit under the sentence that says the queue is stopped, indented
+   from it, so they read as the answer to it rather than as another feature of
+   the panel. */
+.thwip-queue-controls {
+  margin: var(--s3) 0 var(--s4);
+  padding-left: var(--s3);
+  border-left: 2px solid var(--rule);
+}
+
 .thwip-json-field {
   width: 100%;
   font-family: var(--mono);

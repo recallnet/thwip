@@ -271,14 +271,106 @@ function ChainHealthPanel({ repositoryId, baseRef }: { repositoryId: string; bas
   );
 }
 
+/**
+ * Pause and resume, for somebody who can.
+ *
+ * The panel had said "an administrator can resume it" and offered nothing to do
+ * it with, so the administrator reading that sentence went to the CLI. The
+ * server is the authority on who may: `canAdminister` is the organization role,
+ * which is a hint, and a reader who is an owner here but not an administrator of
+ * this repository is refused by the route and told so.
+ *
+ * A pause needs a reason because the reason is what the next person to look at a
+ * stopped queue reads.
+ */
+function QueueControls({
+  repositoryId,
+  baseRef,
+  paused,
+  rebaselineRequired,
+  onChanged,
+}: {
+  repositoryId: string;
+  baseRef: string;
+  paused: boolean;
+  rebaselineRequired: boolean;
+  onChanged: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const send = async (action: "pause" | "resume", body: unknown) => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      await api(`/v1/queue/${repositoryId}/${action}?ref=${encodeURIComponent(baseRef)}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setReason("");
+      onChanged();
+    } catch (cause) {
+      setFailed((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // A rebaseline comes first, and it is not this control. Offering resume here
+  // would be offering a button whose only outcome is a refusal.
+  if (paused && rebaselineRequired) return failed === null ? null : <p className="thwip-error">{failed}</p>;
+
+  return (
+    <div className="thwip-queue-controls">
+      {paused ? (
+        <div className="thwip-actions">
+          <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void send("resume", {})}>
+            Resume merging
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="thwip-field">
+            <label htmlFor={`pause-reason-${repositoryId}`}>Reason</label>
+            <input
+              id={`pause-reason-${repositoryId}`}
+              value={reason}
+              disabled={busy}
+              placeholder="why merging should stop"
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </div>
+          <ConfirmAction
+            label="Pause merging"
+            title="Stop this queue merging anything?"
+            consequence={
+              <p>
+                Nothing merges on this branch until somebody resumes it. Whatever holds the lane keeps its place, and
+                every entry behind it waits where it is.
+              </p>
+            }
+            confirmLabel="Pause it"
+            busy={busy || reason.trim() === ""}
+            onConfirm={() => void send("pause", { reason: reason.trim() })}
+          />
+        </>
+      )}
+      {failed && <p className="thwip-error">{failed}</p>}
+    </div>
+  );
+}
+
 export function QueuePanel({
   repositoryId,
   baseRef,
   repositoryName,
+  canAdminister,
 }: {
   repositoryId: string;
   baseRef: string;
   repositoryName: string;
+  canAdminister: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -376,8 +468,19 @@ export function QueuePanel({
               : `Merging is paused: ${blockedNextAction(snapshot.pauseReason)}`}
             {snapshot.rebaselineRequired
               ? " The branch moved outside the queue, so an administrator has to rebaseline before merging resumes."
-              : " An administrator can resume it."}
+              : canAdminister
+                ? ""
+                : " An administrator can resume it."}
           </p>
+        )}
+        {canAdminister && (
+          <QueueControls
+            repositoryId={repositoryId}
+            baseRef={baseRef}
+            paused={snapshot.paused}
+            rebaselineRequired={snapshot.rebaselineRequired}
+            onChanged={load}
+          />
         )}
 
         {snapshot.entries.length === 0 && (
