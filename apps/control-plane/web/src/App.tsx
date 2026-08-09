@@ -1612,9 +1612,21 @@ function Profile({ me }: { me: Me }) {
   const [showPrompt, setShowPrompt] = useState(false);
   const prompt = developerSetupPrompt();
 
+  const [denying, setDenying] = useState<string | null>(null);
+  const [denyError, setDenyError] = useState<string | null>(null);
+  // A failing request used to reject an unawaited promise, so a denial that the
+  // control plane refused left the row exactly as it was and said nothing.
   const deny = async (keyId: string) => {
-    await api(`/v1/dashboard/devices/${keyId}/revoke`, { method: "POST", body: "{}" });
-    reload();
+    setDenying(keyId);
+    setDenyError(null);
+    try {
+      await api(`/v1/dashboard/devices/${keyId}/revoke`, { method: "POST", body: "{}" });
+      reload();
+    } catch (e) {
+      setDenyError((e as Error).message);
+    } finally {
+      setDenying(null);
+    }
   };
 
   if (error) return <p className="thwip-error">{error}</p>;
@@ -1671,13 +1683,26 @@ function Profile({ me }: { me: Me }) {
                     </td>
                     <td>
                       {cached && !cached.revoked_at && (
-                        <button
-                          className="gp-btn gp-btn--sm gp-btn--danger"
-                          onClick={() => void deny(cached.key_id)}
-                          title="Stop accepting proofs signed by this key in this organization."
-                        >
-                          Deny in this org
-                        </button>
+                        <ConfirmAction
+                          label="Deny in this org"
+                          title="Stop accepting proofs signed by this key?"
+                          consequence={
+                            <>
+                              <p>
+                                Every proof this key has signed stops counting here, including proofs already sitting
+                                on open pull requests. Those pull requests go back to unverified until something signs
+                                them again.
+                              </p>
+                              <p>
+                                The key stays on your GitHub account and keeps working everywhere else. Nothing in the
+                                dashboard can undo this.
+                              </p>
+                            </>
+                          }
+                          confirmLabel="Deny it"
+                          busy={denying === cached.key_id}
+                          onConfirm={() => void deny(cached.key_id)}
+                        />
                       )}
                     </td>
                   </tr>
@@ -1686,6 +1711,7 @@ function Profile({ me }: { me: Me }) {
             </tbody>
           </table>
         )}
+        {denyError && <p className="thwip-error">{denyError}</p>}
         <p className="gp-panel__meta">
           Add or remove keys in{" "}
           <a href="https://github.com/settings/keys" target="_blank" rel="noreferrer">
