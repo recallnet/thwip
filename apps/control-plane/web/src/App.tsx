@@ -773,10 +773,10 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
  *
  * The project row carries its own `last_outcome`, and for repositories whose
  * verifications were recorded before the row was linked it is null, so the
- * column printed an em dash while the Overview page listed those same
- * verifications by name one screen earlier. Two readings of one fact, and the
- * emptier one won. The observations feed is the same feed Overview reads, so it
- * answers here too when the row has nothing.
+ * column printed an em dash while the same verifications were listed by name on
+ * the operations page. Two readings of one fact, and the emptier one won. The
+ * observations feed is the same feed operations reads, so it answers here too
+ * when the row has nothing.
  */
 interface LastVerification {
   outcome: string | null;
