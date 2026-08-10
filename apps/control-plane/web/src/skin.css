@@ -248,18 +248,22 @@ select.gp-btn:hover {
   letter-spacing: 0.13em;
   text-transform: uppercase;
   padding: var(--s1) var(--s2);
-  border: 1px solid var(--rule);
-  background: var(--paper);
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
   color: var(--muted);
 }
 
-/* A status chip belongs to a column, so every one is the same box. They were
-   drawn ad hoc at eight call sites and came out at three different widths. */
+/* A status chip belongs to a column, so every one is the same label. They
+   were drawn ad hoc at eight call sites and came out at three different
+   widths. The colored left rule reads as a tick on the lane, not as a
+   button: nothing here is clickable. */
 .gp-chip--status {
   min-width: var(--status-width);
   text-align: center;
   white-space: nowrap;
-  border-left-width: 3px;
+  border-bottom: none;
+  border-left: 3px solid var(--rule);
 }
 .gp-chip--status.is-ok { border-left-color: var(--pass); color: var(--ink); }
 .gp-chip--status.is-wait { border-left-color: var(--civic); color: var(--ink); }
