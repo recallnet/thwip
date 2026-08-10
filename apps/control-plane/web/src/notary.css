@@ -210,6 +210,37 @@
 .nt-qa dd ul { margin: 0.6em 0 0; padding-left: 1.2em; }
 .nt-qa dd li + li { margin-top: 0.3em; }
 
+/* ---------- the numbered summary on the install page ---------- */
+
+.nt-steps {
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: nt-step;
+  max-width: 66ch;
+}
+.nt-steps li {
+  counter-increment: nt-step;
+  position: relative;
+  padding: 0 0 12px 34px;
+  color: var(--muted);
+  font-size: 15.5px;
+}
+.nt-steps li::before {
+  content: counter(nt-step, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  padding: 3px 5px;
+}
+.nt-steps b { color: var(--ink); }
+.nt-steps code { color: var(--ink); }
+
 /* ---------- the agent prompt ---------- */
 
 .nt-prompt {

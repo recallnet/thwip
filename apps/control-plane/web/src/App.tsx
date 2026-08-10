@@ -143,9 +143,9 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <a href="/llms.txt">/llms.txt</a>.
         </p>
         <dl className="nt-qa">
-          {parseFaq(faqSource).map(({ question, answer }) => (
+          {parseFaq(faqSource).map(({ question, answer, slug }) => (
             <React.Fragment key={question}>
-              <dt>{question}</dt>
+              <dt id={slug}>{question}</dt>
               <dd>{renderBlocks(answer)}</dd>
             </React.Fragment>
           ))}
@@ -176,6 +176,31 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
               Paste this into your coding agent. It installs the CLI, signs you in through a device code that
               works over SSH, and stops for your approval at every step that changes a file or your GitHub
               account. Raw copy at <a href="/install.md">/install.md</a>.
+            </p>
+            <p>What the prompt does, for a human reading without an agent:</p>
+            <ol className="nt-steps">
+              <li>
+                <b>Install the CLI.</b> One global install of <code>@recallnet/thwip</code>; the command is{" "}
+                <code>thwip</code>, and Node 22 or newer is required.
+              </li>
+              <li>
+                <b>Sign in.</b> <code>thwip login</code> prints a URL and a short code; you open the URL in your
+                own browser and approve. The session belongs to you, not to the agent.
+              </li>
+              <li>
+                <b>Register a signing key.</b> <code>thwip keys status</code> says which key would sign and
+                whether GitHub lists it as a <b>signing</b> key. The most common mistake is registering the key as
+                an authentication key instead, and thwip only reads signing keys.{" "}
+                <a href="/faq#where-do-signing-keys-come-from">Keys come from your GitHub account</a>.
+              </li>
+              <li>
+                <b>Report back.</b> You get the fingerprint that will appear in your proofs, the GitHub account
+                it is attributed to, and the key file it came from.
+              </li>
+            </ol>
+            <p>
+              That is the whole machine. Setting up a <em>repository</em> is a separate prompt on the project's
+              page in the <a href="/dashboard">dashboard</a>.
             </p>
             <figure className="nt-record">
               <div className="nt-record__head">
