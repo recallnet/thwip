@@ -1031,6 +1031,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         409,
       );
     }
+    // A draft cannot take a turn, so it gets no place in line. GitHub's
+    // `ready_for_review` event re-runs the same join and admits it then.
+    if (placement.draft) {
+      return c.json(
+        { error: "PR_DRAFT", detail: "mark the pull request ready for review before it can join the queue" },
+        409,
+      );
+    }
     const who = c.get("caller");
     const sponsorPrincipalId = placement.authorIsBot
       ? who.principalId
