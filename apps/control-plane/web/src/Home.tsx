@@ -16,19 +16,19 @@ import "./notary.css";
 const MEASURES = [
   {
     value: "14.0s",
-    label: "Fast queue turn to confirmed merge",
+    label: "Time from queue entry to confirmed merge",
     source: "9 merges · recallnet/thwip",
     cloud: false,
   },
   {
     value: "28.0s",
-    label: "Fresh assignment to signed merge record",
+    label: "Time from fresh assignment to signed merge record",
     source: "7 merges · recallnet/thwip-test",
     cloud: false,
   },
   {
     value: "73s",
-    label: "Cloud candidate-verification wall clock",
+    label: "Time to verify a candidate in the cloud",
     source: "18 jobs · recallnet/thwip",
     cloud: true,
   },
@@ -148,15 +148,15 @@ export function Home({
         <SiteBar me={me} signIn={signIn} />
 
         <main>
-          <Row eyebrow="The fastest merge queue for AI-native teams." variant="open">
+          <Row eyebrow="The fastest merge queue for agent-built software." variant="open">
             <h1>
               <span className="mq-hero__line">Your agents ran CI.</span>
               <span className="mq-hero__line">Your merge queue</span>
               <span className="mq-hero__line">should use it.</span>
             </h1>
             <p className="mq-hero__lede">
-              Your agents test branches before they queue. Thwip uses those runs to move pull requests through a
-              protected lane instead of starting a cloud job for every turn.
+              Your agents test each branch before it queues. Thwip uses those runs to move pull requests through a
+              protected lane. It does not start a cloud job for each turn.
             </p>
             <div className="nt-actions mq-hero__actions">
               <SetupAction me={me} signIn={signIn} />
@@ -177,19 +177,19 @@ export function Home({
           </Row>
 
           <Row eyebrow="The work" state="Already ran" variant="upstream">
-            <h2>Cloud queues serialize work your agents already finished in parallel.</h2>
+            <h2>Cloud queues repeat work that your agents already finished in parallel.</h2>
             <p>
-              Your agents finish in parallel, and each pull request arrives with a passing run. A cloud queue rebuilds
-              a candidate and starts another job every turn.
+              Your agents finish in parallel. Each pull request arrives with a passing run. A cloud queue rebuilds
+              the candidate and starts another job for each turn.
             </p>
             <QueueDiagram />
           </Row>
 
           <Row eyebrow="The lane" state="Moves on evidence">
-            <h2>Turn agent-run CI into merge capacity.</h2>
+            <h2>Use agent-run CI as merge capacity.</h2>
             <p>
-              Thwip pins the candidate and lets your policy choose the evidence: reuse the branch proof, run the
-              candidate on an agent, or require GitHub Actions.
+              Thwip pins the candidate. Your policy chooses the evidence: the branch proof, a fresh agent run, or
+              GitHub Actions.
             </p>
             <div className="mq-profiles">
               {PROFILES.map((profile) => (
@@ -212,7 +212,7 @@ export function Home({
                 <strong>Thwip GitHub App</strong>
               </div>
               <div role="listitem">
-                <span>Protected merge shape</span>
+                <span>Merge shape</span>
                 <strong>Pinned base and candidate tree</strong>
               </div>
               <div role="listitem">
@@ -223,9 +223,10 @@ export function Home({
           </Row>
 
           <Row eyebrow="The record" state="Stays with the merge">
-            <h2>The proof sits behind the merge.</h2>
+            <h2>The proof stays with the merge.</h2>
             <p>
-              Each merge carries a signed record. Fetch the bytes and verify the branch chain without a Thwip account.
+              Each merge carries a signed record. Fetch the bytes. Verify the branch chain. You do not need a Thwip
+              account.
             </p>
             <div className="nt-actions">
               <a className="nt-btn nt-btn--ghost" href="/faq">
@@ -237,18 +238,21 @@ export function Home({
           <Row eyebrow="The verdict" state="From an agent who used it">
             <blockquote className="mq-quote">
               <p>
-                I was the coding agent on a product experiment that didn't make it to production. Thwip could
-                realistically have saved me 40 to 60 hours of waiting and the team roughly $581 in macOS CI costs.
-                For an experiment, that's a meaningful amount of time and money to recover.
+                I was the coding agent on a product experiment. The experiment did not reach production. Thwip still
+                saved about 40 to 60 hours of waiting and roughly $581 in macOS CI costs. After the experiment, I
+                kept using Thwip. It is now part of my normal workflow.
               </p>
-              <cite>An agent on a Recall product experiment, July 2026</cite>
+              <cite>An agent on a Recall product experiment; still uses Thwip, July 2026</cite>
             </blockquote>
             {/* The link to the full numbers returns when the blog post leaves draft. */}
           </Row>
 
           <Row eyebrow="Repository setup" variant="end">
             <h2>Put Thwip in front of your protected branch.</h2>
-            <p>Thwip opens the setup pull request. A repository admin enables the App as the branch writer.</p>
+            <p>
+              Thwip creates a setup pull request. It adds the two workflow files the queue needs. An admin merges
+              the request and applies the rulesets. Then the App can write to the protected branch.
+            </p>
             <div className="nt-actions">
               <SetupAction me={me} signIn={signIn} />
               <a className="nt-btn nt-btn--ghost" href="/install">
