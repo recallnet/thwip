@@ -171,31 +171,31 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
             Install<b>Developer setup</b>
           </div>
           <div className="nt-body">
-            <h2>Setting up your machine is a prompt, not a checklist.</h2>
+            <h2>Machine setup is a prompt, not a checklist.</h2>
             <p>
-              Paste this into your coding agent. It installs the CLI, signs you in through a device code that
-              works over SSH, and stops for your approval at every step that changes a file or your GitHub
-              account. Raw copy at <a href="/install.md">/install.md</a>.
+              Paste this prompt into your coding agent. The prompt installs the CLI. It signs you in with a device
+              code that works over SSH. It stops at each step that changes a file or your GitHub account, and waits
+              for your approval. Raw copy at <a href="/install.md">/install.md</a>.
             </p>
-            <p>What the prompt does, for a human reading without an agent:</p>
+            <p>What the prompt does:</p>
             <ol className="nt-steps">
               <li>
-                <b>Install the CLI.</b> One global install of <code>@recallnet/thwip</code>; the command is{" "}
-                <code>thwip</code>, and Node 22 or newer is required.
+                <b>Install the CLI.</b> One global install of <code>@recallnet/thwip</code>. The command is{" "}
+                <code>thwip</code>. Node 22 or newer is required.
               </li>
               <li>
-                <b>Sign in.</b> <code>thwip login</code> prints a URL and a short code; you open the URL in your
+                <b>Sign in.</b> <code>thwip login</code> prints a URL and a short code. You open the URL in your
                 own browser and approve. The session belongs to you, not to the agent.
               </li>
               <li>
-                <b>Register a signing key.</b> <code>thwip keys status</code> says which key would sign and
-                whether GitHub lists it as a <b>signing</b> key. The most common mistake is registering the key as
-                an authentication key instead, and thwip only reads signing keys.{" "}
+                <b>Register a signing key.</b> <code>thwip keys status</code> says which key would sign. It also
+                says whether GitHub lists the key as a <b>signing</b> key. The most common mistake is to register
+                the key as an authentication key. Thwip reads signing keys only.{" "}
                 <a href="/faq#where-do-signing-keys-come-from">Keys come from your GitHub account</a>.
               </li>
               <li>
-                <b>Report back.</b> You get the fingerprint that will appear in your proofs, the GitHub account
-                it is attributed to, and the key file it came from.
+                <b>Report back.</b> You get the fingerprint that appears in your proofs. You also get the GitHub
+                account the proof names, and the key file it came from.
               </li>
             </ol>
             <p>
