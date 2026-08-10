@@ -40,12 +40,12 @@ Four.
 
 - **fast**: a signed local proof with no pre-run contact with the control
   plane. Works fully offline before push.
-- **remote**: the pipeline runs in GitHub for every required check
-  (conventional remote CI).
 - **fresh**: the required suites run on your own machine. The queue signs an
   assignment naming the candidate tree and the suites to run, your machine
   runs them and signs a receipt naming what ran and against what tree, and the
   control plane checks the receipt against the assignment before it merges.
+- **remote**: the pipeline runs in GitHub for every required check
+  (conventional remote CI).
 - **audited**: fresh plus a second, independent run of the same suites in
   GitHub Actions. The merge waits on both the local receipt and that remote
   verdict.
