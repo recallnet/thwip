@@ -1553,6 +1553,14 @@ export async function queueFromPullRequest(env: Env, payload: {
     .state()
     .entries.get(entryId);
 
+  // A draft gets no entry: it cannot take a turn, and `ready_for_review` runs
+  // this walk again with `draft: false`, which admits it then. An existing
+  // entry is different — a ready pull request that became a draft stays in
+  // place, blocked — so only drafts with no entry are skipped.
+  if (pr?.draft === true && placed === undefined) {
+    return { handled: true, detail: "draft pull requests join the queue when marked ready" };
+  }
+
   // A bot has no principal and no fairness share, so it cannot sponsor its own
   // pull request. `user.type` was read from GitHub, declared on this payload,
   // and never used, which is why `SPONSOR_REQUIRED` had no writer and a

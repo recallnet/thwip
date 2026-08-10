@@ -108,6 +108,22 @@ describe("joining the queue", () => {
     expect(await entry(e)).toBeUndefined();
   });
 
+  it("refuses a draft pull request instead of placing it", async () => {
+    const e = env();
+    const routes = app({
+      pullRequestPlacement: async () => ({
+        authorGithubUserId: "2",
+        baseRef: REF,
+        authorIsBot: false,
+        draft: true,
+        headSha: "a".repeat(40),
+      }),
+    });
+    const response = await join(routes, e);
+    expect(response.status).toBe(409);
+    expect(await entry(e)).toBeUndefined();
+  });
+
   /**
    * The caller names the branch, and nothing used to check it against the
    * branch the pull request actually targets. A mismatch put a second entry for
