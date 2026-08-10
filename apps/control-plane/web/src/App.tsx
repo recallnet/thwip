@@ -1536,12 +1536,11 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <>
-      <Panel title={`Access · ${data.project.github_name}`} meta="from GitHub; who may sign a proof for this repository">
+      <Panel title={`Access · ${data.project.github_name}`} meta="who may sign a proof for this repository">
         <table className="thwip-table">
           <thead>
             <tr>
               <th>Member</th>
-              <th>Org role</th>
               <th>Permission</th>
               <th>Status</th>
             </tr>
@@ -1553,9 +1552,6 @@ function ProjectAccess({ projectId, me }: { projectId: string; me: Me }) {
                   <a href={`https://github.com/${g.github_login}`} target="_blank" rel="noreferrer">
                     <code>{g.github_login}</code>
                   </a>
-                </td>
-                <td>
-                  {g.github_org_role === "outside" ? <Chip>outside collaborator</Chip> : (g.github_org_role ?? "member")}
                 </td>
                 <td>{g.permission}</td>
                 <td>
