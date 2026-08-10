@@ -820,7 +820,10 @@ function People({ me }: { me: Me }) {
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
     <>
-      <Panel title="Members" meta="imported from GitHub; roles and permissions are GitHub's">
+      <Panel
+        title="Members"
+        meta="membership, roles, and permissions are GitHub's own; there are no invitations"
+      >
         <table className="thwip-table">
           <thead>
             <tr>
@@ -849,11 +852,6 @@ function People({ me }: { me: Me }) {
             ))}
           </tbody>
         </table>
-        <p className="gp-panel__meta">
-          There are no invitations. A member signs in with GitHub and gets exactly the access their GitHub role and
-          repository permissions already grant. Outside collaborators invited to individual repositories on GitHub
-          appear here too, marked as such, with the same per-repository standing.
-        </p>
       </Panel>
       <Panel title="Teams">
         {data.teams.length === 0 && <p>No GitHub teams synced.</p>}
@@ -1832,7 +1830,9 @@ function Policies() {
               <td>
                 <StatusChip tone={p.status === "active" ? "ok" : "off"}>{policyStatusText(p.status)}</StatusChip>
               </td>
-              <td className="gp-panel__meta">{p.activated_at?.slice(0, 10) ?? "not activated"}</td>
+              <td className="gp-panel__meta">
+                {p.activated_at === null ? "not activated" : whenText(p.activated_at)}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -1913,7 +1913,7 @@ function Billing() {
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <Panel title="Billing" meta="checkout and the customer portal are hosted by Stripe">
+    <Panel title="Billing">
       <dl className="thwip-pairs">
         <div>
           <dt>Plan</dt>
