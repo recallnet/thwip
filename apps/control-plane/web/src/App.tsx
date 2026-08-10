@@ -1946,9 +1946,11 @@ function Billing() {
             </button>
           </div>
         ) : (
-          <button className="gp-btn" disabled={working} onClick={() => void portal()}>
-            Manage billing
-          </button>
+          <div className="thwip-actions">
+            <button className="gp-btn" disabled={working} onClick={() => void portal()}>
+              Manage billing
+            </button>
+          </div>
         )
       ) : (
         <p className="gp-panel__meta">Only GitHub organization owners can change billing.</p>
