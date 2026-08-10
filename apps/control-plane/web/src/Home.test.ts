@@ -57,11 +57,25 @@ describe("Home", () => {
   it("runs the lane down every section", () => {
     const html = render();
 
-    expect(html.match(/<section class="mq-row/g)?.length).toBe(6);
-    expect(html.match(/class="mq-row__body"/g)?.length).toBe(6);
+    expect(html.match(/<section class="mq-row/g)?.length).toBe(7);
+    expect(html.match(/class="mq-row__body"/g)?.length).toBe(7);
     expect(html).toContain('<section class="mq-row mq-row--open">');
     expect(html).toContain('<section class="mq-row mq-row--upstream">');
     expect(html).toContain('<section class="mq-row mq-row--end">');
+  });
+
+  /**
+   * A real agent's verdict is the only claim on the page with a signer
+   * behind it. It stays sourced; the link to the full numbers returns
+   * when the blog post leaves draft.
+   */
+  it("quotes an agent who used the queue, sourced but not yet linked", () => {
+    const html = render();
+
+    expect(html).toContain("saved me 40 to 60 hours of waiting");
+    expect(html).toContain("An agent on a Recall product experiment, July 2026");
+    expect(html).not.toContain("Read the agent's full numbers");
+    expect(html).toContain('class="mq-quote"');
   });
 
   /**

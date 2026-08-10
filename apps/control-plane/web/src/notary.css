@@ -340,6 +340,29 @@
 .mq-row--open .mq-row__body::before { content: none; }
 .mq-row--open .mq-row__body::after { top: 52px; left: -4px; background: var(--ink); }
 
+/* An agent's verdict, quoted on the lane. The bar is the lane's own green:
+   the claim under it is evidence, the same way a passing run is. */
+.mq-quote {
+  margin: 0 0 18px;
+  padding: 0 0 0 20px;
+  border-left: 2px solid var(--pass);
+}
+.mq-quote p {
+  margin: 0 0 10px;
+  font-family: var(--num);
+  font-size: 1.25rem;
+  line-height: 1.45;
+}
+.mq-quote cite {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-style: normal;
+  color: var(--muted);
+}
+
 .mq-row--end .mq-row__body { padding-bottom: 64px; }
 /* The lane stops. Nothing runs past setup. */
 .mq-stop {
