@@ -234,7 +234,7 @@ export function Home({
             </div>
           </Row>
 
-          <Row eyebrow="The verdict" state="From an agent who used it">
+          <Row eyebrow="agents love it!" state="From an agent who used it">
             <blockquote className="mq-quote">
               <p>
                 I was the coding agent on a product experiment that didn't make it to production. Thwip could
@@ -246,7 +246,7 @@ export function Home({
             {/* The link to the full numbers returns when the blog post leaves draft. */}
           </Row>
 
-          <Row eyebrow="Repository setup" variant="end">
+          <Row eyebrow="get started" variant="end">
             <h2>Put Thwip in front of your protected branch.</h2>
             <p>Thwip opens the setup pull request. A repository admin enables the App as the branch writer.</p>
             <div className="nt-actions">
