@@ -1913,7 +1913,7 @@ function Billing() {
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <Panel title="Billing" meta="checkout and the customer portal are hosted by Stripe">
+    <Panel title="Billing">
       <dl className="thwip-pairs">
         <div>
           <dt>Plan</dt>
