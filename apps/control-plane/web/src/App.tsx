@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
+import faqSource from "../public/faq.md?raw";
+import { parseFaq, renderBlocks } from "./faq.js";
 import { Home } from "./Home.js";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { QueuePanel } from "./Queue.js";
@@ -141,98 +143,13 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <a href="/llms.txt">/llms.txt</a>.
         </p>
         <dl className="nt-qa">
-          <dt>Can someone fake a proof?</dt>
-          <dd>
-            They can sign a claim without running the checks, the same way anyone can write "tests pass" in a pull
-            request. What changes is the cost. They have to use a key enrolled to their GitHub account, spend the
-            time the run would have taken, and state a fingerprint for every step. Those fingerprints are identical
-            on every machine that runs the same code, so the claim has to keep agreeing with everyone else's runs
-            forever. The first time it doesn't, the signed claim is the evidence.
-          </dd>
-          <dt>Does thwip watch my tests?</dt>
-          <dd>
-            No. thwip never sees your code and runs nothing. It checks that a signed claim matches the exact commit,
-            the approved checks, and a signer who currently has access.
-          </dd>
-          <dt>Some changes are too important to take someone's word for.</dt>
-          <dd>
-            Set those paths to run in GitHub. GitHub signs the result, so the developer isn't the source of the
-            claim. Most teams do this for auth, billing, deploy config, and lockfiles.
-          </dd>
-          <dt>How does this map to SLSA?</dt>
-          <dd>
-            The remote profile is SLSA Build L3. GitHub Actions performs the build and GitHub signs the provenance
-            with an identity the workflow cannot forge. Fast is deliberately not L3. It is an attributed assertion
-            plus the controls SLSA's original L4 asked for and v1.0 dropped as impractical: hermetic execution,
-            reproducible outputs, and optional two-party agreement. Those are cheap here because the pipeline runs
-            as a content-addressed graph, so identical inputs must produce identical digests on any machine. Pick
-            per path: L3 where a rerun is worth the minutes, a reproducibility-backed assertion everywhere else.
-          </dd>
-          <dt>Which security profiles can I pick?</dt>
-          <dd>
-            Four. <b>Fast</b> is a signed local proof with no pre-run contact with the control plane, so it works
-            offline before push. <b>Remote</b> runs the pipeline in GitHub for every required check, which is
-            conventional remote CI. <b>Fresh</b> runs the required suites on your own machine: the queue signs an
-            assignment naming the candidate tree and the suites to run, your machine runs them and signs a receipt
-            naming what ran and against what tree, and the control plane checks the receipt against the assignment
-            before it merges. <b>Audited</b> is fresh plus that same run repeated in GitHub Actions, and the merge
-            waits on both verdicts. Pick organization defaults in the dashboard, and use <code>thwip.yaml</code>{" "}
-            only where a repository needs to override them.
-          </dd>
-          <dt>What does a proof actually prove?</dt>
-          <dd>
-            That an enrolled signing key asserted the approved pipeline and required suites passed for this exact
-            repository, Git tree, ancestry, base, and policy version. Under fast, the execution claim is the
-            signer's own assertion. Under remote, GitHub ran the required suites and signed for them.
-          </dd>
-          <dt>How does a teammate join?</dt>
-          <dd>
-            They sign in with GitHub. Membership, roles, and repository permissions come from the GitHub
-            organization, so there are no invitations to manage. Outside collaborators invited to individual
-            repositories on GitHub count too, with their per-repository permission as their standing. Verification
-            always checks current GitHub permission, so removing someone on GitHub removes their standing here too.
-          </dd>
-          <dt>Where do signing keys come from?</dt>
-          <dd>
-            GitHub. thwip does not issue, store, or enroll keys — it reads the signing keys you have registered on
-            your GitHub account, and a proof names a key by its OpenSSH fingerprint, which anyone can compute from
-            the public key. Run <code>thwip keys status</code> to see which key on your machine would sign and
-            whether GitHub lists it. Removing a key from GitHub stops it verifying; an organization can also deny a
-            key from the dashboard for faster revocation.
-          </dd>
-          <dt>Do commits have to be signed?</dt>
-          <dd>
-            The proof is its own signature and does not depend on git commit signatures. If you want signed commits
-            too, <code>thwip init</code> can configure git to sign with the same enrolled SSH key, and your ruleset
-            can additionally require signed commits.
-          </dd>
-          <dt>What happens on a rebase or squash?</dt>
-          <dd>
-            The proof binds the exact tree and ancestry, so a rebase, squash, or cherry-pick needs a new{" "}
-            <code>thwip run</code>. Thwip Queue itself always writes a merge commit on the exact base and tree it
-            verified; setup exposes no merge-method choice.
-          </dd>
-          <dt>Where do project settings live?</dt>
-          <dd>
-            Organization proof defaults live in the dashboard. A repository may commit a partial{" "}
-            <code>thwip.yaml</code> whose fields override those defaults after the file reaches the protected
-            default branch. Candidate pull-request configuration is never used to approve itself.
-          </dd>
-          <dt>Who publishes the required proof check?</dt>
-          <dd>
-            The thwip GitHub App evaluates the exact pull-request head and publishes the{" "}
-            <code>thwip</code> check directly. Projects start with a distinct{" "}
-            <code>thwip / proof (observe)</code> check; enforce it only after an observed PASS. The setup workflow
-            publishes <code>thwip / workflow</code>. During the staged handoff setup requires that Actions-owned
-            context; once you enforce the App proof, setup replaces it with App-owned <code>thwip</code>. The two
-            publishers never share a check name. Every evaluation has a service-signed, immutable audit record.
-          </dd>
-          <dt>What data does the control plane hold?</dt>
-          <dd>
-            Organization and permission projections from GitHub, enrolled public keys, immutable policy versions,
-            and verification outcomes. No source code, no logs, no artifacts, and never a private key.
-          </dd>
-            </dl>
+          {parseFaq(faqSource).map(({ question, answer }) => (
+            <React.Fragment key={question}>
+              <dt>{question}</dt>
+              <dd>{renderBlocks(answer)}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
           </div>
         </section>
         <SiteFoot />
