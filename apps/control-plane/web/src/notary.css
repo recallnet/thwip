@@ -205,6 +205,10 @@
   max-width: 66ch;
 }
 .nt-qa dd code { color: var(--ink); }
+.nt-qa dd p { margin: 0.6em 0 0; }
+.nt-qa dd p:first-child { margin-top: 0; }
+.nt-qa dd ul { margin: 0.6em 0 0; padding-left: 1.2em; }
+.nt-qa dd li + li { margin-top: 0.3em; }
 
 /* ---------- the agent prompt ---------- */
 
