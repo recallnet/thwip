@@ -39,7 +39,7 @@ const MEASURES = [
  * is the only thing that actually varies between them, and four paragraphs of
  * prose hide that behind synonyms.
  */
-const PROFILES = [
+export const PROFILES = [
   { name: "Fast", body: "Reuse the proof on the pull request. No extra cloud run.", strength: 1 },
   { name: "Fresh", body: "Run the pinned candidate on an agent. Return a signed receipt.", strength: 2 },
   { name: "Remote", body: "Run required suites in GitHub Actions.", strength: 3 },
