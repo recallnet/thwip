@@ -142,6 +142,24 @@ describe("enrolment from the pull_request webhook", () => {
     expect(await entry(e)).not.toBeUndefined();
   });
 
+  it("withdraws an entry left by a draft, and re-admits it when marked ready", async () => {
+    const e = env();
+    // An entry that predates the draft rule (or a pull request marked draft
+    // after joining) holds a blocked place in the waiting list. A draft
+    // arrival withdraws it, and `ready_for_review` puts it back at the back.
+    await queueFromPullRequest(e as never, opened("opened", HEAD));
+    expect(await entry(e)).not.toBeUndefined();
+
+    await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
+    expect((await entry(e))?.state).toBe("Cancelled");
+
+    // A changed decision re-evaluates even inside the same readiness bucket,
+    // so the re-requested entry takes the lane again once the proof lands.
+    acceptProof(raw, REPO, HEAD);
+    await queueFromPullRequest(e as never, opened("ready_for_review", HEAD));
+    expect((await entry(e))?.state).toBe("Active");
+  });
+
   it("offers the lane to a pull request whose proof the App accepted", async () => {
     const e = env();
     acceptProof(raw, REPO, HEAD);
