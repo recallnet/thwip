@@ -12,6 +12,23 @@ import { createElement, type ReactNode } from "react";
 export interface FaqEntry {
   readonly question: string;
   readonly answer: string;
+  /**
+   * The id the question is rendered with, so other pages can link to one.
+   *
+   * The install page pointed at `/faq#signing-keys` and landed at the top of
+   * the FAQ, because nothing here had ever put an id on anything. A fragment
+   * that resolves to nothing looks identical to one that works until somebody
+   * clicks it.
+   */
+  readonly slug: string;
+}
+
+/** A question as a fragment: lower case, words joined by dashes. */
+export function faqSlug(question: string): string {
+  return question
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 /**
@@ -26,7 +43,7 @@ export function parseFaq(source: string): FaqEntry[] {
     const newline = section.indexOf("\n");
     const question = (newline === -1 ? section : section.slice(0, newline)).trim();
     const answer = (newline === -1 ? "" : section.slice(newline + 1)).trim();
-    return { question, answer };
+    return { question, answer, slug: faqSlug(question) };
   });
 }
 
