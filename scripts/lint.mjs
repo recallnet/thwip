@@ -11,6 +11,7 @@ import {
 } from "./migration-numbers.mjs";
 import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs";
 import { describe as renderUnrendered, unrenderedClassesInRepo } from "./unrendered-classes.mjs";
+import { describe as renderStale, staleCitations } from "./stale-citations.mjs";
 import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
 import { validateWorkflow } from "./workflow-lint.mjs";
 
@@ -148,7 +149,8 @@ for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
 //
 // The two checks above read JavaScript, so a rule reachable by nothing was the
 // one place the family could still hide. It was hiding in quantity. Fifty-three
-// classes on the day this ran first, two thirds of `styles.css`, including a
+// classes on the day this ran first, two thirds of the signed-in stylesheet,
+// including a
 // pricing block that had been carried through the palette migration and set in
 // Archivo with tabular numerals for a price no page has ever drawn.
 //
@@ -157,6 +159,28 @@ for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
 {
   for (const line of renderUnrendered(unrenderedClassesInRepo({ root }))) {
     console.error(`lint: ${line} is styled and no markup renders it`);
+    failures++;
+  }
+}
+
+// Comments that send a reader to a file this repository does not have.
+//
+// The same family one level down from the code. A comment naming a document by
+// path reads exactly the same after the document is deleted, and a reviewer
+// cannot tell: the sentence is well-formed and the file it sits in is the right
+// file. Deleting one design document left about a hundred and ten of these to be
+// chased by hand, six of which survived in file types the sweep never opened,
+// and two more arrived in a single afternoon this week when a dashboard page was
+// replaced.
+//
+// Only code comments, and only citations that name a file. Markdown discusses
+// the world rather than annotating this tree, and a rule of "anything with a
+// slash" reported 162 things here of which almost all were repository slugs,
+// HTTP routes and ordinary prose. A check that is wrong that often is the
+// argument somebody uses for an allowlist, and there is no allowlist.
+{
+  for (const line of renderStale(staleCitations({ root }))) {
+    console.error(`lint: ${line}, which does not exist`);
     failures++;
   }
 }

@@ -56,6 +56,7 @@ import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
 import {
   claimTick,
+  failTick,
   finishTick,
   readClock,
   secondsBefore,
@@ -383,6 +384,10 @@ app.get("/health", async (c) => {
       source: clock.source,
       ageSeconds,
       stale: ageSeconds > TICK_STALE_SECONDS,
+      // Null once a tick has finished cleanly. A stopped clock that says only
+      // how long it has been stopped is what cost eleven hours on 5 August.
+      lastError: clock.lastError,
+      lastErrorAt: clock.lastErrorAt,
     },
     // Null on an ordinary deploy. When this worker went out past a gate, it says
     // which gate and why, signed with everything else here, for as long as it is
@@ -2924,7 +2929,17 @@ export default {
         console.log("[queue heartbeat] a tick ran inside the interval, skipping this firing");
         return;
       }
-      const result = await tickAllQueues(env as unknown as QueueRouteEnv, tickPortsFor(env));
+      // A throw here used to leave the claim taken and nothing else: the clock
+      // reported an age and no cause, and twelve dead firings an hour looked
+      // exactly like an idle queue.
+      let result;
+      try {
+        result = await tickAllQueues(env as unknown as QueueRouteEnv, tickPortsFor(env));
+      } catch (error) {
+        await failTick(db, nowIso(), error);
+        console.error(`[queue heartbeat] the tick threw: ${String(error)}`);
+        throw error;
+      }
       await finishTick(db, nowIso());
       console.log(
         `[queue heartbeat] ticked=${result.ticked} driven=${result.driven} failed=${result.failed} ` +

@@ -62,7 +62,7 @@ writeFileSync(
       license: "Apache-2.0",
       type: "module",
       bin: { thwip: "thwip.mjs" },
-      // build-stamp.json ships too. It is how an installed thwip answers
+      // The build stamp ships too. It is how an installed thwip answers
       // `thwip version` with the commit it was built from instead of a shrug.
       files: ["thwip.mjs", "build-stamp.json", "README.md"],
       engines: { node: ">=22" },

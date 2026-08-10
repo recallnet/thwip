@@ -2,7 +2,7 @@
 --
 -- Who performs the merge for a queue branch.
 --
--- The merge was shell in every adopter's thwip-merge.yml, behind a
+-- The merge was shell in every adopter's own merge workflow, behind a
 -- THWIP_ENQUEUE_TOKEN the adopter minted and pasted into Actions. That put a
 -- branch-write credential in the most exposed surface in the design and left
 -- the fast-forward guard as untested shell in somebody else's repository. The
