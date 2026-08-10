@@ -225,8 +225,8 @@ export function Home({
           <Row eyebrow="The record" state="Stays with the merge">
             <h2>The proof stays with the merge.</h2>
             <p>
-              Each merge carries a signed record. Fetch the bytes. Verify the branch chain. You do not need a Thwip
-              account.
+              Each merge carries a signed record. Fetch the bytes and verify the branch chain, even without a Thwip
+              account!
             </p>
             <div className="nt-actions">
               <a className="nt-btn nt-btn--ghost" href="/faq">
