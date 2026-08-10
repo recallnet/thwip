@@ -143,9 +143,9 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
           <a href="/llms.txt">/llms.txt</a>.
         </p>
         <dl className="nt-qa">
-          {parseFaq(faqSource).map(({ question, answer }) => (
+          {parseFaq(faqSource).map(({ question, answer, slug }) => (
             <React.Fragment key={question}>
-              <dt>{question}</dt>
+              <dt id={slug}>{question}</dt>
               <dd>{renderBlocks(answer)}</dd>
             </React.Fragment>
           ))}
@@ -190,8 +190,8 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
               <li>
                 <b>Register a signing key.</b> <code>thwip keys status</code> says which key would sign and
                 whether GitHub lists it as a <b>signing</b> key. The most common mistake is registering the key as
-                an authentication key instead — thwip only reads signing keys.{" "}
-                <a href="/faq#signing-keys">Keys come from your GitHub account</a>.
+                an authentication key instead, and thwip only reads signing keys.{" "}
+                <a href="/faq#where-do-signing-keys-come-from">Keys come from your GitHub account</a>.
               </li>
               <li>
                 <b>Report back.</b> You get the fingerprint that will appear in your proofs, the GitHub account
