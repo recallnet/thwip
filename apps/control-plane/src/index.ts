@@ -1572,7 +1572,13 @@ export async function queueFromPullRequest(env: Env, payload: {
         ref,
         ({ commands }) =>
           commands.cancel({
-            idempotencyKey: `webhook:draft:${entryId}:${headSha}`,
+            // Keyed on the admission being withdrawn, not on the head.
+            // A pull request toggled ready and then draft again without
+            // pushing repeats every other part of this key, so keying on the
+            // head made the second withdrawal a duplicate and left the entry
+            // holding its place. The ordinal is reset on every re-admission,
+            // which is what makes each one a distinct thing to withdraw.
+            idempotencyKey: `webhook:draft:${entryId}:${placed.fairnessOrdinal}`,
             entryId,
             actorPrincipalId: "github",
             reason: "the pull request is a draft; it rejoins when marked ready",
