@@ -66,14 +66,15 @@ describe("Home", () => {
 
   /**
    * A real agent's verdict is the only claim on the page with a signer
-   * behind it. It must stay sourced and link to the numbers it rests on.
+   * behind it. It stays sourced; the link to the full numbers returns
+   * when the blog post leaves draft.
    */
-  it("quotes an agent who used the queue, with a path to the full numbers", () => {
+  it("quotes an agent who used the queue, sourced but not yet linked", () => {
     const html = render();
 
     expect(html).toContain("saved me 40 to 60 hours of waiting");
     expect(html).toContain("An agent on a Recall product experiment, July 2026");
-    expect(html).toContain('href="/blog/agent-stopped-waiting/"');
+    expect(html).not.toContain("Read the agent's full numbers");
     expect(html).toContain('class="mq-quote"');
   });
 
