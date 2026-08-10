@@ -1830,7 +1830,9 @@ function Policies() {
               <td>
                 <StatusChip tone={p.status === "active" ? "ok" : "off"}>{policyStatusText(p.status)}</StatusChip>
               </td>
-              <td className="gp-panel__meta">{p.activated_at?.slice(0, 10) ?? "not activated"}</td>
+              <td className="gp-panel__meta">
+                {p.activated_at === null ? "not activated" : whenText(p.activated_at)}
+              </td>
             </tr>
           ))}
         </tbody>
