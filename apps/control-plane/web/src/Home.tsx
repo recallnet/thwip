@@ -250,8 +250,8 @@ export function Home({
           <Row eyebrow="Repository setup" variant="end">
             <h2>Put Thwip in front of your protected branch.</h2>
             <p>
-              Thwip creates a setup pull request. It adds the two workflow files the queue needs. An admin merges
-              the request and applies the rulesets. Then the App can write to the protected branch.
+              Thwip is easy to set up. Just ask your agent to configure it for you, and they'll walk you through
+              it!
             </p>
             <div className="nt-actions">
               <SetupAction me={me} signIn={signIn} />
