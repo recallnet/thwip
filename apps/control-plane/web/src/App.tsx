@@ -552,8 +552,8 @@ function OrgHome({ me }: { me: Me }) {
                         title={row.project.enabled === 1 ? "Stop verifying this project?" : "Enable this project?"}
                         consequence={
                           row.project.enabled === 1
-                            ? "The App check stops publishing and the queue stops running for it."
-                            : "It consumes plan quota, and enabling needs repository admin on GitHub."
+                            ? "The App check stops publishing. The queue stops running for it."
+                            : "It consumes plan quota. Enabling it needs repository admin on GitHub."
                         }
                         confirmLabel={row.project.enabled === 1 ? "Disable it" : "Enable it"}
                         busy={busy === row.project.id}
@@ -567,13 +567,14 @@ function OrgHome({ me }: { me: Me }) {
           )}
           {summary.data?.viewerHasSigningKey === false && (
             <p className="thwip-note">
-              You hold no signing key, so nothing you push can carry a proof yet.{" "}
+              You hold no signing key. Nothing you push can carry a proof yet.{" "}
               <a href="/dashboard/profile">Set this machine up</a>
             </p>
           )}
           {installUrl && (
             <p className="thwip-note">
-              Grant the thwip App access to a repository on GitHub; it imports here automatically, then you enable it.{" "}
+              Grant the thwip App access to a repository on GitHub. The repository imports here automatically. Then
+              you enable it.{" "}
               <a href={installUrl} target="_blank" rel="noreferrer">
                 Add repositories on GitHub
               </a>
@@ -687,7 +688,7 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
   return (
     <Panel
       title="Organization proof defaults"
-      meta="repositories inherit these settings; committed thwip.yaml fields override them after protected merge"
+      meta="repositories inherit these settings; a committed thwip.yaml field overrides them after a protected merge"
     >
       {error && <p className="thwip-error">{error}</p>}
       {raw ? (
@@ -727,8 +728,8 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
             />
           </div>
           <p className="gp-panel__meta">
-            Every suite named here has to pass before a proof counts. A repository can add to this in its own
-            thwip.yaml; it cannot take one away.
+            Every suite named here must pass before a proof counts. A repository can add to this in its own
+            thwip.yaml. It cannot take one away.
           </p>
           {hasFieldsBeyondTheForm(data?.defaults ?? null) && (
             <p className="gp-panel__meta">
@@ -1060,7 +1061,7 @@ function ProjectVerification({ project, reload }: { project: ProjectRow; reload:
         </table>
       </Panel>
 
-      <Panel title="Actions" meta="enabling consumes plan quota; requires repository admin on GitHub">
+      <Panel title="Actions" meta="enabling consumes plan quota; it requires repository admin on GitHub">
         {actionError && <p className="thwip-error">{actionError}</p>}
         <div className="thwip-actions">
           {project.enabled === 1 ? (
@@ -1073,7 +1074,7 @@ function ProjectVerification({ project, reload }: { project: ProjectRow; reload:
                     The thwip check stops reporting on <code>{project.github_name}</code>, and stops gating merges
                     if it was enforcing. Its plan slot goes back to the pool.
                   </p>
-                  <p>Enabling it again later is one click, and the policy history is kept either way.</p>
+                  <p>Enabling it again later is one click. The policy history stays either way.</p>
                 </>
               }
               confirmLabel="Stop verifying"
@@ -1332,8 +1333,8 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
     return (
       <Panel title="Thwip Queue" meta="one request, made by an organization administrator">
         <p>
-          Setting up the queue needs the admin or owner role in this organization on GitHub. Ask someone who has it to
-          open this tab.
+          Setting up the queue needs the admin or owner role in this organization on GitHub. Ask someone who has
+          that role to open this tab.
         </p>
       </Panel>
     );
@@ -1349,12 +1350,12 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   return (
     <Panel title="Thwip Queue" meta="merges one pull request at a time, with a signed record of each merge">
       <p>
-        Setting up opens a pull request on <code>{project.github_name}</code> carrying the two queue workflows. It
-        inherits organization policy by default; a repository-specific <code>thwip.yaml</code> is added only when you
-        choose that override below. Merge it under the controls this repository already has, then continue. The queue
-        observes a real pull request before setup offers enforcement. The App receives Contents and Workflows write so
-        the one queue path can merge reviewed source and CI changes; it never receives repository Administration
-        permission.
+        Setup opens a pull request on <code>{project.github_name}</code>. The request carries the two queue
+        workflows. It inherits organization policy by default. A repository-specific <code>thwip.yaml</code> is
+        added only when you choose that override below. Merge the request under the controls this repository already
+        has. Then continue. The queue observes a real pull request before setup offers enforcement. The App receives
+        Contents and Workflows write. That lets the one queue path merge reviewed source and CI changes. It never
+        receives repository Administration permission.
       </p>
       {failure && <p className="thwip-error">{failure}</p>}
       {phase === "idle" && (
@@ -1501,9 +1502,9 @@ function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
         meta="paste into your coding agent, in a checkout of this repository"
       >
         <p>
-          The agent installs the CLI, signs you in, resolves organization defaults, proposes only the repository
-          overrides this project needs, proves the App-owned check in observe mode, and guides the staged ruleset
-          activation. Re-running it is safe.
+          The agent installs the CLI and signs you in. It resolves organization defaults. It proposes only the
+          repository overrides this project needs. It proves the App-owned check in observe mode. It guides the
+          staged ruleset activation. Re-running it is safe.
         </p>
         <button
           className="gp-btn gp-btn--sm"
@@ -1802,7 +1803,7 @@ function Policies() {
   if (error) return <p className="thwip-error">{error}</p>;
   if (!data) return <p className="gp-panel__meta">Loading…</p>;
   return (
-    <Panel title="Policy history" meta="immutable, content-addressed; a PR can never approve its own policy change">
+    <Panel title="Policy history" meta="immutable, content-addressed; a pull request can never approve its own policy change">
       <table className="thwip-table">
         <thead>
           <tr>
