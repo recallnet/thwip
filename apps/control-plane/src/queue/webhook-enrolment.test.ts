@@ -160,6 +160,27 @@ describe("enrolment from the pull_request webhook", () => {
     expect((await entry(e))?.state).toBe("Active");
   });
 
+  /**
+   * Toggling draft twice without pushing repeats every other part of the
+   * withdrawal's key, so keying it on the head made the second withdrawal a
+   * duplicate and left the entry holding a place it had given up.
+   */
+  it("withdraws a second time when the same head is drafted, readied, and drafted again", async () => {
+    const e = env();
+    await queueFromPullRequest(e as never, opened("opened", HEAD));
+    await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
+    expect((await entry(e))?.state).toBe("Cancelled");
+
+    // Re-admitted without a proof, so it waits rather than taking the lane.
+    // A draft that already holds the lane is left alone on purpose, and that
+    // exemption would otherwise hide the repeat this test is about.
+    await queueFromPullRequest(e as never, opened("ready_for_review", HEAD));
+    expect((await entry(e))?.state).not.toBe("Cancelled");
+
+    await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
+    expect((await entry(e))?.state).toBe("Cancelled");
+  });
+
   it("offers the lane to a pull request whose proof the App accepted", async () => {
     const e = env();
     acceptProof(raw, REPO, HEAD);
