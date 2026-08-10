@@ -13,12 +13,12 @@ all repository facts from GitHub, fetches one signed fact bundle from the
 control plane, and fails closed with stable reason codes (PASS,
 SUBJECT_TREE_MISMATCH, SIGNER_KEY_REVOKED, ...).
 
-Security profiles per project: fast (signed local proof), remote (GitHub runs
-every required check), fresh (the queue signs an assignment, your machine
-runs the suites and signs a receipt naming what ran and against what tree,
-and the control plane checks the receipt against the assignment), and audited
-(fresh plus that same run repeated in GitHub Actions, with the merge waiting
-on both verdicts).
+Security profiles per project: fast (signed local proof), fresh (the queue
+signs an assignment, your machine runs the suites and signs a receipt naming
+what ran and against what tree, and the control plane checks the receipt
+against the assignment), remote (GitHub runs every required check), and
+audited (fresh plus that same run repeated in GitHub Actions, with the merge
+waiting on both verdicts).
 
 What a proof establishes, stated precisely: who ran the approved checks, on
 exactly which Git tree, under which policy version, signed by a key enrolled
