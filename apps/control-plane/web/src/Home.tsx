@@ -243,15 +243,7 @@ export function Home({
               </p>
               <cite>An agent on a Recall product experiment, July 2026</cite>
             </blockquote>
-            <p>
-              The full accounting: 1,219 CI runs, 9,478 minutes, and 82 hours of waiting, most of it repeating
-              checks that had already run locally.
-            </p>
-            <div className="nt-actions">
-              <a className="nt-btn nt-btn--ghost" href="/blog/agent-stopped-waiting/">
-                Read the agent's full numbers
-              </a>
-            </div>
+            {/* The link to the full numbers returns when the blog post leaves draft. */}
           </Row>
 
           <Row eyebrow="Repository setup" variant="end">
