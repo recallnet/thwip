@@ -1,0 +1,75 @@
+---
+title: "The merge queue that trusts your agents"
+description: "Your agents already ran the checks before they queued. Thwip Queue merges on that evidence instead of replaying every candidate in the cloud. One lane, one writer, and a signed record stand behind each merge."
+author: thwip
+pubDate: 2026-08-07T12:00:00.000Z
+tags:
+  - merge-queue
+  - agents
+  - announcement
+  - continuous-integration
+heroImage: /blog/queue-hero.svg
+heroAlt: Several pull requests joining a single merge lane
+draft: true
+---
+
+Agents work in parallel. The protected branch does not. Every pull request
+that wants to land queues up, and a conventional merge queue answers each turn
+the same way: build the candidate, run a fresh cloud CI job, merge, repeat.
+Your agents already did the work. The cloud sets aside that passing local run
+on the branch and replays it anyway.
+
+Thwip Queue keeps the safety of a queue and drops the replay. It merges on the
+evidence that already exists: the signed proof your agent attached to the
+branch. The queue pins the exact candidate, offers the lane to the first pull
+request whose proof still holds, and records every move as a signed
+transition. Nothing reruns unless your policy says it should.
+
+## The same lane, a deliberate work loop
+
+The queue still serializes the one operation that must be serial: writing the
+protected branch. One lane per branch, one eligible pull request at a time,
+one writer, the Thwip GitHub App. What changes is what happens between turns.
+
+When a pull request is ready, the queue builds the pinned candidate: the exact
+merge GitHub has prepared from the current base and the current PR head. Then
+the policy decides where the evidence for that candidate comes from:
+
+| Profile | What happens | Trade-off |
+| --- | --- | --- |
+| `fast` | Reuse the signed proof already attached to the PR head. | Fastest; trusts the key that signed it. |
+| `fresh` | A project agent re-runs the pinned candidate and signs a receipt. | No cloud rerun; needs a project runner. |
+| `remote` | A pinned GitHub Actions verifier runs the candidate. | Conventional CI reference; one run per candidate. |
+| `audited` | The agent run, then a GitHub Actions rerun of the same suites. | Strongest; pays both costs. |
+
+The profiles are a progression, and the right one is a per-project choice
+about where the rerun is worth the minutes. `fast` is the one the queue is
+built around: the branch already carries a proof of the exact tree, so the
+turn costs nothing to re-verify. `thwip / turn` is the check that says whose turn it is, and it goes
+green the moment the queue offers the lane. Waiting pull requests sit *in
+progress* rather than failing. Waiting is not a failure.
+
+## What a turn looks like
+
+The queue evaluates the exact pull-request head, offers the lane, and merges
+with a merge commit whose first parent is the base it verified. Each movement
+writes a signed record: which candidate, which base, which policy version,
+which evidence. Anyone can fetch the record bytes and verify the branch chain
+without a Thwip account.
+
+## Getting started
+
+Machine setup is one agent prompt ([install](/install)); repository setup is
+one guided path in the [dashboard](/dashboard) that opens the queue pull
+request with the required workflows. From a branch that carries a valid proof:
+
+```bash
+thwip ship --wait
+```
+
+The queue does the rest, and writes the record that says how it did it.
+
+{% cta-row %}
+{% cta href="/dashboard" label="Open the dashboard" /%}
+{% cta href="/blog/merge-queue/" label="Why merge queues slow down with agents" variant="ghost" /%}
+{% /cta-row %}
