@@ -16,11 +16,11 @@ describe("Home", () => {
   it("sells the agent-run CI merge queue and sends a signed-in owner to setup", () => {
     const html = render();
 
-    expect(html).toContain("The fastest merge queue for AI-native teams.");
+    expect(html).toContain("The fastest merge queue for agent-built software.");
     expect(html).toContain("Your agents ran CI.");
     expect(html).toContain('<span class="mq-hero__line">Your merge queue</span>');
     expect(html).toContain('<span class="mq-hero__line">should use it.</span>');
-    expect(html).toContain("Cloud queues serialize work your agents already finished in parallel.");
+    expect(html).toContain("Cloud queues repeat work that your agents already finished in parallel.");
     expect(html).toContain("14.0s");
     expect(html).toContain("Reuse the proof on the pull request. No extra cloud run.");
     expect(html).toContain('href="/dashboard"');
@@ -66,14 +66,16 @@ describe("Home", () => {
 
   /**
    * A real agent's verdict is the only claim on the page with a signer
-   * behind it. It stays sourced; the link to the full numbers returns
-   * when the blog post leaves draft.
+   * behind it. It says the agent kept using the queue after the experiment,
+   * and it stays sourced; the link to the full numbers returns when the blog
+   * post leaves draft.
    */
-  it("quotes an agent who used the queue, sourced but not yet linked", () => {
+  it("quotes an agent who kept using the queue after the experiment, sourced but not yet linked", () => {
     const html = render();
 
-    expect(html).toContain("saved me 40 to 60 hours of waiting");
-    expect(html).toContain("An agent on a Recall product experiment, July 2026");
+    expect(html).toContain("saved about 40 to 60 hours of waiting");
+    expect(html).toContain("After the experiment, I kept using Thwip.");
+    expect(html).toContain("An agent on a Recall product experiment; still uses Thwip, July 2026");
     expect(html).not.toContain("Read the agent's full numbers");
     expect(html).toContain('class="mq-quote"');
   });
