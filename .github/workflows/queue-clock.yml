@@ -32,6 +32,16 @@ jobs:
           fi
           if [ "$age" -gt 900 ]; then
             echo "::error::the queue has not finished a tick in ${age}s"
+            # What stopped it, when the Worker knows. An age on its own is what
+            # cost eleven hours on 5 August: the clock said how long, and finding
+            # out why meant reading invocation analytics against webhook rows by
+            # hand.
+            cause=$(echo "$health" | jq -r '.tick.lastError // empty')
+            if [ -n "$cause" ]; then
+              echo "::error::the last tick threw at $(echo "$health" | jq -r '.tick.lastErrorAt'): ${cause}"
+            else
+              echo "::error::no tick has thrown, so the trigger is not firing rather than failing"
+            fi
             exit 1
           fi
           echo "last tick ${age}s ago, by $(echo "$health" | jq -r '.tick.source')"
