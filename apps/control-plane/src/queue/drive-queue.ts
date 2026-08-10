@@ -9,7 +9,7 @@ import { readAttestation } from "./attestation.js";
 import { parseMergeIntent } from "@thwip/queue-protocol";
 
 /** The states in which an entry is the one the lane belongs to. */
-const HOLDING = ["Offered", "Active", "Verifying", "MergeGuard", "Merging"];
+export const HOLDING = ["Offered", "Active", "Verifying", "MergeGuard", "Merging"];
 
 /**
  * Take whoever holds the lane as far as the App can take them.

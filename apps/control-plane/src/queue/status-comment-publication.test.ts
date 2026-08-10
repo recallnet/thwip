@@ -132,13 +132,15 @@ describe("the comment on a queued pull request", () => {
     const comments = recordingGithub();
 
     await queueFromPullRequest(e as unknown as Env, openedPayload(120, HEAD));
+    // A pull request marked draft leaves the line (drafts hold no place in
+    // it), and the comment says so on the same comment, not a second one.
     await queueFromPullRequest(e as unknown as Env, {
       ...openedPayload(120, "6".repeat(40), { draft: true }),
       action: "converted_to_draft",
     });
 
     expect(comments.filter((c) => c.body.includes(COMMENT_MARKER))).toHaveLength(1);
-    expect(comments[0]!.body).toContain("draft");
+    expect(comments[0]!.body).toContain("cancelled · this entry left the queue");
   });
 
   /**
