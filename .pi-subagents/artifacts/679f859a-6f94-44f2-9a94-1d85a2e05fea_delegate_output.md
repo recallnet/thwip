@@ -1,0 +1,1 @@
+All reducer probes pass. Now the end-to-end webhook probe for the same-minute wedge (finding #5):
