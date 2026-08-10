@@ -47,7 +47,7 @@ import {
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { authorizeTurn } from "./queue/authorize-turn.js";
 import { reconsiderHead } from "./queue/reconsider-head.js";
-import { driveQueue } from "./queue/drive-queue.js";
+import { driveQueue, HOLDING } from "./queue/drive-queue.js";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
 import type { QueueSnapshot } from "./queue/queue-operations.js";
@@ -1554,11 +1554,43 @@ export async function queueFromPullRequest(env: Env, payload: {
     .entries.get(entryId);
 
   // A draft gets no entry: it cannot take a turn, and `ready_for_review` runs
-  // this walk again with `draft: false`, which admits it then. An existing
-  // entry is different — a ready pull request that became a draft stays in
-  // place, blocked — so only drafts with no entry are skipped.
-  if (pr?.draft === true && placed === undefined) {
-    return { handled: true, detail: "draft pull requests join the queue when marked ready" };
+  // this walk again with `draft: false`, which admits it then. An entry that
+  // predates this rule — or a ready pull request that became a draft — gets
+  // withdrawn rather than left blocking the waiting list: drafts hold no place
+  // in line, and marking the pull request ready re-joins it at the back through
+  // `requestTurn`'s `resetOrdinal` path. A draft mid-turn is left alone: the
+  // merge gate already refuses it, the failed attempt frees the lane, and the
+  // next event withdraws it.
+  if (pr?.draft === true) {
+    if (placed === undefined) {
+      return { handled: true, detail: "draft pull requests join the queue when marked ready" };
+    }
+    if (!HOLDING.includes(placed.state)) {
+      await runOnQueue(
+        env,
+        String(repositoryId),
+        ref,
+        ({ commands }) =>
+          commands.cancel({
+            // Keyed on the admission being withdrawn, not on the head.
+            // A pull request toggled ready and then draft again without
+            // pushing repeats every other part of this key, so keying on the
+            // head made the second withdrawal a duplicate and left the entry
+            // holding its place. The ordinal is reset on every re-admission,
+            // which is what makes each one a distinct thing to withdraw.
+            idempotencyKey: `webhook:draft:${entryId}:${placed.fairnessOrdinal}`,
+            entryId,
+            actorPrincipalId: "github",
+            reason: "the pull request is a draft; it rejoins when marked ready",
+          }),
+        // No turn-check publish: a draft was never offered a turn, so there is
+        // no check to update. The status comment does have to move — it is the
+        // only surface that says the entry left the line.
+        undefined,
+        (snapshot) => publishStatusCommentsFor(env, String(repositoryId), ref, snapshot),
+      );
+      return { handled: true, detail: "draft pull request withdrawn; it rejoins when marked ready" };
+    }
   }
 
   // A bot has no principal and no fairness share, so it cannot sponsor its own
