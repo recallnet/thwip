@@ -42,10 +42,10 @@ the policy decides where the evidence for that candidate comes from:
 | `remote` | A pinned GitHub Actions verifier runs the candidate. | Conventional CI reference; one run per candidate. |
 | `audited` | The agent run, then a GitHub Actions rerun of the same suites. | Strongest; pays both costs. |
 
-The profiles are not a ladder. They are a per-project choice about where the
-rerun is worth the minutes. `fast` is the one the queue is built around: the
-branch already carries a proof of the exact tree, so the turn costs nothing to
-re-verify. `thwip / turn` is the check that says whose turn it is, and it goes
+The profiles are a progression, and the right one is a per-project choice
+about where the rerun is worth the minutes. `fast` is the one the queue is
+built around: the branch already carries a proof of the exact tree, so the
+turn costs nothing to re-verify. `thwip / turn` is the check that says whose turn it is, and it goes
 green the moment the queue offers the lane. Waiting pull requests sit *in
 progress* rather than failing. Waiting is not a failure.
 
@@ -56,11 +56,6 @@ with a merge commit whose first parent is the base it verified. Each movement
 writes a signed record: which candidate, which base, which policy version,
 which evidence. Anyone can fetch the record bytes and verify the branch chain
 without a Thwip account.
-
-Measured on this repository's own queue:
-
-- Fast queue turn to confirmed merge: **14.0s** (9 merges).
-- Fresh assignment to signed merge record: **28.0s** (7 merges).
 
 ## Getting started
 
