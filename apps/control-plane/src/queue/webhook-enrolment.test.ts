@@ -85,12 +85,12 @@ afterEach(() => {
   while (open.length > 0) open.pop()!.close();
 });
 
-function opened(action = "opened", headSha = HEAD) {
+function opened(action = "opened", headSha = HEAD, draft = false) {
   return {
     action,
     pull_request: {
       number: 120,
-      draft: false,
+      draft,
       state: "open",
       base: { ref: "main", repo: { id: Number(REPO) } },
       head: { sha: headSha },
@@ -132,6 +132,16 @@ function reads(over: Record<string, unknown> = {}) {
 }
 
 describe("enrolment from the pull_request webhook", () => {
+  it("does not place a draft; marking it ready places it", async () => {
+    const e = env();
+
+    await queueFromPullRequest(e as never, opened("opened", HEAD, true));
+    expect(await entry(e)).toBeUndefined();
+
+    await queueFromPullRequest(e as never, opened("ready_for_review", HEAD));
+    expect(await entry(e)).not.toBeUndefined();
+  });
+
   it("offers the lane to a pull request whose proof the App accepted", async () => {
     const e = env();
     acceptProof(raw, REPO, HEAD);
