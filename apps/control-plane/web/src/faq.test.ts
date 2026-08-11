@@ -22,8 +22,8 @@ describe("parseFaq", () => {
     expect(entries.map((entry) => entry.question)).toEqual([
       "Can someone fake a proof?",
       "Does thwip watch my tests?",
-      "Some changes are too important to take someone's word for.",
-      "How does this map to SLSA?",
+      "What if some checks must run in GitHub?",
+      "How does this relate to SLSA?",
       "Which security profiles can I pick?",
       "What does a proof actually prove?",
       "How does a teammate join?",
@@ -96,7 +96,7 @@ describe("parseBlocks", () => {
     const blocks = parseBlocks(answer!.answer);
 
     expect(blocks).toHaveLength(3);
-    expect(blocks[0]).toEqual({ kind: "paragraph", text: "Four." });
+    expect(blocks[0]).toEqual({ kind: "paragraph", text: "Four, from least to most independent evidence." });
     expect(blocks[1]?.kind).toBe("list");
     expect(blocks[1]?.kind === "list" ? blocks[1].items : []).toHaveLength(4);
     expect(blocks[2]?.kind).toBe("paragraph");
@@ -110,7 +110,7 @@ describe("parseBlocks", () => {
     if (list?.kind !== "list") return;
 
     expect(list.items[0]).toBe(
-      "**fast**: a signed local proof with no pre-run contact with the control plane. Works fully offline before push.",
+      "**fast**: reuse the signed proof on the pull-request head. Do not run the integrated candidate again.",
     );
     expect(list.items).toHaveLength(4);
   });
@@ -124,5 +124,36 @@ describe("parseBlocks", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.kind).toBe("paragraph");
     expect(blocks[0]?.kind === "paragraph" ? blocks[0].text : "").not.toContain("\n");
+  });
+});
+
+describe("FAQ accuracy guardrails", () => {
+  function answer(question: string): string {
+    const entry = parseFaq(faqSource).find((candidate) => candidate.question === question);
+    expect(entry, question).toBeDefined();
+    return entry!.answer;
+  }
+
+  it("separates local execution from control-plane verification", () => {
+    const text = answer("Does thwip watch my tests?");
+
+    expect(text).toContain("The CLI runs the approved suite commands on your machine");
+    expect(text).toContain("The control plane does not run repository code or read test logs");
+    expect(text).not.toContain("thwip never sees your code and runs nothing");
+  });
+
+  it("does not claim a SLSA level the candidate workflow does not establish", () => {
+    const text = answer("How does this relate to SLSA?");
+
+    expect(text).toContain("does not currently claim a SLSA level");
+    expect(text).toContain("does not create or distribute SLSA provenance");
+    expect(text).not.toContain("is SLSA Build L3");
+  });
+
+  it("states that the control plane retains public keys and authentication records", () => {
+    expect(answer("Where do signing keys come from?")).toMatch(
+      /stores its\s+public value and fingerprint for verification and audit/,
+    );
+    expect(answer("What data does the control plane hold?")).toContain("encrypted GitHub OAuth");
   });
 });

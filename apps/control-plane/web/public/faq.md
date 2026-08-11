@@ -2,87 +2,143 @@
 
 ## Can someone fake a proof?
 
-They can sign a claim without running the checks. Anyone can write "tests pass" in a pull request the same way. What changes is the cost. They must use a key enrolled to their GitHub account. They must spend the time the run would have taken. They must state a fingerprint for every step. Those fingerprints are identical on every machine that runs the same code. The claim must keep agreeing with everyone else's runs. The first time it disagrees, the signed claim is the evidence.
+Yes. A `fast` proof is a signed claim. It does not independently prove that the
+commands ran. Thwip verifies the signer, signing key, Git tree, base, pipeline,
+suite results, proof age, and current policy.
+
+Use `remote` for an independent GitHub run. Use `audited` to require both a
+device run and a GitHub run. Set `policy.allow_author_as_signer: false` if an
+author must not sign their own proof.
 
 ## Does thwip watch my tests?
 
-No. thwip never sees your code and runs nothing. It checks that a signed claim matches the exact commit, the approved checks, and a signer who currently has access.
+No. The CLI runs the approved suite commands on your machine and records whether
+they passed. The control plane does not run repository code or read test logs. It
+checks the signed proof against the commit and the active policy.
 
-## Some changes are too important to take someone's word for.
+## What if some checks must run in GitHub?
 
-Set those paths to run in GitHub. GitHub signs the result. The developer is not the source of the claim. Most teams do this for auth, billing, deploy config, and lockfiles.
+List their suite IDs under `remote:` in `thwip.yaml`. Each ID must match its
+GitHub check-run name. The proof passes only after those checks pass on the same
+pull-request head.
 
-## How does this map to SLSA?
+The `remote` profile also runs the integrated candidate in GitHub Actions. The
+`audited` profile requires both that GitHub run and a signed device run.
 
-The remote profile is SLSA Build L3. GitHub Actions performs the build. GitHub signs the provenance with an identity the workflow cannot forge.
+## How does this relate to SLSA?
 
-Fast is deliberately not L3. It is an attributed assertion plus three controls: hermetic execution, reproducible outputs, and optional two-party agreement. SLSA's original L4 asked for those controls. SLSA v1.0 dropped them as impractical. They are cheap here because the pipeline runs as a content-addressed graph. Identical inputs must produce identical digests on any machine.
-
-Choose per path. Use L3 where a rerun is worth the minutes. Use a reproducibility-backed assertion everywhere else.
+Thwip does not currently claim a SLSA level. The `remote` and `audited` profiles
+use GitHub Actions and record its verdict, but the standard candidate workflow
+does not create or distribute SLSA provenance. A hosted runner alone does not
+meet SLSA Build L3.
 
 ## Which security profiles can I pick?
 
-Four.
+Four, from least to most independent evidence.
 
-- **fast**: a signed local proof with no pre-run contact with the control plane. Works fully offline before push.
-- **fresh**: the required suites run on your own machine. The queue signs an assignment. The assignment names the candidate tree and the suites to run. Your machine runs them and signs a receipt. The receipt names what ran and against what tree. The control plane checks the receipt against the assignment before it merges.
-- **remote**: the pipeline runs in GitHub for every required check. This is conventional remote CI.
-- **audited**: fresh plus a second run of the same suites in GitHub Actions. The second run is independent. The merge waits on both the local receipt and the remote verdict.
+- **fast**: reuse the signed proof on the pull-request head. Do not run the
+  integrated candidate again.
+- **fresh**: assign the integrated candidate to a connected device. The device
+  runs the required suites and returns a signed receipt.
+- **remote**: run the required suites on the integrated candidate in the pinned
+  GitHub Actions workflow.
+- **audited**: require both the signed device receipt and the GitHub Actions
+  verdict for the integrated candidate.
 
-Pick organization defaults in the dashboard. Use `thwip.yaml` only where a repository needs to override them.
+Choose organization defaults in the dashboard. Add a partial `thwip.yaml` only
+when one repository needs different settings.
 
 ## What does a proof actually prove?
 
-A proof says that an enrolled signing key asserted the approved pipeline and required suites passed for this exact repository, Git tree, ancestry, base, and policy version. Under fast, the execution claim is the signer's own assertion. Under remote, GitHub ran the required suites and signed for them.
+A proof shows that an allowed GitHub signing key signed a statement about one
+Git tree, its parents, its base, its pipeline, and its suite results. The
+verifier also checks the active policy, the signer's current repository access,
+the key's current status, and the proof's age.
+
+Under `fast`, the suite results remain the signer's claim.
 
 ## How does a teammate join?
 
-They sign in with GitHub at https://thwip.ai. Membership, roles, and repository permissions come from the GitHub organization. There are no invitations. Outside collaborators invited to individual repositories also count: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
+They sign in with GitHub at https://thwip.ai. Thwip copies organization roles and
+repository permissions from GitHub. There is no separate Thwip invitation.
+
+Outside collaborators keep only the access GitHub gives them for each
+repository. Removing a member, collaborator, or permission in GitHub removes
+that access after the next sync or verification.
 
 ## How do I express a build matrix, services, or several platforms?
 
-In your Dagger module, not in thwip.yaml. A matrix is a loop. A database is a service binding. A platform is an argument. All three live in a real language, with types and tests. thwip.yaml only names which module functions are required and where each may run. Thwip owns no pipeline dialect of its own.
+Put execution logic in package scripts or a Dagger module. `thwip.yaml` names
+suite IDs; it is not a pipeline language. A Dagger module can define loops and
+services. The CLI downloads the pinned Dagger version, checks its checksum, and
+uses your container runtime.
 
-macOS and Windows cannot run in a Linux container. A cross-platform matrix is therefore hybrid. List those suites under `remote:` and GitHub runs and signs them. Everything else is proven locally. One merge gate, two sources of evidence. The remote half is SLSA Build L3.
-
-The CLI provisions the pinned Dagger version into its own cache. It verifies the download against the published checksum. Using thwip does not mean installing another global toolchain. It does need a container runtime.
+Put platform-specific remote jobs in their own GitHub workflows and list their
+check names under `remote:`. The standard integrated-candidate workflow runs
+`pnpm` scripts on Ubuntu. It does not create a macOS or Windows matrix.
 
 ## Where do signing keys come from?
 
-GitHub. thwip does not issue, store, or enroll keys. It reads the signing keys you registered on your GitHub account. A proof names a key by its OpenSSH fingerprint. Anyone can compute that fingerprint from the public key. Run `thwip keys status` to see which key on your machine would sign, and whether GitHub lists it. Removing a key from GitHub stops it verifying. An organization can also deny a key from the dashboard for faster revocation.
+Use an SSH key that GitHub lists as a **Signing Key**. The CLI uses the private
+key locally. The control plane reads the public key from GitHub and stores its
+public value and fingerprint for verification and audit. It never receives the
+private key.
+
+Run `thwip keys status` to see which local key would sign. Removing the key from
+GitHub stops new verifications. An organization administrator can also deny its
+fingerprint in Thwip.
 
 ## Do commits have to be signed?
 
-The proof is its own signature. It does not depend on git commit signatures. If you want signed commits too, `thwip init` can configure git to sign with the same enrolled SSH key. Your ruleset can also require signed commits.
+No. A proof has its own signature. Run `thwip init --sign-commits` if you also
+want Git to sign commits with the same SSH key. A GitHub ruleset can require
+signed commits separately.
 
 ## What happens on a rebase or squash?
 
-The proof binds the exact tree and ancestry. A rebase, squash, or cherry-pick therefore needs a new `thwip run`. Thwip Queue always writes a merge commit on the exact base and tree it verified. Setup exposes no merge-method choice.
+Run `thwip run` again after a rebase, squash, or cherry-pick. A proof binds the
+exact tree, parents, and base.
+
+Thwip Queue creates a merge commit with the verified base as its first parent
+and the verified pull-request tree as its result. Setup does not offer another
+merge method.
 
 ## Where do project settings live?
 
-Organization proof defaults live in the dashboard. A repository may commit a partial `thwip.yaml`. Its fields override the defaults after the file reaches the protected default branch. Candidate pull-request configuration never approves itself.
+Organization defaults live in the dashboard. A repository can commit a partial
+`thwip.yaml` to override them. Arrays replace default arrays. Fields inside
+mapping sections merge with their defaults.
+
+Only the file on the protected default branch applies. A pull request cannot
+approve itself by changing its own policy.
 
 ## Who publishes the required proof check?
 
-The thwip GitHub App evaluates the exact pull-request head and publishes the `thwip` check directly. New projects start with a distinct `thwip / proof (observe)` check. An administrator enforces it once that check has passed.
+After enforcement, the Thwip GitHub App publishes the required `thwip` check.
+Before enforcement, GitHub Actions publishes `thwip / workflow` and the App
+publishes `thwip / proof (observe)`. An administrator switches to the App check
+only after the observe check passes.
 
-The repository workflow and the App use different names. During the staged handoff, GitHub Actions publishes `thwip / workflow`. The setup pull request adds `thwip-required.yml`, the workflow that publishes it. Once an administrator enforces the App's proof check, setup replaces that requirement with the App-owned `thwip` context. GitHub therefore never has to evaluate two same-named checks while the App writes the protected branch.
-
-Every evaluation produces a service-signed audit record. The record contains the exact subject, base, policy, verifier version, signer outcomes, and GitHub check-run id. A rerun creates another record. It does not overwrite history.
+Each completed App evaluation gets its own database record and a service-signed
+audit record. A rerun creates a new evaluation instead of replacing the old one.
 
 ## Why are there two required checks?
 
-They answer different questions and change at different times.
+They answer different questions.
 
-The active proof gate says the proof is good for this exact tree. It is `thwip / workflow` during the staged Actions handoff. It is the App-owned `thwip` after enforcement. That fact stays true until the commit changes.
+- `thwip` says the proof is valid for the current tree.
+- `thwip / turn` says this pull request currently holds the queue lane.
 
-`thwip / turn` says it is this pull request's turn to merge. Only one pull request holds the lane at a time. This one moves whenever the queue offers the turn to somebody else.
-
-While a pull request waits, its turn check sits in progress. It does not fail. Waiting is not a failure. A required check that failed keeps refusing the merge until something re-runs it. That is how a queue ends up offering a turn to a pull request that cannot take it.
-
-The queue publishes the turn check the moment it offers the lane. Nothing has to re-run for the check to go green.
+The turn check stays in progress while the pull request waits. It passes when
+the queue offers that pull request the lane. During setup, `thwip / workflow`
+temporarily fills the proof-check role.
 
 ## What data does the control plane hold?
 
-The control plane holds organization and permission projections from GitHub, enrolled public keys, immutable policy versions, and verification outcomes. It holds no source code, no logs, no artifacts, and never a private key.
+The control plane stores account and session data, encrypted GitHub OAuth
+tokens, Stripe customer and subscription IDs, GitHub organization and
+repository permission copies, public signing keys and fingerprints, policies,
+verification outcomes, and signed queue records.
+
+It does not store repository source code, test logs, build artifacts, or users'
+private SSH keys.
