@@ -111,7 +111,7 @@ jobs:
       - name: Report the verdict to Thwip Queue
         if: always() && steps.suites.outcome != 'skipped'
         env:
-          THWIP_ENDPOINT: https://thwip.recall.net
+          THWIP_ENDPOINT: https://thwip.ai
           REPO_ID: ${{ github.event.repository.id }}
           SUITES: ${{ steps.suites.outputs.suites }}
           ACCEPTED: ${{ steps.suites.outputs.accepted }}
