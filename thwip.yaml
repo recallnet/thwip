@@ -1,5 +1,5 @@
 # thwip.yaml — thwip settings for this repository
-# docs: https://thwip.recall.net/faq
+# docs: https://thwip.ai/faq
 # Repository identity comes from the git remote; suite commands come from
 # package.json scripts (or an explicit `suites:` map for non-node repos).
 version: 4

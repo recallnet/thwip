@@ -55,7 +55,7 @@ export const QUEUE_ACTION_REF = "recallnet/thwip@v0.13.6";
  * file would override those defaults everywhere and defeat that model.
  */
 const THWIP_YAML = `# thwip.yaml - thwip settings for this repository
-# docs: https://thwip.recall.net/faq
+# docs: https://thwip.ai/faq
 # Repository identity comes from the git remote; suite commands come from
 # package.json scripts (or an explicit \`suites:\` map for non-node repos).
 version: 4

@@ -7,7 +7,7 @@
 
 ## Install
 
-Canonical source: [Developer setup](https://thwip.recall.net/install.md)
+Canonical source: [Developer setup](https://thwip.ai/install.md)
 
 The CLI is on npm as `@recallnet/thwip`. The installed command is `thwip`;
 `npx @recallnet/thwip` works without a global install. Node 22 or newer.
@@ -26,28 +26,28 @@ Steps:
 ## Profiles
 
 Security profiles per project: fast, fresh, remote, audited. The FAQ defines
-each one and when to use it: https://thwip.recall.net/faq.md
+each one and when to use it: https://thwip.ai/faq.md
 
 ## Pages
 
-- [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit
+- [FAQ](https://thwip.ai/faq.md): profiles, membership, commit
   signing, rebases, data handling
-- [Developer setup](https://thwip.recall.net/install.md): machine setup
+- [Developer setup](https://thwip.ai/install.md): machine setup
   prompt: install the CLI, sign in, register a signing key with GitHub
-- [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored
+- [Dashboard](https://thwip.ai/dashboard): GitHub-mirrored
   organization management (requires sign-in)
-- [Blog](https://thwip.recall.net/blog/): product announcements and guides
-- [RSS](https://thwip.recall.net/rss.xml): blog feed
+- [Blog](https://thwip.ai/blog/): product announcements and guides
+- [RSS](https://thwip.ai/rss.xml): blog feed
 
 ## Blog
 
-- [Verifiable agent coding](https://thwip.recall.net/blog/beta.md): research
+- [Verifiable agent coding](https://thwip.ai/blog/beta.md): research
   note on edge-signed commit-carried CI evidence.
-  HTML: https://thwip.recall.net/blog/beta/
-- [Why merge queues slow down with agents](https://thwip.recall.net/blog/merge-queue.md):
+  HTML: https://thwip.ai/blog/beta/
+- [Why merge queues slow down with agents](https://thwip.ai/blog/merge-queue.md):
   why a protected branch takes one change at a time, and what a signed proof
   saves the queue.
-  HTML: https://thwip.recall.net/blog/merge-queue/
+  HTML: https://thwip.ai/blog/merge-queue/
 
 ## Facts
 

@@ -51,7 +51,7 @@ describe("the identity a deploy runs under", () => {
 
 describe("where the gate asks what the live schema is", () => {
   it("reads the origin out of the environment being deployed, so nothing is typed twice", () => {
-    expect(liveSchemaUrl("staging")).toBe("https://thwip.recall.net/v1/schema");
+    expect(liveSchemaUrl("staging")).toBe("https://thwip.ai/v1/schema");
   });
 
   it("refuses an environment wrangler.jsonc does not define", () => {

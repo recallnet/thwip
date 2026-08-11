@@ -7,7 +7,7 @@ export async function GET(context: APIContext) {
   return rss({
     title: "thwip blog",
     description: "Commit-carried CI evidence for agent-run pipelines.",
-    site: context.site ?? "https://thwip.recall.net",
+    site: context.site ?? "https://thwip.ai",
     items: posts.map((post) => ({
       title: post.data.title,
       description: post.data.description,

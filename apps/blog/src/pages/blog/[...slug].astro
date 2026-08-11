@@ -17,7 +17,7 @@ interface Props {
 const { post } = Astro.props;
 const { Content } = await render(post);
 const path = `/blog/${post.id}/`;
-const site = Astro.site ?? new URL("https://thwip.recall.net");
+const site = Astro.site ?? new URL("https://thwip.ai");
 const pageUrl = new URL(path, site).href;
 const jsonLd = [
   {

@@ -1,13 +1,13 @@
 # Blog ops notes
 
-Operational checklist for the product blog on `thwip.recall.net`. Not a deploy
+Operational checklist for the product blog on `thwip.ai`. Not a deploy
 script.
 
 ## Cloudflare crawl policy
 
 The Worker serves the blog as static assets under the same zone as the SPA.
 
-1. Open Cloudflare for the zone that fronts `thwip.recall.net`.
+1. Open Cloudflare for the zone that fronts `thwip.ai`.
 2. Review **AI Crawl Control** / managed `robots.txt`. A managed file that
    `Disallow: /` for GPTBot, ClaudeBot, PerplexityBot, and OAI-SearchBot will
    hide the blog from AI search products even when the app is public.
@@ -28,7 +28,7 @@ fetch explicit paths.
 
 After the first production deploy that includes `/blog`:
 
-1. Verify `thwip.recall.net` in Google Search Console if not already.
+1. Verify `thwip.ai` in Google Search Console if not already.
 2. Submit or refresh the sitemap (`/sitemap-index.xml`).
 3. Use the Generative AI performance report later to see AI Overview / AI Mode
    visibility for blog URLs.

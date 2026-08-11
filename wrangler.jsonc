@@ -48,7 +48,7 @@
       "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },
       "vars": {
         "THWIP_ENV": "staging",
-        "PUBLIC_ORIGIN": "https://thwip.recall.net",
+        "PUBLIC_ORIGIN": "https://thwip.ai",
         "LEGACY_ORIGIN": "https://thwip.recall.net",
         // Overridden per deploy by scripts/build-sha.mjs. If this value ever
         // reaches /health or a proof's verifierVersion, the deploy skipped the

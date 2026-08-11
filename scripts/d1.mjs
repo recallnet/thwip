@@ -2,7 +2,7 @@
 /**
  * Read a row out of the live database, and only read.
  *
- * The database behind `thwip.recall.net` is the live one. There is no second
+ * The database behind `thwip.ai` is the live one. There is no second
  * copy to practise on, and the documented way to look at it was
  * `wrangler d1 execute --remote --command "..."`, which is one word away from
  * `DELETE FROM mergeOperations`. Every mutation the product makes writes a

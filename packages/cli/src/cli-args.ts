@@ -1,5 +1,6 @@
 import { planQueueCommand } from "./queue-commands.js";
 import { EXIT } from "./queue-exit.js";
+import { DEFAULT_ENDPOINT } from "./endpoint.js";
 
 export type CliCommand =
   | "login"
@@ -39,7 +40,7 @@ interface OptionSpec {
 const HELP_FLAGS = new Set(["--help", "-h"]);
 const VERSION_FLAGS = new Set(["--version", "-v"]);
 
-const HELP = `thwip — verified local CI (https://thwip.recall.net)
+const HELP = `thwip — verified local CI (${DEFAULT_ENDPOINT})
 
 Run CI where the code lives, sign a proof of the exact Git tree, and let a
 protected GitHub check verify it. Repositories inherit organization defaults;

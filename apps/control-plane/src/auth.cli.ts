@@ -8,7 +8,7 @@ import Stripe from "stripe";
 import Database from "better-sqlite3";
 
 export const auth = betterAuth({
-  baseURL: "https://thwip.recall.net",
+  baseURL: "https://thwip.ai",
   secret: "schema-generation-only",
   database: new Database(":memory:"),
   account: { encryptOAuthTokens: true },

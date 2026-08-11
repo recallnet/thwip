@@ -12,7 +12,7 @@ is the control plane and the packages behind it, and nobody needs to clone it to
 use thwip.
 
 - Product: https://recall.network
-- Control plane (staging): https://thwip.recall.net
+- Control plane (staging): https://thwip.ai
 - Current Queue architecture: `docs/adr/0001-app-native-proof-checks.md`
 - Queue onboarding and steady state: `docs/queue-onboarding.md`
 - Reused CI measurement definitions: `docs/reused-ci-metrics.md`
