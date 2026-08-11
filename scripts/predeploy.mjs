@@ -35,6 +35,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { breakGlassRefusal, excuses, parseBreakGlass } from "./break-glass.mjs";
+import { deployCheckout } from "./deploy-checkout.mjs";
 import { deployIdentity, liveSchemaUrl } from "./deploy-identity.mjs";
 import {
   blockingMigrations,
@@ -46,19 +47,29 @@ import {
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
-const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+const gitBranch = git("rev-parse", "--abbrev-ref", "HEAD");
+const headSha = git("rev-parse", "HEAD");
 const head = git("rev-parse", "--short", "HEAD");
 const dirty = git("status", "--porcelain").length > 0;
 
 let behind = "0";
+let remoteMainSha = null;
 try {
   git("fetch", "--quiet", "origin", "main");
+  remoteMainSha = git("rev-parse", "origin/main");
   behind = git("rev-list", "--count", "HEAD..origin/main");
 } catch {
   behind = "?";
 }
 
+const checkout = deployCheckout({ gitBranch, headSha, remoteMainSha, dirty }, process.env);
+const branch = checkout.branch;
 console.log(`deploying ${branch}@${head}${dirty ? " (uncommitted changes)" : ""}, ${behind} commit(s) behind origin/main`);
+if (checkout.note !== null) console.log(checkout.note);
+if (checkout.refusal !== null) {
+  console.error(`\n${checkout.refusal}`);
+  process.exit(1);
+}
 
 const identity = deployIdentity(process.env);
 console.log(identity.note);

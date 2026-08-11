@@ -21,6 +21,27 @@ describe("the stamp a deploy carries", () => {
   it("says so when the tree has uncommitted changes", () => {
     expect(buildStamp(fakeGit("385bafd91c2a", " M src/index.ts\n"))).toBe("385bafd91c2a-dirty");
   });
+
+  it("keeps the full exact SHA in the canonical GitHub Actions deploy", () => {
+    const sha = "a".repeat(40);
+    const git = (...args) => {
+      if (args[0] === "status") return "";
+      if (args.at(-1) === "HEAD" && args.includes("--abbrev-ref")) return "HEAD";
+      return sha;
+    };
+    expect(
+      buildStamp(git, {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        GITHUB_EVENT_NAME: "push",
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_REPOSITORY: "recallnet/thwip",
+        GITHUB_REPOSITORY_ID: "1315419165",
+        GITHUB_SHA: sha,
+        GITHUB_WORKFLOW_REF: "recallnet/thwip/.github/workflows/deploy-staging.yml@refs/heads/main",
+      }),
+    ).toBe(sha);
+  });
 });
 
 /**
