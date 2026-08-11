@@ -31,6 +31,9 @@ committed tree, attaches the proof to `HEAD`, pushes, opens or updates the pull
 request, joins the queue, and waits for the outcome. Use `thwip run` when you
 only need to create or refresh a proof without shipping it.
 
+The CLI connects to `https://thwip.ai` by default. Set `THWIP_ENDPOINT` only
+when an operator has given you a different control-plane origin.
+
 Suite ids name the `package.json` scripts you already run. Configuration is one
 committed file:
 
