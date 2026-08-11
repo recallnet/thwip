@@ -26,6 +26,7 @@ import { serviceKey, signPayload } from "./service-signing.js";
 import { appliedMigrations } from "./schema-state.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
+import { GITHUB_OIDC_ISSUER, githubOidcAudiences } from "./github-oidc.js";
 import { capabilityFor, enrolDeviceKey } from "./queue/runners.js";
 import { isOrgAdmin } from "./queue/repository-access.js";
 import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
@@ -96,7 +97,6 @@ export type { Env } from "./env.js";
 
 const te = new TextEncoder();
 
-const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 const githubJwks = createRemoteJWKSet(new URL(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`));
 
 const PLAN_LIMITS: Record<string, { projects: number; users: number }> = {
@@ -1339,7 +1339,7 @@ async function verifyGithubOidc(c: { env: Env; req: { raw: Request } }): Promise
   try {
     const { payload } = await jwtVerify(token, githubJwks, {
       issuer: GITHUB_OIDC_ISSUER,
-      audience: `${c.env.PUBLIC_ORIGIN}/api/github-actions`,
+      audience: githubOidcAudiences(c.env),
     });
     return payload as OidcClaims;
   } catch {
