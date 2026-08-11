@@ -47,7 +47,8 @@ import {
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
 import { authorizeTurn } from "./queue/authorize-turn.js";
 import { reconsiderHead } from "./queue/reconsider-head.js";
-import { driveQueue, HOLDING } from "./queue/drive-queue.js";
+import { driveQueue } from "./queue/drive-queue.js";
+import type { BranchQueueState, Entry } from "@thwip/queue-domain";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
 import type { QueueSnapshot } from "./queue/queue-operations.js";
@@ -1461,6 +1462,22 @@ app.get("/v1/proof-verifications/:id", async (c) => {
 });
 
 /**
+ * Whether a turn is in flight for this entry.
+ *
+ * The same test the reducer applies before it lets any command touch an
+ * attempt: an outcome ends it, and `MERGED` is the ending that gets recorded in
+ * the phase rather than the outcome. Anything else is a run somebody's machine
+ * may still be executing, a verification waiting on a nonce, or a merge write
+ * whose result nobody has read yet.
+ */
+function midTurn(state: BranchQueueState, entry: Entry): boolean {
+  if (entry.currentAttemptId === null) return false;
+  const attempt = state.attempts.get(entry.currentAttemptId);
+  if (attempt === undefined) return false;
+  return attempt.outcome === null && attempt.phase !== "MERGED";
+}
+
+/**
  * Turn a pull_request webhook into a queue entry and a readiness evaluation.
  *
  * This is why no workflow needs to enqueue anything: the control plane learns
@@ -1549,9 +1566,8 @@ export async function queueFromPullRequest(env: Env, payload: {
   // whichever ran last won: under `fresh` the turn went to one person while the
   // queue waited for a machine belonging to the other. One row read against the
   // document this handler is about to open anyway.
-  const placed = (await loadQueueState(env.DB as unknown as D1Like, String(repositoryId), ref)).store
-    .state()
-    .entries.get(entryId);
+  const queued = (await loadQueueState(env.DB as unknown as D1Like, String(repositoryId), ref)).store.state();
+  const placed = queued.entries.get(entryId);
 
   // A draft gets no entry: it cannot take a turn, and `ready_for_review` runs
   // this walk again with `draft: false`, which admits it then. An entry that
@@ -1561,17 +1577,39 @@ export async function queueFromPullRequest(env: Env, payload: {
   // `requestTurn`'s `resetOrdinal` path. A draft mid-turn is left alone: the
   // merge gate already refuses it, the failed attempt frees the lane, and the
   // next event withdraws it.
+  //
+  // Whether a turn is in flight is asked of the attempt, not of a list of
+  // states. It was `HOLDING`, which `driveQueue` uses to answer a narrower
+  // question — which entry is the lane, for advancing a merge write — and two
+  // states sit outside it with a live run. In `ReconnectGrace` the run has lost
+  // its heartbeats and is inside its grace window, and cancelling killed it
+  // mid-flight. In `Reconciling` a merge write is out with its outcome unknown,
+  // and the reducer refuses the cancel; the entry survived and the author was
+  // told it had been withdrawn. Reading the attempt covers both, and covers the
+  // next state somebody adds without anyone having to remember this list.
   if (pr?.draft === true) {
     if (placed === undefined) {
       return { handled: true, detail: "draft pull requests join the queue when marked ready" };
     }
-    if (!HOLDING.includes(placed.state)) {
+    if (!midTurn(queued, placed)) {
       await runOnQueue(
         env,
         String(repositoryId),
         ref,
-        ({ commands }) =>
-          commands.cancel({
+        ({ commands }) => {
+          // Recorded before the cancel, because `EntryCancelled` sets the state
+          // and leaves the reason alone. Without it the status comment reads
+          // "cancelled · this entry left the queue", which is true of an
+          // administrator ejecting somebody and of a pull request closing, and
+          // says nothing the author of a draft can act on.
+          commands.evaluateReadiness({
+            idempotencyKey: `webhook:draft-reason:${entryId}:${placed.fairnessOrdinal}`,
+            entryId,
+            ready: false,
+            schedulerEligible: false,
+            primaryReason: "PR_DRAFT",
+          });
+          return commands.cancel({
             // Keyed on the admission being withdrawn, not on the head.
             // A pull request toggled ready and then draft again without
             // pushing repeats every other part of this key, so keying on the
@@ -1582,7 +1620,8 @@ export async function queueFromPullRequest(env: Env, payload: {
             entryId,
             actorPrincipalId: "github",
             reason: "the pull request is a draft; it rejoins when marked ready",
-          }),
+          });
+        },
         // No turn-check publish: a draft was never offered a turn, so there is
         // no check to update. The status comment does have to move — it is the
         // only surface that says the entry left the line.
@@ -1591,6 +1630,10 @@ export async function queueFromPullRequest(env: Env, payload: {
       );
       return { handled: true, detail: "draft pull request withdrawn; it rejoins when marked ready" };
     }
+    // A draft mid-turn falls through to the walk below, which re-evaluates it
+    // and refuses the merge on `PR_DRAFT` without touching the run in flight.
+    // Returning here instead would skip that evaluation, and the entry would
+    // carry whatever readiness it had before the author reached for the button.
   }
 
   // A bot has no principal and no fairness share, so it cannot sponsor its own
