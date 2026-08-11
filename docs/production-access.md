@@ -100,6 +100,33 @@ export CLOUDFLARE_ACCOUNT_ID=...
 Without them it falls back to the interactive wrangler session, says so, and
 names the token to create. The session works, and it carries the whole account.
 
+### Automatic deploys from canonical main
+
+`.github/workflows/deploy-staging.yml` verifies every landed `main` SHA against
+the public signed merge chain. It reads the exact merge record rather than
+looking for a developer proof or signature on the GitHub App-created merge
+commit. Override merges and external movements do not deploy.
+
+The workflow is safe to merge before its credential exists. Its evidence job
+runs, but the deploy job stays skipped until a repository administrator sets
+the repository variable `THWIP_STAGING_DEPLOY_ENABLED` to `true`. A manual run
+is an evidence-only rehearsal by default; select its `deploy` input only for a
+deliberate recovery deploy.
+
+To enable the deploy job:
+
+1. Create the `staging` GitHub environment.
+2. Add the environment secret `CLOUDFLARE_API_TOKEN` with the permissions below
+   and no D1 permission.
+3. Add the environment variable `CLOUDFLARE_ACCOUNT_ID`.
+4. Set the repository variable `THWIP_STAGING_DEPLOY_ENABLED` to `true`.
+
+The workflow uses a read-only `GITHUB_TOKEN`. It installs from the lockfile,
+verifies that its exact SHA is still canonical `main`, verifies the signed
+non-override merge record, runs the existing build and predeploy schema gate,
+stamps the full workflow SHA, publishes, and waits for `/health` to report that
+same SHA. It never applies a migration.
+
 ### The token a deploy needs
 
 Create it at **My Profile → API Tokens → Create Token → Create Custom Token**:
