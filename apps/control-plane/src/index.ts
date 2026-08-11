@@ -6,6 +6,7 @@ import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
 import { projectsInReach } from "./dashboard-scope.js";
 import { dashboardCounts } from "./dashboard-counts.js";
+import { publicReusedCiMetrics, reusedCiMetrics } from "./reused-ci-metrics.js";
 import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
@@ -426,6 +427,16 @@ app.get("/v1/schema", async (c) => {
 });
 
 /**
+ * Deployment-wide product evidence with no tenant or repository identifiers.
+ * Small samples return no aggregate at all, so one organization's activity
+ * cannot be inferred from the public page.
+ */
+app.get("/v1/metrics", async (c) => {
+  const metrics = await reusedCiMetrics(c.env.DB as unknown as D1Like, { kind: "public" });
+  return c.json(publicReusedCiMetrics(metrics), 200, { "cache-control": "public, max-age=300" });
+});
+
+/**
  * The keys that verify thwip's signed records.
  *
  * Public and unauthenticated on purpose. A merge record is only evidence if
@@ -527,6 +538,38 @@ app.get("/v1/dashboard/summary", async (c) => {
     githubUserId: viewer.githubUserId,
   });
   return c.json({ plan, limits: PLAN_LIMITS[plan], ...counts });
+});
+
+/** Every reused proof belonging to the selected organization, and no other. */
+app.get("/v1/dashboard/metrics", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  return c.json(
+    await reusedCiMetrics(c.env.DB as unknown as D1Like, {
+      kind: "organization",
+      organizationId: viewer.organizationId,
+    }),
+  );
+});
+
+/** A member of the owner organization or an active collaborator may read it. */
+app.get("/v1/dashboard/projects/:id/metrics", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer) return c.json({ error: "unauthenticated" }, 401);
+  const projectId = c.req.param("id");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id
+       FROM projects p
+      WHERE p.id = ?
+        AND (p.organization_id = ? OR EXISTS (
+          SELECT 1 FROM repository_grants g
+           WHERE g.project_id = p.id AND g.github_user_id = ? AND g.active = 1
+        ))`,
+  )
+    .bind(projectId, viewer.organizationId ?? "", viewer.githubUserId)
+    .first<{ id: string }>();
+  if (project === null) return c.json({ error: "project not found" }, 404);
+  return c.json(await reusedCiMetrics(c.env.DB as unknown as D1Like, { kind: "project", projectId }));
 });
 
 app.get("/v1/dashboard/proof-defaults", async (c) => {
