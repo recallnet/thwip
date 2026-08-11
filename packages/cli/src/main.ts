@@ -54,6 +54,7 @@ import { runFreshTurn, type FreshTurnResult } from "./fresh-turn.js";
 import { flag } from "./cli-flags.js";
 import { realHeartbeat, runQueueWork } from "./queue-work.js";
 import { installPushWarning } from "./push-hook.js";
+import { DEFAULT_ENDPOINT } from "./endpoint.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -171,7 +172,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const baseRef = flag(argv, "--base") ?? "origin/main";
   const config = await loadConfig();
-  const endpoint = config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
 
   const identity = await resolveGithubIdentity(config);
   const key = await requireRegisteredKey(cwd, config, identity.login);
@@ -324,7 +325,7 @@ const TOKEN_PATH = join(homedir(), ".config", "thwip", "session-token");
 
 /** RFC 8628 device authorization flow against the thwip control plane. */
 async function cmdLogin(argv: string[]): Promise<number> {
-  const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const codeRes = await fetch(`${endpoint}/api/auth/device/code`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -388,7 +389,7 @@ async function apiAuthHeader(): Promise<string | null> {
 
 async function cmdPolicyDigest(): Promise<number> {
   const cwd = process.cwd();
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
   process.stdout.write(
     JSON.stringify(
@@ -447,7 +448,7 @@ async function cmdInit(argv: string[]): Promise<number> {
     .filter((s) => s.length > 0);
   const yaml = [
     "# thwip.yaml — thwip settings for this repository",
-    "# docs: https://thwip.recall.net/faq",
+    `# docs: ${DEFAULT_ENDPOINT}/faq`,
     "# Repository identity comes from the git remote; suite commands come from",
     "# package.json scripts (or an explicit `suites:` map for non-node repos).",
     "version: 1",
@@ -467,7 +468,7 @@ async function cmdInit(argv: string[]): Promise<number> {
  */
 async function cmdShip(argv: string[]): Promise<number> {
   const cwd = process.cwd();
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const jsonEvents = argv.includes("--json-events");
   const wait = argv.includes("--wait");
   const useQueue = !argv.includes("--no-queue");
@@ -861,7 +862,7 @@ async function cmdQueue(argv: string[]): Promise<number> {
     process.stderr.write(parsed.message + "\n");
     return parsed.exitCode;
   }
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const auth = await apiAuthHeader();
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
@@ -930,7 +931,7 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
   const repo = flag(argv, "--repo") ?? "";
   const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
   const allowUnread = argv.includes("--allow-unread");
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const auth = await apiAuthHeader();
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
@@ -981,7 +982,7 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
 async function cmdDoctor(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const allowUnread = argv.includes("--allow-unread");
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const repo = flag(argv, "--repo") ?? (await originName(cwd)) ?? "";
   const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
   const auth = await apiAuthHeader();
@@ -1147,7 +1148,7 @@ async function cmdQueueSetup(argv: string[]): Promise<number> {
 
   const { existsSync } = await import("node:fs");
   const { writeFile } = await import("node:fs/promises");
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const branch = flag(argv, "--branch") ?? (await defaultBranch(cwd));
 
   let hasDaggerModule = false;
@@ -1214,7 +1215,7 @@ async function cmdQueueWork(argv: string[]): Promise<number> {
   }
   const repo = flag(argv, "--repo") ?? "";
   const cwd = process.cwd();
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const auth = await apiAuthHeader();
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");

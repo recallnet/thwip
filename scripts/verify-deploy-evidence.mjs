@@ -34,7 +34,7 @@ const outcome = await waitForDeployEvidence({
       repo: repositoryId,
       ref,
       expectedSha,
-      api: process.env.THWIP_API ?? "https://thwip.recall.net",
+      api: process.env.THWIP_API ?? "https://thwip.ai",
     });
     const evaluated = evaluateDeployEvidence(report, expectedSha);
     if (evaluated.status === "accepted") acceptedReport = report;

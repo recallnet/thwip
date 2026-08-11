@@ -1848,7 +1848,7 @@ function parseBundleResolutionBody(value) {
 // src/main.ts
 var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
 var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
-var ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+var ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.ai";
 function summary(line) {
   const f = process.env["GITHUB_STEP_SUMMARY"];
   if (f) (0, import_node_fs.appendFileSync)(f, line + "\n");

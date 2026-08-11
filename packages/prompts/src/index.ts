@@ -6,7 +6,7 @@
  *   projectSetupPrompt   — put one repository on thwip
  */
 
-export const SITE = "https://thwip.recall.net";
+export const SITE = "https://thwip.ai";
 
 /**
  * Preparing a developer machine. Written so the agent never touches the

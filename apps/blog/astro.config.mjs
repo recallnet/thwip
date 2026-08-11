@@ -3,7 +3,7 @@ import markdoc from "@astrojs/markdoc";
 import sitemap from "@astrojs/sitemap";
 
 export default defineConfig({
-  site: "https://thwip.recall.net",
+  site: "https://thwip.ai",
   integrations: [
     markdoc({ ignoreIndentation: true }),
     sitemap({
