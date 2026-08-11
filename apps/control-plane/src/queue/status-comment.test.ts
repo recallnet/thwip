@@ -235,6 +235,20 @@ describe("which of the six a reader is looking at", () => {
     expect(statusCommentBody(view, NOW)).toContain("cancelled");
   });
 
+  /**
+   * "cancelled · this entry left the queue" is true of every cancelled entry
+   * and useful about none of them. An author who moved a pull request back to
+   * draft is reading the one comment that says what the queue did, and it told
+   * them their entry was gone without saying why or how to get it back.
+   */
+  it("says a draft left because it is a draft, and how it rejoins", () => {
+    const view = only(snapshot({ entries: [entry({ state: "Cancelled", primaryReason: "PR_DRAFT" })] }));
+    expect(view.state).toBe("withdrawn-draft");
+    const body = statusCommentBody(view, NOW);
+    expect(body).toContain("draft");
+    expect(body).toContain("ready for review");
+  });
+
   it("says the queue is not offering turns when it is halted", () => {
     const view = only(snapshot({ paused: true, pauseReason: "PAUSED", entries: [entry()] }));
     expect(view.state).toBe("halted");

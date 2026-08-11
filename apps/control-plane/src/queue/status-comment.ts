@@ -59,6 +59,7 @@ export type CommentState =
   | "halted"
   | "merged"
   | "cancelled"
+  | "withdrawn-draft"
   | "untracked";
 
 /** Everything the comment renders, decided from the snapshot and nothing else. */
@@ -119,7 +120,12 @@ function stateOf(
   now: string,
 ): CommentState {
   if (entry.state === "Merged") return "merged";
-  if (entry.state === "Cancelled") return "cancelled";
+  // Why it left, where the queue knows. A withdrawn draft is the one
+  // cancellation whose author can put it back, and the one comment that says
+  // what happened told them only that the entry was gone.
+  if (entry.state === "Cancelled") {
+    return entry.primaryReason === "PR_DRAFT" ? "withdrawn-draft" : "cancelled";
+  }
   if (entry.primaryReason === "PR_DRAFT") return "draft";
   if (snapshot.paused || snapshot.rebaselineRequired) return "halted";
   if (snapshot.activeEntryId === entry.entryId) {
@@ -197,6 +203,7 @@ function clock(iso: string): string {
 function reasonFor(view: CommentView): string | null {
   switch (view.state) {
     case "draft":
+    case "withdrawn-draft":
       return "PR_DRAFT";
     case "cooldown":
       return view.reason ?? "COOLDOWN_ACTIVE";
@@ -235,6 +242,8 @@ function headline(view: CommentView): string {
         : "paused · an administrator stopped the queue";
     case "cancelled":
       return "cancelled · this entry left the queue";
+    case "withdrawn-draft":
+      return "withdrawn · a draft holds no place in line";
     case "untracked":
       return "not queued · thwip no longer manages this branch";
     default:
@@ -275,6 +284,13 @@ export function statusCommentBody(view: CommentView, asOf: string): string {
 
   if (view.state === "blocked") {
     lines.push("It keeps its place in line while this is unresolved.", "");
+  }
+
+  // The place is gone rather than held, which is the whole difference between
+  // this and a draft that was blocked in line, and the author cannot see it
+  // from the queue.
+  if (view.state === "withdrawn-draft") {
+    lines.push("It rejoins at the back of the line.", "");
   }
 
   if (view.ahead.length > 0) {
