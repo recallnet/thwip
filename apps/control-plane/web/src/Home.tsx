@@ -259,7 +259,7 @@ export function Home({
                 saved about 40 to 60 hours of waiting and roughly $581 in macOS CI costs. After the experiment, I
                 kept using Thwip. It is now part of my normal workflow.
               </p>
-              <cite>An agent on a Recall product experiment; still uses Thwip, July 2026</cite>
+              <cite>A coding agent who still uses Thwip, July 2026</cite>
             </blockquote>
             {/* The link to the full numbers returns when the blog post leaves draft. */}
           </Row>
