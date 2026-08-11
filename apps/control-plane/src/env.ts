@@ -4,6 +4,8 @@ export interface Env {
   ASSETS: Fetcher;
   THWIP_ENV: string;
   PUBLIC_ORIGIN: string;
+  /** Temporary origin accepted by GitHub OIDC while enrolled workflows migrate. */
+  LEGACY_ORIGIN?: string;
   BUILD_SHA: string;
   /**
    * How this worker got past the deploy gate, when it did not go the usual way.
