@@ -465,8 +465,8 @@ function QueueControls({
             title="Stop this queue merging anything?"
             consequence={
               <p>
-                Nothing merges on this branch until somebody resumes it. Whatever holds the lane keeps its place, and
-                every entry behind it waits where it is.
+                Nothing merges on this branch until somebody resumes it. Whatever holds the lane keeps its place.
+                Every entry behind it waits where it is.
               </p>
             }
             confirmLabel="Pause it"
