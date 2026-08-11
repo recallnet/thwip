@@ -116,20 +116,30 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    macOS or Windows builds — goes under \`remote:\` instead, and GitHub runs
    and signs those. Show me any proposed thwip.yaml before continuing.
 
-2. Prove it. Commit configuration changes on a branch, then run "thwip run".
-   It runs the suites against the committed tree and attaches a signed proof
-   to HEAD. If it refuses to sign, tell me the reason it printed rather than
-   working around it. Push and open a pull request. Keep the current required
-   check unchanged while the App-owned "thwip / proof (observe)" check proves
-   the same exact PR head successfully.
+2. Local push warning. Offer to install Thwip's managed, non-blocking pre-push
+   warning. Explain that it covers this repository's main worktree and every
+   linked worktree, always allows deliberate low-level Git, and never overwrites
+   a pre-push hook Thwip does not manage. Only after I explicitly approve, run:
+     thwip setup --install-push-warning
+   If I decline, continue without it.
 
-3. Cut over the gate. After at least one observe-mode PASS, ask me to switch
+3. Prove and ship it. Commit configuration changes on a branch, then run
+   "thwip ship --wait". This is the complete path: it runs the suites, attaches
+   a signed proof to HEAD, pushes, opens or updates the pull request, joins the
+   queue, and waits for the outcome. If the goal is only to create or refresh a
+   proof without shipping, "thwip run" remains the proof-only command. If
+   either command refuses to sign, tell me the reason it printed rather than
+   working around it. Keep the current required check unchanged while the
+   App-owned "thwip / proof (observe)" check proves the same exact PR head
+   successfully.
+
+4. Cut over the gate. After at least one observe-mode PASS, ask me to switch
    this project to "Enforce App check" in the dashboard. Update the GitHub
    ruleset so the Actions-owned "thwip / workflow" requirement is replaced by
    the App-owned "thwip" context, then confirm the App-owned check passes on a
    fresh commit before removing any verifier workflow. Do not leave an unprotected interval.
 
-4. Retire duplicated remote CI. Read .github/workflows/*. List every job and
+5. Retire duplicated remote CI. Read .github/workflows/*. List every job and
    sort it into:
      - now proven locally by thwip (the same lint/typecheck/test work) —
        candidates for removal
@@ -140,7 +150,7 @@ pushes. This is safe to re-run: if a step is already done, say so and move on.
    candidate before editing or deleting anything. Removing CI is the one step
    I want to review carefully.
 
-5. Finish. ${finish}
+6. Finish. ${finish}
 
 Rules: never move a private key anywhere outside my ~/.ssh or ~/.config/thwip;
 never skip or weaken a failing check to get a green proof; the default branch

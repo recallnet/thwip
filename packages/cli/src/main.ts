@@ -39,7 +39,7 @@ import { classifyFailure, failureDetail, runCliProcess } from "./cli-failure.js"
 import { forceArgs, planPush } from "./push-plan.js";
 import { openPullRequestNumber } from "./pull-request.js";
 import {
-  buildMismatchWarning,
+  buildMismatchFailure,
   findCliCheckout,
   parseBuildStamp,
   versionReport,
@@ -294,7 +294,7 @@ async function cmdVerifyLocal(argv: string[]): Promise<number> {
   const { state } = proof;
   if (state === "stale") {
     process.stderr.write(
-      "[thwip] PROOF_STALE this proof names a different tree, which is what a rebase leaves behind; run thwip ship to sign again\n",
+      "[thwip] PROOF_STALE this proof names a different tree, which is what a rebase leaves behind; run thwip run to sign again\n",
     );
     return 1;
   }
@@ -1297,25 +1297,29 @@ async function runningBuild(): Promise<BuildIdentity> {
 }
 
 /**
- * Say so when the build that is running did not come from the checkout it is
- * standing in. A warning, never a failure: running a released thwip inside this
- * repository is an ordinary thing to do, and the person who meant it should not
- * be stopped. The person who did not mean it now finds out on the first line
- * instead of after a day of testing a build nobody was editing.
+ * Stop when the build that is running did not come from the checkout it is
+ * standing in. Continuing after a warning still lets an agent prove and ship
+ * with code from another worktree. The repair installs the checkout-aware
+ * resolver; deliberate low-level Git remains untouched.
  */
-async function warnAboutForeignBuild(): Promise<void> {
+async function rejectForeignBuild(): Promise<boolean> {
   const { existsSync } = await import("node:fs");
   const identity = await runningBuild();
-  const warning = buildMismatchWarning({
+  const failure = buildMismatchFailure({
     runningMainPath: identity.mainPath,
     checkoutRoot: findCliCheckout(process.cwd(), existsSync),
     identity,
   });
-  if (warning !== null) process.stderr.write(warning + "\n");
+  if (failure === null) return false;
+  process.stderr.write(failure + "\n");
+  return true;
 }
 
 async function main(): Promise<void> {
-  await warnAboutForeignBuild();
+  if (await rejectForeignBuild()) {
+    process.exitCode = EXIT.setupInvalid;
+    return;
+  }
   const code = await runCliProcess(process.argv.slice(2), {
     dispatch: dispatchCli,
     stdout: (text) => process.stdout.write(text),
