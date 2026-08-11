@@ -9,7 +9,10 @@
   "env": {
     "staging": {
       "name": "thwip-staging",
-      "routes": [{ "pattern": "thwip.recall.net", "custom_domain": true }],
+      "routes": [
+        { "pattern": "thwip.recall.net", "custom_domain": true },
+        { "pattern": "thwip.ai", "custom_domain": true }
+      ],
       "assets": {
         "directory": "apps/control-plane/dist/client",
         "binding": "ASSETS",
