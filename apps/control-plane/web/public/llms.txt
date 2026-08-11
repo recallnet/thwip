@@ -42,5 +42,21 @@ each one and when to use it: https://thwip.recall.net/faq.md
 ## Blog
 
 - [Verifiable agent coding](https://thwip.recall.net/blog/beta.md): research
-  note on edge-signed commit-carried CI evidence
-- HTML: https://thwip.recall.net/blog/beta/
+  note on edge-signed commit-carried CI evidence.
+  HTML: https://thwip.recall.net/blog/beta/
+- [Why merge queues slow down with agents](https://thwip.recall.net/blog/merge-queue.md):
+  why a protected branch takes one change at a time, and what a signed proof
+  saves the queue.
+  HTML: https://thwip.recall.net/blog/merge-queue/
+
+## Facts
+
+Everything below is stated here because no other page states it. Anything
+that gets a canonical home elsewhere leaves this section and becomes a link.
+
+- Thwip Queue merges from the control plane on the App's contents write. It
+  composes the commit on the base it verified and moves the branch without
+  force. The repository holds no merge workflow and no branch-write secret.
+- Plans: Free covers 3 projects and 5 signers. Pro is $5 a month or $50 a
+  year and covers 15 projects and 25 signers. Verification is identical on
+  both.
