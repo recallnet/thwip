@@ -1,81 +1,62 @@
 # thwip
 
-> Commit-carried CI evidence for agent-run pipelines. Run CI on the machine
-> where the code lives, sign a compact proof of the exact Git tree, and let a
-> ruleset-protected GitHub check verify it in seconds. The merge queue merges
-> on that proof; nothing reruns in the cloud.
-
-thwip is a control plane, not a CI compute platform. Evidence is a single git
-trailer (`thwip-Proof: v1.<base64url DSSE envelope>`) over an in-toto
-Statement v1 with predicate `urn:thwip:attestation:ci-run:v1`, signed with a
-dedicated OpenSSH key enrolled to the author's device. Verification derives
-all repository facts from GitHub, fetches one signed fact bundle from the
-control plane, and fails closed with stable reason codes (PASS,
-SUBJECT_TREE_MISMATCH, SIGNER_KEY_REVOKED, ...).
-
-Security profiles per project: fast (signed local proof), fresh (the queue
-signs an assignment, your machine runs the suites and signs a receipt naming
-what ran and against what tree, and the control plane checks the receipt
-against the assignment), remote (GitHub runs every required check), and
-audited (fresh plus that same run repeated in GitHub Actions, with the merge
-waiting on both verdicts).
-
-What a proof establishes, stated precisely: who ran the approved checks, on
-exactly which Git tree, under which policy version, signed by a key enrolled
-to a GitHub account that currently holds repository permission. thwip does not
-observe execution and never sees source code. False claims are detected by
-reproducibility rather than surveillance: identical inputs produce identical
-digests on every machine, so a fabricated claim disagrees with teammates'
-runs, later commits, and any cloud run, permanently and attributably. The
-remote profile is SLSA Build L3 (GitHub builds and signs the provenance); fast
-is an attributed assertion plus the hermeticity, reproducibility, and
-two-party controls that SLSA's original L4 specified and v1.0 dropped.
+> Commit-carried CI evidence for agent-run pipelines. Agents run CI where the
+> code lives, sign a compact proof of the exact Git tree, and a
+> ruleset-protected GitHub check verifies it in seconds. Thwip Queue merges on
+> that proof; nothing reruns in the cloud.
 
 ## Install
 
-The CLI is published on npm as `@recallnet/thwip`. The installed command is
-`thwip`; there is no repository to clone.
+Canonical source: [Developer setup](https://thwip.recall.net/install.md)
 
-    npm install -g @recallnet/thwip     # or: npx @recallnet/thwip
-    thwip login
-    thwip init --required "lint,typecheck,test"
-    thwip run
+The CLI is on npm as `@recallnet/thwip`. The installed command is `thwip`;
+`npx @recallnet/thwip` works without a global install. Node 22 or newer.
 
-Node 22 or newer.
+Steps:
+
+1. Install the CLI: `npm install -g @recallnet/thwip`.
+2. Sign in: `thwip login` prints a URL and a short code. You approve it in
+   your own browser.
+3. Register a signing key: `thwip keys status` says which key would sign and
+   whether GitHub lists it. Register the public half with GitHub as a
+   "Signing Key". GitHub defaults to "Authentication Key", which thwip does
+   not read.
+4. Report back the fingerprint, the GitHub account, and the key file.
+
+## Profiles
+
+Security profiles per project: fast, fresh, remote, audited. The FAQ defines
+each one and when to use it: https://thwip.recall.net/faq.md
 
 ## Pages
 
 - [FAQ](https://thwip.recall.net/faq.md): profiles, membership, commit
   signing, rebases, data handling
-- [Developer setup](https://thwip.recall.net/install.md): agent prompt for
-  preparing a machine — install the CLI, device-flow sign-in, and register an
-  ed25519 signing key with GitHub. Also printed by `thwip setup`.
-  Repository setup is a separate prompt, on each project's dashboard page.
-- [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored org
-  management (requires sign-in)
+- [Developer setup](https://thwip.recall.net/install.md): machine setup
+  prompt: install the CLI, sign in, register a signing key with GitHub
+- [Dashboard](https://thwip.recall.net/dashboard): GitHub-mirrored
+  organization management (requires sign-in)
 - [Blog](https://thwip.recall.net/blog/): product announcements and guides
 - [RSS](https://thwip.recall.net/rss.xml): blog feed
 
 ## Blog
 
 - [Verifiable agent coding](https://thwip.recall.net/blog/beta.md): research
-  note on edge-signed commit-carried CI evidence, trust bounds, and open
-  invitations
-- HTML: https://thwip.recall.net/blog/beta/
+  note on edge-signed commit-carried CI evidence.
+  HTML: https://thwip.recall.net/blog/beta/
+- [Why merge queues slow down with agents](https://thwip.recall.net/blog/merge-queue.md):
+  why a protected branch takes one change at a time, and what a signed proof
+  saves the queue.
+  HTML: https://thwip.recall.net/blog/merge-queue/
 
 ## Facts
 
-- Membership and permissions come from the GitHub organization; there are no
-  invitations. Verification checks current GitHub permission.
-- Project settings inherit organization defaults from the dashboard. A
-  committed thwip.yaml can partially override them after protected merge.
-- The thwip GitHub App evaluates exact PR heads and publishes the `thwip`
-  check; observe mode runs it under a separate name first. The setup workflow
-  publishes `thwip / workflow`. Setup requires that Actions-owned context during
-  the staged handoff, then replaces it with App-owned `thwip` after enforcement.
-  The workflow and App never publish the same check name.
-- Thwip Queue performs the merge from the control plane on the App's contents
-  write, composing the commit on the base it verified and moving the branch
-  without force. There is no repository merge workflow or branch-write secret.
-- Plans: Free (3 projects, 5 signers), Pro $5/month or $50/year (15 projects,
-  25 signers). Both verify identically.
+Everything below is stated here because no other page states it. Anything
+that gets a canonical home elsewhere leaves this section and becomes a link.
+
+- Thwip Queue merges from the control plane on the App's contents write. It
+  composes the commit on the base it verified and moves the branch without
+  force. The repository holds no merge workflow and no branch-write secret.
+- Plans: Free covers 3 projects and 5 signers. Pro is $5 a month or $50 a
+  year and covers 15 projects and 25 signers. Verification is identical on
+  both.
