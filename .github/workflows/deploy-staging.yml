@@ -70,7 +70,7 @@ jobs:
       - name: Verify the signed record for this landed SHA
         id: evidence
         env:
-          THWIP_API: https://thwip.recall.net
+          THWIP_API: https://thwip.ai
         run: >-
           node scripts/verify-deploy-evidence.mjs
           "${{ github.event.repository.id }}"
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: https://thwip.recall.net/health
+      url: https://thwip.ai/health
     steps:
       # Keep the read-only checkout credential so predeploy can refetch the
       # internal canonical branch after any environment approval wait.
@@ -159,7 +159,7 @@ jobs:
       - name: Recheck the signed record for this landed SHA
         id: evidence
         env:
-          THWIP_API: https://thwip.recall.net
+          THWIP_API: https://thwip.ai
         run: >-
           node scripts/verify-deploy-evidence.mjs
           "${{ github.event.repository.id }}"

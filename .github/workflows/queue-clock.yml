@@ -23,7 +23,7 @@ jobs:
       - name: Ask thwip when it last moved
         run: |
           set -euo pipefail
-          health=$(curl -fsS https://thwip.recall.net/health)
+          health=$(curl -fsS https://thwip.ai/health)
           echo "$health" | jq .
           age=$(echo "$health" | jq -r '.tick.ageSeconds // empty')
           if [ -z "$age" ]; then
