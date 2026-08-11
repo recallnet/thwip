@@ -294,19 +294,6 @@ export function configSourceText(source: string | null): string {
   }
 }
 
-export function policyStatusText(status: string): string {
-  switch (status) {
-    case "active":
-      return "Active";
-    case "superseded":
-      return "Superseded";
-    case "pending":
-      return "Pending";
-    default:
-      return humanise(status);
-  }
-}
-
 /** What a recorded move of the protected branch means, in a reader's words. */
 export function transitionKindText(kind: string): string {
   switch (kind) {
