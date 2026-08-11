@@ -124,6 +124,33 @@ async function authorize(
   return (await response.json()) as Verdict;
 }
 
+/**
+ * The queue as the object holds it, not as the projection reports it.
+ *
+ * `?live=1` because the projection only upserts: an entry the authority never
+ * created has no row either way, so a test reading the projection would pass
+ * whether or not the entry exists.
+ */
+async function entries(
+  routes: ReturnType<typeof app>,
+  e: QueueRouteEnv,
+): Promise<Array<{ entryId: string; pullRequestNumber: number; state: string }>> {
+  const response = await routes.request(`/v1/queue/${REPO}?ref=${REF}&live=1`, {}, e);
+  const body = (await response.json()) as {
+    entries: Array<{ entryId: string; pullRequestNumber: number; state: string }>;
+  };
+  return body.entries;
+}
+
+/** Leave the queue, the way the dashboard and `thwip queue leave` do. */
+async function withdraw(routes: ReturnType<typeof app>, e: QueueRouteEnv, pullRequestNumber: number): Promise<void> {
+  await routes.request(
+    `/v1/queue/${REPO}/entries/entry_${REPO}_${pullRequestNumber}?ref=${REF}`,
+    { method: "DELETE" },
+    e,
+  );
+}
+
 describe("the merge gate", () => {
   it("gives the lane to exactly one pull request", async () => {
     const e = env();
@@ -185,6 +212,49 @@ describe("the merge gate", () => {
     const verdict = await authorize(routes, e, 59, { draft: true });
     expect(verdict.authorized).toBe(false);
     expect(verdict.reason).toBe("PR_DRAFT");
+  });
+
+  /**
+   * Refusing the turn is not the same as declining the place in line.
+   *
+   * The webhook stopped admitting drafts and started withdrawing the ones that
+   * became drafts, and this route kept its own admission: it called `admit`
+   * before any readiness gate ran, so the poll from `thwip-queue-verify.yml`
+   * put every refused draft straight back on the waiting list. The verdict said
+   * `PR_DRAFT` the whole time, which is why nothing caught it.
+   */
+  it("gives a draft no place in line", async () => {
+    const e = env();
+    const routes = app();
+    await authorize(routes, e, 59, { draft: true });
+    expect(await entries(routes, e)).toEqual([]);
+  });
+
+  it("leaves a withdrawn draft withdrawn, however often the workflow polls", async () => {
+    const e = env();
+    const routes = app();
+    await authorize(routes, e, 59);
+    expect((await entries(routes, e)).map((entry) => entry.pullRequestNumber)).toEqual([59]);
+
+    await withdraw(routes, e, 59);
+    expect((await entries(routes, e)).map((entry) => entry.state)).toEqual(["Cancelled"]);
+
+    for (let poll = 0; poll < 3; poll += 1) {
+      const verdict = await authorize(routes, e, 59, { draft: true });
+      expect(verdict.reason).toBe("PR_DRAFT");
+      expect((await entries(routes, e)).map((entry) => entry.state)).toEqual(["Cancelled"]);
+    }
+  });
+
+  it("admits the pull request once it is ready", async () => {
+    const e = env();
+    const routes = app();
+    await authorize(routes, e, 59, { draft: true });
+    expect(await entries(routes, e)).toEqual([]);
+
+    const ready = await authorize(routes, e, 59);
+    expect(ready.reason).toBe("HOLDS_TURN");
+    expect((await entries(routes, e)).map((entry) => entry.pullRequestNumber)).toEqual([59]);
   });
 
   it("says yes to everyone on a branch with no queue, rather than failing the check", async () => {

@@ -8,6 +8,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState } from "./queue-state.js";
+import type { QueueStateStore } from "./store.js";
 import { capabilityFor, requiresDeviceOnly } from "./runners.js";
 import {
   deriveReadiness,
@@ -31,6 +32,7 @@ import {
 } from "./attestation.js";
 import { mergeOperationId } from "./merge-commit.js";
 import { requiredSuitesDigest, type Sha256 } from "@thwip/queue-protocol";
+import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { decideCandidate, requiresRemoteVerification } from "./candidate-verdict.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
 import { headProofAccepted } from "./head-proof.js";
@@ -465,8 +467,14 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
   // against the stored document. This was a Durable Object round trip, which
   // is the one resource with a daily cliff; it is now a row read and, only when
   // something actually changed, a row write.
-  const { snapshot: held } = await onQueue(env, repositoryId, baseRef, ({ store, commands }) =>
-    sponsorPrincipalId === null
+  // Whether this walk declined to give a draft a place in line, which the
+  // verdict below has to say out loud: with no entry to read a reason off, the
+  // answer would otherwise fall through to `WAITING_FOR_TURN`, and the author
+  // of a draft would be told to wait for a turn that is never coming.
+  let draftWithheld = false;
+  const { snapshot: held } = await onQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+    draftWithheld = withholdsDraft(store, entryId, input.draft);
+    return sponsorPrincipalId === null || draftWithheld
       ? buildSnapshot(store)
       : admit(commands, store, {
           entryId,
@@ -488,8 +496,8 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
           // merge on the head's own proof, which is the `fast` merge wearing
           // another profile's name.
           serverMayClaim: !deviceOnly,
-        }),
-  );
+        });
+  });
 
   let operationId: string | null = null;
   let latest = held;
@@ -1117,13 +1125,40 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         : "QUEUE_PAUSED"
       : holdsLane
         ? "HOLDS_TURN"
-        : // No entry means no sponsor, and `unplaceableReason` says whether
-          // that is a bot with nobody behind it, which a person can clear.
-          (entry?.primaryReason ?? unplaceableReason ?? "WAITING_FOR_TURN"),
+        : draftWithheld
+          ? // Said from the decision this walk took, not read off an entry,
+            // because declining to write one is exactly what happened.
+            "PR_DRAFT"
+          : // No entry means no sponsor, and `unplaceableReason` says whether
+            // that is a bot with nobody behind it, which a person can clear.
+            (entry?.primaryReason ?? unplaceableReason ?? "WAITING_FOR_TURN"),
     entryId,
     operationId,
     queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
   };
+}
+
+/**
+ * Whether this walk must leave the queue document alone because the pull
+ * request is a draft with no place in it.
+ *
+ * The webhook stopped admitting drafts, and #316 started withdrawing the ones
+ * that become drafts. This route kept admitting them anyway: `admit` calls
+ * `requestTurn` before any readiness gate, and `requestTurn` rebuilds a
+ * `Cancelled` entry through its `resetOrdinal` path. So the workflow poll that
+ * runs every couple of minutes put each withdrawn draft straight back on the
+ * waiting list, and the verdict said `PR_DRAFT` while it did, which is why the
+ * refusal looked like it was working.
+ *
+ * A draft that already holds a live entry is not covered here. That entry keeps
+ * its readiness re-evaluated on every poll, which is how it becomes Blocked and
+ * how it clears once the pull request is ready again.
+ */
+function withholdsDraft(store: QueueStateStore, entryId: string, draft: boolean): boolean {
+  if (!draft) return false;
+  const entry = store.state().entries.get(entryId);
+  if (entry === undefined) return true;
+  return TERMINAL_ENTRY_STATES.includes(entry.state as (typeof TERMINAL_ENTRY_STATES)[number]);
 }
 
 /**
