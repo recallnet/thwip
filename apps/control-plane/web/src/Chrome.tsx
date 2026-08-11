@@ -48,7 +48,7 @@ export function SiteFoot() {
         <a href="/rss.xml">RSS</a>
         <a href="/llms.txt">llms.txt</a>
       </span>
-      <span>thwip · merge fast. ship more. · recall.network</span>
+      <span>thwip · merge fast. ship more. · thwip.ai</span>
     </footer>
   );
 }

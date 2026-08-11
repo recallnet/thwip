@@ -11,7 +11,7 @@ The CLI ships on npm as `@recallnet/thwip`. Users install that; this repository
 is the control plane and the packages behind it, and nobody needs to clone it to
 use thwip.
 
-- Product: https://recall.network
+- Product: https://thwip.ai
 - Control plane (staging): https://thwip.ai
 - Current Queue architecture: `docs/adr/0001-app-native-proof-checks.md`
 - Queue onboarding and steady state: `docs/queue-onboarding.md`

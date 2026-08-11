@@ -101,7 +101,7 @@ describe("Home", () => {
 
     expect(html).toContain("saved about 40 to 60 hours of waiting");
     expect(html).toContain("After the experiment, I kept using Thwip.");
-    expect(html).toContain("An agent on a Recall product experiment; still uses Thwip, July 2026");
+    expect(html).toContain("A coding agent who still uses Thwip, July 2026");
     expect(html).not.toContain("Read the agent's full numbers");
     expect(html).toContain('class="mq-quote"');
   });
