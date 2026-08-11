@@ -552,8 +552,8 @@ function OrgHome({ me }: { me: Me }) {
                         title={row.project.enabled === 1 ? "Stop verifying this project?" : "Enable this project?"}
                         consequence={
                           row.project.enabled === 1
-                            ? "The App check stops publishing. The queue stops running for it."
-                            : "It consumes plan quota. Enabling it needs repository admin on GitHub."
+                            ? "The App check stops publishing, and the queue stops running for it."
+                            : "It consumes plan quota, and enabling it needs repository admin on GitHub."
                         }
                         confirmLabel={row.project.enabled === 1 ? "Disable it" : "Enable it"}
                         busy={busy === row.project.id}
@@ -573,8 +573,8 @@ function OrgHome({ me }: { me: Me }) {
           )}
           {installUrl && (
             <p className="thwip-note">
-              Grant the thwip App access to a repository on GitHub. The repository imports here automatically. Then
-              you enable it.{" "}
+              Grant the thwip App access to a repository on GitHub. The repository imports here automatically, and
+              then you enable it.{" "}
               <a href={installUrl} target="_blank" rel="noreferrer">
                 Add repositories on GitHub
               </a>
@@ -1061,7 +1061,7 @@ function ProjectVerification({ project, reload }: { project: ProjectRow; reload:
         </table>
       </Panel>
 
-      <Panel title="Actions" meta="enabling consumes plan quota; it requires repository admin on GitHub">
+      <Panel title="Actions" meta="enabling consumes plan quota and needs repository admin on GitHub">
         {actionError && <p className="thwip-error">{actionError}</p>}
         <div className="thwip-actions">
           {project.enabled === 1 ? (
@@ -1350,12 +1350,12 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   return (
     <Panel title="Thwip Queue" meta="merges one pull request at a time, with a signed record of each merge">
       <p>
-        Setup opens a pull request on <code>{project.github_name}</code>. The request carries the two queue
-        workflows. It inherits organization policy by default. A repository-specific <code>thwip.yaml</code> is
-        added only when you choose that override below. Merge the request under the controls this repository already
-        has. Then continue. The queue observes a real pull request before setup offers enforcement. The App receives
-        Contents and Workflows write. That lets the one queue path merge reviewed source and CI changes. It never
-        receives repository Administration permission.
+        Setup opens a pull request on <code>{project.github_name}</code> carrying the two queue workflows. It
+        inherits organization policy by default. A repository-specific <code>thwip.yaml</code> is added only when
+        you choose that override below. Merge that pull request under the controls this repository already has, then
+        continue. The queue observes a real pull request before setup offers enforcement. The App receives Contents
+        and Workflows write, so the one queue path can merge reviewed source and CI changes. It never receives
+        repository Administration permission.
       </p>
       {failure && <p className="thwip-error">{failure}</p>}
       {phase === "idle" && (
@@ -1502,8 +1502,8 @@ function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
         meta="paste into your coding agent, in a checkout of this repository"
       >
         <p>
-          The agent installs the CLI and signs you in. It resolves organization defaults. It proposes only the
-          repository overrides this project needs. It proves the App-owned check in observe mode. It guides the
+          The agent installs the CLI and signs you in. It resolves organization defaults, then proposes only the
+          repository overrides this project needs. It proves the App-owned check in observe mode and guides the
           staged ruleset activation. Re-running it is safe.
         </p>
         <button
