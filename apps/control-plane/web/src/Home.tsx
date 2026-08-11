@@ -223,7 +223,7 @@ export function Home({
           </Row>
 
           <Row eyebrow="The record" state="Stays with the merge">
-            <h2>The proof stays with the merge.</h2>
+            <h2>The proof is in the commit.</h2>
             <p>
               Each merge carries a signed record. Fetch the bytes and verify the branch chain, even without a Thwip
               account!
