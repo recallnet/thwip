@@ -108,6 +108,72 @@ async function entry(e: QueueRouteEnv) {
   return store.state().entries.get(`entry_${REPO}_120`);
 }
 
+async function attempt(e: QueueRouteEnv, attemptId: string) {
+  const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+  return store.state().attempts.get(attemptId);
+}
+
+/** The id of the attempt holding the lane, which the walk above just claimed. */
+async function activeAttempt(e: QueueRouteEnv): Promise<string> {
+  const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+  const attemptId = store.state().activeAttemptId;
+  if (attemptId === null) throw new Error("no attempt holds the lane");
+  return attemptId;
+}
+
+/** Take the running attempt into its grace window, the way a dead device does. */
+async function loseTheHeartbeat(e: QueueRouteEnv): Promise<string> {
+  const attemptId = await activeAttempt(e);
+  await runOnQueue(e, REPO, REF, ({ commands }) => {
+    commands.candidatePrepared({
+      idempotencyKey: "prepared",
+      attemptId,
+      baseSha: "b".repeat(40),
+      headSha: HEAD,
+      candidateSha: "c".repeat(40),
+      candidateTree: "t".repeat(40),
+      policyDigest: "sha256:pol",
+      runner: "dagger",
+    });
+    commands.assign({ idempotencyKey: "assign", attemptId, assignmentDigest: "sha256:asg" });
+    commands.heartbeat({ idempotencyKey: "beat", attemptId });
+    commands.heartbeatLost({ idempotencyKey: "lost", attemptId });
+  });
+  return attemptId;
+}
+
+/** Walk the attempt to a merge write whose outcome nobody knows. */
+async function reachReconciling(e: QueueRouteEnv): Promise<string> {
+  const attemptId = await activeAttempt(e);
+  await runOnQueue(e, REPO, REF, ({ commands }) => {
+    commands.candidatePrepared({
+      idempotencyKey: "prepared",
+      attemptId,
+      baseSha: "b".repeat(40),
+      headSha: HEAD,
+      candidateSha: "c".repeat(40),
+      candidateTree: "t".repeat(40),
+      policyDigest: "sha256:pol",
+      runner: "dagger",
+    });
+    commands.assign({ idempotencyKey: "assign", attemptId, assignmentDigest: "sha256:asg" });
+    commands.heartbeat({ idempotencyKey: "beat", attemptId });
+    commands.submitReceipt({ idempotencyKey: "receipt", attemptId, receiptDigest: "sha256:rcpt" });
+    const started = commands.startVerification({ idempotencyKey: "verify", attemptId }) as { nonce: string };
+    commands.completeVerification({
+      idempotencyKey: "verified",
+      attemptId,
+      nonce: started.nonce,
+      accepted: true,
+      resultDigest: "sha256:res",
+    });
+    commands.createMergeIntent({ idempotencyKey: "intent", attemptId, intentDigest: "sha256:intent" });
+    commands.beginMergeWrite({ idempotencyKey: "write", attemptId, operationId: "op-x" });
+    commands.mergeOutcomeUnknown({ idempotencyKey: "unknown", attemptId });
+  });
+  return attemptId;
+}
+
 /** The queue's own reads, with GitHub stubbed to one open pull request on HEAD. */
 function reads(over: Record<string, unknown> = {}) {
   return {
@@ -152,6 +218,10 @@ describe("enrolment from the pull_request webhook", () => {
 
     await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
     expect((await entry(e))?.state).toBe("Cancelled");
+    // Why it left, recorded on the entry, because the status comment is the
+    // only surface that tells the author anything and "this entry left the
+    // queue" tells them nothing they can act on.
+    expect((await entry(e))?.primaryReason).toBe("PR_DRAFT");
 
     // A changed decision re-evaluates even inside the same readiness bucket,
     // so the re-requested entry takes the lane again once the proof lands.
@@ -179,6 +249,45 @@ describe("enrolment from the pull_request webhook", () => {
 
     await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
     expect((await entry(e))?.state).toBe("Cancelled");
+  });
+
+  /**
+   * The two states with a live attempt that the state list forgot.
+   *
+   * The guard asked `HOLDING`, a list written for `driveQueue`'s narrower
+   * question: which entry is the lane, for the purpose of advancing a merge
+   * write. That is not the same question as "is there a run in flight", and two
+   * states answer them differently. In `ReconnectGrace` a run has lost its
+   * heartbeats and is inside its grace window, and cancelling killed it. In
+   * `Reconciling` a merge write is out with its outcome unknown, and the
+   * reducer refuses the cancel — correctly, and the webhook told the author it
+   * had withdrawn anyway.
+   */
+  it("leaves a draft alone while its attempt is inside the reconnect grace", async () => {
+    const e = env();
+    acceptProof(raw, REPO, HEAD);
+    await queueFromPullRequest(e as never, opened("opened", HEAD));
+    const attemptId = await loseTheHeartbeat(e);
+    expect((await entry(e))?.state).toBe("ReconnectGrace");
+
+    const result = await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
+
+    expect((await entry(e))?.state).toBe("ReconnectGrace");
+    expect((await attempt(e, attemptId))?.outcome).toBeNull();
+    expect(result.detail).not.toContain("withdrawn");
+  });
+
+  it("never says withdrawn about an entry it did not withdraw", async () => {
+    const e = env();
+    acceptProof(raw, REPO, HEAD);
+    await queueFromPullRequest(e as never, opened("opened", HEAD));
+    await reachReconciling(e);
+    expect((await entry(e))?.state).toBe("Reconciling");
+
+    const result = await queueFromPullRequest(e as never, opened("converted_to_draft", HEAD, true));
+
+    expect((await entry(e))?.state).toBe("Reconciling");
+    expect(result.detail).not.toContain("withdrawn");
   });
 
   it("offers the lane to a pull request whose proof the App accepted", async () => {

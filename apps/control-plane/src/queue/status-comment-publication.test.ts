@@ -140,7 +140,7 @@ describe("the comment on a queued pull request", () => {
     });
 
     expect(comments.filter((c) => c.body.includes(COMMENT_MARKER))).toHaveLength(1);
-    expect(comments[0]!.body).toContain("cancelled · this entry left the queue");
+    expect(comments[0]!.body).toContain("withdrawn · a draft holds no place in line");
   });
 
   /**
