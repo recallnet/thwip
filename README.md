@@ -41,8 +41,7 @@ it cannot run the other way round.
 git checkout -b my-change
 # ...edit, commit...
 pnpm build          # once
-thwip run           # runs lint/typecheck/test, signs, amends HEAD
-thwip ship          # pushes, opens the pull request, joins the queue
+thwip ship --wait   # runs, signs, pushes, opens the pull request, and waits for merge
 ```
 
 ### Which thwip are you running
@@ -66,9 +65,10 @@ It writes `~/.local/bin/thwip`, fetches the published release into
 again any time; it changes nothing that is already right.
 
 The resolver walks up for a checkout whose `packages/cli` is this project and
-runs that build. A checkout that has not been built falls back to the release
-and says so on stderr. Nothing in the resolver reaches the network. To undo the
-lot, delete `~/.local/bin/thwip` and `~/.local/share/thwip`.
+runs that build. A checkout that has not been built stops with the exact build
+command instead of running code from somewhere else. Nothing in the resolver
+reaches the network. To undo the lot, delete `~/.local/bin/thwip` and
+`~/.local/share/thwip`.
 
 Pointing `thwip` straight at one worktree's `dist/main.js` is what this
 replaced, and it cost a day: five worktrees ran the sixth one's build, so a bug
@@ -78,14 +78,14 @@ every run of it.
 `pnpm exec thwip` also runs this checkout's build, from any directory in it.
 
 `thwip version` prints the version, the commit the build was made from, and the
-file that is running. A build standing in a checkout it did not come from says
-so on stderr before it does anything, which is the net under all of the above.
+file that is running. A build standing in a checkout it did not come from stops
+before it does anything and prints the exact resolver repair.
 
 ```sh
 thwip version
 ```
 
-### Optional proof warning before push
+### Proof warning before push
 
 GitHub remains the proof authority, but a missing proof is cheaper to catch
 before a remote check fails. This installs one non-blocking `pre-push` warning
@@ -98,4 +98,5 @@ thwip setup --install-push-warning
 The hook checks the exact outgoing branch commit, names the current checkout
 and remediation, and always allows the push. For an intentional low-level push,
 set `THWIP_ALLOW_UNPROVEN_PUSH=1`. Thwip refuses to overwrite an existing hook
-that it does not manage; remove the marked Thwip hook to uninstall it.
+that it does not manage; remove the marked Thwip hook to uninstall it. The
+repository setup prompt offers this command and runs it only after approval.

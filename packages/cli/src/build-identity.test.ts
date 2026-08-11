@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMismatchWarning, findCliCheckout, parseBuildStamp, versionReport } from "./build-identity.js";
+import { buildMismatchFailure, findCliCheckout, parseBuildStamp, versionReport } from "./build-identity.js";
 
 /**
  * Which build is running, and does it belong to the checkout it is standing in.
@@ -12,10 +12,10 @@ import { buildMismatchWarning, findCliCheckout, parseBuildStamp, versionReport }
 
 const identity = { version: "0.1.1", commit: "36b6338a1b2c" };
 
-describe("buildMismatchWarning", () => {
+describe("buildMismatchFailure", () => {
   it("says nothing when the running build comes from this checkout", () => {
     expect(
-      buildMismatchWarning({
+      buildMismatchFailure({
         runningMainPath: "/repos/thwip/packages/cli/dist/main.js",
         checkoutRoot: "/repos/thwip",
         identity,
@@ -25,7 +25,7 @@ describe("buildMismatchWarning", () => {
 
   it("says nothing outside a checkout that builds its own thwip", () => {
     expect(
-      buildMismatchWarning({
+      buildMismatchFailure({
         runningMainPath: "/repos/thwip/packages/cli/dist/main.js",
         checkoutRoot: null,
         identity,
@@ -34,7 +34,7 @@ describe("buildMismatchWarning", () => {
   });
 
   it("names both the build and the checkout when they disagree", () => {
-    const warning = buildMismatchWarning({
+    const warning = buildMismatchFailure({
       runningMainPath: "/repos/thwip/packages/cli/dist/main.js",
       checkoutRoot: "/wt/thwip/cli-ship-fixes",
       identity,
@@ -44,8 +44,9 @@ describe("buildMismatchWarning", () => {
     expect(warning).toContain("/wt/thwip/cli-ship-fixes");
     expect(warning).toContain("0.1.1");
     expect(warning).toContain("36b6338a1b2c");
+    expect(warning).toContain("Stop");
     // It has to be actionable, and it has to be one line.
-    expect(warning).toContain("pnpm exec thwip");
+    expect(warning).toContain('node "$(git rev-parse --show-toplevel)/scripts/install-thwip.mjs" --write-path');
     expect(warning!.split("\n")).toHaveLength(1);
   });
 
@@ -53,7 +54,7 @@ describe("buildMismatchWarning", () => {
     // "/repos/thwip-old" starts with "/repos/thwip". A plain string prefix
     // would call that a match and stay silent about the wrong build.
     expect(
-      buildMismatchWarning({
+      buildMismatchFailure({
         runningMainPath: "/repos/thwip-old/packages/cli/dist/main.js",
         checkoutRoot: "/repos/thwip",
         identity,
@@ -61,11 +62,11 @@ describe("buildMismatchWarning", () => {
     ).not.toBeNull();
   });
 
-  it("warns about a build elsewhere in the same checkout", () => {
+  it("rejects a build elsewhere in the same checkout", () => {
     // Only packages/cli produces a thwip. Anything else under the root that
     // claims to be one is not this checkout's build.
     expect(
-      buildMismatchWarning({
+      buildMismatchFailure({
         runningMainPath: "/repos/thwip/apps/somewhere/main.js",
         checkoutRoot: "/repos/thwip",
         identity,
@@ -75,7 +76,7 @@ describe("buildMismatchWarning", () => {
 
   it("counts the published bundle from this checkout as this checkout's build", () => {
     expect(
-      buildMismatchWarning({
+      buildMismatchFailure({
         runningMainPath: "/repos/thwip/packages/cli/dist-npm/thwip.mjs",
         checkoutRoot: "/repos/thwip",
         identity,

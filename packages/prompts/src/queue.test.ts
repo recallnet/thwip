@@ -47,7 +47,9 @@ describe("queueInstructions", () => {
   });
 
   it("defines completion precisely", () => {
-    expect(queueInstructions(facts())).toMatch(/complete only after `queue\.merge_confirmed`/);
+    const prompt = queueInstructions(facts());
+    expect(prompt).toMatch(/complete only after `queue\.merge_confirmed`/);
+    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
   });
 
   it("forbids retrying around a signature or permission failure", () => {
@@ -153,6 +155,14 @@ describe("withQueuePointer", () => {
 });
 
 describe("queueSetupPrompt", () => {
+  it("offers the shared warning after approval and uses the complete shipping command", () => {
+    const prompt = queueSetupPrompt("recallnet/thwip");
+    expect(prompt).toContain("Only after I explicitly approve");
+    expect(prompt).toContain("thwip setup --install-push-warning");
+    expect(prompt).toContain('Run "thwip ship --wait"');
+    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
+  });
+
   it("tells the agent to find a conflicting auto-merge system first", () => {
     expect(queueSetupPrompt("recallnet/thwip")).toMatch(/second auto-merge system\n *racing the queue/);
   });

@@ -33,11 +33,12 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
-function repository(): { root: string; linked: string; sha: string } {
+function repository(): { root: string; linked: string; secondLinked: string; sha: string } {
   const parent = mkdtempSync(join(tmpdir(), "thwip-push-warning-"));
   roots.push(parent);
   const root = join(parent, "root");
   const linked = join(parent, "linked");
+  const secondLinked = join(parent, "second-linked");
   git(parent, "init", "-b", "main", root);
   git(root, "config", "user.email", "test@example.invalid");
   git(root, "config", "user.name", "Test");
@@ -45,7 +46,8 @@ function repository(): { root: string; linked: string; sha: string } {
   git(root, "add", "file.txt");
   git(root, "-c", "commit.gpgsign=false", "commit", "-m", "first");
   git(root, "worktree", "add", "-b", "topic", linked);
-  return { root, linked, sha: git(linked, "rev-parse", "HEAD") };
+  git(root, "worktree", "add", "-b", "second-topic", secondLinked);
+  return { root, linked, secondLinked, sha: git(linked, "rev-parse", "HEAD") };
 }
 
 function fakeThwip(parent: string, exitCode: number): string {
@@ -82,10 +84,13 @@ describe("the optional pre-push proof warning", () => {
     const repo = repository();
     const fromRoot = await installPushWarning(repo.root);
     const fromLinked = await installPushWarning(repo.linked);
+    const fromSecondLinked = await installPushWarning(repo.secondLinked);
 
     expect(fromRoot.status).toBe("installed");
     expect(fromLinked.status).toBe("updated");
+    expect(fromSecondLinked.status).toBe("updated");
     expect(fromLinked.path).toBe(fromRoot.path);
+    expect(fromSecondLinked.path).toBe(fromRoot.path);
     expect(readFileSync(fromRoot.path, "utf8")).toContain(PUSH_WARNING_MARKER);
   });
 
@@ -99,7 +104,7 @@ describe("the optional pre-push proof warning", () => {
     expect(result.stderr).toContain("refs/heads/topic");
     expect(result.stderr).toContain(repo.sha.slice(0, 12));
     expect(result.stderr).toContain(realpathSync(repo.linked));
-    expect(result.stderr).toContain("thwip ship");
+    expect(result.stderr).toContain("thwip ship --wait");
     expect(result.stderr).toContain("THWIP_ALLOW_UNPROVEN_PUSH=1");
     expect(result.stderr).toContain("this push is still allowed");
   });

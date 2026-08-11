@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { projectSetupPrompt } from "./index.js";
 
 describe("project setup prompt policy lifecycle", () => {
+  it("offers the shared warning only after approval and names the full shipping path", () => {
+    const prompt = projectSetupPrompt({
+      githubName: "recallnet/playhouse",
+      defaultBranch: "main",
+      enabled: true,
+      hasActivePolicy: true,
+    });
+    expect(prompt).toContain("Only after I explicitly approve");
+    expect(prompt).toContain("thwip setup --install-push-warning");
+    expect(prompt).toContain("never overwrites");
+    expect(prompt).toContain("always allows deliberate low-level Git");
+    expect(prompt).toContain('"thwip ship --wait"');
+    expect(prompt).toContain('"thwip run" remains the proof-only command');
+    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
+  });
+
   it("explains the non-approving bootstrap result before first activation", () => {
     const prompt = projectSetupPrompt({
       githubName: "recallnet/playhouse",
