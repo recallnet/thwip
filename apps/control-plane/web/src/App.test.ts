@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   completedQueueActivationText,
+  DashboardMetrics,
   GitHubSync,
   ORGANIZATION_TABS,
   organizationSection,
@@ -69,5 +70,46 @@ describe("the full sync recovery control", () => {
 
     expect(html).not.toContain("Run full sync");
     expect(html).toContain("Only GitHub organization owners can run a full sync.");
+  });
+});
+
+describe("the organization's reused-CI measurements", () => {
+  it("distinguishes loading, empty and partial history", () => {
+    const loading = renderToStaticMarkup(createElement(DashboardMetrics, { metrics: null, error: null }));
+    const empty = renderToStaticMarkup(
+      createElement(DashboardMetrics, {
+        metrics: {
+          status: "empty",
+          signedSuiteDurationMs: 0,
+          signedWallClockDurationMs: 0,
+          verificationOverheadMs: 0,
+          mergedProofs: 0,
+          knownReusedMerges: 0,
+          unmeasuredMergedProofs: 0,
+        },
+        error: null,
+      }),
+    );
+    const partial = renderToStaticMarkup(
+      createElement(DashboardMetrics, {
+        metrics: {
+          status: "partial",
+          signedSuiteDurationMs: 5_000,
+          signedWallClockDurationMs: 6_000,
+          verificationOverheadMs: 30,
+          mergedProofs: 2,
+          knownReusedMerges: 3,
+          unmeasuredMergedProofs: 1,
+        },
+        error: null,
+      }),
+    );
+
+    expect(loading).toContain("Loading measured results");
+    expect(empty).toContain("No merge has reused a measured proof yet");
+    expect(partial).toContain("Verified local CI reused");
+    expect(partial).toContain("6s");
+    expect(partial).toContain("2 measured · 1 older merge has no timing");
+    expect(partial).toContain("not developer waiting time or money saved");
   });
 });
