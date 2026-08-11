@@ -9,7 +9,7 @@ Setting up a *repository* is a separate prompt, on that project's page in the
 dashboard.
 
 ```
-Set up my machine to sign thwip proofs (https://thwip.recall.net).
+Set up my machine to sign thwip proofs (https://thwip.ai).
 
 Ground rules: ask me before anything that changes files or my GitHub account,
 and never read, copy, move, or print the contents of a private key. You may
@@ -64,5 +64,5 @@ the exact command or URL and wait.
    account they will be attributed to, and which local key file it came from.
 
 That's the machine ready. Setting up a repository is a separate prompt, in the
-project's page at https://thwip.recall.net/dashboard/projects.
+project's page at https://thwip.ai/dashboard/projects.
 ```

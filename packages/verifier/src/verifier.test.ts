@@ -496,7 +496,7 @@ const NOW_SECONDS = Math.floor(Date.parse(NOW) / 1000);
 function makeLease(claims?: Record<string, unknown>, header?: Record<string, unknown>, sig = "GOOD"): string {
   const payload = {
     aud: "urn:thwip:ci-run:v1",
-    iss: "https://thwip.recall.net",
+    iss: "https://thwip.ai",
     repositoryId: "1315419165",
     treeOid: TREE,
     parentOids: [PARENT],

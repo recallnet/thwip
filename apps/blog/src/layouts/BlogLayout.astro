@@ -13,7 +13,7 @@ interface Props {
   jsonLd?: Record<string, unknown> | Record<string, unknown>[];
 }
 const { title, description, canonicalPath, ogImage, jsonLd } = Astro.props;
-const site = Astro.site ?? new URL("https://thwip.recall.net");
+const site = Astro.site ?? new URL("https://thwip.ai");
 const canonical = new URL(canonicalPath, site).href;
 const ogImageUrl = ogImage ? new URL(ogImage, site).href : undefined;
 ---

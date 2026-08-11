@@ -44,7 +44,7 @@ const enc = new TextEncoder();
 export async function verifyPublishedChain({
   repo = "recallnet/thwip",
   ref = "refs/heads/main",
-  api = "https://thwip.recall.net",
+  api = "https://thwip.ai",
   expectedSha = null,
   githubToken = "",
   fetchImpl = fetch,
@@ -157,7 +157,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   const report = await verifyPublishedChain({
     repo: process.argv[2] ?? "recallnet/thwip",
     ref: process.argv[3] ?? "refs/heads/main",
-    api: process.env.THWIP_API ?? "https://thwip.recall.net",
+    api: process.env.THWIP_API ?? "https://thwip.ai",
     githubToken: process.env.GITHUB_TOKEN ?? "",
   });
   printChainReport(report);
