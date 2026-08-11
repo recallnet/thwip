@@ -8,7 +8,7 @@ import {
 } from "../apps/control-plane/src/queue/bootstrap-workflows.ts";
 
 /** Where the deployed control plane answers. Same value as wrangler.jsonc. */
-export const PRODUCTION_ENDPOINT = "https://thwip.recall.net";
+export const PRODUCTION_ENDPOINT = "https://thwip.ai";
 
 /**
  * The workflows this repository checks in and the template writes. Not the

@@ -38,7 +38,7 @@ jobs:
         uses: ./
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          THWIP_ENDPOINT: https://thwip.recall.net
+          THWIP_ENDPOINT: https://thwip.ai
       # Place this pull request in the queue, and tell it what the proof said.
       #
       # This is what enrols the entry, derives its readiness from the proof, and
@@ -59,7 +59,7 @@ jobs:
         # block is visible, and nothing claims the proof was bad.
         continue-on-error: true
         env:
-          THWIP_ENDPOINT: https://thwip.recall.net
+          THWIP_ENDPOINT: https://thwip.ai
           REPO_ID: ${{ github.event.repository.id }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
