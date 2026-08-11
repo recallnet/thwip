@@ -26,7 +26,16 @@
  * Usage: node scripts/install-thwip.mjs [--write-path] [--no-fetch]
  */
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +56,15 @@ const problems = [];
 
 /* 1. The command itself. */
 mkdirSync(binDir, { recursive: true });
+try {
+  // copyFileSync follows a destination symlink. The old installer therefore
+  // overwrote a build inside another checkout instead of replacing the stale
+  // bare command. Remove only this exact symlink before installing the managed
+  // resolver; regular files remain the installer's normal update path.
+  if (lstatSync(installed).isSymbolicLink()) unlinkSync(installed);
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 copyFileSync(join(here, "thwip-resolver.sh"), installed);
 chmodSync(installed, 0o755);
 say(`installed ${installed}`);
@@ -66,12 +84,18 @@ if (existsSync(bundle)) {
 }
 
 /* 3. PATH, once, and only with consent. */
-const onPath = (process.env["PATH"] ?? "").split(delimiter).includes(binDir);
+const currentPath = process.env["PATH"] ?? "";
+const selectedBeforeResult = spawnSync("sh", ["-c", "command -v thwip"], {
+  env: process.env,
+  encoding: "utf8",
+});
+const selectedBefore = (selectedBeforeResult.stdout ?? "").trim();
+const resolverSelected = selectedBefore === installed;
 const MARKER = "# added by thwip installer";
 const line = `export PATH="$HOME/.local/bin:$PATH" ${MARKER}`;
 
-if (onPath) {
-  say(`${binDir} is already on PATH`);
+if (resolverSelected) {
+  say(`${installed} is already the first thwip on PATH`);
 } else if (writePath) {
   const rc = rcFile();
   const existing = existsSync(rc) ? readFileSync(rc, "utf8") : "";
@@ -82,7 +106,8 @@ if (onPath) {
     say(`added the PATH line to ${rc}; open a new shell for it`);
   }
 } else {
-  say(`${binDir} is not on PATH. Add this line to your shell profile, or re-run with --write-path:`);
+  const selected = selectedBefore === "" ? "no thwip" : selectedBefore;
+  say(`${installed} is not the first thwip on PATH (${selected}). Add this line to your shell profile, or re-run with --write-path:`);
   say(`  ${line}`);
 }
 
@@ -94,10 +119,10 @@ function rcFile() {
 }
 
 /* 4. Check the work. Reporting success without this is the bug in issue #29. */
-const pathForChecks = onPath ? (process.env["PATH"] ?? "") : `${binDir}${delimiter}${process.env["PATH"] ?? ""}`;
+const pathForChecks = `${binDir}${delimiter}${currentPath}`;
 const env = { ...process.env, PATH: pathForChecks, HOME: home };
 
-check("command -v thwip", "sh", ["-c", "command -v thwip"]);
+checkSelectedCommand();
 check("thwip --version", "thwip", ["--version"]);
 check("thwip keys status", "thwip", ["keys", "status"]);
 
@@ -110,6 +135,18 @@ function check(label, command, args) {
   const detail = (result.stderr ?? "").trim().split("\n")[0] ?? `exit ${result.status}`;
   say(`FAIL ${label}: ${detail}`);
   problems.push(`${label}: ${detail}`);
+}
+
+function checkSelectedCommand() {
+  const result = spawnSync("sh", ["-c", "command -v thwip"], { env, encoding: "utf8" });
+  const selected = (result.stdout ?? "").trim();
+  if (result.status === 0 && selected === installed) {
+    say("ok   command -v thwip");
+    return;
+  }
+  const detail = selected === "" ? (result.stderr ?? "").trim() || `exit ${result.status}` : `selected ${selected}`;
+  say(`FAIL command -v thwip: ${detail}`);
+  problems.push(`command -v thwip: ${detail}`);
 }
 
 if (problems.length > 0) {

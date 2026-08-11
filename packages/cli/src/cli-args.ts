@@ -50,12 +50,12 @@ USAGE
 
 COMMANDS
   login                     Sign in via device code.
-  ship                      Run suites, sign, push, and manage the queue.
+  ship                      Run suites, sign, push, and manage the queue; use --wait to finish.
   queue <subcommand>        Inspect or operate the branch queue.
   init                      Write thwip.yaml for this repository.
   keys status               Show the signing key and GitHub registration.
-  setup                     Machine setup and optional local push warning.
-  run                       Run approved suites and attach a proof.
+  setup                     Machine setup and managed local push warning.
+  run                       Proof-only: run approved suites and attach a proof.
   doctor                    Check this project can produce and verify a proof.
   verify                    Parse and check a commit's proof.
   verify-chain              Fetch and verify a branch's merge chain.
@@ -69,7 +69,8 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
   login: `Usage: thwip login [--endpoint URL]\n\nSign in through the thwip device authorization flow.\n`,
   ship:
     `Usage: thwip ship [--wait] [--no-queue] [--json-events]\n\n` +
-    `Run approved suites, attach a proof, push, and open or update the pull request.\n`,
+    `Run approved suites, attach a proof, push, and open or update the pull request.\n` +
+    `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n`,
   init:
     `Usage: thwip init --required "lint,typecheck,test" [--profile PROFILE] [--sign-commits]\n\n` +
     `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
@@ -94,7 +95,8 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `non-blocking pre-push warning shared by this repository's linked worktrees.\n`,
   run:
     `Usage: thwip run [--base REF]\n\n` +
-    `Run approved suites against the committed tree and attach a signed proof to HEAD.\n`,
+    `Proof-only: run approved suites against the committed tree and attach a signed proof to HEAD.\n` +
+    `Use \`thwip ship --wait\` when the work should be pushed and completed.\n`,
   "policy-digest":
     `Usage: thwip policy digest\n\nPrint the canonical policy and pipeline digests for HEAD.\n`,
   version:

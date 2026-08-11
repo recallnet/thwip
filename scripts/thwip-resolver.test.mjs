@@ -10,7 +10,7 @@
  * mock of the filesystem it walks is testing the mock.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,29 +99,29 @@ describe("thwip-resolver", () => {
     expect(run(root, release(scratch()), ["queue", "status", "--json"])).toContain("queue status --json");
   });
 
-  it("falls back to the release in an unbuilt checkout, and says which it used", () => {
-    // A fresh clone of thwip has no build yet. Stopping here broke the first
-    // command a new contributor ran. Falling back silently is the other half of
-    // the trap, so the fallback is announced.
-    const root = checkout(scratch(), { built: false });
-    const out = execFileSync(resolver, [], {
-      cwd: root,
-      encoding: "utf8",
-      env: { ...process.env, THWIP_RELEASE_HOME: release(scratch()) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    expect(out).toContain("release build");
-  });
-
-  it("names pnpm build on stderr when it falls back from an unbuilt checkout", () => {
+  it("stops in an unbuilt checkout instead of running code from elsewhere", () => {
     const root = checkout(scratch(), { built: false });
     const result = spawnSync(resolver, [], {
       cwd: root,
       encoding: "utf8",
       env: { ...process.env, THWIP_RELEASE_HOME: release(scratch()) },
     });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain("pnpm build");
+    expect(result.status).toBe(12);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).not.toContain("release build");
+  });
+
+  it("names the exact checkout build repair when a linked worktree has no build", () => {
+    const root = checkout(scratch(), { built: false });
+    const result = spawnSync(resolver, [], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, THWIP_RELEASE_HOME: release(scratch()) },
+    });
+    const resolvedRoot = realpathSync(root);
+    expect(result.status).toBe(12);
+    expect(result.stderr).toContain('pnpm --dir "$(git rev-parse --show-toplevel)" build');
+    expect(result.stderr).toContain(join(resolvedRoot, "packages", "cli", "dist", "main.js"));
   });
 
   it("never installs anything on its own, and says what to run instead", () => {

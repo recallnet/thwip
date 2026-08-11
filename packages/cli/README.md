@@ -23,11 +23,13 @@ wherever the commands below say `thwip`.
 ```
 thwip login                                    # sign in with GitHub
 thwip init --required "lint,typecheck,test"    # write thwip.yaml
-thwip run                                      # run the suites and sign a proof
+thwip ship --wait                              # run, sign, push, and wait for merge
 ```
 
-`thwip run` executes the suites against the committed tree and attaches the proof
-to `HEAD` as a Git trailer. Push, open a pull request, and the check reads it.
+`thwip ship --wait` is the full completion path. It runs the suites against the
+committed tree, attaches the proof to `HEAD`, pushes, opens or updates the pull
+request, joins the queue, and waits for the outcome. Use `thwip run` when you
+only need to create or refresh a proof without shipping it.
 
 Suite ids name the `package.json` scripts you already run. Configuration is one
 committed file:
@@ -47,9 +49,9 @@ required:
 | --- | --- |
 | `thwip login` | Sign in through a device code that works over SSH |
 | `thwip init` | Write `thwip.yaml` from the suites you name |
-| `thwip run` | Run the required suites and sign a proof of the tree |
+| `thwip run` | Proof-only: run the required suites and sign a proof of the tree |
 | `thwip verify` | Run the same checks the protected check will run |
-| `thwip ship` | Run, sign, push, open the pull request, take a queue turn |
+| `thwip ship --wait` | Run, sign, push, open the pull request, and wait for the queue outcome |
 | `thwip keys status` | Report which key signs, and whether GitHub lists it |
 | `thwip doctor` | Check the whole chain, from your key to the App's grants |
 | `thwip queue` | Inspect and administer the merge queue |

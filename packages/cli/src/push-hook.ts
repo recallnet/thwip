@@ -49,7 +49,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   short=$(printf '%.12s' "$local_sha")
   echo "[thwip] warning: $local_ref ($short) $proof_detail" >&2
   echo "[thwip] checkout: $checkout" >&2
-  echo '[thwip] run \`thwip ship\` in this checkout before pushing; this push is still allowed' >&2
+  echo '[thwip] run \`thwip ship --wait\` in this checkout before pushing; this push is still allowed' >&2
   echo '[thwip] intentional low-level push: THWIP_ALLOW_UNPROVEN_PUSH=1 git push ...' >&2
 done
 
