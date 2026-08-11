@@ -77,7 +77,7 @@ Your private key is never read, moved, or transmitted.
 
 ## Learn more
 
-https://recall.network
+https://thwip.ai
 
 ## License
 
