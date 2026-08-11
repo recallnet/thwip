@@ -3,7 +3,7 @@ import BlogLayout from "../../layouts/BlogLayout.astro";
 import { publishedPosts } from "../../lib/posts";
 
 const posts = await publishedPosts();
-const site = Astro.site ?? new URL("https://thwip.recall.net");
+const site = Astro.site ?? new URL("https://thwip.ai");
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "Blog",

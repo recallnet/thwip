@@ -21,7 +21,7 @@ interface CommitData {
 
 const API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
 const TOKEN = process.env["GITHUB_TOKEN"] ?? "";
-const ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+const ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.ai";
 
 function summary(line: string): void {
   const f = process.env["GITHUB_STEP_SUMMARY"];

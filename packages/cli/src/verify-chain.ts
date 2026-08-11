@@ -1,6 +1,7 @@
 import { createLocalJWKSet, compactVerify, type JSONWebKeySet } from "jose";
 import { verifyChain, type ChainCorrection, type ChainFinding, type ChainLink } from "@thwip/queue-protocol";
 import { flag } from "./cli-flags.js";
+import { DEFAULT_ENDPOINT } from "./endpoint.js";
 import { EXIT } from "./queue-exit.js";
 
 /**
@@ -253,7 +254,7 @@ export async function resolveBranchHeadFromGithub(repo: string, branch: string):
  * `thwip queue`, which mutates state and legitimately needs an identity.
  */
 export async function cmdVerifyChain(argv: string[]): Promise<number> {
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? "https://thwip.recall.net";
+  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
   const repo = flag(argv, "--repo") ?? "";
   const repositoryIdFlag = flag(argv, "--repository-id");
   if (repositoryIdFlag === undefined && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {

@@ -1,6 +1,6 @@
 # Working on production without a key to the database
 
-`thwip.recall.net` runs one Worker against one D1 database, and that database is
+`thwip.ai` runs one Worker against one D1 database, and that database is
 live. There is no staging copy to practise on. Everything below assumes that.
 
 This page says how to deploy, how to diagnose, and how to change something,
@@ -139,7 +139,7 @@ Create it at **My Profile → API Tokens → Create Token → Create Custom Toke
 - Account / Account Settings:Read
 - User / User Details:Read
 - User / Memberships:Read
-- Zone / Workers Routes:Edit, scoped to `recall.net`
+- Zone / Workers Routes:Edit, scoped to `thwip.ai`
 
 Give it **no D1 permission**. The database binding travels in `wrangler.jsonc`
 as an id, and the id is not a secret. A deploy that fails asking for D1 is worth

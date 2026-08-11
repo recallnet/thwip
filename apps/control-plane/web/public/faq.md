@@ -37,7 +37,7 @@ A proof says that an enrolled signing key asserted the approved pipeline and req
 
 ## How does a teammate join?
 
-They sign in with GitHub at https://thwip.recall.net. Membership, roles, and repository permissions come from the GitHub organization. There are no invitations. Outside collaborators invited to individual repositories also count: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
+They sign in with GitHub at https://thwip.ai. Membership, roles, and repository permissions come from the GitHub organization. There are no invitations. Outside collaborators invited to individual repositories also count: their per-repository permission is their standing. Removing someone on GitHub removes their standing here too.
 
 ## How do I express a build matrix, services, or several platforms?
 
