@@ -68,19 +68,19 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
 
   /* The turn handed this machine work it refused to do. */
   ASSIGNMENT_UNVERIFIED:
-    "The turn thwip handed this machine is not signed by a key thwip publishes, so nothing was run. Run thwip ship again, and if it happens twice send this output to whoever runs the queue.",
+    "The turn thwip handed this machine is not signed by a key thwip publishes, so nothing was run. Run thwip ship --wait again, and if it happens twice send this output to whoever runs the queue.",
   ASSIGNMENT_EXPIRED:
-    "The turn's execution window closed before the suites finished. Run thwip ship again and the queue will hand you another.",
+    "The turn's execution window closed before the suites finished. Run thwip ship --wait again and the queue will hand you another.",
   ASSIGNMENT_MISMATCH:
-    "The receipt this machine signed answers a turn the queue is no longer running. Run thwip ship again to take a current one.",
+    "The receipt this machine signed answers a turn the queue is no longer running. Run thwip ship --wait again to take a current one.",
   DEVICE_MISMATCH:
-    "Another machine holds this turn. Run thwip ship on the machine that claimed it, or wait for the queue to offer the turn here.",
+    "Another machine holds this turn. Run thwip ship --wait on the machine that claimed it, or wait for the queue to offer the turn here.",
   CANDIDATE_UNAVAILABLE:
-    "This machine cannot fetch the merged commit the queue built, so there is nothing to run the suites against. Check that you can reach origin, then run thwip ship again.",
+    "This machine cannot fetch the merged commit the queue built, so there is nothing to run the suites against. Check that you can reach origin, then run thwip ship --wait again.",
   INTEGRATION_ASSIGNMENT_MISSING:
     "This project runs the integration on your own machine and no machine ever took the turn. Keep `thwip ship --wait` running and the queue will hand it one.",
   INTEGRATION_RECEIPT_MISSING:
-    "The machine holding this turn has not sent back a signed receipt for the integration run. Let it finish, or run thwip ship again to take a fresh turn.",
+    "The machine holding this turn has not sent back a signed receipt for the integration run. Let it finish, or run thwip ship --wait again to take a fresh turn.",
   INTEGRATION_RECEIPT_TREE_MISMATCH:
     "The receipt this machine signed covers a different merge than the one being written. The queue is rebuilding the candidate and will hand out another turn.",
   INTEGRATION_ASSIGNMENT_MISMATCH:
@@ -88,20 +88,20 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   INTEGRATION_RECEIPT_MISMATCH:
     "The queue holds two accounts of this turn's receipt and they do not match, so nothing was merged. Send this output to whoever runs the queue.",
   INTEGRATION_RECEIPT_DEVICE_MISMATCH:
-    "The receipt came from a machine other than the one that claimed this turn. Run thwip ship on the machine holding the turn.",
+    "The receipt came from a machine other than the one that claimed this turn. Run thwip ship --wait on the machine holding the turn.",
   CANDIDATE_CHANGED:
     "GitHub is now integrating a different merge commit than the one this turn ran against. The queue will pin the new one and hand out another turn.",
 
   /* The local machine stopped before it could name anything better. */
   PUSH_REJECTED:
-    "The remote branch holds a commit this machine does not have, so nothing was pushed. Fetch and rebase onto it, then run thwip ship again.",
+    "The remote branch holds a commit this machine does not have, so nothing was pushed. Fetch and rebase onto it, then run thwip ship --wait again.",
   LOCAL_FAILURE:
     "Thwip stopped on a failure it has no reason code for. The line above is what failed; if it repeats, send it to whoever runs the queue.",
   PR_NOT_OPENED:
-    "Your branch is pushed and no open pull request names it. Open one with gh pr create, then run thwip ship again.",
+    "Your branch is pushed and no open pull request names it. Open one with gh pr create, then run thwip ship --wait again.",
 
   /* The work itself failed. */
-  SUITE_FAILED: "A required suite failed on your machine. Fix it and run thwip ship again.",
+  SUITE_FAILED: "A required suite failed on your machine. Fix it and run thwip ship --wait again.",
   SUITE_NOT_PASSED: "A required suite did not pass. Fix it and run thwip run again.",
   CI_FAILED: "The integration run failed. Fix it and push; your place in line is kept.",
   CANDIDATE_SUITE_NOT_PASSED:
@@ -117,7 +117,7 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The evidence for this commit has not settled, so there is no verdict to read yet. Check again shortly.",
 
   /* Evidence was refused. */
-  LOCAL_RECEIPT_MISSING: "Run thwip run on this commit and push, so the head carries a proof.",
+  LOCAL_RECEIPT_MISSING: "Run thwip ship --wait on this commit, so the head carries a proof and completes shipping.",
   LOCAL_RECEIPT_REJECTED: "The proof on this commit was not accepted. thwip verify explains why.",
   RECEIPT_REJECTED: "The proof for this attempt was refused. Run thwip verify to see which check refused it.",
   VERIFICATION_FAILED: "Verification of this attempt failed. Run thwip verify to see why.",
@@ -131,7 +131,7 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   PIPELINE_DIGEST_MISMATCH:
     "The pipeline changed after this proof was signed. Pull the current thwip.yaml, then run thwip run again.",
   PROOF_EXPIRED: "This proof is older than the policy allows. Run thwip run again.",
-  PROOF_MISSING: "This commit carries no proof. Run thwip run and push again.",
+  PROOF_MISSING: "This commit carries no proof. Run thwip ship --wait to create the proof and complete shipping.",
   PROOF_DUPLICATE: "The commit message carries more than one proof. Amend it to carry exactly one, then push again.",
   PROOF_MALFORMED: "The proof on this commit does not parse. Run thwip run again to write a fresh one.",
   PROOF_TOO_LARGE:
@@ -143,7 +143,7 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   LEASE_EXPIRED: "The lease expired before the run finished. Run thwip run again.",
   LEASE_CONTEXT_MISMATCH: "The lease was issued for other work. Run thwip run again.",
   WORK_RECEIPT_UNREADABLE:
-    "The head commit carries no readable proof, so the merge record has nothing to cite. Run thwip run and push again.",
+    "The head commit carries no readable proof, so the merge record has nothing to cite. Run thwip ship --wait to create the proof and complete shipping.",
   CANDIDATE_REJECTED: "The verifier refused this candidate. Open the verifier run to see what it refused.",
   CANDIDATE_SUITE_DUPLICATE:
     "The verifier reported the same suite twice, so its verdict was refused. An admin needs to fix the verifier workflow.",
@@ -199,8 +199,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "The merge commit GitHub offers does not sit on this pull request's base and head, so the queue will not pin it. It will ask again once GitHub has rebuilt it.",
 
   /* What was being integrated is no longer what is there. */
-  HEAD_MOVED: "You pushed during your turn, so the queue needs a proof for the new head. Run thwip ship again.",
-  BASE_MOVED: "The base moved, so this proof no longer covers what would be merged. Run thwip ship again.",
+  HEAD_MOVED: "You pushed during your turn, so the queue needs a proof for the new head. Run thwip ship --wait again.",
+  BASE_MOVED: "The base moved, so this proof no longer covers what would be merged. Run thwip ship --wait again.",
   POLICY_CHANGED:
     "The policy now requires something this proof does not cover: a different pipeline, or a suite it never ran. Run thwip run again on this commit and push.",
   REVIEWS_CHANGED:

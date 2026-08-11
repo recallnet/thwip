@@ -68,16 +68,17 @@ candidate when the turn arrives, and asks GitHub to merge it.
 - Do not manually rebase merely because another pull request is queued. The queue
   tests the integrated candidate for you.
 - Once a turn is assigned, use only the exact candidate Thwip supplies.
-- Do not amend or force-push a queued head without rerunning \`thwip ship\`. The
-  candidate someone is testing is the head you replaced.
+- Do not amend or force-push a queued head without rerunning
+  \`thwip ship --wait --json-events\`.
+  The candidate someone is testing is the head you replaced.
 - Ctrl-C detaches safely. It does not erase the queue request or lose your place.
 - If review is required, stop and report the pull request URL and the required
   action. Do not attempt to satisfy a human requirement yourself.
 - If integrated CI fails, inspect the preserved worktree, fix the feature branch,
   and rerun \`thwip ship --wait --json-events\`.
 - If Thwip reports a conflict, rebase the feature branch yourself and rerun
-  \`thwip ship\`. A rebase moves the tree out from under the proof, so it has to
-  be signed again; \`ship\` notices and does it.
+  \`thwip ship --wait --json-events\`. A rebase moves the tree out from under
+  the proof, so it has to be signed again; \`ship\` notices and does it.
 - Treat any invariant, signature, ruleset, or permission failure as blocking and
   report it. These are not conditions to retry around.
 - Work is complete only after \`queue.merge_confirmed\`, or after clearly
@@ -151,7 +152,13 @@ for things only I can do.
 
 2. Run "thwip queue doctor --json" and show me the whole output.
 
-3. Tell me which two checks have to be required on the protected branch at each
+3. Offer to install Thwip's managed, non-blocking pre-push warning. Explain that
+   it applies to the main worktree and every linked worktree, never replaces an
+   unmanaged hook, and can be bypassed for a deliberate low-level Git push.
+   Only after I explicitly approve, run "thwip setup --install-push-warning".
+   If I decline, continue without it.
+
+4. Tell me which two checks have to be required on the protected branch at each
    stage, and why the proof publisher changes name rather than sharing one:
 
    - "thwip / workflow" is the Actions-owned proof gate during the staged
@@ -162,12 +169,12 @@ for things only I can do.
      rather than failing while a pull request waits. A required check that has
      failed goes on refusing the merge after the queue has authorized it.
 
-4. Write the repository's own instructions: run "thwip queue setup --write". It
+5. Write the repository's own instructions: run "thwip queue setup --write". It
    writes THWIP.md and adds only the bounded pointer to the AGENTS.md and
    CLAUDE.md that already exist. Show me the diff. Do not rewrite instructions
    someone else authored.
 
-5. Start enrolment: the "Set up" tab of this project in the dashboard, or POST
+6. Start enrolment: the "Set up" tab of this project in the dashboard, or POST
    /v1/queue/<repository id>/bootstrap. It enrols the repository and opens a
    setup pull request carrying the two workflows, then stops. Organization
    defaults are inherited; select the repository-override option only when this
@@ -175,7 +182,7 @@ for things only I can do.
    must not judge itself, so that pull request merges under the controls this
    repository already has, before any Thwip check is required.
 
-6. Tell me what I have to do myself, because you cannot:
+7. Tell me what I have to do myself, because you cannot:
    - merge the setup pull request, which is where enrolment is waiting;
    - first apply only the disabled policy payloads enrolment returns, in the order
      shown, using my own repository-administrator authority;
@@ -198,15 +205,15 @@ for things only I can do.
    needed when a reviewed commit changes CI definitions; setup needs no personal
    access token or repository merge secret.
 
-7. Prove it before enforcing it. Enrolment enables the queue in observe mode while
+8. Prove it before enforcing it. Enrolment enables the queue in observe mode while
    ownership and policy enforcement remain disabled, so the repository keeps its
-   existing merge controls. Push a real pull request and confirm the proof and
-   queue checks behave correctly. Then enforce the App proof publisher and let
-   setup replace the proof context while the policy is still disabled. A
-   required check that nothing publishes blocks every merge on the branch, and
-   that is the failure this order exists to avoid.
+   existing merge controls. Run "thwip ship --wait" on a real pull request and
+   confirm the proof and queue checks behave correctly. Then enforce the App
+   proof publisher and let setup replace the proof context while the policy is
+   still disabled. A required check that nothing publishes blocks every merge
+   on the branch, and that is the failure this order exists to avoid.
 
-8. Only after the App proof context is pinned and verified, confirm "Begin enforcement".
+9. Only after the App proof context is pinned and verified, confirm "Begin enforcement".
    Setup persists a recoverable canary state before the manual
    ownership handoff and records "enforced" only after it reads both active
    rulesets back. Reconcile the open pull requests before treating setup as

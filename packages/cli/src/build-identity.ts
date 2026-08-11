@@ -8,11 +8,10 @@
  * ship.ts survived a day of use that way: the runs that hit it were not running
  * the code anybody was reading.
  *
- * A symlink on somebody's machine is not this repository's to move. What this
- * repository can do is refuse to be quiet about it, so a build standing in a
- * checkout it did not come from says so on the way past. It is a warning and
- * not a failure: running a released thwip inside this repository is a perfectly
- * ordinary thing to do, and a person who meant it should not be stopped.
+ * A symlink on somebody's machine is not this repository's to move. A build
+ * standing in another checkout now stops with the exact resolver repair. A
+ * warning still let an agent ship with code from the wrong worktree, which is
+ * the failure this check exists to prevent.
  */
 
 import { dirname, join, sep } from "node:path";
@@ -48,10 +47,10 @@ export function findCliCheckout(startDir: string, exists: (path: string) => bool
 }
 
 /**
- * One line naming the build that is running and the checkout it is standing in,
- * or nothing when they are the same.
+ * One line naming the mismatch and its exact repair, or nothing when the
+ * checkout selected its own build.
  */
-export function buildMismatchWarning(input: {
+export function buildMismatchFailure(input: {
   runningMainPath: string;
   checkoutRoot: string | null;
   identity: { version: string; commit: string };
@@ -67,7 +66,8 @@ export function buildMismatchWarning(input: {
   return (
     `[thwip] running ${runningMainPath} (${identity.version}, ${identity.commit}) ` +
     `while standing in ${checkoutRoot}, which builds its own thwip. ` +
-    `Run \`pnpm exec thwip\` there to use that build.`
+    "Stop and repair the bare command with " +
+    '`node "$(git rev-parse --show-toplevel)/scripts/install-thwip.mjs" --write-path`, then retry.'
   );
 }
 

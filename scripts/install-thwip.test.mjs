@@ -11,7 +11,16 @@
  * already is the one environment that proves nothing.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -145,6 +154,41 @@ describe("install-thwip", () => {
     const result = install(env, ["--write-path"]);
     expect(result.status).toBe(0);
     expect(existsSync(join(env.dir, ".zshrc"))).toBe(false);
+  });
+
+  it("repairs an old bare command that points into another checkout", () => {
+    const env = home();
+    const bin = join(env.dir, ".local", "bin");
+    const installed = join(bin, "thwip");
+    const foreignBuild = join(scratch(), "packages", "cli", "dist", "main.js");
+    mkdirSync(dirname(foreignBuild), { recursive: true });
+    writeFileSync(foreignBuild, "console.log('foreign checkout');\n");
+    mkdirSync(bin, { recursive: true });
+    symlinkSync(foreignBuild, installed);
+
+    const result = install(env);
+
+    expect(result.status).toBe(0);
+    expect(lstatSync(installed).isSymbolicLink()).toBe(false);
+    expect(readFileSync(foreignBuild, "utf8")).toBe("console.log('foreign checkout');\n");
+    expect(readFileSync(installed, "utf8")).toContain("Which thwip does a bare `thwip` run");
+  });
+
+  it("reports a stale higher-priority thwip and writes the exact PATH repair after approval", () => {
+    const env = home();
+    const staleBin = scratch();
+    const stale = join(staleBin, "thwip");
+    writeFileSync(stale, "#!/bin/sh\necho stale\n");
+    chmodSync(stale, 0o755);
+    env.extra = {
+      PATH: `${staleBin}:${join(env.dir, ".local", "bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    };
+
+    const result = install(env, ["--write-path"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("already the first thwip");
+    expect(readFileSync(join(env.dir, ".zshrc"), "utf8")).toContain('export PATH="$HOME/.local/bin:$PATH"');
   });
 
   it("stops with the command to run when no release is installed", () => {

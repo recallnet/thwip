@@ -17,11 +17,9 @@
 # Both halves are predictable, and neither depends on which worktree happens to
 # exist. Install this file at the `thwip` on your PATH; the README says how.
 #
-# A checkout with no build falls back to the release and says so. It used to
-# stop, which meant a fresh clone of thwip broke the first command a new
-# contributor ran. Falling back silently is the bug family this repository keeps
-# finding, so the fallback is announced and `thwip version` names the build that
-# answered.
+# A checkout with no build stops with the exact build command. Falling back to
+# the release still runs code from somewhere other than the checkout, even when
+# it says so, which is the mismatch this resolver exists to prevent.
 #
 # Nothing here reaches the network. `thwip --version` fetching a package is a
 # surprise nobody asked for, so a missing release is reported with the command
@@ -41,8 +39,10 @@ while :; do
     if [ -f "$build" ]; then
       exec node "$build" "$@"
     fi
-    echo "thwip: $dir has no build yet, so this is the published release. Run \`pnpm build\` there to use its own." >&2
-    break
+    echo "thwip: $dir has no checkout build at $build." >&2
+    echo 'thwip: repair it with: pnpm --dir "$(git rev-parse --show-toplevel)" build' >&2
+    echo "thwip: then retry the same thwip command from this checkout." >&2
+    exit 12
   fi
   parent=$(dirname "$dir")
   if [ "$parent" = "$dir" ]; then break; fi
