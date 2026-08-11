@@ -13,12 +13,18 @@ import { GithubApiError } from "./github-error.js";
 import { signPayload } from "./service-signing.js";
 import { verifySshSigEd25519 } from "./sshsig-verify.js";
 import {
+  recordProofCompletion,
+  signedProofDurations,
+  type SignedProofDurations,
+} from "./reused-ci-metrics.js";
+import {
   resolveVerificationBundle,
   VerificationBundleError,
   type VerificationBundleInput,
   type VerificationBundleResolution,
 } from "./verification-bundle.js";
 import type { Env } from "./env.js";
+import type { D1Like } from "./queue/projection.js";
 
 const API = "https://api.github.com";
 export const APP_PROOF_CHECK = "thwip";
@@ -224,6 +230,8 @@ export interface AppProofEvaluation {
   policyVersion: ProofVerificationAuditV1["policyVersion"];
   configSource: ProofVerificationAuditV1["configSource"];
   targets: AppProofTargetResult[];
+  /** Present only when a fully accepted signed statement carried safe durations. */
+  durations?: SignedProofDurations;
 }
 
 export interface AppProofEvaluationDependencies {
@@ -328,6 +336,9 @@ export async function evaluateAppProof(
     },
   );
   const evaluated = targetResult(target, result);
+  const durations = result.code === "PASS" && result.statement !== undefined
+    ? signedProofDurations(result.statement)
+    : null;
   return {
     outcome: evaluated.outcome,
     ...(evaluated.detail !== undefined ? { detail: evaluated.detail } : {}),
@@ -335,6 +346,7 @@ export async function evaluateAppProof(
     policyVersion: resolution.bundle.policy.version,
     configSource,
     targets: [evaluated],
+    ...(durations !== null ? { durations } : {}),
   };
 }
 
@@ -839,20 +851,7 @@ const defaultStorageDependencies: Pick<
     return row !== null;
   },
   async markCompleted(env, id, evaluation, auditJws, completedAt) {
-    await env.DB.prepare(
-      `UPDATE proof_verifications
-          SET status = 'completed', outcome = ?, detail = ?, policy_digest = ?, audit_jws = ?, completed_at = ?
-        WHERE id = ?`,
-    )
-      .bind(
-        evaluation.outcome,
-        evaluation.detail ?? null,
-        evaluation.policyDigest,
-        auditJws,
-        completedAt,
-        id,
-      )
-      .run();
+    await recordProofCompletion(env.DB as unknown as D1Like, id, evaluation, auditJws, completedAt);
     // This commit has an answer now, so nothing on it is still waiting.
     await env.DB.prepare(
       `UPDATE proof_verifications SET status = 'superseded'

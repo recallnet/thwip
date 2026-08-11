@@ -422,6 +422,13 @@
   margin-top: 64px;
   padding-bottom: 44px;
 }
+
+.mq-measures__state {
+  margin: 48px 0 0;
+  padding: 20px 0;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+}
 /* Three shared rows, so the number, the label and the source it was taken from
    line up across the measures however many lines a label runs to. */
 .mq-measure {
@@ -462,10 +469,6 @@
   line-height: 1.4;
   color: var(--muted);
 }
-/* The figure Thwip is measured against, not a third thing it does. */
-.mq-measure--cloud { border-top-color: var(--fail); }
-.mq-measure--cloud span { color: var(--muted); }
-
 /* Three checkouts arriving on their own, converging on one rule. */
 .mq-diagram { margin: 38px 0 0 -36px; padding: 0; }
 .mq-agent {

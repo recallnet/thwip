@@ -397,6 +397,7 @@ describe("App-native check publication", () => {
     const result = await processAppProofVerification(env, request(), state.dependencies);
 
     expect(result.evaluation.outcome).toBe("PASS");
+    expect(result.evaluation.durations).toEqual({ suiteDurationMs: 100, wallClockDurationMs: 540_000 });
     expect(state.dependencies.insertStarted).toHaveBeenCalledWith(
       env,
       expect.objectContaining({ checkName: APP_PROOF_OBSERVE_CHECK, mode: "observe" }),
@@ -444,6 +445,7 @@ describe("App-native check publication", () => {
     const result = await processAppProofVerification(env, request(), state.dependencies);
 
     expect(result.evaluation.outcome).toBe("PROOF_MISSING");
+    expect(result.evaluation.durations).toBeUndefined();
     expect(state.dependencies.insertStarted).toHaveBeenCalledWith(
       env,
       expect.objectContaining({ checkName: APP_PROOF_CHECK, mode: "enforced" }),

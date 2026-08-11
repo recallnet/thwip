@@ -1,7 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { Home } from "./Home.js";
+import { Home, OperatingMeasures } from "./Home.js";
+import type { PublicReusedCiMetrics } from "./metrics.js";
 
 function render() {
   return renderToStaticMarkup(
@@ -21,7 +22,10 @@ describe("Home", () => {
     expect(html).toContain('<span class="mq-hero__line">Your merge queue</span>');
     expect(html).toContain('<span class="mq-hero__line">should use it.</span>');
     expect(html).toContain("Cloud queues repeat work that your agents already finished in parallel.");
-    expect(html).toContain("14.0s");
+    expect(html).toContain("Loading measured results");
+    expect(html).not.toContain("14.0s");
+    expect(html).not.toContain("28.0s");
+    expect(html).not.toContain("73s");
     expect(html).toContain("Reuse the proof on the pull request. No extra cloud run.");
     expect(html).toContain('href="/dashboard"');
     expect(html).not.toContain("The proof commits to the tree");
@@ -29,25 +33,47 @@ describe("Home", () => {
     expect(html).not.toContain("Pick an organization default in the dashboard.");
   });
 
-  /**
-   * A duration with no denominator is a marketing number. Each measure names
-   * the merges it was taken over, and the redesign that moved these into the
-   * hero must not drop the line that makes them checkable.
-   */
-  it("keeps the provenance under every measurement", () => {
-    const html = render();
+  it("shows API-backed measurements and names exactly what they measure", () => {
+    const metrics: PublicReusedCiMetrics = {
+      status: "partial",
+      minimumMergedProofs: 10,
+      signedSuiteDurationMs: 3_000_000,
+      signedWallClockDurationMs: 3_660_000,
+      verificationOverheadMs: 125,
+      mergedProofs: 12,
+      knownReusedMerges: 14,
+      unmeasuredMergedProofs: 2,
+    };
+    const html = renderToStaticMarkup(createElement(OperatingMeasures, { metrics, error: null }));
 
-    expect(html).toContain("9 merges · recallnet/thwip");
-    expect(html).toContain("7 merges · recallnet/thwip-test");
-    expect(html).toContain("18 jobs · recallnet/thwip");
+    expect(html).toContain("1h 1m");
+    expect(html).toContain("Verified local CI reused");
+    expect(html).toContain("125ms");
+    expect(html).toContain("Proof verification overhead");
+    expect(html).toContain("Merges that reused a proof");
+    expect(html).toContain("12 measured · 2 older merges have no timing");
+    expect(html).not.toMatch(/money saved|developer waiting time/i);
   });
 
-  /**
-   * The cloud figure is the one Thwip is measured against, so it reads as the
-   * outlier rather than as a third thing Thwip does.
-   */
-  it("marks the cloud measurement apart from the queue's own", () => {
-    expect(render()).toContain('class="mq-measure mq-measure--cloud"');
+  it("shows no estimate while the public sample is too small", () => {
+    const html = renderToStaticMarkup(
+      createElement(OperatingMeasures, {
+        metrics: { status: "insufficient-sample", minimumMergedProofs: 10 },
+        error: null,
+      }),
+    );
+    expect(html).toContain("Public totals appear after 10 measured merges");
+    expect(html).toContain("No estimate is shown before then");
+    expect(html).not.toContain("<article");
+  });
+
+  it("distinguishes loading from an unavailable measurement", () => {
+    const loading = renderToStaticMarkup(createElement(OperatingMeasures, { metrics: null, error: null }));
+    const unavailable = renderToStaticMarkup(
+      createElement(OperatingMeasures, { metrics: null, error: "network failed" }),
+    );
+    expect(loading).toContain("Loading measured results");
+    expect(unavailable).toContain("Measured results are unavailable");
   });
 
   /**

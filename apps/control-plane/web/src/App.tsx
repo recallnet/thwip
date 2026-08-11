@@ -16,6 +16,7 @@ import {
 } from "./proofDefaults.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
 import { api, selectedOrg, useFetch, withOrg } from "./api.js";
+import { durationText, metricHistory, type ReusedCiMetrics } from "./metrics.js";
 import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
 import {
   activationText,
@@ -459,6 +460,7 @@ function OrgHome({ me }: { me: Me }) {
     viewerHasSigningKey: boolean;
   }>("/v1/dashboard/summary");
   const queues = useFetch<{ queues: QueueSummary[] }>("/v1/dashboard/queues");
+  const metrics = useFetch<ReusedCiMetrics>("/v1/dashboard/metrics");
   const installUrl = me.organization?.installation_id
     ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
     : null;
@@ -495,6 +497,7 @@ function OrgHome({ me }: { me: Me }) {
           </span>
         </div>
       )}
+      <DashboardMetrics metrics={metrics.data} error={metrics.error} />
       <section className="thwip-section">
         <div className="thwip-section__head">
           Projects<span>ordered by what needs attention</span>
@@ -583,6 +586,45 @@ function OrgHome({ me }: { me: Me }) {
         </div>
       </section>
     </>
+  );
+}
+
+export function DashboardMetrics({ metrics, error }: { metrics: ReusedCiMetrics | null; error: string | null }) {
+  return (
+    <section className="thwip-section">
+      <div className="thwip-section__head">
+        Reused CI<span>measured from signed proofs that merged</span>
+      </div>
+      <div className="thwip-section__body">
+        {error !== null ? (
+          <p className="thwip-error">Measured results are unavailable: {error}</p>
+        ) : metrics === null ? (
+          <p className="gp-panel__meta">Loading measured results…</p>
+        ) : metrics.status === "empty" ? (
+          <p>No merge has reused a measured proof yet.</p>
+        ) : (
+          <>
+            <dl className="thwip-metrics">
+              <div>
+                <dt>Verified local CI reused</dt>
+                <dd>{durationText(metrics.signedWallClockDurationMs)}</dd>
+              </div>
+              <div>
+                <dt>Proof verification overhead</dt>
+                <dd>{durationText(metrics.verificationOverheadMs)}</dd>
+              </div>
+              <div>
+                <dt>Merges that reused a proof</dt>
+                <dd>{metrics.mergedProofs}</dd>
+              </div>
+            </dl>
+            <p className="thwip-note">
+              {metricHistory(metrics)}. These are signed run durations, not developer waiting time or money saved.
+            </p>
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 
