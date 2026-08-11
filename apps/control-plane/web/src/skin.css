@@ -395,6 +395,31 @@ select.gp-btn:hover {
 .thwip-limit i span { display: block; height: 3px; background: var(--ink); }
 .thwip-limit--full i span { background: var(--fail); }
 
+.thwip-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s5);
+  margin: 0;
+}
+.thwip-metrics > div { border-top: 2px solid var(--ink); padding-top: 10px; }
+.thwip-metrics dt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.thwip-metrics dd {
+  margin: 8px 0 0;
+  font-family: var(--num);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 680px) {
+  .thwip-metrics { grid-template-columns: 1fr; }
+}
+
 /* ---------- facts ---------- */
 
 .thwip-facts {

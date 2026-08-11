@@ -1,5 +1,7 @@
 import React from "react";
 import { SiteBar, SiteFoot } from "./Chrome.js";
+import { useFetch } from "./api.js";
+import { durationText, metricHistory, type PublicReusedCiMetrics } from "./metrics.js";
 import "./notary.css";
 
 /**
@@ -13,26 +15,48 @@ import "./notary.css";
  * agents, one writer.
  */
 
-const MEASURES = [
-  {
-    value: "14.0s",
-    label: "Time from queue entry to confirmed merge",
-    source: "9 merges · recallnet/thwip",
-    cloud: false,
-  },
-  {
-    value: "28.0s",
-    label: "Time from fresh assignment to signed merge record",
-    source: "7 merges · recallnet/thwip-test",
-    cloud: false,
-  },
-  {
-    value: "73s",
-    label: "Time to verify a candidate in the cloud",
-    source: "18 jobs · recallnet/thwip",
-    cloud: true,
-  },
-] as const;
+export function OperatingMeasures({
+  metrics,
+  error,
+}: {
+  metrics: PublicReusedCiMetrics | null;
+  error: string | null;
+}) {
+  if (error !== null) {
+    return <p className="mq-measures__state">Measured results are unavailable right now.</p>;
+  }
+  if (metrics === null) {
+    return <p className="mq-measures__state">Loading measured results…</p>;
+  }
+  if (metrics.status === "insufficient-sample") {
+    return (
+      <p className="mq-measures__state">
+        Public totals appear after {metrics.minimumMergedProofs} measured merges. No estimate is shown before then.
+      </p>
+    );
+  }
+
+  const source = metricHistory(metrics);
+  return (
+    <div className="mq-measures" aria-label="Measured reused CI">
+      <article className="mq-measure">
+        <strong>{durationText(metrics.signedWallClockDurationMs)}</strong>
+        <span>Verified local CI reused</span>
+        <small>{source} · signed run time</small>
+      </article>
+      <article className="mq-measure">
+        <strong>{durationText(metrics.verificationOverheadMs)}</strong>
+        <span>Proof verification overhead</span>
+        <small>{source} · control-plane time</small>
+      </article>
+      <article className="mq-measure">
+        <strong>{metrics.mergedProofs}</strong>
+        <span>Merges that reused a proof</span>
+        <small>{metrics.status === "partial" ? "Partial history" : "Complete measured history"}</small>
+      </article>
+    </div>
+  );
+}
 
 /**
  * `strength` is how many of the four evidence sources the profile demands. It
@@ -142,6 +166,7 @@ export function Home({
   me: { organization: { github_login: string } | null } | null | undefined;
   signIn: () => void;
 }) {
+  const metrics = useFetch<PublicReusedCiMetrics>("/v1/metrics");
   return (
     <div className="nt mq">
       <div className="nt-page">
@@ -165,15 +190,7 @@ export function Home({
               </a>
             </div>
 
-            <div className="mq-measures" aria-label="Queue operating measurements">
-              {MEASURES.map((measure) => (
-                <article className={measure.cloud ? "mq-measure mq-measure--cloud" : "mq-measure"} key={measure.label}>
-                  <strong>{measure.value}</strong>
-                  <span>{measure.label}</span>
-                  <small>{measure.source}</small>
-                </article>
-              ))}
-            </div>
+            <OperatingMeasures metrics={metrics.data} error={metrics.error} />
           </Row>
 
           <Row eyebrow="The work" state="Already ran" variant="upstream">

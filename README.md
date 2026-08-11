@@ -15,6 +15,7 @@ use thwip.
 - Control plane (staging): https://thwip.recall.net
 - Current Queue architecture: `docs/adr/0001-app-native-proof-checks.md`
 - Queue onboarding and steady state: `docs/queue-onboarding.md`
+- Reused CI measurement definitions: `docs/reused-ci-metrics.md`
 
 ## Effective policy and first activation
 
