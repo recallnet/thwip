@@ -22,7 +22,6 @@ import {
   configSourceText,
   entryStateText,
   outcome,
-  policyStatusText,
   proofCheckModeText,
   whenText,
 } from "./vocabulary.js";
@@ -234,11 +233,9 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
  * same tabs, and nothing on the screen said which of the two you were looking
  * at. The breadcrumb names the place; these name what there is to read there.
  */
-const ORG_TABS = [
+export const ORGANIZATION_TABS = [
   ["", "Projects"],
   ["people", "People & teams"],
-  ["policies", "Policies"],
-  ["operations", "Operations"],
   ["settings", "Settings"],
 ] as const;
 
@@ -349,7 +346,7 @@ function DashboardShell({
             <div className="thwip-section__body">
               <p>
                 Your GitHub account is not part of a synced thwip organization yet. Install the thwip GitHub App on
-                the organization, then run a sync from Operations.
+                the organization, then select it above. Organization owners can run a recovery sync from Settings.
               </p>
             </div>
           </section>
@@ -462,7 +459,6 @@ function OrgHome({ me }: { me: Me }) {
     viewerHasSigningKey: boolean;
   }>("/v1/dashboard/summary");
   const queues = useFetch<{ queues: QueueSummary[] }>("/v1/dashboard/queues");
-  const lastVerification = useLastVerifications();
   const installUrl = me.organization?.installation_id
     ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
     : null;
@@ -505,7 +501,11 @@ function OrgHome({ me }: { me: Me }) {
         </div>
         <div className="thwip-section__body">
           {actionError && <p className="thwip-error">{actionError}</p>}
-          {data.projects.length === 0 && <p>No repositories imported yet. Run a sync from Operations.</p>}
+          {data.projects.length === 0 && (
+            <p>
+              No repositories imported yet. <NavLink to="/dashboard/settings">Run a full sync from Settings.</NavLink>
+            </p>
+          )}
           {data.projects.length > 0 && (
             <table className="thwip-table">
               <thead>
@@ -776,33 +776,17 @@ function ProofDefaults({ canEdit }: { canEdit: boolean }) {
 /**
  * What the check last said about a repository.
  *
- * The project row carries its own `last_outcome`, and for repositories whose
- * verifications were recorded before the row was linked it is null, so the
- * column printed an em dash while the same verifications were listed by name on
- * the operations page. Two readings of one fact, and the emptier one won. The
- * observations feed is the same feed operations reads, so it answers here too
- * when the row has nothing.
+ * The project query chooses one newest event from App verifications and
+ * observations. Keep the outcome and its time together here so every project
+ * view reads that same current state.
  */
 interface LastVerification {
   outcome: string | null;
   at: string | null;
 }
 
-function useLastVerifications(): (project: ProjectRow) => LastVerification {
-  const ops = useFetch<{
-    observations: Array<{ github_name: string; outcome: string; observed_at: string }>;
-  }>("/v1/dashboard/operations");
-  const latest = new Map<string, { outcome: string; observed_at: string }>();
-  for (const o of ops.data?.observations ?? []) {
-    if (!latest.has(o.github_name)) latest.set(o.github_name, o);
-  }
-  return (project) => {
-    if (project.last_outcome !== null) {
-      return { outcome: project.last_outcome, at: project.last_observed_at };
-    }
-    const seen = latest.get(project.github_name);
-    return seen === undefined ? { outcome: null, at: null } : { outcome: seen.outcome, at: seen.observed_at };
-  };
+function lastVerification(project: ProjectRow): LastVerification {
+  return { outcome: project.last_outcome, at: project.last_observed_at };
 }
 
 function People({ me }: { me: Me }) {
@@ -994,7 +978,6 @@ function projectFacts(p: ProjectRow): ProjectFact[] {
 function ProjectVerification({ project, reload }: { project: ProjectRow; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const lastVerification = useLastVerifications();
   const last = lastVerification(project);
   const setMode = async (mode: "observe" | "enforced") => {
     setBusy(true);
@@ -1789,61 +1772,46 @@ function Profile({ me }: { me: Me }) {
     </>
   );
 }
-function Policies() {
-  const { data, error } = useFetch<{
-    policies: Array<{
-      digest: string;
-      github_name: string;
-      version: number;
-      status: string;
-      created_at: string;
-      activated_at: string | null;
-    }>;
-  }>("/v1/dashboard/policies");
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  return (
-    <Panel title="Policy history" meta="immutable, content-addressed; a pull request can never approve its own policy change">
-      <table className="thwip-table">
-        <thead>
-          <tr>
-            <th>Repository</th>
-            <th>Version</th>
-            <th>Digest</th>
-            <th>Status</th>
-            <th>Activated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.policies.map((p) => (
-            <tr key={p.digest}>
-              <td>
-                <code>{p.github_name}</code>
-              </td>
-              <td>v{p.version}</td>
-              <td>
-                <code>{p.digest.slice(7, 23)}…</code>
-              </td>
-              <td>
-                <StatusChip tone={p.status === "active" ? "ok" : "off"}>{policyStatusText(p.status)}</StatusChip>
-              </td>
-              <td className="gp-panel__meta">
-                {p.activated_at === null ? "not activated" : whenText(p.activated_at)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Panel>
-  );
-}
-
 function OrgSettings({ me }: { me: Me }) {
   return (
     <>
       <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
+      <GitHubSync canSync={me.viewer.githubOrgRole === "owner"} />
       <Billing />
     </>
+  );
+}
+
+export function GitHubSync({ canSync }: { canSync: boolean }) {
+  const [syncing, setSyncing] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const sync = async () => {
+    setSyncing(true);
+    setNote(null);
+    try {
+      const res = await api<{ synced: Record<string, number> }>("/v1/dashboard/sync", { method: "POST", body: "{}" });
+      setNote(`Synced: ${JSON.stringify(res.synced)}`);
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+  return (
+    <Panel title="GitHub sync" meta="recovery control; webhooks normally keep project data current">
+      {canSync ? (
+        <button className="gp-btn gp-btn--sm" disabled={syncing} onClick={() => void sync()}>
+          {syncing ? "Syncing…" : "Run full sync"}
+        </button>
+      ) : (
+        <p className="gp-panel__meta">Only GitHub organization owners can run a full sync.</p>
+      )}
+      {note && (
+        <p className="gp-panel__meta">
+          <code>{note}</code>
+        </p>
+      )}
+    </Panel>
   );
 }
 
@@ -1956,85 +1924,6 @@ function Billing() {
   );
 }
 
-function Operations({ me }: { me: Me }) {
-  const { data, error, reload } = useFetch<{
-    deliveries: Array<{ provider: string; delivery_id: string; event: string; received_at: string }>;
-    observations: Array<{ github_name: string; head_sha: string; outcome: string; observed_at: string }>;
-  }>("/v1/dashboard/operations");
-  const [syncing, setSyncing] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const sync = async () => {
-    setSyncing(true);
-    setNote(null);
-    try {
-      const res = await api<{ synced: Record<string, number> }>("/v1/dashboard/sync", { method: "POST", body: "{}" });
-      setNote(`Synced: ${JSON.stringify(res.synced)}`);
-      reload();
-    } catch (e) {
-      setNote((e as Error).message);
-    } finally {
-      setSyncing(false);
-    }
-  };
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  return (
-    <>
-      <Panel title="GitHub sync" meta="webhooks keep the projection warm; a full sync re-reads everything">
-        {me.viewer.githubOrgRole === "owner" ? (
-          <button className="gp-btn gp-btn--sm" disabled={syncing} onClick={() => void sync()}>
-            {syncing ? "Syncing…" : "Run full sync"}
-          </button>
-        ) : (
-          <p className="gp-panel__meta">Org owners can trigger a full sync.</p>
-        )}
-        {note && (
-          <p className="gp-panel__meta">
-            <code>{note}</code>
-          </p>
-        )}
-      </Panel>
-      <Panel title="Recent verifications">
-        {data.observations.length === 0 && <p>No verifications recorded yet.</p>}
-        <table className="thwip-table">
-          <tbody>
-            {data.observations.map((o, i) => (
-              <tr key={i}>
-                <td>
-                  <code>{o.github_name}</code>
-                </td>
-                <td>
-                  <code>{o.head_sha.slice(0, 12)}</code>
-                </td>
-                <td>
-                  <OutcomeText code={o.outcome} />
-                </td>
-                <td className="gp-panel__meta">{whenText(o.observed_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
-      <Panel title="Webhook deliveries">
-        {data.deliveries.length === 0 && <p>No deliveries yet.</p>}
-        <table className="thwip-table">
-          <tbody>
-            {data.deliveries.map((d) => (
-              <tr key={d.delivery_id}>
-                <td>{d.provider}</td>
-                <td>
-                  <code>{d.event}</code>
-                </td>
-                <td className="gp-panel__meta">{d.received_at.slice(0, 19)}Z</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
-    </>
-  );
-}
-
 /* ---------- device approval ---------- */
 
 function DevicePage({ me }: { me: Me | null | undefined }) {
@@ -2099,13 +1988,6 @@ function DevicePage({ me }: { me: Me | null | undefined }) {
   );
 }
 
-/**
- * The queue tab. One queue exists per repository and base branch, so this lists
- * the enabled projects and shows the queue for each project's default branch —
- * a single combined view would hide that `main` and `release` are independent
- * protected resources.
- */
-
 /* ---------- router ---------- */
 
 /**
@@ -2152,18 +2034,21 @@ export function SignedOutDashboard() {
 /**
  * Where a path that no longer exists goes.
  *
- * Overview and the organization-wide queue were folded into the project list,
- * and billing into settings. A reader with either bookmarked lands on the page
- * that answers what they went there for rather than on an empty tab.
+ * Overview, the organization-wide queue, and policy history were folded into
+ * the project list. Billing and the full-sync recovery control live in
+ * Settings. A reader with an old bookmark lands on the page that now answers
+ * what they went there for rather than on an empty tab.
  */
 const MOVED: Record<string, string> = {
   overview: "",
   projects: "",
   queue: "",
+  policies: "",
   billing: "settings",
+  operations: "settings",
 };
 
-function orgTab(segment: string | undefined): string {
+export function organizationSection(segment: string | undefined): string {
   const key = segment ?? "";
   return MOVED[key] ?? key;
 }
@@ -2197,13 +2082,16 @@ export function App() {
       );
     }
     return (
-      <DashboardShell me={me} tabs={ORG_TABS} base="/dashboard" active={orgTab(dashMatch[1])}>
-        {orgTab(dashMatch[1]) === "" && <OrgHome me={me} />}
-        {orgTab(dashMatch[1]) === "people" && <People me={me} />}
-        {orgTab(dashMatch[1]) === "policies" && <Policies />}
-        {orgTab(dashMatch[1]) === "operations" && <Operations me={me} />}
-        {orgTab(dashMatch[1]) === "settings" && <OrgSettings me={me} />}
-        {orgTab(dashMatch[1]) === "profile" && <Profile me={me} />}
+      <DashboardShell
+        me={me}
+        tabs={ORGANIZATION_TABS}
+        base="/dashboard"
+        active={organizationSection(dashMatch[1])}
+      >
+        {organizationSection(dashMatch[1]) === "" && <OrgHome me={me} />}
+        {organizationSection(dashMatch[1]) === "people" && <People me={me} />}
+        {organizationSection(dashMatch[1]) === "settings" && <OrgSettings me={me} />}
+        {organizationSection(dashMatch[1]) === "profile" && <Profile me={me} />}
       </DashboardShell>
     );
   }

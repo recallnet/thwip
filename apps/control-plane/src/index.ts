@@ -907,20 +907,7 @@ app.post("/v1/dashboard/devices/:keyId/revoke", async (c) => {
   return c.json({ revoked: revoked !== null });
 });
 
-// --- Dashboard: policy, billing, operations --------------------------------
-
-app.get("/v1/dashboard/policies", async (c) => {
-  const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const rows = await c.env.DB.prepare(
-    `SELECT b.digest, b.project_id, p.github_name, b.version, b.status, b.created_at, b.activated_at, b.canonical_json
-     FROM policy_bundles b JOIN projects p ON p.id = b.project_id
-     WHERE p.organization_id = ? ORDER BY p.github_name, b.version DESC`,
-  )
-    .bind(viewer.organizationId)
-    .all();
-  return c.json({ policies: rows.results });
-});
+// --- Dashboard: settings ---------------------------------------------------
 
 app.get("/v1/dashboard/billing", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
@@ -947,30 +934,6 @@ app.get("/v1/dashboard/billing", async (c) => {
     prices: { monthly: "$5", annual: "$50" },
     isOwner: viewer.githubOrgRole === "owner",
   });
-});
-
-app.get("/v1/dashboard/operations", async (c) => {
-  const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const deliveries = await c.env.DB.prepare(
-    "SELECT provider, delivery_id, event, received_at FROM webhook_deliveries ORDER BY received_at DESC LIMIT 25",
-  ).all();
-  const observations = await c.env.DB.prepare(
-    `SELECT github_name, head_sha, outcome, observed_at
-       FROM (
-         SELECT p.github_name, v.subject_sha AS head_sha, v.outcome, v.completed_at AS observed_at
-           FROM proof_verifications v JOIN projects p ON p.id = v.project_id
-          WHERE p.organization_id = ? AND v.status = 'completed'
-         UNION ALL
-         SELECT p.github_name, o.head_sha, o.outcome, o.observed_at
-           FROM verification_observations o JOIN projects p ON p.id = o.project_id
-          WHERE p.organization_id = ?
-       )
-      ORDER BY observed_at DESC LIMIT 25`,
-  )
-    .bind(viewer.organizationId, viewer.organizationId)
-    .all();
-  return c.json({ deliveries: deliveries.results, observations: observations.results });
 });
 
 app.post("/v1/dashboard/sync", async (c) => {
