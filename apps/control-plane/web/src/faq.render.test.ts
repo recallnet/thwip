@@ -22,7 +22,7 @@ describe("the markup the FAQ page renders", () => {
 
   it("gives the security profiles a real list rather than a run-on line", () => {
     const html = answerTo("Which security profiles");
-    expect(html).toContain("<p>Four.</p>");
+    expect(html).toContain("<p>Four, from least to most independent evidence.</p>");
     expect((html.match(/<li>/g) ?? []).length).toBe(4);
     expect(html).toContain("<code>thwip.yaml</code>");
     expect(html).not.toContain("- <b>");
