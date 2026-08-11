@@ -18,107 +18,152 @@
 // signatures reports zero verified, because an empty findings list on its own
 // says nothing about whether anything was read.
 
-import { verifyChain } from "../packages/queue-protocol/dist/verify-chain.js";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-const repo = process.argv[2] ?? "recallnet/thwip";
-const ref = process.argv[3] ?? "refs/heads/main";
-const api = process.env.THWIP_API ?? "https://thwip.recall.net";
+import { parseTransitionRecord } from "../packages/queue-protocol/dist/transition-record.js";
+import { verifyChain } from "../packages/queue-protocol/dist/verify-chain.js";
 
 const b64url = (s) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 
-async function getJson(url, init) {
-  const res = await fetch(url, init);
+async function getJson(fetchImpl, url, init) {
+  const res = await fetchImpl(url, init);
   if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
   return res.json();
 }
 
-const gh = { accept: "application/vnd.github+json", "user-agent": "thwip-verify-chain" };
-
-// The chain route is keyed by GitHub's numeric repository id rather than the
-// name a human types. Resolve it against GitHub so that nothing in this script
-// depends on a thwip endpoint that needs an account. A numeric first argument
-// is taken as the id directly, which is what a reader needs when the repository
-// itself is not readable by them.
-const numeric = /^[0-9]+$/.test(repo);
-const repositoryId = numeric ? repo : (await getJson(`https://api.github.com/repos/${repo}`, { headers: gh })).id;
-
-const chain = await getJson(`${api}/v1/queue/${repositoryId}/chain?ref=${encodeURIComponent(ref)}`);
-
-const jwks = await getJson(`${api}/.well-known/thwip-keys`);
-const keys = new Map();
-for (const jwk of jwks.keys) {
-  keys.set(
-    jwk.kid,
-    await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]),
-  );
-}
-
-// Where the branch actually stands, from GitHub rather than from thwip. A
-// service asked to report both its chain and the head it is behind would
-// report a head that matches.
-// A chain that simply stops is internally perfect, so the branch's real head is
-// the only fact that catches merges nobody recorded. Without it the walk stays
-// silent about the head rather than guessing, and the report says so.
-const branch = ref.replace(/^refs\/heads\//, "");
-const head = numeric
-  ? null
-  : await getJson(`https://api.github.com/repos/${repo}/commits/${branch}`, { headers: gh });
-
 const enc = new TextEncoder();
 
-async function verifySignature(jws, bytes) {
-  const [h, p, s] = String(jws).split(".");
-  if (!h || !p || !s) return false;
-  const header = JSON.parse(b64url(h).toString("utf8"));
-  const key = keys.get(header.kid);
-  if (key === undefined || header.alg !== "ES256") return false;
-  const ok = await crypto.subtle.verify(
-    { name: "ECDSA", hash: "SHA-256" },
-    key,
-    b64url(s),
-    enc.encode(`${h}.${p}`),
+/**
+ * Fetch and verify the public chain with the same verifier used by the Worker.
+ * `expectedSha` lets a caller supply an independently checked branch head. The
+ * deploy workflow does that from its freshly fetched canonical main checkout,
+ * so an internal repository does not have to grant Thwip or this script another
+ * GitHub credential just to verify the public evidence.
+ */
+export async function verifyPublishedChain({
+  repo = "recallnet/thwip",
+  ref = "refs/heads/main",
+  api = "https://thwip.recall.net",
+  expectedSha = null,
+  githubToken = "",
+  fetchImpl = fetch,
+}) {
+  const gh = {
+    accept: "application/vnd.github+json",
+    "user-agent": "thwip-verify-chain",
+    ...(githubToken.length === 0 ? {} : { authorization: `Bearer ${githubToken}` }),
+  };
+
+  // The chain route is keyed by GitHub's numeric repository id rather than the
+  // name a human types. A numeric argument avoids a GitHub read, which is useful
+  // for an internal repository whose signed chain is deliberately public.
+  const numeric = /^[0-9]+$/.test(repo);
+  const repositoryId = numeric
+    ? repo
+    : String((await getJson(fetchImpl, `https://api.github.com/repos/${repo}`, { headers: gh })).id);
+  const chain = await getJson(
+    fetchImpl,
+    `${api.replace(/\/$/, "")}/v1/queue/${repositoryId}/chain?ref=${encodeURIComponent(ref)}`,
   );
-  if (!ok) return false;
-  // The signature being valid says only that these payload bytes were signed.
-  // It does not say they are the record bytes the chain served, so compare them.
-  return Buffer.compare(b64url(p), Buffer.from(bytes)) === 0;
+  const jwks = await getJson(fetchImpl, `${api.replace(/\/$/, "")}/.well-known/thwip-keys`);
+  const keys = new Map();
+  for (const jwk of jwks.keys) {
+    keys.set(
+      jwk.kid,
+      await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]),
+    );
+  }
+
+  const branch = ref.replace(/^refs\/heads\//, "");
+  const headSha =
+    expectedSha ??
+    (numeric
+      ? null
+      : (await getJson(fetchImpl, `https://api.github.com/repos/${repo}/commits/${branch}`, { headers: gh })).sha);
+
+  async function verifySignature(jws, bytes) {
+    const [h, p, s] = String(jws).split(".");
+    if (!h || !p || !s) return false;
+    const header = JSON.parse(b64url(h).toString("utf8"));
+    const key = keys.get(header.kid);
+    if (key === undefined || header.alg !== "ES256") return false;
+    const valid = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      b64url(s),
+      enc.encode(`${h}.${p}`),
+    );
+    if (!valid) return false;
+    return Buffer.compare(b64url(p), Buffer.from(bytes)) === 0;
+  }
+
+  const links = chain.links.map((link) => ({
+    digest: link.digest,
+    sequence: link.sequence,
+    bytes: link.record === undefined || link.record === null ? new Uint8Array() : enc.encode(link.record),
+    jws: link.jws ?? link.signature ?? "",
+  }));
+  const result = await verifyChain(links, {
+    verifySignature,
+    epochStartsAt: chain.epochStartsAt,
+    subject: { repositoryId, baseRef: ref },
+    ...(headSha === null ? {} : { head: { baseSha: headSha } }),
+  });
+
+  const records = [];
+  const kinds = {};
+  for (const link of chain.links) {
+    if (!link.record) continue;
+    let decoded;
+    try {
+      decoded = JSON.parse(link.record);
+    } catch {
+      continue;
+    }
+    const parsed = parseTransitionRecord(decoded);
+    if (!parsed.ok) continue;
+    records.push({ digest: link.digest, sequence: link.sequence, record: parsed.value });
+    kinds[parsed.value.kind] = (kinds[parsed.value.kind] ?? 0) + 1;
+  }
+
+  return { repo, ref, repositoryId, epochStartsAt: chain.epochStartsAt, links, headSha, records, kinds, result };
 }
 
-const links = chain.links.map((l) => ({
-  digest: l.digest,
-  sequence: l.sequence,
-  bytes: l.record === undefined || l.record === null ? new Uint8Array() : enc.encode(l.record),
-  jws: l.jws ?? l.signature ?? "",
-}));
-
-const result = await verifyChain(links, {
-  verifySignature,
-  epochStartsAt: chain.epochStartsAt,
-  subject: { repositoryId: String(repositoryId), baseRef: ref },
-  ...(head === null ? {} : { head: { baseSha: head.sha } }),
-});
-
-const kinds = {};
-for (const l of chain.links) {
-  if (!l.record) continue;
-  const kind = JSON.parse(l.record).kind;
-  kinds[kind] = (kinds[kind] ?? 0) + 1;
+export function printChainReport(report) {
+  console.log(`${report.repo} ${report.ref}`);
+  console.log(
+    `links ${report.links.length}, epoch starts at ${report.epochStartsAt}, ` +
+      (report.headSha === null
+        ? "branch head not read, so nothing is claimed about it"
+        : `head ${report.headSha.slice(0, 12)}`),
+  );
+  console.log(`signatures verified ${report.result.signaturesChecked} of ${report.links.length}`);
+  for (const [kind, n] of Object.entries(report.kinds).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${kind}: ${n}`);
+  }
+  for (const correction of report.result.corrections) {
+    console.log(
+      `correction at ${correction.sequence}: ${correction.correctsDigest} said ${correction.from}, ` +
+        `branch took ${correction.to} (${correction.reason})`,
+    );
+  }
+  for (const finding of report.result.findings) {
+    console.log(`finding ${finding.code} at ${finding.sequence}: ${finding.detail}`);
+  }
 }
 
-console.log(`${repo} ${ref}`);
-console.log(
-  `links ${links.length}, epoch starts at ${chain.epochStartsAt}, ` +
-    (head === null ? "branch head not read, so nothing is claimed about it" : `head ${head.sha.slice(0, 12)}`),
-);
-console.log(`signatures verified ${result.signaturesChecked} of ${links.length}`);
-for (const [kind, n] of Object.entries(kinds).sort((a, b) => b[1] - a[1])) console.log(`  ${kind}: ${n}`);
-for (const c of result.corrections) {
-  console.log(`correction at ${c.sequence}: ${c.correctsDigest} said ${c.from}, branch took ${c.to} (${c.reason})`);
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  const report = await verifyPublishedChain({
+    repo: process.argv[2] ?? "recallnet/thwip",
+    ref: process.argv[3] ?? "refs/heads/main",
+    api: process.env.THWIP_API ?? "https://thwip.recall.net",
+    githubToken: process.env.GITHUB_TOKEN ?? "",
+  });
+  printChainReport(report);
+  if (report.result.findings.length > 0) {
+    console.log(`\n${report.result.findings.length} finding(s). Please open an issue with this output.`);
+    process.exit(1);
+  }
+  console.log("\nno findings");
 }
-for (const f of result.findings) console.log(`finding ${f.code} at ${f.sequence}: ${f.detail}`);
-
-if (result.findings.length > 0) {
-  console.log(`\n${result.findings.length} finding(s). Please open an issue with this output.`);
-  process.exit(1);
-}
-console.log("\nno findings");
