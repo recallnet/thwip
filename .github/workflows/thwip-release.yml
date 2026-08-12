@@ -158,15 +158,15 @@ jobs:
           DRY: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          args="--access public"
-          if [ "${VISIBILITY:-}" = "public" ]; then args="$args --provenance"; fi
+          args=(--access public)
+          if [ "${VISIBILITY:-}" = "public" ]; then args+=(--provenance); fi
           if [ "${{ steps.decide.outputs.npm_exists }}" = "true" ]; then
             echo "npm already has this exact release; continuing the interrupted publication"
           elif [ "${DRY:-false}" = "true" ]; then
             echo "npm user: $(npm whoami 2>&1 || echo 'not authenticated')"
-            npm publish packages/cli/dist-npm $args --dry-run
+            npm publish packages/cli/dist-npm "${args[@]}" --dry-run
           else
-            npm publish packages/cli/dist-npm $args
+            npm publish packages/cli/dist-npm "${args[@]}"
           fi
 
       - name: Publish the GitHub Packages mirror
@@ -204,7 +204,7 @@ jobs:
             while [ "$attempt" -le 6 ]; do
               probe=$(mktemp -d)
               if npm install --silent --prefix "$probe" --userconfig="$config" "@recallnet/thwip@$VERSION" &&
-                 "$probe/node_modules/.bin/thwip" version | tee "$probe/version" &&
+                 (cd "$probe" && ./node_modules/.bin/thwip version) | tee "$probe/version" &&
                  grep -F "thwip $VERSION" "$probe/version"; then
                 echo "$label serves @recallnet/thwip@$VERSION"
                 return 0
