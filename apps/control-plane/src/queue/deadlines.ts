@@ -89,12 +89,12 @@ export interface ReconciliationReads {
     repositoryId: string,
     sha: string,
   ): Promise<readonly number[] | null>;
-  /** The tree and parents of a commit, so a confirmation cites the commit itself. */
+  /** The tree, parents and message of a commit, so confirmation cites the exact object. */
   commitFacts(
     env: QueueRouteEnv,
     repositoryId: string,
     sha: string,
-  ): Promise<{ treeOid: string; parentShas: readonly string[] } | null>;
+  ): Promise<{ treeOid: string; parentShas: readonly string[]; message: string } | null>;
   /** The backoff between reads. Overridden in tests so they do not wait it out. */
   sleep?(ms: number): Promise<void>;
 }
@@ -182,16 +182,17 @@ export const GITHUB_READS: ReconciliationReads = {
   },
 
   async commitFacts(env, repositoryId, sha) {
-    const commit = await githubJson<{ tree?: { sha?: string }; parents?: Array<{ sha?: string }> }>(
+    const commit = await githubJson<{ tree?: { sha?: string }; parents?: Array<{ sha?: string }>; message?: string }>(
       env,
       repositoryId,
       `/git/commits/${sha}`,
     );
     const treeOid = commit?.tree?.sha;
-    if (typeof treeOid !== "string") return null;
+    if (typeof treeOid !== "string" || typeof commit?.message !== "string") return null;
     return {
       treeOid,
       parentShas: (commit?.parents ?? []).map((parent) => parent.sha).filter((s): s is string => typeof s === "string"),
+      message: commit.message,
     };
   },
 };

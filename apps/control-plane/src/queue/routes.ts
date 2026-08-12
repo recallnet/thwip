@@ -127,6 +127,7 @@ export function recordFromIntentDepsFor<TEnv extends QueueRouteEnv>(
   reads: {
     commitFacts: RecordFromIntentDeps<TEnv>["commitFacts"];
     baseContainsSha: RecordFromIntentDeps<TEnv>["baseContainsSha"];
+    pullRequestMergeState?: RecordFromIntentDeps<TEnv>["pullRequestMergeState"];
     activePolicy: RecordFromIntentDeps<TEnv>["activePolicy"];
     signRecordBytes: RecordFromIntentDeps<TEnv>["signRecordBytes"];
   },
@@ -135,6 +136,7 @@ export function recordFromIntentDepsFor<TEnv extends QueueRouteEnv>(
   return {
     commitFacts: reads.commitFacts,
     baseContainsSha: reads.baseContainsSha,
+    pullRequestMergeState: reads.pullRequestMergeState ?? (async () => null),
     activePolicy: reads.activePolicy,
     signRecordBytes: reads.signRecordBytes,
     storeEvidence,
@@ -2271,6 +2273,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       baseRef,
       mergeSha,
       witnessPrincipalId: who.principalId,
+      reason,
       ...(typeof body.attemptId === "string" ? { attemptId: body.attemptId } : {}),
     });
 
@@ -2284,6 +2287,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         attemptId: outcome.attemptId,
         pullRequestNumber: outcome.pullRequestNumber,
         transitionDigest: outcome.transitionDigest,
+        repairAuditDigest: outcome.repairAuditDigest,
       });
     }
     return c.json({
@@ -2293,6 +2297,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       mergeSha: outcome.mergeSha,
       sequence: outcome.sequence,
       transitionDigest: outcome.transitionDigest,
+      repairAuditDigest: outcome.repairAuditDigest,
       mergeIntentDigest: outcome.mergeIntentDigest,
       actor: who.principalId,
       reason,

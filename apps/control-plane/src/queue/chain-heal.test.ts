@@ -5,6 +5,10 @@ import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent, signVerifiedIntent } from "./attestation.js";
 import { applyHeal, type ApplyHealDeps, type HealPlan } from "./chain-heal.js";
 import type { Sha256 } from "@thwip/queue-protocol";
+import { mergeCommitText } from "./merge-commit.js";
+import { withQueueState } from "./queue-state.js";
+import { commandsFor } from "./queue-operations.js";
+import type { D1Like } from "./projection.js";
 
 /**
  * Answering a chain finding without letting anybody forge one.
@@ -38,6 +42,7 @@ function env(): QueueRouteEnv {
 
 afterEach(() => {
   while (open.length > 0) open.pop()!.close();
+  CONFIRMED_MERGES.clear();
 });
 
 /**
@@ -92,13 +97,25 @@ const UNAUTHORIZED = {
   pinnedTreeOid: "d3".repeat(20),
 };
 
-const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
-  [ROOT.sha]: { treeOid: ROOT.tree, parentShas: ROOT.parents },
-  [RECORDED.mergeSha]: { treeOid: RECORDED.treeOid, parentShas: [RECORDED.baseSha, RECORDED.headSha] },
-  [AUTHORIZED.mergeSha]: { treeOid: AUTHORIZED.treeOid, parentShas: [AUTHORIZED.baseSha, AUTHORIZED.headSha] },
+const messageFor = (merge: { attemptId: string; pullRequestNumber: number }) =>
+  mergeCommitText(merge.pullRequestNumber, `merge_${merge.attemptId}`);
+const CONFIRMED_MERGES = new Map<number, string>();
+const COMMITS: Record<string, { treeOid: string; parentShas: string[]; message: string }> = {
+  [ROOT.sha]: { treeOid: ROOT.tree, parentShas: ROOT.parents, message: "root" },
+  [RECORDED.mergeSha]: {
+    treeOid: RECORDED.treeOid,
+    parentShas: [RECORDED.baseSha, RECORDED.headSha],
+    message: messageFor(RECORDED),
+  },
+  [AUTHORIZED.mergeSha]: {
+    treeOid: AUTHORIZED.treeOid,
+    parentShas: [AUTHORIZED.baseSha, AUTHORIZED.headSha],
+    message: messageFor(AUTHORIZED),
+  },
   [UNAUTHORIZED.mergeSha]: {
     treeOid: UNAUTHORIZED.landedTreeOid,
     parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+    message: messageFor(UNAUTHORIZED),
   },
 };
 
@@ -131,11 +148,13 @@ async function seedIntent(merge: {
   pullRequestNumber: number;
   baseSha: string;
   headSha: string;
+  mergeSha: string;
   treeOid: string;
   proofCheckRunId?: string;
+  operationId?: string;
 }): Promise<string> {
   const signed = await signReusedIntent({
-    operationId: `merge_${merge.attemptId}`,
+    operationId: merge.operationId ?? `merge_${merge.attemptId}`,
     attemptId: merge.attemptId,
     git: {
       objectFormat: "sha1",
@@ -144,7 +163,7 @@ async function seedIntent(merge: {
       baseSha: merge.baseSha,
       headRepositoryId: REPO,
       headSha: merge.headSha,
-      candidateSha: "9f".repeat(20),
+      candidateSha: merge.mergeSha,
       candidateTreeOid: merge.treeOid,
       candidateParentOids: [merge.baseSha, merge.headSha],
     },
@@ -163,6 +182,7 @@ async function seedIntent(merge: {
     signer: { sign: async () => "jws-intent" },
   });
   if ("error" in signed) throw new Error(signed.error);
+  CONFIRMED_MERGES.set(merge.pullRequestNumber, merge.mergeSha);
   raw
     .prepare(
       `INSERT INTO queue_attestations
@@ -191,6 +211,7 @@ async function seedVerifiedIntent(merge: {
   pullRequestNumber: number;
   baseSha: string;
   headSha: string;
+  mergeSha: string;
   treeOid: string;
 }): Promise<string> {
   const signed = await signVerifiedIntent({
@@ -203,7 +224,7 @@ async function seedVerifiedIntent(merge: {
       baseSha: merge.baseSha,
       headRepositoryId: REPO,
       headSha: merge.headSha,
-      candidateSha: "9f".repeat(20),
+      candidateSha: merge.mergeSha,
       candidateTreeOid: merge.treeOid,
       candidateParentOids: [merge.baseSha, merge.headSha],
     },
@@ -229,6 +250,7 @@ async function seedVerifiedIntent(merge: {
     signer: { sign: async () => "jws-intent" },
   });
   if ("error" in signed) throw new Error(signed.error);
+  CONFIRMED_MERGES.set(merge.pullRequestNumber, merge.mergeSha);
   raw
     .prepare(
       `INSERT INTO queue_attestations
@@ -266,6 +288,10 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
     baseContainsSha: async () => true,
+    pullRequestMergeState: async (_e, _r, pullRequestNumber) => ({
+      merged: CONFIRMED_MERGES.has(pullRequestNumber),
+      mergeCommitSha: CONFIRMED_MERGES.get(pullRequestNumber) ?? null,
+    }),
     proofCheckRunId: async () => "91289436271",
     signRecordBytes: async (_e, bytes, typ) =>
       new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid: "test-key", typ }).sign(signingKey),
@@ -308,7 +334,11 @@ async function seedRecordPastTheGap(app: App, e: QueueRouteEnv, beganAt: string)
     mergeSha: "e1".repeat(20),
     treeOid: "e2".repeat(20),
   };
-  COMMITS[past.mergeSha] = { treeOid: past.treeOid, parentShas: [past.baseSha, past.headSha] };
+  COMMITS[past.mergeSha] = {
+    treeOid: past.treeOid,
+    parentShas: [past.baseSha, past.headSha],
+    message: messageFor(past),
+  };
   await seedIntent(past);
   const response = await app.request(
     `/v1/queue/${REPO}/repair?ref=${encodeURIComponent(REF)}`,
@@ -398,6 +428,7 @@ describe("GET /v1/queue/:repositoryId/heal", () => {
       pullRequestNumber: UNAUTHORIZED.pullRequestNumber,
       baseSha: UNAUTHORIZED.staleBaseSha,
       headSha: UNAUTHORIZED.headSha,
+      mergeSha: UNAUTHORIZED.mergeSha,
       treeOid: UNAUTHORIZED.pinnedTreeOid,
     });
     await seedRecordPastTheGap(app, e, UNAUTHORIZED.mergeSha);
@@ -419,7 +450,11 @@ describe("GET /v1/queue/:repositoryId/heal", () => {
     const app = routes();
     await seedRecordedMerge(app, e);
     await seedIntent(AUTHORIZED);
-    await seedIntent({ ...AUTHORIZED, attemptId: "att_rival" });
+    await seedIntent({
+      ...AUTHORIZED,
+      attemptId: "att_rival",
+      operationId: `merge_${AUTHORIZED.attemptId}`,
+    });
     await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
 
     const found = await plans(app, e);
@@ -523,11 +558,13 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
       pullRequestNumber: UNAUTHORIZED.pullRequestNumber,
       baseSha: UNAUTHORIZED.staleBaseSha,
       headSha: UNAUTHORIZED.headSha,
+      mergeSha: UNAUTHORIZED.mergeSha,
       treeOid: UNAUTHORIZED.pinnedTreeOid,
     });
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
     await seedRecordPastTheGap(app, e, UNAUTHORIZED.mergeSha);
     const finding = (await plans(app, e))[0]!.digest;
@@ -556,6 +593,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
   });
 
@@ -565,7 +603,11 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     const app = routes();
     await seedRecordedMerge(app, e);
     await seedIntent(AUTHORIZED);
-    await seedIntent({ ...AUTHORIZED, attemptId: "att_rival" });
+    await seedIntent({
+      ...AUTHORIZED,
+      attemptId: "att_rival",
+      operationId: `merge_${AUTHORIZED.attemptId}`,
+    });
     await seedRecordPastTheGap(app, e, AUTHORIZED.mergeSha);
     const before = await records(app, e);
     const finding = (await plans(app, e))[0]!.digest;
@@ -595,6 +637,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
     const finding = (await plans(app, e))[0]!.digest;
     const strict = routes(true, { baseContainsSha: async (_e, _r, _b, sha) => sha !== UNAUTHORIZED.mergeSha });
@@ -608,6 +651,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
   });
 
@@ -632,6 +676,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
     const finding = (await plans(app, e))[0]!.digest;
     await heal(app, e, { finding, reason: REASON });
@@ -652,6 +697,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
   });
 
@@ -693,7 +739,11 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
       mergeSha: "f1".repeat(20),
       treeOid: "f2".repeat(20),
     };
-    COMMITS[verified.mergeSha] = { treeOid: verified.treeOid, parentShas: [verified.baseSha, verified.headSha] };
+    COMMITS[verified.mergeSha] = {
+      treeOid: verified.treeOid,
+      parentShas: [verified.baseSha, verified.headSha],
+      message: messageFor(verified),
+    };
     await seedVerifiedIntent(verified);
     await seedRecordPastTheGap(app, e, verified.mergeSha);
     const before = await records(app, e);
@@ -727,11 +777,13 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
       pullRequestNumber: UNAUTHORIZED.pullRequestNumber,
       baseSha: UNAUTHORIZED.staleBaseSha,
       headSha: UNAUTHORIZED.headSha,
+      mergeSha: UNAUTHORIZED.mergeSha,
       treeOid: UNAUTHORIZED.pinnedTreeOid,
     });
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
     await seedRecordPastTheGap(app, e, UNAUTHORIZED.mergeSha);
     const finding = (await plans(app, e))[0]!.digest;
@@ -746,6 +798,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
   });
 
@@ -826,10 +879,14 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
  * the commit, and signing it would put a false claim in an append-only chain.
  */
 describe("applyHeal", () => {
-  function applyDeps(): ApplyHealDeps<QueueRouteEnv> {
+  function applyDeps(over: Partial<ApplyHealDeps<QueueRouteEnv>> = {}): ApplyHealDeps<QueueRouteEnv> {
     return {
       commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
       baseContainsSha: async () => true,
+      pullRequestMergeState: async (_e, _r, pullRequestNumber) => ({
+        merged: CONFIRMED_MERGES.has(pullRequestNumber),
+        mergeCommitSha: CONFIRMED_MERGES.get(pullRequestNumber) ?? null,
+      }),
       activePolicy: async () => ({
         policyDigest: `sha256:${"2".repeat(64)}`,
         pipelineDigest: `sha256:${"3".repeat(64)}`,
@@ -840,6 +897,43 @@ describe("applyHeal", () => {
         new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid: "test-key", typ }).sign(signingKey),
       storeEvidence: async () => "no-bucket",
       onQueue: (e, repositoryId, baseRef, decide) => runOnQueue(e, repositoryId, baseRef, decide),
+      ...over,
+    };
+  }
+
+  function movementPlan(): HealPlan {
+    return {
+      code: "BASE_DISCONTINUITY",
+      sequence: 1,
+      digest: `sha256:${"a".repeat(64)}`,
+      detail: "the branch moved and no record accounts for it",
+      summary: "recording this writes one movement",
+      steps: [
+        {
+          action: "record-movement",
+          commitSha: UNAUTHORIZED.mergeSha,
+          sentence: "no signed intent pins this commit",
+        },
+      ],
+      healable: true,
+    };
+  }
+
+  function movementInput() {
+    return {
+      repositoryId: REPO,
+      baseRef: REF,
+      plan: movementPlan(),
+      actorPrincipalId: "prn_acme",
+      reason: REASON,
+    };
+  }
+
+  function makeMovementCommit(): void {
+    COMMITS[UNAUTHORIZED.mergeSha] = {
+      treeOid: UNAUTHORIZED.landedTreeOid,
+      parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
   }
 
@@ -859,6 +953,7 @@ describe("applyHeal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [RECORDED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
     const plan: HealPlan = {
       code: "BASE_DISCONTINUITY",
@@ -893,7 +988,214 @@ describe("applyHeal", () => {
     COMMITS[UNAUTHORIZED.mergeSha] = {
       treeOid: UNAUTHORIZED.landedTreeOid,
       parentShas: [AUTHORIZED.mergeSha, UNAUTHORIZED.headSha],
+      message: messageFor(UNAUTHORIZED),
     };
+  });
+
+  it("does not report healed when the queue rejects the movement link", async () => {
+    const e = env();
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    const deps = applyDeps({
+      onQueue: (env, repositoryId, baseRef, decide) =>
+        runOnQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+          Object.defineProperty(commands, "recordTransition", {
+            value: () => ({ status: "rejected", detail: "injected movement link rejection" }),
+          });
+          return decide({ store, commands });
+        }),
+    });
+
+    const outcome = await applyHeal(e, deps, movementInput());
+
+    expect(outcome).toMatchObject({ status: "refused", code: "CHAIN_MOVED" });
+    if (outcome.status === "refused") expect(outcome.detail).toMatch(/injected movement link rejection/i);
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE kind = 'external-transition'").all(),
+    ).toEqual([{ sequence: null }]);
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toEqual([]);
+  });
+
+  it("retries after the signed movement is stored but the queue link is not attempted", async () => {
+    const e = env();
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    let stopBeforeLink = true;
+    const deps = applyDeps({
+      onQueue: async (...args) => {
+        if (stopBeforeLink) {
+          stopBeforeLink = false;
+          throw new Error("injected stop before movement link");
+        }
+        return runOnQueue(...args);
+      },
+    });
+
+    await expect(applyHeal(e, deps, movementInput())).rejects.toThrow(/before movement link/i);
+    const staged = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind = 'external-transition'")
+      .get() as { digest: string };
+    const retry = await applyHeal(e, applyDeps(), movementInput());
+
+    expect(retry).toMatchObject({ status: "healed" });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toEqual([
+      { digest: staged.digest },
+    ]);
+    expect(
+      raw
+        .prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE kind = 'external-transition' ORDER BY created_at")
+        .all(),
+    ).toEqual([{ sequence: 2 }]);
+  });
+
+  it("promotes a movement link left durable before its attestation placement", async () => {
+    const e = env();
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    const deps = applyDeps({
+      onQueue: async (...args) => {
+        await runOnQueue(...args);
+        throw new Error("injected stop after movement link");
+      },
+    });
+
+    await expect(applyHeal(e, deps, movementInput())).rejects.toThrow(/after movement link/i);
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toHaveLength(1);
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE kind = 'external-transition'").get(),
+    ).toEqual({ sequence: null });
+
+    const retry = await applyHeal(e, applyDeps(), movementInput());
+    expect(retry).toMatchObject({ status: "healed", wrote: [{ sequence: 2 }] });
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE kind = 'external-transition'").get(),
+    ).toEqual({ sequence: 2 });
+  });
+
+  it("recovers when queue state commits the movement before its durable projection", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    const rejecting = applyDeps({
+      onQueue: (env, repositoryId, baseRef, decide) =>
+        runOnQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+          Object.defineProperty(commands, "recordTransition", {
+            value: () => ({ status: "rejected", detail: "stage without link" }),
+          });
+          return decide({ store, commands });
+        }),
+    });
+    await applyHeal(e, rejecting, movementInput());
+    const staged = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind = 'external-transition'")
+      .get() as { digest: string };
+
+    // This is the exact runOnQueue interleaving: queue_state committed the
+    // append, but projectQueueState has not yet written queue_transitions_index.
+    await withQueueState(db, REPO, REF, (store) => {
+      const tail = store.state().transitions.at(-1);
+      return commandsFor(store).recordTransition({
+        idempotencyKey: `heal:${UNAUTHORIZED.mergeSha}`,
+        kind: "external",
+        transitionSequence: (tail?.transitionSequence ?? 0) + 1,
+        priorDigest: tail?.digest ?? null,
+        digest: staged.digest,
+        baseSha: UNAUTHORIZED.mergeSha,
+        attemptId: null,
+        witnessPrincipalIds: ["prn_acme"],
+      });
+    });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toEqual([]);
+
+    const retry = await applyHeal(e, applyDeps(), movementInput());
+
+    expect(retry).toMatchObject({ status: "healed", wrote: [{ sequence: 2 }] });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toEqual([
+      { digest: staged.digest },
+    ]);
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence, attempt_id AS attemptId FROM queue_attestations WHERE digest = ?").get(staged.digest),
+    ).toEqual({ sequence: 2, attemptId: `movement:${UNAUTHORIZED.mergeSha}` });
+  });
+
+  it("quarantines an unlinked staged movement after the head advances, then retries", async () => {
+    const e = env();
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    const fillerDigest = `sha256:${"f".repeat(64)}`;
+    let advanceHead = true;
+    const moving = applyDeps({
+      onQueue: async (env, repositoryId, baseRef, decide) => {
+        if (advanceHead) {
+          advanceHead = false;
+          await runOnQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+            const tail = store.state().transitions.at(-1);
+            return commands.recordTransition({
+              idempotencyKey: "advance-before-movement-cas",
+              kind: "external",
+              transitionSequence: (tail?.transitionSequence ?? 0) + 1,
+              priorDigest: tail?.digest ?? null,
+              digest: fillerDigest,
+              baseSha: "f0".repeat(20),
+              attemptId: null,
+              witnessPrincipalIds: ["prn_other"],
+            });
+          });
+        }
+        return runOnQueue(env, repositoryId, baseRef, decide);
+      },
+    });
+
+    const first = await applyHeal(e, moving, movementInput());
+    expect(first).toMatchObject({ status: "refused", code: "CHAIN_MOVED" });
+    const stale = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind = 'external-transition'")
+      .get() as { digest: string };
+
+    const retry = await applyHeal(e, applyDeps(), movementInput());
+
+    expect(retry).toMatchObject({ status: "healed", wrote: [{ sequence: 3 }] });
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence, attempt_id AS attemptId FROM queue_attestations WHERE digest = ?").get(stale.digest),
+    ).toEqual({ sequence: null, attemptId: null });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external' ORDER BY transition_sequence").all()).toHaveLength(2);
+  });
+
+  it("recovers a legacy positioned movement with no durable link on retry", async () => {
+    const e = env();
+    seed();
+    await seedRecordedMerge(routes(), e);
+    makeMovementCommit();
+    const rejecting = applyDeps({
+      onQueue: (env, repositoryId, baseRef, decide) =>
+        runOnQueue(env, repositoryId, baseRef, ({ store, commands }) => {
+          Object.defineProperty(commands, "recordTransition", {
+            value: () => ({ status: "rejected", detail: "seed unlinked movement" }),
+          });
+          return decide({ store, commands });
+        }),
+    });
+    await applyHeal(e, rejecting, movementInput());
+    const legacy = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind = 'external-transition'")
+      .get() as { digest: string };
+    raw.prepare("UPDATE queue_attestations SET transition_sequence = 2 WHERE digest = ?").run(legacy.digest);
+
+    const retry = await applyHeal(e, applyDeps(), movementInput());
+
+    expect(retry).toMatchObject({ status: "healed", wrote: [{ sequence: 2 }] });
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence, attempt_id AS attemptId FROM queue_attestations WHERE digest = ?").get(legacy.digest),
+    ).toEqual({ sequence: 2, attemptId: `movement:${UNAUTHORIZED.mergeSha}` });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index WHERE kind = 'external'").all()).toEqual([
+      { digest: legacy.digest },
+    ]);
   });
 
   it("refuses to record a movement for a commit a signed intent pins", async () => {

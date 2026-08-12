@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
-import { queueRoutes, type QueueRouteEnv } from "./routes.js";
+import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
 import { loadQueueState } from "./queue-state.js";
 import { buildSnapshot } from "./queue-operations.js";
 import type { D1Like } from "./projection.js";
+import { envelopeDigest } from "@thwip/queue-protocol";
 
 /**
  * The App performs the merge with the installation credential and keeps the
@@ -225,7 +226,7 @@ describe("the Worker performing the merge", () => {
   });
 
   /** A read that never agrees records nothing. The sweep asks again. */
-  it("records nothing when the branch never says it contains the commit", async () => {
+  it("marks the merge operation for repair when the branch never says it contains the commit", async () => {
     const e = env();
     const w = writer({ kind: "merged", mergeSha: LANDED });
     await authorize(routes({ mergeWrite: w.port, baseContainsSha: async () => false }), e);
@@ -233,6 +234,79 @@ describe("the Worker performing the merge", () => {
       .prepare("SELECT COUNT(*) AS count FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
       .get() as { count: number };
     expect(records.count).toBe(0);
+    const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+    expect(store.mergeOperations()).toEqual([
+      expect.objectContaining({
+        outcome: "MERGED",
+        refusalReason: expect.stringContaining("does not contain") as unknown as string,
+        refusalCount: 1,
+        retryAfter: expect.any(String) as unknown as string,
+      }),
+    ]);
+  });
+
+  it("keeps a durable repair reason when transition recording throws after the merge", async () => {
+    const e = env();
+    const w = writer({ kind: "merged", mergeSha: LANDED });
+    await authorize(
+      routes({
+        mergeWrite: w.port,
+        signRecordBytes: async (_env, _bytes, typ) => {
+          if (typ.includes("transition-record")) throw new Error("injected signer outage");
+          return "signed-intent";
+        },
+      }),
+      e,
+    );
+
+    expect(w.intents).toHaveLength(1);
+    const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+    expect(store.mergeOperations()).toEqual([
+      expect.objectContaining({
+        outcome: "MERGED",
+        refusalReason: expect.stringContaining("injected signer outage") as unknown as string,
+        refusalCount: 1,
+        retryAfter: expect.any(String) as unknown as string,
+      }),
+    ]);
+  });
+
+  it("does not link signed bytes at a different position when the chain moves before append", async () => {
+    const e = env();
+    const w = writer({ kind: "merged", mergeSha: LANDED });
+    const competitor = `sha256:${"9".repeat(64)}`;
+    let attemptedDigest: string | null = null;
+    await authorize(
+      routes({
+        mergeWrite: w.port,
+        signRecordBytes: async (_env, bytes, typ) => {
+          if (typ.includes("transition-record")) {
+            attemptedDigest = await envelopeDigest(bytes);
+            await runOnQueue(e, REPO, REF, ({ commands }) =>
+              commands.recordTransition({
+                idempotencyKey: "injected-competing-transition",
+                kind: "reused",
+                transitionSequence: 1,
+                priorDigest: null,
+                digest: competitor,
+                baseSha: "8".repeat(40),
+                attemptId: null,
+                witnessPrincipalIds: [],
+              }),
+            );
+          }
+          return "test-jws";
+        },
+      }),
+      e,
+    );
+
+    expect(attemptedDigest).toMatch(/^sha256:/);
+    const links = raw.prepare("SELECT digest FROM queue_transitions_index ORDER BY transition_sequence").all() as Array<{
+      digest: string;
+    }>;
+    expect(links.map((link) => link.digest)).toEqual([competitor]);
+    expect(links.some((link) => link.digest === attemptedDigest)).toBe(false);
   });
 
   it("writes a signed record for the merge it performed", async () => {
