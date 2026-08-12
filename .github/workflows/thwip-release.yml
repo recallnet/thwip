@@ -80,6 +80,7 @@ jobs:
           set -euo pipefail
           config="$RUNNER_TEMP/thwip-github-packages.npmrc"
           {
+            echo "registry=https://registry.npmjs.org"
             echo "@recallnet:registry=https://npm.pkg.github.com"
             echo "//npm.pkg.github.com/:_authToken=$GH_PACKAGES_TOKEN"
             echo "always-auth=true"
@@ -88,7 +89,10 @@ jobs:
           echo "path=$config" >> "$GITHUB_OUTPUT"
 
           npmjs_config="$RUNNER_TEMP/thwip-npmjs-read.npmrc"
-          echo "registry=https://registry.npmjs.org" > "$npmjs_config"
+          {
+            echo "registry=https://registry.npmjs.org"
+            echo "@recallnet:registry=https://registry.npmjs.org"
+          } > "$npmjs_config"
           chmod 0600 "$npmjs_config"
           echo "npmjs_path=$npmjs_config" >> "$GITHUB_OUTPUT"
 
@@ -190,13 +194,10 @@ jobs:
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:
           GITHUB_PACKAGES_NPMRC: ${{ steps.github-packages.outputs.path }}
+          NPMJS_NPMRC: ${{ steps.github-packages.outputs.npmjs_path }}
           VERSION: ${{ steps.decide.outputs.version }}
         run: |
           set -euo pipefail
-          config_dir=$(mktemp -d)
-          npm_config="$config_dir/npmrc"
-          echo "registry=https://registry.npmjs.org" > "$npm_config"
-
           confirm_install() {
             label=$1
             config=$2
@@ -204,7 +205,8 @@ jobs:
             max_attempts=18
             while [ "$attempt" -le "$max_attempts" ]; do
               probe=$(mktemp -d)
-              if npm install --silent --prefix "$probe" --userconfig="$config" "@recallnet/thwip@$VERSION" &&
+              if (cd "$probe" && npm install --userconfig="$config" \
+                    "@recallnet/thwip@$VERSION") &&
                  (cd "$probe" && ./node_modules/.bin/thwip version) | tee "$probe/version" &&
                  grep -F "thwip $VERSION" "$probe/version"; then
                 echo "$label serves @recallnet/thwip@$VERSION"
@@ -219,7 +221,7 @@ jobs:
             return 1
           }
 
-          confirm_install "npm" "$npm_config"
+          confirm_install "npm" "$NPMJS_NPMRC"
           confirm_install "GitHub Packages" "$GITHUB_PACKAGES_NPMRC"
 
       # Only once both registries have it. A tag naming a version that was never
