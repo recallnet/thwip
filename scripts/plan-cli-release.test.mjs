@@ -104,6 +104,9 @@ describe("CLI release planning", () => {
     expect(workflow).toContain("run: git diff --exit-code");
     expect(workflow).toContain('confirm_install "npm"');
     expect(workflow).toContain('confirm_install "GitHub Packages"');
+    expect(workflow).toContain('echo "@recallnet:registry=https://registry.npmjs.org"');
+    expect(workflow).toContain('echo "@recallnet:registry=https://npm.pkg.github.com"');
+    expect(workflow).toContain('(cd "$probe" && npm install');
     expect(workflow).toContain('(cd "$probe" && ./node_modules/.bin/thwip version)');
     expect(workflow).toContain('max_attempts=18');
   });
