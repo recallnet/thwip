@@ -371,6 +371,34 @@ export function planQueueCommand(argv: readonly string[], context: PlanContext):
       };
     }
 
+    case "repair": {
+      const unknown = rejectUnknown(flags, ["repo", "branch", "merge-sha", "attempt-id", "reason"]);
+      if (unknown !== null) return unknown;
+      const repo = requireRepo(flags);
+      if (isPlan(repo)) return repo;
+      const reason = requireReason(flags);
+      if (isPlan(reason)) return reason;
+      const mergeSha = flags.values.get("merge-sha") ?? "";
+      if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(mergeSha)) {
+        return usage("--merge-sha <oid> is required and must be a lowercase hex object id");
+      }
+      const attemptId = flags.values.get("attempt-id");
+      if (attemptId !== undefined && !/^att_[A-Za-z0-9_-]+$/.test(attemptId)) {
+        return usage("--attempt-id must name a queue attempt such as att_...");
+      }
+      const ref = requireRef(flags);
+      return {
+        ok: true,
+        plan: {
+          method: "POST",
+          path: `/v1/queue/{repositoryId}/repair?ref=${encodeURIComponent(ref)}`,
+          body: { mergeSha, reason, ...(attemptId === undefined ? {} : { attemptId }) },
+          idempotencyKey: key(["repair", repo, ref, mergeSha, attemptId ?? ""]),
+          requiresAdmin: true,
+        },
+      };
+    }
+
     case "work": {
       // The actual watch loop lives in queue-work.ts and is dispatched there
       // directly (it heartbeats on an interval rather than making one

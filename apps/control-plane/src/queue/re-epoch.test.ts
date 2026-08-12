@@ -4,6 +4,7 @@ import { verifyChain, type Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
+import { mergeCommitText } from "./merge-commit.js";
 
 /**
  * Starting a repository's attested chain again, rather than repairing it.
@@ -64,10 +65,14 @@ const OLD = {
 /** Where the branch stands now, past everything the old range holds. */
 const NOW = { sha: "e1".repeat(20), tree: "e2".repeat(20), parents: [OLD.mergeSha, "e3".repeat(20)] };
 
-const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
-  [ROOT.sha]: { treeOid: ROOT.tree, parentShas: ROOT.parents },
-  [OLD.mergeSha]: { treeOid: OLD.treeOid, parentShas: [OLD.baseSha, OLD.headSha] },
-  [NOW.sha]: { treeOid: NOW.tree, parentShas: NOW.parents },
+const COMMITS: Record<string, { treeOid: string; parentShas: string[]; message: string }> = {
+  [ROOT.sha]: { treeOid: ROOT.tree, parentShas: ROOT.parents, message: "root" },
+  [OLD.mergeSha]: {
+    treeOid: OLD.treeOid,
+    parentShas: [OLD.baseSha, OLD.headSha],
+    message: mergeCommitText(OLD.pullRequestNumber, `merge_${OLD.attemptId}`),
+  },
+  [NOW.sha]: { treeOid: NOW.tree, parentShas: NOW.parents, message: "current base" },
 };
 
 function seed(): void {
@@ -104,7 +109,7 @@ async function seedIntent(): Promise<void> {
       baseSha: OLD.baseSha,
       headRepositoryId: REPO,
       headSha: OLD.headSha,
-      candidateSha: "9f".repeat(20),
+      candidateSha: OLD.mergeSha,
       candidateTreeOid: OLD.treeOid,
       candidateParentOids: [OLD.baseSha, OLD.headSha],
     },
@@ -165,6 +170,7 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
     }),
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
     baseContainsSha: async () => true,
+    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: OLD.mergeSha }),
     proofCheckRunId: async () => "91289436271",
     signRecordBytes: async (_e, bytes, typ) =>
       new CompactSign(bytes).setProtectedHeader({ alg: "ES256", kid: "test-key", typ }).sign(signingKey),

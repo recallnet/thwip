@@ -14,6 +14,7 @@ const QUEUE_SUBCOMMANDS = [
   "bypass",
   "explain",
   "reconcile",
+  "repair",
   "doctor",
   "work",
 ] as const;

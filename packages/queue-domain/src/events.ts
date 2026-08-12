@@ -156,6 +156,8 @@ export type QueueEvent = EventEnvelope &
         readonly baseSha: string;
         readonly attemptId: string | null;
         readonly witnessPrincipalIds: readonly string[];
+        /** Administrator or automatic operator reason for a repaired link. */
+        readonly reason?: string;
       }
     | { readonly type: "ExternalTransitionObserved"; readonly observedBaseSha: string }
     | { readonly type: "QueuePaused"; readonly actorPrincipalId: string; readonly reason: string }

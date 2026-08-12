@@ -19,7 +19,7 @@ import {
   retryAfter,
   settleOrphanedWrite,
 } from "./orphaned-writes.js";
-import { transitionRecordFor } from "./attestation.js";
+import { durableTransitionForAttempt } from "./attestation.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { findingsForChain } from "./chain-self-check.js";
 import type { CommentBudget } from "./status-comment-write.js";
@@ -37,9 +37,12 @@ const RECORD_FROM_INTENT_DEPS: RecordFromIntentDeps<QueueRouteEnv> = recordFromI
   {
     async commitFacts(env, repositoryId, sha) {
       const facts = await GITHUB_READS.commitFacts(env, repositoryId, sha);
-      return facts === null ? null : { treeOid: facts.treeOid, parentShas: [...facts.parentShas] };
+      return facts === null
+        ? null
+        : { treeOid: facts.treeOid, parentShas: [...facts.parentShas], message: facts.message };
     },
     baseContainsSha: GITHUB_READS.baseContainsSha,
+    pullRequestMergeState: GITHUB_READS.pullRequestMergeState,
     async activePolicy(env, repositoryId) {
       return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
     },
@@ -610,7 +613,27 @@ async function sweepOrphanedWrites(
   // absence there is not an absence.
   const unrecorded: typeof open = [];
   for (const write of settledRecently) {
-    if ((await transitionRecordFor(db, row.repositoryId, row.baseRef, write.attemptId)) === null) {
+    const intents = await db
+      .prepare(
+        `SELECT DISTINCT json_extract(bytes, '$.git.candidateSha') AS mergeSha
+           FROM queue_attestations
+          WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ? AND kind = 'merge-intent'`,
+      )
+      .bind(row.repositoryId, row.baseRef, write.attemptId)
+      .all<{ mergeSha: string | null }>();
+    let linked = false;
+    for (const intent of intents.results) {
+      if (intent.mergeSha === null) continue;
+      linked =
+        (await durableTransitionForAttempt(db, {
+          repositoryId: row.repositoryId,
+          baseRef: row.baseRef,
+          attemptId: write.attemptId,
+          mergeSha: intent.mergeSha,
+        })) !== null;
+      if (linked) break;
+    }
+    if (!linked) {
       unrecorded.push(write);
     }
   }
@@ -638,6 +661,7 @@ async function sweepOrphanedWrites(
           // this string touches. No principal row is claimed for it, because the
           // sweep is the Worker's own clock rather than any person or device.
           witnessPrincipalId: "queue",
+          reason: `automatic repair of settled merge operation ${write.operationId}`,
           attemptId: write.attemptId,
         }),
       resolve: (operationId, resolvedAs) =>

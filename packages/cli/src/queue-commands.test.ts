@@ -76,6 +76,7 @@ describe("reasons", () => {
     ["pause", ["pause", ...REPO]],
     ["eject", ["eject", ...REPO, "--pr", "42"]],
     ["rebaseline", ["rebaseline", ...REPO, "--base-sha", "a".repeat(40)]],
+    ["repair", ["repair", ...REPO, "--merge-sha", "a".repeat(40)]],
   ] as const;
 
   for (const [name, argv] of needsReason) {
@@ -174,6 +175,7 @@ describe("authority", () => {
     expect(plan(["pause", ...REPO, "--reason", "incident under way"]).requiresAdmin).toBe(true);
     expect(plan(["resume", ...REPO]).requiresAdmin).toBe(true);
     expect(plan(["eject", ...REPO, "--pr", "1", "--reason", "abandoned by its author"]).requiresAdmin).toBe(true);
+    expect(plan(["repair", ...REPO, "--merge-sha", "a".repeat(40), "--reason", "missing chain record"]).requiresAdmin).toBe(true);
   });
 
   it("does not require admin for a developer's own queue actions", () => {
@@ -201,6 +203,7 @@ describe("idempotency", () => {
       ["rebaseline", ...REPO, "--reason", "external push happened", "--base-sha", "a".repeat(40)],
       ["eject", ...REPO, "--pr", "1", "--reason", "abandoned by its author"],
       ["bypass", ...REPO, "--pr", "1", "--reason", "verifier outage today", "--confirm", "recallnet/thwip#1"],
+      ["repair", ...REPO, "--merge-sha", "a".repeat(40), "--reason", "missing chain record"],
     ];
     for (const argv of mutations) {
       expect(plan(argv).idempotencyKey, argv[0]).toBeDefined();
@@ -280,6 +283,56 @@ describe("reconcile", () => {
   it("requires a reason and admin standing", () => {
     expect(planQueueCommand(["reconcile", ...REPO, "--observed", "not-merged"], { nonce: "test-nonce" })).toMatchObject({ ok: false });
     expect(plan([...base, "--observed", "not-merged"]).requiresAdmin).toBe(true);
+  });
+});
+
+describe("repair", () => {
+  it("sends only the commit, reason and optional attempt to the stored-evidence repair route", () => {
+    const sha = "a".repeat(40);
+    const p = plan([
+      "repair",
+      ...REPO,
+      "--merge-sha",
+      sha,
+      "--attempt-id",
+      "att_123",
+      "--reason",
+      "verified merge is missing its record",
+    ]);
+    expect(p).toMatchObject({
+      method: "POST",
+      requiresAdmin: true,
+      body: {
+        mergeSha: sha,
+        attemptId: "att_123",
+        reason: "verified merge is missing its record",
+      },
+    });
+    expect(p.path).toContain("/repair");
+    expect(p.body).not.toHaveProperty("tree");
+    expect(p.body).not.toHaveProperty("parents");
+    expect(p.body).not.toHaveProperty("evidence");
+  });
+
+  it("refuses a missing commit or malformed attempt", () => {
+    expect(
+      planQueueCommand(["repair", ...REPO, "--reason", "missing chain record"], { nonce: "test-nonce" }),
+    ).toMatchObject({ ok: false });
+    expect(
+      planQueueCommand(
+        [
+          "repair",
+          ...REPO,
+          "--merge-sha",
+          "a".repeat(40),
+          "--attempt-id",
+          "not-an-attempt",
+          "--reason",
+          "missing chain record",
+        ],
+        { nonce: "test-nonce" },
+      ),
+    ).toMatchObject({ ok: false });
   });
 });
 

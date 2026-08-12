@@ -5,7 +5,9 @@ import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import { proofBindingFrom, type ProofBinding } from "./work-receipt.js";
 import {
-  readAttestation,
+  clearAttestationChainPosition,
+  durableTransitionForAttempt,
+  placeAttestationInChain,
   reuseEvidenceFor,
   signReusedRecord,
   signVerifiedRecord,
@@ -15,12 +17,7 @@ import {
 } from "./attestation.js";
 import { mergeCommitText } from "./merge-commit.js";
 import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
-import {
-  TRANSITION_KINDS as RECORD_KINDS,
-  requiredSuitesDigest,
-  type Sha256,
-  type TransitionRecordKind,
-} from "@thwip/queue-protocol";
+import { requiredSuitesDigest, type Sha256, type TransitionRecordKind } from "@thwip/queue-protocol";
 import { transitionKindOf, type TransitionKind } from "@thwip/queue-domain";
 import { putEvidence, type R2Like } from "./evidence-store.js";
 import { acceptedReceiptFor } from "./assignment-store.js";
@@ -178,22 +175,6 @@ async function proofBindingForHead<TEnv extends QueueRouteEnv>(
  * is visible and can be retried, while a link naming a record nobody has is the
  * thing this replaces.
  */
-/**
- * What kind of transition a stored record is, read from the record itself.
- *
- * Null where the row is missing, or carries a kind this build does not know.
- * Both used to answer "reused", so an unreadable record and a record kind added
- * after this code was written both went into the chain claiming the merge rested
- * on the head's own proof. That claim is exactly what a reader auditing the
- * chain relies on, and it was the one thing nobody was checking.
- */
-function storedTransitionKind(kind: string | undefined): TransitionKind | null {
-  if (kind === undefined) return null;
-  return (RECORD_KINDS as readonly string[]).includes(kind)
-    ? transitionKindOf(kind as TransitionRecordKind)
-    : null;
-}
-
 export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   env: TEnv,
   deps: MergeLaneDeps<TEnv>,
@@ -264,30 +245,34 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // the transition.
   const db = env.DB as unknown as D1Like;
   const existingDigest = await transitionRecordFor(db, input.repositoryId, input.baseRef, input.attemptId);
+  const existingLink = await durableTransitionForAttempt(db, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    attemptId: input.attemptId,
+    mergeSha: input.mergeSha,
+  });
+  if (existingLink !== null) {
+    const placed = await placeAttestationInChain(db, {
+      digest: existingLink.digest,
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      attemptId: input.attemptId,
+      transitionSequence: existingLink.transitionSequence,
+    });
+    return placed
+      ? {
+          status: "duplicate",
+          sequence: existingLink.transitionSequence,
+          digest: existingLink.digest,
+          snapshot: null,
+        }
+      : skip("the queue link exists but its signed record could not be placed in the public chain");
+  }
   if (existingDigest !== null) {
-    // Read back what was actually stored: a plain replay stored a
-    // "reused-proof-merge" record, but a process that died between storing
-    // the record and recording the transition on a first report leaves a
-    // "candidate-verified-merge" record here too, and hardcoding "reused"
-    // would misreport that merge as a reuse forever.
-    const existing = await readAttestation(db, existingDigest);
-    const existingKind = storedTransitionKind(existing?.kind);
-    if (existingKind === null) {
-      return skip(`the stored record for this merge does not say what kind it is: ${existingDigest}`);
-    }
-    const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
-      recordOnly(commands, store, {
-        attemptId: input.attemptId,
-        // Ignored on replay: the domain layer's idempotency key is keyed on
-        // attempt id alone, so this call can only ever return the transition
-        // this attempt already recorded.
-        kind: existingKind,
-        digest: existingDigest,
-        baseSha: input.mergeSha,
-        witnessPrincipalIds: input.witnessPrincipalIds,
-      }),
-    );
-    return { status: result.transition.status, sequence: result.sequence, digest: existingDigest, snapshot };
+    // Old builds stored a positioned row before asking the queue for the link.
+    // The full durable transition index says no link exists, so that position
+    // is a stale claim, not a successful replay.
+    await clearAttestationChainPosition(db, existingDigest);
   }
 
   const attempt = input.attempt;
@@ -376,12 +361,12 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
       ? "candidate-verified-merge"
       : "reused-proof-merge";
-  const stored = await storeAttestation(db, {
+  await storeAttestation(db, {
     digest: signed.digest,
     kind: recordKind,
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
-    transitionSequence: (input.chainHead?.sequence ?? 0) + 1,
+    transitionSequence: null,
     attemptId: input.attemptId,
     bytes: signed.bytes,
     jws: signed.jws,
@@ -396,32 +381,56 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       }).then(() => undefined),
   });
 
-  // Lost a simultaneous race with another report of the same merge: the
-  // index refused this attempt a second chain position. The record that won
-  // is already stored and is what the transition has to cite — this call's
-  // own signed bytes never occupy a link and are not persisted.
-  let digest = signed.digest;
-  let kind = transitionKindOf(recordKind);
-  if (!stored.stored) {
-    digest = stored.digest as Sha256;
-    const winner = await readAttestation(db, stored.digest);
-    const winnerKind = storedTransitionKind(winner?.kind);
-    if (winnerKind === null) {
-      return skip(`the record that won this chain position does not say what kind it is: ${stored.digest}`);
+  const expectedSequence = recordSubject.position.transitionSequence;
+  const expectedPrior = recordSubject.position.previousTransitionDigest;
+  const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) => {
+    const tail = store.state().transitions.at(-1);
+    if ((tail?.transitionSequence ?? 0) + 1 !== expectedSequence || (tail?.digest ?? null) !== expectedPrior) {
+      return { moved: true as const };
     }
-    kind = winnerKind;
+    return {
+      moved: false as const,
+      transition: commands.recordTransition({
+        idempotencyKey: `transition:${input.attemptId}`,
+        kind: transitionKindOf(recordKind),
+        transitionSequence: expectedSequence,
+        priorDigest: expectedPrior,
+        digest: signed.digest,
+        baseSha: input.mergeSha,
+        attemptId: input.attemptId,
+        witnessPrincipalIds: input.witnessPrincipalIds,
+      }),
+    };
+  });
+  const linked = await durableTransitionForAttempt(db, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    attemptId: input.attemptId,
+    mergeSha: input.mergeSha,
+  });
+  if (linked === null) {
+    return skip(
+      result.moved
+        ? "the chain moved while the transition record was being signed"
+        : result.transition.status === "rejected"
+        ? `the queue refused the transition: ${result.transition.detail}`
+        : "the transition command did not create the signed queue link",
+    );
   }
-
-  const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) =>
-    recordOnly(commands, store, {
-      attemptId: input.attemptId,
-      kind,
-      digest,
-      baseSha: input.mergeSha,
-      witnessPrincipalIds: input.witnessPrincipalIds,
-    }),
-  );
-  return { status: result.transition.status, sequence: result.sequence, digest, snapshot };
+  const placed = await placeAttestationInChain(db, {
+    digest: linked.digest,
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    attemptId: input.attemptId,
+    transitionSequence: linked.transitionSequence,
+  });
+  if (!placed) return skip("the queue linked the record but its public chain position could not be stored");
+  return {
+    status: result.moved || linked.digest !== signed.digest ? "duplicate" : result.transition.status,
+    sequence: linked.transitionSequence,
+    digest: linked.digest,
+    snapshot,
+  };
 }
 
 /**
@@ -565,6 +574,16 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       merge: { baseSha: string; headSha: string; treeOid: string; parentShas: string[] };
     },
   ): Promise<Record<string, unknown>> => {
+    const markUnrecorded = async (detail: string): Promise<void> => {
+      const now = new Date().toISOString();
+      await onQueue(env, input.repositoryId, input.baseRef, ({ store }) =>
+        store.refuseMergeOperation(input.operationId, detail, now, () => now),
+      );
+      console.error(
+        `[queue merge] ${input.operationId} landed without a signed transition: ${detail}`,
+      );
+    };
+
     const outcome = await deps.mergeWrite(env, input.repositoryId, {
       baseRef: input.baseRef,
       pullRequestNumber: input.pullRequestNumber,
@@ -576,22 +595,40 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
     });
 
     if (outcome.kind === "merged" && outcome.mergeSha !== null) {
-      const recorded = await recordLandedMerge(env, {
-        repositoryId: input.repositoryId,
-        baseRef: input.baseRef,
-        attemptId: input.attemptId,
-        operationId: input.operationId,
-        mergeSha: outcome.mergeSha,
-        witnessPrincipalIds: [],
-      });
-      if (!recorded.ok) return { merged: true, recorded: false, reason: recorded.code, detail: recorded.detail };
+      let recorded: Awaited<ReturnType<typeof recordLandedMerge>>;
+      try {
+        recorded = await recordLandedMerge(env, {
+          repositoryId: input.repositoryId,
+          baseRef: input.baseRef,
+          attemptId: input.attemptId,
+          operationId: input.operationId,
+          mergeSha: outcome.mergeSha,
+          witnessPrincipalIds: [],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const detail = `transition recording threw after the merge landed: ${message}`.slice(0, 1_000);
+        await markUnrecorded(detail);
+        return { merged: true, recorded: false, reason: "TRANSITION_RECORDING_FAILED", detail };
+      }
+      if (!recorded.ok) {
+        await markUnrecorded(`${recorded.code}: ${recorded.detail}`);
+        return { merged: true, recorded: false, reason: recorded.code, detail: recorded.detail };
+      }
+      const transitionRecorded =
+        recorded.digest !== null && (recorded.transition === "applied" || recorded.transition === "duplicate");
+      if (!transitionRecorded) {
+        const detail =
+          recorded.detail ??
+          `transition ${recorded.transition}${recorded.digest === null ? " has no signed record" : " was not applied"}`;
+        await markUnrecorded(detail);
+      }
       return {
         merged: true,
-        // What was actually written, not that the call returned. A skipped
-        // transition used to be reported as `recorded: true` with the skip
-        // sitting in a field nobody reads, which is how a merge with no record
-        // looked like a merge with one.
-        recorded: recorded.digest !== null,
+        // A signed row and an applied queue link are both required. Reporting
+        // either one alone as complete is how a merge with no public transition
+        // became a successful App write.
+        recorded: transitionRecorded,
         transition: recorded.transition,
         transitionDigest: recorded.digest,
         detail: recorded.detail,

@@ -660,6 +660,7 @@ export class QueueCommands {
     baseSha: string;
     attemptId: string | null;
     witnessPrincipalIds: readonly string[];
+    reason?: string;
   }): CommandResult {
     return this.store.append({
       idempotencyKey: input.idempotencyKey,
@@ -672,6 +673,7 @@ export class QueueCommands {
       baseSha: input.baseSha,
       attemptId: input.attemptId,
       witnessPrincipalIds: input.witnessPrincipalIds,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
     });
   }
 

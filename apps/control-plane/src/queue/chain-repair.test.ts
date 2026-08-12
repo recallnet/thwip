@@ -3,6 +3,7 @@ import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
 import type { Sha256 } from "@thwip/queue-protocol";
+import { mergeCommitText } from "./merge-commit.js";
 
 /**
  * Putting a merge back into the chain after the attempt that authorized it is
@@ -100,7 +101,7 @@ function seed(): void {
  */
 async function seedIntent(
   merge: Merge,
-  candidateSha = "9f".repeat(20),
+  candidateSha = merge.mergeSha,
   createdAt = "2026-07-31T22:00:00.000Z",
 ): Promise<string> {
   const signed = await signReusedIntent({
@@ -143,11 +144,23 @@ async function seedIntent(
 }
 
 /** What GitHub says about every commit these tests name. */
-const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
-  [FIRST.baseSha]: { treeOid: FIRST.beforeTree, parentShas: ["5c".repeat(20)] },
-  [FIRST.mergeSha]: { treeOid: FIRST.treeOid, parentShas: [FIRST.baseSha, FIRST.headSha] },
-  [SECOND.mergeSha]: { treeOid: SECOND.treeOid, parentShas: [SECOND.baseSha, SECOND.headSha] },
-  [UNAUTHORIZED.mergeSha]: { treeOid: UNAUTHORIZED.treeOid, parentShas: UNAUTHORIZED.parentShas },
+const COMMITS: Record<string, { treeOid: string; parentShas: string[]; message: string }> = {
+  [FIRST.baseSha]: { treeOid: FIRST.beforeTree, parentShas: ["5c".repeat(20)], message: "base" },
+  [FIRST.mergeSha]: {
+    treeOid: FIRST.treeOid,
+    parentShas: [FIRST.baseSha, FIRST.headSha],
+    message: mergeCommitText(FIRST.pullRequestNumber, `merge_${FIRST.attemptId}`),
+  },
+  [SECOND.mergeSha]: {
+    treeOid: SECOND.treeOid,
+    parentShas: [SECOND.baseSha, SECOND.headSha],
+    message: mergeCommitText(SECOND.pullRequestNumber, `merge_${SECOND.attemptId}`),
+  },
+  [UNAUTHORIZED.mergeSha]: {
+    treeOid: UNAUTHORIZED.treeOid,
+    parentShas: UNAUTHORIZED.parentShas,
+    message: "not written by the queue",
+  },
 };
 
 function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
@@ -171,6 +184,10 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
     // Every commit these tests name is on main, which is what makes them
     // repairs. The one that is not has a test of its own.
     baseContainsSha: async () => true,
+    pullRequestMergeState: async (_e, _r, pullRequestNumber) => {
+      const merge = [FIRST, SECOND].find((candidate) => candidate.pullRequestNumber === pullRequestNumber);
+      return { merged: merge !== undefined, mergeCommitSha: merge?.mergeSha ?? null };
+    },
     proofCheckRunId: async () => "91289436271",
     signRecordBytes: async () => "jws-record",
     ...over,
@@ -330,7 +347,11 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
     await seedIntent(FIRST);
     const app = routes();
     const forged = "5d".repeat(20);
-    COMMITS[forged] = { treeOid: "6e".repeat(20), parentShas: [FIRST.baseSha, FIRST.headSha] };
+    COMMITS[forged] = {
+      treeOid: "6e".repeat(20),
+      parentShas: [FIRST.baseSha, FIRST.headSha],
+      message: mergeCommitText(FIRST.pullRequestNumber, `merge_${FIRST.attemptId}`),
+    };
 
     const response = await repair(app, e, { mergeSha: forged, reason: REASON });
 
@@ -346,7 +367,11 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
     await seedIntent(FIRST);
     const app = routes();
     const forged = "7f".repeat(20);
-    COMMITS[forged] = { treeOid: FIRST.treeOid, parentShas: [FIRST.baseSha, "80".repeat(20)] };
+    COMMITS[forged] = {
+      treeOid: FIRST.treeOid,
+      parentShas: [FIRST.baseSha, "80".repeat(20)],
+      message: mergeCommitText(FIRST.pullRequestNumber, `merge_${FIRST.attemptId}`),
+    };
 
     const response = await repair(app, e, { mergeSha: forged, reason: REASON });
 
@@ -408,12 +433,7 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
     expect(await response.json()).toMatchObject({ recorded: "applied", mergeIntentDigest: earlier });
   });
 
-  /**
-   * Two different attempts on the same base and head do authorize the same
-   * commit, and the record has to name one of them. Guessing would attribute a
-   * merge to a turn that did not ask for it, so this asks.
-   */
-  it("refuses when two different attempts authorize the same commit", async () => {
+  it("uses the generated commit message to identify which attempt wrote the commit", async () => {
     const e = env();
     seed();
     await seedIntent(FIRST);
@@ -422,14 +442,12 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
 
     const response = await repair(app, e, { mergeSha: FIRST.mergeSha, reason: REASON });
 
-    expect(response.status).toBe(409);
-    expect((await response.json()) as { error: string }).toMatchObject({
-      error: expect.stringContaining("att_retry") as unknown as string,
-    });
-    expect(await chainLinks(app, e)).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recorded: "applied", attemptId: FIRST.attemptId });
+    expect(await chainLinks(app, e)).toHaveLength(1);
   });
 
-  it("names the attempt to settle which of two authorized the commit", async () => {
+  it("refuses a named attempt whose generated commit message did not land", async () => {
     const e = env();
     seed();
     await seedIntent(FIRST);
@@ -442,8 +460,8 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
       attemptId: "att_retry",
     });
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ recorded: "applied", attemptId: "att_retry" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "MERGE_NOT_AUTHORIZED" });
   });
 
   it("requires an administrator of the organization that owns the repository", async () => {

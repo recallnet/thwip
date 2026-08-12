@@ -3,6 +3,7 @@ import { verifyChain, type Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
+import { mergeCommitText } from "./merge-commit.js";
 
 /**
  * Correcting a record that says something untrue, without rewriting history.
@@ -47,10 +48,11 @@ const REAL_MERGE = "0b2076107aa20f8b365d3b510de4838b05d12622";
 const MERGE_TREE = "febb37430f3fd96c8b11e1b0f60ec0697b9f7cb6";
 
 /** What GitHub says about each commit here. Both merges carry the same facts. */
-const COMMITS: Record<string, { treeOid: string; parentShas: string[] }> = {
-  [PRIOR]: { treeOid: PRIOR_TREE, parentShas: ["5c".repeat(20)] },
-  [TEST_MERGE]: { treeOid: MERGE_TREE, parentShas: [PRIOR, HEAD_107] },
-  [REAL_MERGE]: { treeOid: MERGE_TREE, parentShas: [PRIOR, HEAD_107] },
+const MERGE_MESSAGE = mergeCommitText(107, `merge_${ATTEMPT}`);
+const COMMITS: Record<string, { treeOid: string; parentShas: string[]; message: string }> = {
+  [PRIOR]: { treeOid: PRIOR_TREE, parentShas: ["5c".repeat(20)], message: "base" },
+  [TEST_MERGE]: { treeOid: MERGE_TREE, parentShas: [PRIOR, HEAD_107], message: MERGE_MESSAGE },
+  [REAL_MERGE]: { treeOid: MERGE_TREE, parentShas: [PRIOR, HEAD_107], message: MERGE_MESSAGE },
 };
 
 /** Only the real merge is on main. The test merge is on no branch and never was. */
@@ -145,6 +147,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
     commitFacts: async (_e, _r, sha) => COMMITS[sha] ?? null,
     baseContainsSha: onMain,
+    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: REAL_MERGE }),
     proofCheckRunId: async () => "91396799250",
     signRecordBytes: async () => "jws-record",
     ...over,
@@ -179,7 +182,10 @@ async function chainLinks(
  * did not ask the branch whether it contained the sha.
  */
 async function writeRecordFiftyFour(e: QueueRouteEnv): Promise<string> {
-  const app = routes({ baseContainsSha: async () => true });
+  const app = routes({
+    baseContainsSha: async () => true,
+    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: TEST_MERGE }),
+  });
   const response = await post(app, e, "repair", { mergeSha: TEST_MERGE, reason: "before the invariant existed" });
   if (response.status !== 200) throw new Error(`seeding the wrong record failed: ${await response.text()}`);
   return ((await response.json()) as { transitionDigest: string }).transitionDigest;
