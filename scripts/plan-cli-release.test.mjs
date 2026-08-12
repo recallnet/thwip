@@ -6,6 +6,7 @@ import {
   RELEASE_PATHS,
   plannedVersion,
   releaseBump,
+  releaseSourceCommit,
 } from "./plan-cli-release.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,6 +26,13 @@ describe("CLI release planning", () => {
 
   it("does not release when no bundled input changed", () => {
     expect(releaseBump({ changed: false, subjects: "", bodies: "" })).toBe("none");
+  });
+
+  it("uses npm's full source commit when the CLI also publishes a short build stamp", () => {
+    expect(releaseSourceCommit({
+      gitHead: "3e9b358a719a706defd3fc11a223536ef8dc1b4c",
+      thwipSourceCommit: "3e9b358a719a",
+    })).toBe("3e9b358a719a706defd3fc11a223536ef8dc1b4c");
   });
 
   it("recovers the same version after only one registry accepted this exact commit", () => {
@@ -97,6 +105,7 @@ describe("CLI release planning", () => {
     expect(workflow).toContain('confirm_install "npm"');
     expect(workflow).toContain('confirm_install "GitHub Packages"');
     expect(workflow).toContain('(cd "$probe" && ./node_modules/.bin/thwip version)');
+    expect(workflow).toContain('max_attempts=18');
   });
 
   it("ships the GitHub Action as a committed bundle, not a consumer build", () => {
