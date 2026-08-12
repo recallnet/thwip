@@ -867,7 +867,6 @@ export async function authorizationFor(
   input: {
     readonly repositoryId: string;
     readonly baseRef: string;
-    readonly sha: string;
     readonly treeOid: string;
     readonly parentShas: readonly string[];
     /** Exact commit message GitHub stored, including title and trailer body. */
@@ -911,7 +910,14 @@ export async function authorizationFor(
     if (!parsed.ok) continue;
     const git = parsed.value.git;
     if (git.repositoryId !== input.repositoryId || git.baseRef !== input.baseRef) continue;
-    if (git.candidateSha !== input.sha) continue;
+    // `candidateSha` is GitHub's temporary test-merge commit. The App creates
+    // the landed commit later, with the signed title, body and operation
+    // trailer, so those two object ids are normally different even though the
+    // signed tree and parents are the same. The repair caller separately asks
+    // GitHub for this intent's pull request and requires its exact landed
+    // `mergeCommitSha`; treating the test-merge id as the landed id makes every
+    // real App-authored repair impossible. For verified runs, the assignment,
+    // assignment row and intent still have to agree on the candidate id.
     if (git.candidateParentOids.length !== input.parentShas.length) continue;
     if (git.candidateParentOids.some((oid, at) => oid !== input.parentShas[at])) continue;
     if (separator < 0 || parsed.value.generatedCommitTitle !== landedTitle) continue;
