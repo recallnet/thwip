@@ -48,6 +48,7 @@ chmodSync(join(out, "thwip.mjs"), 0o755);
 
 // The bundle reads this beside itself to answer `thwip version`.
 execFileSync("node", [join(root, "scripts/stamp-build.mjs"), out], { stdio: "inherit" });
+const stamp = JSON.parse(readFileSync(join(out, "build-stamp.json"), "utf8"));
 
 writeFileSync(
   join(out, "package.json"),
@@ -59,6 +60,8 @@ writeFileSync(
       keywords: ["ci", "attestation", "provenance", "git", "github", "signing"],
       homepage: "https://thwip.ai",
       bugs: { url: "https://thwip.ai" },
+      repository: { type: "git", url: "git+https://github.com/recallnet/thwip.git" },
+      thwipSourceCommit: stamp.commit,
       license: "Apache-2.0",
       type: "module",
       bin: { thwip: "thwip.mjs" },
