@@ -23,7 +23,7 @@ const MAX_ATTEMPTS = 5;
 export interface LoadedQueueState {
   readonly store: SnapshotQueueStore;
   /** `unchanged` when the commands wrote nothing, so a read costs no write. */
-  save(): Promise<"saved" | "conflict" | "unchanged">;
+  save(): Promise<"saved" | "conflict" | "unchanged" | "removed">;
 }
 
 interface StateRow {
@@ -33,6 +33,21 @@ interface StateRow {
 
 function identityOf(repositoryId: string, baseRef: string) {
   return { queueKey: `${repositoryId}:${baseRef}`, repositoryId, baseRef };
+}
+
+export class QueueProjectRemovedError extends Error {
+  constructor(readonly repositoryId: string) {
+    super(`repository ${repositoryId} has been removed from thwip`);
+    this.name = "QueueProjectRemovedError";
+  }
+}
+
+async function projectWasRemoved(db: D1Like, repositoryId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
+    .bind(repositoryId)
+    .first<{ found: number }>();
+  return row !== null;
 }
 
 export async function loadQueueState(
@@ -67,22 +82,30 @@ export async function loadQueueState(
         const result = await db
           .prepare(
             `INSERT INTO queue_state (github_repository_id, base_ref, generation, document, updated_at)
-             VALUES (?, ?, 1, ?, ?)
+             SELECT ?, ?, 1, ?, ?
+              WHERE NOT EXISTS (
+                SELECT 1 FROM removed_projects WHERE github_repository_id = ?
+              )
              ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
           )
-          .bind(repositoryId, baseRef, document, at)
+          .bind(repositoryId, baseRef, document, at, repositoryId)
           .run();
-        return changed(result) ? "saved" : "conflict";
+        if (changed(result)) return "saved";
+        return (await projectWasRemoved(db, repositoryId)) ? "removed" : "conflict";
       }
 
       const result = await db
         .prepare(
           `UPDATE queue_state SET generation = ?, document = ?, updated_at = ?
-            WHERE github_repository_id = ? AND base_ref = ? AND generation = ?`,
+            WHERE github_repository_id = ? AND base_ref = ? AND generation = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM removed_projects WHERE github_repository_id = ?
+              )`,
         )
-        .bind(loadedGeneration + 1, document, at, repositoryId, baseRef, loadedGeneration)
+        .bind(loadedGeneration + 1, document, at, repositoryId, baseRef, loadedGeneration, repositoryId)
         .run();
-      return changed(result) ? "saved" : "conflict";
+      if (changed(result)) return "saved";
+      return (await projectWasRemoved(db, repositoryId)) ? "removed" : "conflict";
     },
   };
 }
@@ -126,6 +149,7 @@ export async function withQueueState<T>(
     const result = await decide(loaded.store);
     if (options.beforeSave !== undefined) await options.beforeSave();
     const outcome = await loaded.save();
+    if (outcome === "removed") throw new QueueProjectRemovedError(repositoryId);
     if (outcome !== "conflict") return result;
   }
   // Losing five times in a row is not contention, it is something writing to this

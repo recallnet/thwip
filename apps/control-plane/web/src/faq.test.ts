@@ -32,6 +32,7 @@ describe("parseFaq", () => {
       "Do commits have to be signed?",
       "What happens on a rebase or squash?",
       "Where do project settings live?",
+      "What is the difference between disabling and removing a project?",
       "Who publishes the required proof check?",
       "Why are there two required checks?",
       "What data does the control plane hold?",

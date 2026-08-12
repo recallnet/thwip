@@ -267,7 +267,12 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
     .prepare(
       `SELECT p.organization_id AS organizationId, p.github_name AS repository, o.github_org_id AS ownerId
          FROM projects p JOIN organizations o ON o.id = p.organization_id
-        WHERE p.github_repository_id = ?`,
+        WHERE p.github_repository_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM removed_projects r
+             WHERE r.organization_id = p.organization_id
+               AND r.github_repository_id = p.github_repository_id
+          )`,
     )
     .bind(request.repositoryId)
     .first<{ organizationId: string; repository: string; ownerId: string }>();
@@ -433,7 +438,14 @@ function policyFor(
  */
 async function proofCheckMode(deps: BootstrapDeps, project: QueueProject): Promise<ProofCheckMode> {
   const row = await deps.db
-    .prepare("SELECT proof_check_mode FROM projects WHERE github_repository_id = ?")
+    .prepare(
+      `SELECT p.proof_check_mode FROM projects p WHERE p.github_repository_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
+    )
     .bind(project.repositoryId)
     .first<{ proof_check_mode: string }>();
   return row?.proof_check_mode === "enforced" ? "enforced" : "observe";

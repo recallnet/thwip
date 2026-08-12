@@ -131,6 +131,11 @@ export async function reusedCiMetrics(db: D1Like, scope: ReusedCiMetricScope): P
             AND qa.kind = 'reused-proof-merge'
             AND json_valid(qa.bytes)
             AND json_extract(qa.bytes, '$.kind') = 'reused-proof-merge'
+            AND NOT EXISTS (
+              SELECT 1 FROM removed_projects r
+               WHERE r.organization_id = p.organization_id
+                 AND r.github_repository_id = p.github_repository_id
+            )
             ${where}
        ), joined AS (
          SELECT rm.digest,

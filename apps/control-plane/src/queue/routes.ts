@@ -2744,6 +2744,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   app.get("/v1/queue/records/:digest", async (c) => {
     const digest = c.req.param("digest");
     if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return c.json({ error: "not a digest" }, 400);
+    const removed = await c.env.DB.prepare(
+      `SELECT 1 AS found FROM queue_attestations a
+        JOIN removed_projects r ON r.github_repository_id = a.github_repository_id
+       WHERE a.digest = ? LIMIT 1`,
+    )
+      .bind(digest)
+      .first<{ found: number }>();
+    if (removed !== null) return c.json({ error: "no record with that digest" }, 404);
     const found = await readAttestation(c.env.DB as unknown as D1Like, digest);
     if (found === null) return c.json({ error: "no record with that digest" }, 404);
     return c.json(found);
@@ -2833,6 +2841,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (repositoryId === null) {
       return c.json({ error: "the repository id must be GitHub's numeric repository id" }, 400);
     }
+    const removed = await c.env.DB.prepare(
+      "SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1",
+    )
+      .bind(repositoryId)
+      .first<{ found: number }>();
+    if (removed !== null) return c.json({ error: "no queue for that repository" }, 404);
 
     const asked = c.req.query("ref");
     let baseRef = asked === undefined ? null : branchRef(asked);
@@ -2848,7 +2862,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // "does this private repository use the queue" to anyone who asked, which
       // is the enumeration the 404 further down exists to prevent.
       const published = await c.env.DB.prepare(
-        "SELECT base_ref AS baseRef FROM queue_projects WHERE github_repository_id = ? AND chain_public = 1",
+        `SELECT q.base_ref AS baseRef FROM queue_projects q
+          JOIN projects p ON p.github_repository_id = q.github_repository_id
+         WHERE q.github_repository_id = ? AND q.chain_public = 1`,
       )
         .bind(repositoryId)
         .all<{ baseRef: string }>();
@@ -2860,7 +2876,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
 
     const project = await c.env.DB.prepare(
-      "SELECT attested_from_sequence AS epoch, chain_public AS chainPublic FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
+      `SELECT q.attested_from_sequence AS epoch, q.chain_public AS chainPublic
+         FROM queue_projects q JOIN projects p ON p.github_repository_id = q.github_repository_id
+        WHERE q.github_repository_id = ? AND q.base_ref = ?`,
     )
       .bind(repositoryId, baseRef)
       .first<{ epoch: number; chainPublic: number }>();

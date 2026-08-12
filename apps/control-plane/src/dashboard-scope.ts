@@ -65,7 +65,12 @@ export async function projectsInReach(db: D1Like, reach: ProjectReach): Promise<
        LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
        LEFT JOIN repository_grants mine
               ON mine.project_id = p.id AND mine.github_user_id = ? AND mine.active = 1
-      WHERE p.organization_id = ? OR mine.permission IS NOT NULL
+      WHERE (p.organization_id = ? OR mine.permission IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )
       ORDER BY p.github_name`,
     )
     // Bound in the order the three placeholders appear, which is the order

@@ -35,10 +35,16 @@ function statements(sql: string): string[] {
     .split("\n")
     .filter((line) => !line.trim().startsWith("--"))
     .join("\n");
-  return withoutComments
+  // A trigger contains its own statement terminator before `END;`. Keep each
+  // trigger whole rather than feeding SQLite the broken `CREATE ... BEGIN`
+  // and `END` fragments produced by a plain semicolon split.
+  const triggers = withoutComments.match(/CREATE TRIGGER[\s\S]*?END;/gi) ?? [];
+  const ordinary = withoutComments.replace(/CREATE TRIGGER[\s\S]*?END;/gi, "");
+  return ordinary
     .split(";")
     .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
+    .filter((statement) => statement.length > 0)
+    .concat(triggers.map((trigger) => trigger.trim().replace(/;$/, "")));
 }
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");

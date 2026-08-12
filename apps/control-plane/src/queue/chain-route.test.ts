@@ -89,6 +89,42 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
     expect(body.links).toEqual([]);
   });
 
+  it("returns 404 for a removed project even while partial cleanup rows remain", async () => {
+    const e = env();
+    await seedProject(e, PUBLIC_REPO, 1);
+    await e.DB.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org_1', ?, 'now', '1')",
+    )
+      .bind(PUBLIC_REPO)
+      .run();
+
+    const response = await routes(false).request(
+      `/v1/queue/${PUBLIC_REPO}/chain?ref=${encodeURIComponent(REF)}`,
+      {},
+      e,
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 404 for a removed project's record before cleanup finishes", async () => {
+    const e = env();
+    await seedProject(e, PUBLIC_REPO, 1);
+    const digest = `sha256:${"a".repeat(64)}`;
+    await e.DB.prepare(
+      "INSERT INTO queue_attestations (digest, kind, github_repository_id, base_ref, bytes, jws) VALUES (?, 'merge', ?, ?, '{}', 'jws')",
+    )
+      .bind(digest, PUBLIC_REPO, REF)
+      .run();
+    await e.DB.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org_1', ?, 'now', '1')",
+    )
+      .bind(PUBLIC_REPO)
+      .run();
+
+    const response = await routes(false).request(`/v1/queue/records/${digest}`, {}, e);
+    expect(response.status).toBe(404);
+  });
+
   /**
    * One message covered a bad repository id and a missing branch, and it named
    * the id. A live investigation followed it to the wrong conclusion, deciding

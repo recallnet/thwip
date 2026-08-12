@@ -29,6 +29,87 @@ async function gh<T>(token: string, path: string, init?: RequestInit): Promise<T
   return res.json() as Promise<T>;
 }
 
+/** Confirm the actor still holds GitHub's organization-admin role now. */
+export async function isCurrentOrganizationOwner(
+  env: Env,
+  input: { installationId: string | null; organizationLogin: string; actorGithubUserId: string },
+): Promise<boolean> {
+  if (input.installationId === null) return false;
+  const token = await installationToken(env, input.installationId);
+  const user = await gh<{ id: number; login: string }>(token, `/user/${encodeURIComponent(input.actorGithubUserId)}`);
+  if (String(user.id) !== input.actorGithubUserId) return false;
+  const membership = await gh<{ state: string; role: string; user?: { id?: number } }>(
+    token,
+    `/orgs/${encodeURIComponent(input.organizationLogin)}/memberships/${encodeURIComponent(user.login)}`,
+  );
+  return membership.state === "active" && membership.role === "admin" && String(membership.user?.id) === input.actorGithubUserId;
+}
+
+export interface InstalledRepository {
+  readonly id: string;
+  readonly fullName: string;
+  readonly defaultBranch: string;
+  readonly ownerId: string;
+}
+
+interface ProjectProjectionRepository {
+  readonly id: number;
+  readonly full_name: string;
+  readonly default_branch: string;
+}
+
+/** The one sync write whose tombstone guard prevents silent recreation. */
+export function installedProjectProjectionStatement(
+  db: Pick<D1Database, "prepare">,
+  organizationId: string,
+  repository: ProjectProjectionRepository,
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch)
+     SELECT ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM removed_projects
+         WHERE organization_id = ? AND github_repository_id = ?
+      )
+     ON CONFLICT(github_repository_id) DO UPDATE SET github_name = excluded.github_name, default_branch = excluded.default_branch`,
+  ).bind(
+    `prj_gh_${repository.id}`,
+    organizationId,
+    String(repository.id),
+    repository.full_name,
+    repository.default_branch,
+    organizationId,
+    String(repository.id),
+  );
+}
+
+/** Resolve one repository through this installation, proving the App can see it. */
+export async function installedRepository(
+  env: Env,
+  installationId: string,
+  fullName: string,
+): Promise<InstalledRepository> {
+  const token = await installationToken(env, installationId);
+  const repository = await gh<{
+    id: number;
+    full_name: string;
+    default_branch: string;
+    owner: { id: number };
+  }>(
+    token,
+    `/repos/${fullName
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/")}`,
+  );
+  return {
+    id: String(repository.id),
+    fullName: repository.full_name,
+    defaultBranch: repository.default_branch,
+    ownerId: String(repository.owner.id),
+  };
+}
+
 async function ghPaged<T>(token: string, path: string): Promise<T[]> {
   const out: T[] = [];
   for (let page = 1; page <= 10; page++) {
@@ -181,15 +262,20 @@ export async function syncInstallation(env: Env, installationId: string): Promis
       const perm = r.role_name ?? (r.permissions?.["admin"] ? "admin" : r.permissions?.["push"] ? "write" : "read");
       stmts.push(
         env.DB.prepare(
-          `INSERT INTO team_repos (organization_id, team_id, github_repository_id, permission) VALUES (?, ?, ?, ?)
+          `INSERT INTO team_repos (organization_id, team_id, github_repository_id, permission)
+           SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM removed_projects
+               WHERE organization_id = ? AND github_repository_id = ?
+            )
            ON CONFLICT(organization_id, team_id, github_repository_id) DO UPDATE SET permission = excluded.permission`,
-        ).bind(orgId, String(t.id), String(r.id), perm),
+        ).bind(orgId, String(t.id), String(r.id), perm, orgId, String(r.id)),
       );
     }
   }
 
   // Installed repositories -> projects (imported disabled unless already present).
-  const repoList: Array<{ id: number; full_name: string; default_branch: string }> = [];
+  const repoList: ProjectProjectionRepository[] = [];
   for (let page = 1; page <= 10; page++) {
     const res = await gh<{ repositories: Array<{ id: number; full_name: string; default_branch: string }> }>(
       token,
@@ -200,13 +286,7 @@ export async function syncInstallation(env: Env, installationId: string): Promis
   }
   for (const r of repoList) {
     counts["repos"]!++;
-    stmts.push(
-      env.DB.prepare(
-        `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(github_repository_id) DO UPDATE SET github_name = excluded.github_name, default_branch = excluded.default_branch`,
-      ).bind(`prj_gh_${r.id}`, orgId, String(r.id), r.full_name, r.default_branch),
-    );
+    stmts.push(installedProjectProjectionStatement(env.DB, orgId, r));
   }
 
   if (stmts.length > 0) await env.DB.batch(stmts);

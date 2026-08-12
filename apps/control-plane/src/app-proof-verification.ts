@@ -760,7 +760,12 @@ async function loadProofProject(env: Env, repositoryId: string): Promise<ProofPr
     `SELECT p.id, p.github_repository_id, p.github_name, p.enabled, p.proof_check_mode,
             o.github_org_id, o.installation_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
-      WHERE p.github_repository_id = ?`,
+      WHERE p.github_repository_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(repositoryId)
     .first<{
@@ -1050,7 +1055,12 @@ export async function reconcileInstallationProofChecks(env: Env, installationId:
   const projects = await env.DB.prepare(
     `SELECT p.github_repository_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
-      WHERE o.installation_id = ? AND p.enabled = 1`,
+      WHERE o.installation_id = ? AND p.enabled = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(installationId)
     .all<{ github_repository_id: string }>();
