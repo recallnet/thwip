@@ -1,5 +1,6 @@
 import { latestVerification } from "./latest-verification.js";
 import type { D1Like } from "./queue/projection.js";
+import { nextBootstrapStep, type BootstrapProgress } from "./queue/rulesets.js";
 
 /**
  * The repositories the dashboard lists for one viewer.
@@ -38,7 +39,26 @@ export interface ProjectRow {
   readonly organization_login: string;
   readonly access: "member" | "collaborator";
   readonly permission: string | null;
+  readonly queue_setup_complete: boolean;
   readonly [column: string]: unknown;
+}
+
+/**
+ * Whether the durable queue bootstrap record completed every required step.
+ *
+ * Project enablement and policy activation are different jobs, so neither is a
+ * safe proxy for queue setup. Invalid or absent progress stays incomplete and
+ * keeps the setup controls visible.
+ */
+function queueSetupComplete(progressJson: string | null): boolean {
+  if (progressJson === null) return false;
+  try {
+    const progress: unknown = JSON.parse(progressJson);
+    if (progress === null || typeof progress !== "object" || Array.isArray(progress)) return false;
+    return nextBootstrapStep(progress as BootstrapProgress) === null;
+  } catch {
+    return false;
+  }
 }
 
 export async function projectsInReach(db: D1Like, reach: ProjectReach): Promise<ProjectRow[]> {
@@ -59,10 +79,14 @@ export async function projectsInReach(db: D1Like, reach: ProjectReach): Promise<
               CASE WHEN p.organization_id = ? THEN 'member' ELSE 'collaborator' END AS access,
               mine.permission AS permission,
               ${latestVerification("outcome")} AS last_outcome,
-              ${latestVerification("at")} AS last_observed_at
+              ${latestVerification("at")} AS last_observed_at,
+              q.bootstrap_progress_json AS queue_bootstrap_progress
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
        LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
+       LEFT JOIN queue_projects q
+              ON q.github_repository_id = p.github_repository_id
+             AND q.base_ref = 'refs/heads/' || p.default_branch
        LEFT JOIN repository_grants mine
               ON mine.project_id = p.id AND mine.github_user_id = ? AND mine.active = 1
       WHERE (p.organization_id = ? OR mine.permission IS NOT NULL)
@@ -77,6 +101,9 @@ export async function projectsInReach(db: D1Like, reach: ProjectReach): Promise<
     // SQLite reads them in. An organization id is never the empty string, so a
     // viewer with no organization selected matches on the grant half alone.
     .bind(reach.organizationId ?? "", reach.githubUserId, reach.organizationId ?? "")
-    .all<ProjectRow>();
-  return rows.results;
+    .all<ProjectRow & { queue_bootstrap_progress: string | null }>();
+  return rows.results.map(({ queue_bootstrap_progress: progress, ...project }) => ({
+    ...project,
+    queue_setup_complete: queueSetupComplete(progress),
+  }));
 }
