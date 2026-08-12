@@ -458,6 +458,42 @@ interface QueueSummary {
   head: { pullRequestNumber: number; state: string; primaryReason: string | null } | null;
 }
 
+export function ProjectQueueHead({
+  projectName,
+  enabled,
+  head,
+}: {
+  projectName: string;
+  enabled: boolean;
+  head: QueueSummary["head"];
+}) {
+  if (!enabled) return <>not enabled</>;
+  if (head === null) return <>nothing queued</>;
+  return (
+    <>
+      <a
+        href={`https://github.com/${projectName}/pull/${head.pullRequestNumber}`}
+        target="_blank"
+        rel="noreferrer"
+      >
+        #{head.pullRequestNumber}
+      </a>{" "}
+      {entryStateText(head.state).toLowerCase()}
+    </>
+  );
+}
+
+export function AddRepositoriesButton({ installUrl }: { installUrl: string | null }) {
+  if (installUrl === null) return null;
+  return (
+    <div className="thwip-actions thwip-projects-actions">
+      <a className="gp-btn gp-btn--sm" href={installUrl} target="_blank" rel="noreferrer">
+        Add repositories on GitHub
+      </a>
+    </div>
+  );
+}
+
 /**
  * The one page somebody arrives at, and the one question they arrive with.
  *
@@ -543,7 +579,7 @@ function OrgHome({ me }: { me: Me }) {
                   <th scope="col" className="why">
                     Why
                   </th>
-                  <th scope="col">At the head</th>
+                  <th scope="col">Head</th>
                   <th scope="col" className="n">
                     Waiting
                   </th>
@@ -569,7 +605,13 @@ function OrgHome({ me }: { me: Me }) {
                       </span>
                     </td>
                     <td className="why">{row.why}</td>
-                    <td className="q">{row.head}</td>
+                    <td className="q">
+                      <ProjectQueueHead
+                        projectName={row.project.github_name}
+                        enabled={row.project.enabled === 1}
+                        head={row.head}
+                      />
+                    </td>
                     <td className="n num">{row.waiting}</td>
                     <td className="n q w">{row.last}</td>
                     <td className="n">
@@ -597,15 +639,7 @@ function OrgHome({ me }: { me: Me }) {
               <a href="/dashboard/profile">Set this machine up</a>
             </p>
           )}
-          {installUrl && (
-            <p className="thwip-note">
-              Grant the thwip App access to a repository on GitHub. New repositories import disabled. A repository
-              removed from Thwip stays removed until an owner explicitly adds it again from Settings.{" "}
-              <a href={installUrl} target="_blank" rel="noreferrer">
-                Add repositories on GitHub
-              </a>
-            </p>
-          )}
+          <AddRepositoriesButton installUrl={installUrl} />
         </div>
       </section>
     </>
@@ -674,7 +708,7 @@ interface OrgRow {
   tone: "ok" | "bad" | "wait" | "off";
   state: string;
   why: string;
-  head: string;
+  head: QueueSummary["head"];
   waiting: string;
   last: string;
   /** Lower sorts first: what needs a person leads, what is quiet trails. */
@@ -694,12 +728,7 @@ function describeRow(project: ProjectRow, last: LastVerification, queue: QueueSu
   // would read as work in progress on a repository thwip has stopped watching.
   const live = project.enabled === 1 ? queue : undefined;
   const waiting = live?.waiting ?? 0;
-  const head =
-    live?.head == null
-      ? project.enabled === 1
-        ? "nothing queued"
-        : "not enabled"
-      : `#${live.head.pullRequestNumber} ${entryStateText(live.head.state).toLowerCase()}`;
+  const head = live?.head ?? null;
   const when = whenText(last.at);
   const row = { project, head, waiting: String(waiting), last: when };
 
