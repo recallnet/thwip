@@ -1,6 +1,7 @@
 import {
   deriveEffectiveProjectConfig,
   parseThwipYaml,
+  repositoryDirectoryPrefix,
   type RepositorySnapshot,
   type ThwipYaml,
 } from "@thwip/policy";
@@ -80,7 +81,7 @@ export class GitHubRepositorySnapshot implements RepositorySnapshot {
   }
 
   async listFiles(path: string): Promise<string[]> {
-    const prefix = `${path.replace(/\/+$/, "")}/`;
+    const prefix = repositoryDirectoryPrefix(path);
     return [...this.blobs.keys()].filter((candidate) => candidate.startsWith(prefix));
   }
 

@@ -1,6 +1,11 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { deriveProjectConfig, parseThwipYaml, type RepositorySnapshot } from "@thwip/policy";
+import {
+  deriveProjectConfig,
+  parseThwipYaml,
+  repositoryDirectoryPrefix,
+  type RepositorySnapshot,
+} from "@thwip/policy";
 import {
   activatePolicyFromDefaultBranchPush,
   policyPushFromGithubWebhook,
@@ -23,7 +28,7 @@ class MemorySnapshot implements RepositorySnapshot {
   }
 
   async listFiles(path: string): Promise<string[]> {
-    const prefix = `${path.replace(/\/+$/, "")}/`;
+    const prefix = repositoryDirectoryPrefix(path);
     return [...this.files.keys()].filter((candidate) => candidate.startsWith(prefix));
   }
 
