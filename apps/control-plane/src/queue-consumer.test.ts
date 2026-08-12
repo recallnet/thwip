@@ -64,4 +64,20 @@ describe("queue consumer", () => {
     );
     expect(reconciled).toEqual(["42"]);
   });
+
+  it("reconciles policies and proof checks for a dashboard full-sync follow-up", async () => {
+    const work: string[] = [];
+    await runMessages(
+      [{ event: "policy_reconcile", installationId: "42" }],
+      {
+        reconcileInstallationPolicies: async (id: string) => {
+          work.push(`policies:${id}`);
+        },
+        reconcileInstallationProofChecks: async (id: string) => {
+          work.push(`proofs:${id}`);
+        },
+      },
+    );
+    expect(work).toEqual(["policies:42", "proofs:42"]);
+  });
 });
