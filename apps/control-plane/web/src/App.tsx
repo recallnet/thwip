@@ -529,7 +529,7 @@ function OrgHome({ me }: { me: Me }) {
           {actionError && <p className="thwip-error">{actionError}</p>}
           {data.projects.length === 0 && (
             <p>
-              No repositories imported yet. <NavLink to="/dashboard/settings">Run a full sync from Settings.</NavLink>
+              No projects yet. <NavLink to="/dashboard/settings">Add one from Settings.</NavLink>
             </p>
           )}
           {data.projects.length > 0 && (
@@ -599,8 +599,8 @@ function OrgHome({ me }: { me: Me }) {
           )}
           {installUrl && (
             <p className="thwip-note">
-              Grant the thwip App access to a repository on GitHub. The repository imports here automatically, and
-              then you enable it.{" "}
+              Grant the thwip App access to a repository on GitHub. New repositories import disabled. A repository
+              removed from Thwip stays removed until an owner explicitly adds it again from Settings.{" "}
               <a href={installUrl} target="_blank" rel="noreferrer">
                 Add repositories on GitHub
               </a>
@@ -1001,7 +1001,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
         />
       )}
       {panels.includes("access") && <ProjectAccess projectId={project.id} me={me} />}
-      {panels.includes("verification") && <ProjectVerification project={project} reload={reload} />}
+      {panels.includes("verification") && <ProjectVerification project={project} me={me} reload={reload} />}
     </DashboardShell>
   );
 }
@@ -1037,7 +1037,7 @@ function projectFacts(p: ProjectRow): ProjectFact[] {
   return facts;
 }
 
-function ProjectVerification({ project, reload }: { project: ProjectRow; reload: () => void }) {
+function ProjectVerification({ project, me, reload }: { project: ProjectRow; me: Me; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const last = lastVerification(project);
@@ -1173,7 +1173,71 @@ function ProjectVerification({ project, reload }: { project: ProjectRow; reload:
           )}
         </div>
       </Panel>
+      {me.viewer.githubOrgRole === "owner" && <RemoveProject project={project} me={me} />}
     </>
+  );
+}
+
+export function RemoveProject({ project, me }: { project: ProjectRow; me: Me }) {
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const installationUrl = me.organization?.installation_id
+    ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
+    : null;
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/v1/dashboard/projects/${project.id}/remove`, {
+        method: "POST",
+        body: JSON.stringify({ confirmation, repositoryId: project.github_repository_id }),
+      });
+      navigate("/dashboard");
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel title="Remove project from Thwip" meta="permanent deletion; disabling above is reversible">
+      <p>
+        This deletes this project's policies, proofs, queue, signed chain, access grants, and measured history. It
+        does not uninstall the GitHub App or change which repositories the App can see.
+      </p>
+      <p>
+        A later full sync will not recreate it. Adding it again from organization Settings creates a new, disabled
+        project with no restored history.
+      </p>
+      {installationUrl && (
+        <p>
+          To revoke App access too, change the organization's{" "}
+          <a href={installationUrl} target="_blank" rel="noreferrer">
+            GitHub App installation settings
+          </a>
+          .
+        </p>
+      )}
+      {project.enabled === 1 && <p className="thwip-error">Disable this project before removing it.</p>}
+      {error && <p className="thwip-error">{error}</p>}
+      <label className="thwip-field">
+        Type <code>{project.github_name}</code> to confirm
+        <input
+          value={confirmation}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => setConfirmation(event.target.value)}
+        />
+      </label>
+      <button
+        className="gp-btn gp-btn--sm gp-btn--danger"
+        disabled={busy || project.enabled === 1 || confirmation !== project.github_name}
+        onClick={() => void remove()}
+      >
+        {busy ? "Removing…" : "Remove project from Thwip"}
+      </button>
+    </Panel>
   );
 }
 
@@ -1832,9 +1896,59 @@ function OrgSettings({ me }: { me: Me }) {
   return (
     <>
       <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
+      <AddProject canAdd={me.viewer.githubOrgRole === "owner"} />
       <GitHubSync canSync={me.viewer.githubOrgRole === "owner"} />
       <Billing />
     </>
+  );
+}
+
+export function AddProject({ canAdd }: { canAdd: boolean }) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const add = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await api<{ project: { name: string } }>("/v1/dashboard/projects", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      navigate(projectPath(result.project.name));
+    } catch (cause) {
+      setNote((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel title="Add project" meta="creates a fresh, disabled project from a repository the GitHub App can see">
+      {canAdd ? (
+        <>
+          <label className="thwip-field">
+            Repository
+            <input
+              value={name}
+              placeholder="OWNER/REPOSITORY"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <button
+            className="gp-btn gp-btn--sm"
+            disabled={busy || !/^[^/\s]+\/[^/\s]+$/.test(name)}
+            onClick={() => void add()}
+          >
+            {busy ? "Adding…" : "Add project"}
+          </button>
+        </>
+      ) : (
+        <p className="gp-panel__meta">Only GitHub organization owners can add a project.</p>
+      )}
+      {note && <p className="thwip-error">{note}</p>}
+    </Panel>
   );
 }
 
@@ -1854,7 +1968,7 @@ export function GitHubSync({ canSync }: { canSync: boolean }) {
     }
   };
   return (
-    <Panel title="GitHub sync" meta="recovery control; webhooks normally keep project data current">
+    <Panel title="GitHub sync" meta="updates current projects; it never restores a project removed from Thwip">
       {canSync ? (
         <button className="gp-btn gp-btn--sm" disabled={syncing} onClick={() => void sync()}>
           {syncing ? "Syncing…" : "Run full sync"}

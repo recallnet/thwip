@@ -105,6 +105,13 @@ function fixture(): { database: Database.Database; env: Env } {
       active_policy_digest TEXT,
       security_profile TEXT NOT NULL DEFAULT 'fast'
     );
+    CREATE TABLE removed_projects (
+      organization_id TEXT NOT NULL,
+      github_repository_id TEXT NOT NULL,
+      deleted_at TEXT NOT NULL,
+      deleted_by_github_user_id TEXT NOT NULL,
+      PRIMARY KEY (organization_id, github_repository_id)
+    );
     CREATE TABLE policy_bundles (
       digest TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,

@@ -52,6 +52,13 @@ export class BranchQueue extends DurableObject<BranchQueueEnv> {
     await this.ctx.storage.deleteAlarm();
   }
 
+  /** Permanently remove the retired copy after its project is removed. */
+  async purge(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.store = null;
+  }
+
   /** The identity this object wrote when it was the authority, or nothing. */
   private reopen(): BranchQueueStore | null {
     if (this.store !== null) return this.store;

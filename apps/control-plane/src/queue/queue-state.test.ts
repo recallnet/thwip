@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
-import { loadQueueState, withQueueState } from "./queue-state.js";
+import { loadQueueState, QueueProjectRemovedError, withQueueState } from "./queue-state.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { SubmittedEvent } from "./store.js";
 
@@ -79,6 +79,37 @@ describe("the queue document in D1", () => {
 
     expect((await loadQueueState(db, "999", REF)).store.state().entries.size).toBe(0);
     expect((await loadQueueState(db, REPO, "refs/heads/release")).store.state().entries.size).toBe(0);
+  });
+
+  it("does not create a queue after the repository removal marker lands", async () => {
+    const test = testD1();
+    open.push(test);
+    test.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+    test.raw.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+    ).run(REPO);
+    const loaded = await loadQueueState(test.db, REPO, REF);
+    request(loaded.store, "e1", 59);
+    expect(await loaded.save()).toBe("removed");
+    expect(test.raw.prepare("SELECT COUNT(*) AS n FROM queue_state").get()).toEqual({ n: 0 });
+  });
+
+  it("does not update a queue after the repository removal marker lands", async () => {
+    const test = testD1();
+    open.push(test);
+    test.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+    const loaded = await loadQueueState(test.db, REPO, REF);
+    request(loaded.store, "e1", 59);
+    expect(await loaded.save()).toBe("saved");
+    test.raw.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+    ).run(REPO);
+    const stale = await loadQueueState(test.db, REPO, REF);
+    request(stale.store, "e2", 61);
+    expect(await stale.save()).toBe("removed");
+    await expect(withQueueState(test.db, REPO, REF, (store) => request(store, "e3", 62))).rejects.toBeInstanceOf(
+      QueueProjectRemovedError,
+    );
   });
 
   describe("two writers at once", () => {

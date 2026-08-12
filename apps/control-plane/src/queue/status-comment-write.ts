@@ -126,6 +126,11 @@ export async function writeStatusComment(
    */
   budget?: CommentBudget,
 ): Promise<CommentWriteOutcome> {
+  const removed = await db
+    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
+    .bind(where.repositoryId)
+    .first<{ found: number }>();
+  if (removed !== null) return "unchanged";
   const fingerprint = commentFingerprint(view);
   const record = await stored(db, where, view.pullRequestNumber);
 

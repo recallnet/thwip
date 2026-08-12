@@ -78,13 +78,19 @@ function rowKey(prefix: string, repositoryId: string, baseRef: string, suffix: s
 
 export type ProjectionResult =
   | { readonly applied: true; readonly entries: number; readonly transitions: number }
-  | { readonly applied: false; readonly reason: "STALE_GENERATION"; readonly seen: number };
+  | { readonly applied: false; readonly reason: "STALE_GENERATION"; readonly seen: number }
+  | { readonly applied: false; readonly reason: "PROJECT_REMOVED"; readonly seen: 0 };
 
 /**
  * Apply a projection message. Idempotent and order-independent: replaying an old
  * message is a no-op, and replaying the current one changes nothing.
  */
 export async function projectQueueState(db: D1Like, message: ProjectionMessage): Promise<ProjectionResult> {
+  const removed = await db
+    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
+    .bind(message.repositoryId)
+    .first<{ found: number }>();
+  if (removed !== null) return { applied: false, reason: "PROJECT_REMOVED", seen: 0 };
   const marker = await db
     .prepare(
       "SELECT MAX(generation) AS generation FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ?",

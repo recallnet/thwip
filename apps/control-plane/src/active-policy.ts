@@ -42,7 +42,12 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
          FROM projects p
          JOIN policy_bundles b ON b.digest = p.active_policy_digest
          LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
-        WHERE p.github_repository_id = ?`,
+        WHERE p.github_repository_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM removed_projects r
+             WHERE r.organization_id = p.organization_id
+               AND r.github_repository_id = p.github_repository_id
+          )`,
     )
     .bind(repositoryId)
     .first<{ digest: string; org: string; bundle: string; verifier: string | null }>();

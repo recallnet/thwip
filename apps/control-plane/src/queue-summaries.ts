@@ -68,6 +68,11 @@ export async function queueSummaries(db: D1Like, organizationId: string): Promis
                 ON m.github_repository_id = e.github_repository_id
                AND m.base_ref = e.base_ref
         WHERE p.organization_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM removed_projects r
+             WHERE r.organization_id = p.organization_id
+               AND r.github_repository_id = p.github_repository_id
+          )
           AND e.state NOT IN (${settled})
           AND (m.generation IS NULL OR e.generation >= m.generation)
         ORDER BY e.github_repository_id, e.fairness_ordinal`,
