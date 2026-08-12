@@ -188,19 +188,41 @@ input:focus-visible { outline: 2px solid var(--civic); outline-offset: 3px; }
    reopen it without adding another custom control. */
 .thwip-setup-disclosure { margin: 0 0 var(--s5); }
 .thwip-setup-disclosure > summary {
-  padding: var(--s3) var(--s4);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s4);
   border: 1px solid var(--rule);
   border-top-color: var(--ink);
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  list-style: none;
   cursor: pointer;
 }
-.thwip-setup-disclosure > summary span {
-  margin-left: var(--s3);
+.thwip-setup-disclosure > summary::-webkit-details-marker { display: none; }
+.thwip-setup-disclosure > summary::after {
+  content: "▸";
+  color: var(--muted);
+  line-height: 1.5;
+}
+.thwip-setup-disclosure[open] > summary::after { transform: rotate(90deg); }
+.thwip-setup-disclosure__copy { flex: 1; min-width: 0; }
+.thwip-setup-disclosure__title,
+.thwip-setup-disclosure__description { display: block; }
+.thwip-setup-disclosure__title {
+  font: 600 16px/1.35 var(--sans);
+}
+.thwip-setup-disclosure__description {
+  margin-top: var(--s1);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+.thwip-setup-disclosure__status {
+  font: 11px/1.5 var(--mono);
   color: var(--muted);
   letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .thwip-setup-disclosure[open] > summary { margin-bottom: var(--s3); }
 .thwip-setup-disclosure__body > .gp-panel:last-child { margin-bottom: 0; }

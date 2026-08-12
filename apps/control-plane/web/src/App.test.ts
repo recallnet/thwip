@@ -117,6 +117,8 @@ describe("project navigation", () => {
     );
 
     expect(complete).toContain("Setup");
+    expect(complete).toContain("Repository setup and queue controls.");
+    expect(complete).toContain('class="thwip-setup-disclosure__title"');
     expect(complete).toContain("Complete");
     expect(complete).not.toContain('open=""');
     expect(incomplete).toContain("Required");

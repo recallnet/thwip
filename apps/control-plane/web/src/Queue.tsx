@@ -737,7 +737,7 @@ export function QueuePanel({
           <QueueTableHeading
             id="queue-entries-title"
             title="Pull requests in this queue"
-            description="Ordered by the queue. Ready pull requests can move when the lane is free; blocked ones keep their place."
+            description="Pull requests waiting to merge."
           />
           {entries.length === 0 ? (
             <p>
@@ -811,7 +811,7 @@ export function QueuePanel({
           <QueueTableHeading
             id="queue-history-title"
             title="Signed branch history"
-            description="Each row is a signed record of a protected-branch move. Newest records appear first."
+            description="Signed records of branch changes."
           />
           {history.length === 0 ? (
             <p>No branch moves have been recorded yet.</p>
