@@ -136,9 +136,11 @@ async function seedVerifiedIntent(
       headSha: string;
       candidateParentOids: string[];
     }>;
+    candidateSha?: string;
+    intentCandidateSha?: string;
   } = {},
 ): Promise<string> {
-  const candidateSha = FIRST.mergeSha;
+  const candidateSha = options.candidateSha ?? FIRST.mergeSha;
   const assignmentId = `asg_${FIRST.attemptId}`;
   const rowAssignmentId = options.rowAssignmentId ?? assignmentId;
   const deviceKeyId = "SHA256:test-device";
@@ -248,7 +250,7 @@ async function seedVerifiedIntent(
       baseSha: FIRST.baseSha,
       headRepositoryId: REPO,
       headSha: FIRST.headSha,
-      candidateSha,
+      candidateSha: options.intentCandidateSha ?? candidateSha,
       candidateTreeOid: FIRST.treeOid,
       candidateParentOids: [FIRST.baseSha, FIRST.headSha],
     },
@@ -325,6 +327,27 @@ async function appendFillerTransitions(e: QueueRouteEnv, count: number): Promise
 }
 
 describe("recordMergeFromIntent", () => {
+  it("accepts the App-authored landed commit when the signed GitHub test-merge candidate has a different SHA", async () => {
+    const e = env();
+    seed();
+    await seedVerifiedIntent({ candidateSha: "2a".repeat(20) });
+
+    const outcome = await recordMergeFromIntent(e, stubDeps, {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prn_acme",
+      reason: "test App commit after GitHub test merge",
+      attemptId: FIRST.attemptId,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "recorded",
+      attemptId: FIRST.attemptId,
+      pullRequestNumber: FIRST.pullRequestNumber,
+    });
+  });
+
   it("repairs a verified local merge across an administrator-approved rebaseline gap exactly once", async () => {
     const e = env();
     seed();
@@ -501,7 +524,7 @@ describe("recordMergeFromIntent", () => {
     if (outcome.status === "refused") expect(outcome.detail).toMatch(/assignment bytes/i);
   });
 
-  it("refuses when the requested commit differs from the intent candidate", async () => {
+  it("accepts a reused-proof App commit whose temporary test-merge candidate has a different SHA", async () => {
     const e = env();
     seed();
     await seedIntent(FIRST, "f6".repeat(20));
@@ -511,11 +534,11 @@ describe("recordMergeFromIntent", () => {
       baseRef: REF,
       mergeSha: FIRST.mergeSha,
       witnessPrincipalId: "prn_acme",
-      reason: "test exact intent candidate",
+      reason: "test reused-proof App commit after GitHub test merge",
       attemptId: FIRST.attemptId,
     });
 
-    expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_AUTHORIZED" });
+    expect(outcome).toMatchObject({ status: "recorded", attemptId: FIRST.attemptId });
   });
 
   it("refuses when the stored assignment id differs from the signed assignment", async () => {
@@ -595,6 +618,24 @@ describe("recordMergeFromIntent", () => {
 
     expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_AUTHORIZED" });
     if (outcome.status === "refused") expect(outcome.detail).toMatch(detail);
+  });
+
+  it("refuses when the signed assignment and intent name different test-merge candidate commits", async () => {
+    const e = env();
+    seed();
+    await seedVerifiedIntent({ candidateSha: "2a".repeat(20), intentCandidateSha: "3b".repeat(20) });
+
+    const outcome = await recordMergeFromIntent(e, stubDeps, {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prn_acme",
+      reason: "test test-merge candidate mismatch",
+      attemptId: FIRST.attemptId,
+    });
+
+    expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_AUTHORIZED" });
+    if (outcome.status === "refused") expect(outcome.detail).toMatch(/signed assignment candidate commit/i);
   });
 
   it("refuses when the stored runner differs from the signed assignment", async () => {
@@ -833,10 +874,13 @@ describe("recordMergeFromIntent", () => {
     const repaired = await recordMergeFromIntent(e, stubDeps, input);
     expect(repaired).toMatchObject({ status: "recorded", sequence: 1 });
     if (repaired.status !== "recorded") throw new Error("legacy repair did not record");
-    expect(repaired.transitionDigest).not.toBe(first.transitionDigest);
     expect(
-      raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE digest = ?").get(first.transitionDigest),
-    ).toEqual({ sequence: null });
+      raw
+        .prepare(
+          "SELECT digest, transition_sequence AS sequence FROM queue_attestations WHERE kind = 'verified-merge' AND transition_sequence IS NOT NULL",
+        )
+        .all(),
+    ).toEqual([{ digest: repaired.transitionDigest, sequence: 1 }]);
     expect(raw.prepare("SELECT digest FROM queue_transitions_index").all()).toEqual([
       { digest: repaired.transitionDigest },
     ]);

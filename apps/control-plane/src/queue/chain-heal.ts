@@ -238,7 +238,6 @@ export async function planHeal<TEnv extends QueueRouteEnv>(
     const authorization = await authorizationFor(db, {
       repositoryId,
       baseRef,
-      sha: commit.sha,
       treeOid: commit.treeOid,
       parentShas: commit.parentShas,
       message: commit.message,
@@ -496,7 +495,6 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
   const pinned = await authorizationFor(db, {
     repositoryId,
     baseRef,
-    sha: commitSha,
     treeOid: facts.treeOid,
     parentShas: facts.parentShas,
     message: facts.message,
