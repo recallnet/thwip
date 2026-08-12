@@ -155,7 +155,6 @@ export async function repositoryAccess(
   repositoryId: string,
   caller: RepositoryCaller,
 ): Promise<RepositoryLevel> {
-  if (caller.operator === true) return "admin";
   const row = await db
     .prepare(
       `SELECT pr.github_org_role AS role,
@@ -166,11 +165,17 @@ export async function repositoryAccess(
          LEFT JOIN repository_grants g
                 ON g.project_id = p.id AND g.github_user_id = ? AND g.active = 1
         WHERE p.github_repository_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM removed_projects r
+             WHERE r.organization_id = p.organization_id
+               AND r.github_repository_id = p.github_repository_id
+          )
         LIMIT 1`,
     )
     .bind(caller.principalId, caller.githubUserId, repositoryId)
     .first<{ role: string | null; owning: number | null; permission: string | null }>();
   if (row === null) return "none";
+  if (caller.operator === true) return "admin";
 
   // Membership in the organization that owns the repository, which is what the
   // whole model was until repositories acquired people from outside it. A

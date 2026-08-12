@@ -68,7 +68,12 @@ async function repositoryFor(
     `SELECT p.github_name, p.default_branch, o.installation_id
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
-      WHERE p.github_repository_id = ?`,
+      WHERE p.github_repository_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(repositoryId)
     .first<RepositoryRow>();

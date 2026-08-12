@@ -158,7 +158,15 @@ export function queueDecisionRecorder(input: {
     // Evidence is tenant-scoped, so a repository this deployment has no project
     // row for has nowhere to put it.
     const row = await input.db
-      .prepare("SELECT organization_id AS id FROM projects WHERE github_repository_id = ?")
+      .prepare(
+        `SELECT p.organization_id AS id FROM projects p
+          WHERE p.github_repository_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM removed_projects r
+               WHERE r.organization_id = p.organization_id
+                 AND r.github_repository_id = p.github_repository_id
+            )`,
+      )
       .bind(input.repositoryId)
       .first<{ id: string }>();
     if (row === null) return digest;

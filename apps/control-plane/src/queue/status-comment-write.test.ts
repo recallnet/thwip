@@ -79,6 +79,18 @@ const WHERE = { repositoryId: REPO, baseRef: REF };
 const NOW = "2026-08-04T21:14:02.000Z";
 
 describe("one comment per pull request", () => {
+  it("does not touch GitHub after the repository removal marker lands", async () => {
+    const t = db();
+    t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+    t.raw.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+    ).run(REPO);
+    const gh = github();
+
+    expect(await writeStatusComment(t.db, gh.api, WHERE, view(), NOW)).toBe("unchanged");
+    expect(gh.calls).toEqual([]);
+  });
+
   it("writes one the first time and edits that one afterwards", async () => {
     const t = db();
     const gh = github();
