@@ -227,6 +227,128 @@ describe("permanent project removal", () => {
     }
   });
 
+  it("ignores settled historical outbox deliveries but fails closed on unknown work", async () => {
+    const historical = fixture();
+    const settled = await loadQueueState(historical.t.db, REPO, "refs/heads/main");
+    expect(
+      settled.store.beginMergeOperation({
+        operationId: "op_settled",
+        attemptId: "att_terminal_old",
+        attemptRevision: 1,
+        expectedBaseSha: "c".repeat(40),
+        expectedHeadSha: "a".repeat(40),
+        expectedTreeOid: "d".repeat(40),
+        pullRequestNumber: 499,
+        at: "2026-08-12T00:00:00.000Z",
+      }),
+    ).toEqual({ status: "started" });
+    settled.store.append(
+      {
+        idempotencyKey: "request-old",
+        at: "2026-08-12T00:00:00.000Z",
+        type: "QueueRequested",
+        entryId: "entry_old",
+        pullRequestNumber: 499,
+        sponsorPrincipalId: "p",
+        sponsorGithubUserId: "7",
+        headSha: "a".repeat(40),
+      },
+    );
+    settled.store.append(
+      {
+        idempotencyKey: "offer-old",
+        at: "2026-08-12T00:00:00.100Z",
+        type: "TurnOffered",
+        entryId: "entry_old",
+        attemptId: "att_terminal_old",
+        offerDeadline: "2026-08-12T00:01:00.000Z",
+        decisionDigest: "sha256:decision",
+      },
+      {
+        outbox: [
+          { kind: "start-workflow", attemptId: "att_terminal_old", payload: {} },
+          {
+            kind: "merge-write",
+            attemptId: "att_terminal_old",
+            operationId: "op_settled",
+            payload: { operationId: "op_settled" },
+          },
+        ],
+      },
+    );
+    await settled.store.resolveMergeOperation("op_settled", "CONFIRMED_NOT_MERGED", "2026-08-12T00:00:00.500Z");
+    settled.store.append({
+      idempotencyKey: "terminate-old",
+      at: "2026-08-12T00:00:01.000Z",
+      type: "AttemptTerminated",
+      attemptId: "att_terminal_old",
+      outcome: "ADMIN_CANCELLED",
+    });
+    settled.store.append({
+      idempotencyKey: "cancel-old",
+      at: "2026-08-12T00:00:02.000Z",
+      type: "EntryCancelled",
+      entryId: "entry_old",
+      actorPrincipalId: "operator",
+      reason: "repository retired",
+    });
+    expect(await settled.save()).toBe("saved");
+
+    expect(await removeProject(historical.env, request(), historical.deps)).toEqual({
+      ok: true,
+      repositoryId: REPO,
+      alreadyRemoved: false,
+    });
+
+    const unknown = fixture();
+    const pending = await loadQueueState(unknown.t.db, REPO, "refs/heads/main");
+    pending.store.append(
+      {
+        idempotencyKey: "request-unknown",
+        at: "2026-08-12T00:00:00.000Z",
+        type: "QueueRequested",
+        entryId: "entry_unknown",
+        pullRequestNumber: 500,
+        sponsorPrincipalId: "p",
+        sponsorGithubUserId: "7",
+        headSha: "b".repeat(40),
+      },
+    );
+    pending.store.append(
+      {
+        idempotencyKey: "offer-unknown",
+        at: "2026-08-12T00:00:00.100Z",
+        type: "TurnOffered",
+        entryId: "entry_unknown",
+        attemptId: "att_terminal",
+        offerDeadline: "2026-08-12T00:01:00.000Z",
+        decisionDigest: "sha256:decision",
+      },
+      { outbox: [{ kind: "future-branch-write", attemptId: "att_terminal", payload: {} }] },
+    );
+    pending.store.append({
+      idempotencyKey: "terminate-unknown",
+      at: "2026-08-12T00:00:01.000Z",
+      type: "AttemptTerminated",
+      attemptId: "att_terminal",
+      outcome: "ADMIN_CANCELLED",
+    });
+    pending.store.append({
+      idempotencyKey: "cancel-unknown",
+      at: "2026-08-12T00:00:02.000Z",
+      type: "EntryCancelled",
+      entryId: "entry_unknown",
+      actorPrincipalId: "operator",
+      reason: "repository retired",
+    });
+    expect(await pending.save()).toBe("saved");
+
+    expect(await removeProject(unknown.env, request(), unknown.deps)).toMatchObject({
+      ok: false,
+      code: "QUEUE_NOT_DRAINED",
+    });
+  });
+
   it("hides a marked partial removal, blocks recreation, and completes safely on retry", async () => {
     const { t, env, deps } = fixture();
     const failed = { ...deps, afterMarker: vi.fn(async () => { throw new Error("injected"); }) };
