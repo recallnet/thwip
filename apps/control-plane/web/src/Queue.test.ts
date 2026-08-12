@@ -61,21 +61,21 @@ describe("project Queue view", () => {
       createElement(QueueTableHeading, {
         id: "entries",
         title: "Pull requests in this queue",
-        description: "Ordered by the queue.",
+        description: "Pull requests waiting to merge.",
       }),
     );
     const history = renderToStaticMarkup(
       createElement(QueueTableHeading, {
         id: "history",
         title: "Signed branch history",
-        description: "Newest records appear first.",
+        description: "Signed records of branch changes.",
       }),
     );
 
     expect(entries).toContain("Pull requests in this queue");
-    expect(entries).toContain("Ordered by the queue.");
+    expect(entries).toContain("Pull requests waiting to merge.");
     expect(history).toContain("Signed branch history");
-    expect(history).toContain("Newest records appear first.");
+    expect(history).toContain("Signed records of branch changes.");
   });
 
   it("reports the selected page and disables paging at its boundaries", () => {
