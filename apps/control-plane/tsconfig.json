@@ -15,7 +15,6 @@
     "src"
   ],
   "exclude": [
-    "src/**/*.test.ts",
-    "src/auth.cli.ts"
+    "src/**/*.test.ts"
   ]
 }

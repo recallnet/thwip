@@ -9,8 +9,7 @@
     "deploy:staging": "pnpm -w -r build && node ../../scripts/predeploy.mjs --env staging && BUILD_SHA=\"$(node ../../scripts/build-sha.mjs)\" && DEPLOY_EXCEPTION=\"$(node ../../scripts/deploy-exception.mjs)\" && wrangler deploy --env staging --var BUILD_SHA:\"$BUILD_SHA\" --var DEPLOY_EXCEPTION:\"$DEPLOY_EXCEPTION\" && node ../../scripts/confirm-deploy.mjs --env staging --sha \"$BUILD_SHA\"",
     "migrate:staging": "node ../../scripts/migrate.mjs --env staging --database thwip-staging-wnam",
     "dev": "wrangler dev --env staging",
-    "test:workers": "vitest run --config vitest.workers.config.ts",
-    "auth:schema": "better-auth generate --config src/auth.cli.ts --output dist/auth-schema.sql --yes"
+    "test:workers": "vitest run --config vitest.workers.config.ts"
   },
   "dependencies": {
     "@andrewxhill/graphics-press-css": "^4.7.2",
@@ -32,7 +31,6 @@
     "@thwip/verifier": "workspace:*"
   },
   "devDependencies": {
-    "@better-auth/cli": "^1.4.21",
     "@cloudflare/workers-types": "^4.20250712.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.2.17",
