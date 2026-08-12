@@ -219,26 +219,6 @@ export function Home({
             </div>
           </Row>
 
-          <Row eyebrow="The branch" state="Stays controlled">
-            <h2>
-              One writer for <code>main</code>.
-            </h2>
-            <div className="mq-ledger" role="list">
-              <div role="listitem">
-                <span>Branch writer</span>
-                <strong>Thwip GitHub App</strong>
-              </div>
-              <div role="listitem">
-                <span>Merge shape</span>
-                <strong>Pinned base and candidate tree</strong>
-              </div>
-              <div role="listitem">
-                <span>Pull-request status</span>
-                <strong>Position, state, and reason</strong>
-              </div>
-            </div>
-          </Row>
-
           <Row eyebrow="The record" state="Stays with the merge">
             <h2>The proof is in the commit.</h2>
             <p>
