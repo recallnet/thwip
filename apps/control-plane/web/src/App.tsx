@@ -1648,7 +1648,11 @@ export function ProjectSetupDisclosure({
   return (
     <details className="thwip-setup-disclosure" open={!complete}>
       <summary>
-        Setup <span>{complete ? "Complete" : "Required"}</span>
+        <span className="thwip-setup-disclosure__copy">
+          <span className="thwip-setup-disclosure__title">Setup</span>
+          <span className="thwip-setup-disclosure__description">Repository setup and queue controls.</span>
+        </span>
+        <span className="thwip-setup-disclosure__status">{complete ? "Complete" : "Required"}</span>
       </summary>
       <div className="thwip-setup-disclosure__body">{children}</div>
     </details>
