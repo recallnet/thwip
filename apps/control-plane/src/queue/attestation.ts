@@ -878,7 +878,15 @@ export async function authorizationFor(
   const separator = input.message.indexOf("\n\n");
   const landedTitle = separator < 0 ? input.message : input.message.slice(0, separator);
   const landedBody = separator < 0 ? "" : input.message.slice(separator + 2);
-  const landedBodyDigest = await recordDigest(landedBody);
+  const landedBodyDigests = [await recordDigest(landedBody)];
+  if (!landedBody.endsWith("\n")) {
+    // GitHub removes the one terminal line feed from the message sent to its
+    // git commit-object API. The signed intent binds the exact body the App
+    // sent, including that line feed, while commitFacts reads the stored body
+    // without it. Accept only that one known normalization; every other byte
+    // of the title, body and attribution trailer still has to match.
+    landedBodyDigests.push(await recordDigest(`${landedBody}\n`));
+  }
   const rows = await db
     .prepare(
       `SELECT digest, bytes FROM queue_attestations
@@ -907,7 +915,7 @@ export async function authorizationFor(
     if (git.candidateParentOids.length !== input.parentShas.length) continue;
     if (git.candidateParentOids.some((oid, at) => oid !== input.parentShas[at])) continue;
     if (separator < 0 || parsed.value.generatedCommitTitle !== landedTitle) continue;
-    if (parsed.value.generatedCommitMessageDigest !== landedBodyDigest) continue;
+    if (!landedBodyDigests.includes(parsed.value.generatedCommitMessageDigest)) continue;
     matched.push({ intentDigest: row.digest as Sha256, intent: parsed.value });
   }
 

@@ -285,7 +285,9 @@ const COMMITS: Record<string, { treeOid: string; parentShas: string[]; message: 
   [FIRST.mergeSha]: {
     treeOid: FIRST.treeOid,
     parentShas: [FIRST.baseSha, FIRST.headSha],
-    message: mergeCommitText(FIRST.pullRequestNumber, `merge_${FIRST.attemptId}`),
+    // GitHub stores the message without the terminal line feed sent to its
+    // commit-object API. This is the exact shape commitFacts reads in service.
+    message: mergeCommitText(FIRST.pullRequestNumber, `merge_${FIRST.attemptId}`).replace(/\n$/, ""),
   },
 };
 
@@ -635,6 +637,33 @@ describe("recordMergeFromIntent", () => {
       mergeSha: FIRST.mergeSha,
       witnessPrincipalId: "prn_acme",
       reason: "test commit message mismatch",
+      attemptId: FIRST.attemptId,
+    });
+
+    expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_AUTHORIZED" });
+    if (outcome.status === "refused") expect(outcome.detail).toMatch(/title, and message/i);
+  });
+
+  it("refuses any message difference beyond GitHub's one terminal line-feed normalization", async () => {
+    const e = env();
+    seed();
+    await seedVerifiedIntent();
+    const deps = {
+      ...stubDeps,
+      commitFacts: async (_env: QueueRouteEnv, _repositoryId: string, sha: string) => {
+        const facts = COMMITS[sha];
+        return facts === undefined
+          ? null
+          : { ...facts, message: sha === FIRST.mergeSha ? `${facts.message}\n\n` : facts.message };
+      },
+    };
+
+    const outcome = await recordMergeFromIntent(e, deps, {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prn_acme",
+      reason: "test exact terminal line-feed normalization",
       attemptId: FIRST.attemptId,
     });
 
