@@ -275,6 +275,9 @@
    pixels once evidence starts deciding turns, so the page's own structure
    carries the claim before a word of it is read: many agents, one writer. */
 .mq .nt-page { max-width: 1140px; }
+.mq {
+  --mq-lane-marker-size: 8px;
+}
 .mq main { display: block; }
 
 .mq-row {
@@ -320,8 +323,8 @@
   position: absolute;
   left: -5px;
   top: -4px;
-  width: 8px;
-  height: 8px;
+  width: var(--mq-lane-marker-size);
+  height: var(--mq-lane-marker-size);
   background: var(--pass);
 }
 
@@ -516,8 +519,9 @@
   position: absolute;
   left: 0;
   top: -5px;
-  width: 8px;
-  height: 8px;
+  width: var(--mq-lane-marker-size);
+  height: var(--mq-lane-marker-size);
+  transform: translateX(-50%);
   background: var(--pass);
 }
 .mq-lane__label { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; }
@@ -604,8 +608,8 @@
     position: absolute;
     left: -5px;
     top: -4px;
-    width: 8px;
-    height: 8px;
+    width: var(--mq-lane-marker-size);
+    height: var(--mq-lane-marker-size);
     background: var(--pass);
   }
   .mq-row--open,
