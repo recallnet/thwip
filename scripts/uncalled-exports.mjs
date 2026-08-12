@@ -50,7 +50,13 @@ export function sourceFiles(root) {
   return execFileSync("git", ["ls-files", "*.ts", "*.tsx"], { cwd: root, encoding: "utf8" })
     .trim()
     .split("\n")
-    .filter((f) => f.length > 0 && !f.includes("/dist/") && !f.includes("node_modules/"));
+    .filter(
+      (f) =>
+        f.length > 0 &&
+        !f.includes("/dist/") &&
+        !f.includes("node_modules/") &&
+        existsSync(join(root, f)),
+    );
 }
 
 /**
@@ -87,11 +93,9 @@ export function entryPoints(root) {
     const scripts = json.scripts ?? {};
     for (const command of Object.values(scripts)) {
       for (const m of String(command).matchAll(/esbuild\s+(\S+\.tsx?)/g)) add(join(dirname(pkg), m[1]));
-      // A tool handed a source file by path. `@better-auth/cli generate` reads
-      // `src/auth.cli.ts` this way to emit the auth schema: it never imports
-      // through the app's module graph, so no call site can exist and both the
-      // file and the devDependency read as dead. The package script is what
-      // names the relationship, so it is what this reads.
+      // A tool handed a source file by path. Vite and Vitest load their config
+      // files this way instead of importing them through the app's module
+      // graph. The package script names that relationship, so read it here.
       for (const m of String(command).matchAll(/--config\s+(\S+\.tsx?)/g)) add(join(dirname(pkg), m[1]));
     }
   }
