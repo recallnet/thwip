@@ -179,8 +179,9 @@ export function Home({
               <span className="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>
             </h1>
             <p className="mq-hero__lede">
-              Thwip verifies signed evidence from those agent runs against your policy. When that evidence is enough,
-              the protected merge queue moves without repeating the same checks in cloud CI.
+              Thwip verifies signed evidence from those agent runs and lets you configure what counts as proof. When
+              that evidence is enough, the protected merge queue moves without repeating the same checks in cloud CI.
+              Simple.
             </p>
             <div className="nt-actions mq-hero__actions">
               <SetupAction me={me} signIn={signIn} />
