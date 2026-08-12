@@ -45,7 +45,7 @@ export const SETUP_PULL_REQUEST_TITLE = "Set up Thwip Queue" as const;
  * drift here means an adopted repository running a different action from the one
  * this repository tests.
  */
-export const QUEUE_ACTION_REF = "recallnet/thwip@v0.13.6";
+export const QUEUE_ACTION_REF = "recallnet/thwip@2c47d61a145c2a7cc245326ccae090c279378962";
 
 /**
  * An explicit repository override for teams that choose one during setup.
