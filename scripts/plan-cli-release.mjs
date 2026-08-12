@@ -68,6 +68,11 @@ export function releaseBump({ changed, subjects, bodies }) {
   return "patch";
 }
 
+export function releaseSourceCommit(value) {
+  if (typeof value.gitHead === "string") return value.gitHead;
+  return typeof value.thwipSourceCommit === "string" ? value.thwipSourceCommit : null;
+}
+
 export function plannedVersion({
   bump,
   declaredVersion,
@@ -130,12 +135,7 @@ function registryInfo({ registry, userconfig }) {
   const value = JSON.parse(result.stdout);
   return {
     version: typeof value.version === "string" ? value.version : "0.0.0",
-    sourceCommit:
-      typeof value.thwipSourceCommit === "string"
-        ? value.thwipSourceCommit
-        : typeof value.gitHead === "string"
-          ? value.gitHead
-          : null,
+    sourceCommit: releaseSourceCommit(value),
   };
 }
 
