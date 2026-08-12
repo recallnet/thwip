@@ -15,7 +15,6 @@
     "apps/control-plane": {
       "entry": [
         "src/index.ts",
-        "src/auth.cli.ts",
         "src/**/*.test.ts",
         "src/**/*.workers.test.ts",
         "test/**/*.ts",
