@@ -315,7 +315,14 @@ select.gp-btn:hover {
   text-transform: uppercase;
   color: var(--ink);
 }
-.thwip-section__head span {
+.thwip-section__tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s3);
+}
+.thwip-section__head > span,
+.thwip-section__tools > span {
   letter-spacing: 0.1em;
   text-transform: none;
   color: var(--muted);
@@ -351,6 +358,33 @@ select.gp-btn:hover {
 .thwip-table .w { white-space: nowrap; }
 /* The reason is the column somebody reads, so it gets the room. */
 .thwip-table .why { min-width: 26ch; max-width: 44ch; }
+.thwip-table-scroll { width: 100%; overflow-x: auto; }
+.thwip-table--queue { min-width: 44rem; }
+
+.thwip-table-section + .thwip-table-section {
+  margin-top: var(--s6);
+  padding-top: var(--s5);
+  border-top: 1px solid var(--rule);
+}
+.thwip-table-section h3 {
+  margin: 0;
+  font: 600 16px/1.35 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.thwip-table-section > .gp-panel__meta { margin: var(--s1) 0 var(--s3); }
+.thwip-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  margin-top: var(--s3);
+}
+.thwip-pagination span {
+  font: 11.5px/1.5 var(--mono);
+  color: var(--muted);
+}
 
 /* The state a row is in, carried on the row's own left edge.
    The homepage made the merge lane the page's left edge; a table of things
@@ -686,13 +720,54 @@ select.gp-btn:hover {
   }
 }
 
-/* The controls sit under the sentence that says the queue is stopped, indented
-   from it, so they read as the answer to it rather than as another feature of
-   the panel. */
 .thwip-queue-controls {
-  margin: var(--s3) 0 var(--s4);
-  padding-left: var(--s3);
-  border-left: 2px solid var(--rule);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.thwip-dialog {
+  width: min(34rem, calc(100vw - 2 * var(--s4)));
+  box-sizing: border-box;
+  padding: var(--s5);
+  border: 1px solid var(--ink);
+  border-top: 4px solid var(--fail);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 20%);
+  font: 16px/1.5 var(--sans);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.thwip-dialog::backdrop { background: rgb(20 20 20 / 42%); }
+.thwip-dialog h2 { margin: 0 0 var(--s2); font-size: 22px; }
+.thwip-dialog p { margin: 0 0 var(--s4); max-width: 58ch; }
+.thwip-dialog label {
+  display: block;
+  margin-bottom: var(--s1);
+  font: 500 12px/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.thwip-dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.5 var(--mono);
+}
+.thwip-dialog .thwip-actions { margin-top: var(--s4); }
+
+@media (max-width: 640px) {
+  .thwip-section__tools { width: 100%; justify-content: space-between; }
+  .thwip-pagination { justify-content: space-between; }
+  .thwip-pagination span { order: -1; width: 100%; }
 }
 
 .thwip-json-field {

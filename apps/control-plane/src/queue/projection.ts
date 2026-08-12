@@ -65,6 +65,29 @@ export interface D1Like {
   batch(statements: unknown[]): Promise<unknown>;
 }
 
+/** One independently selected page of the project Queue view. */
+export interface QueuePageRequest {
+  readonly entriesPage: number;
+  readonly transitionsPage: number;
+  readonly pageSize: number;
+}
+
+export interface QueuePageInfo {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly totalPages: number;
+}
+
+export function queuePageInfo(page: number, pageSize: number, total: number): QueuePageInfo {
+  return {
+    page,
+    pageSize,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
+
 /**
  * A projected row's identity must include the base ref. A queue exists per
  * repository *and* base branch, so `main` and `release` can hold entries with the
@@ -245,6 +268,7 @@ export async function readProjectedQueue(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  pages?: QueuePageRequest,
 ): Promise<Record<string, unknown> | null> {
   const mark = await db
     .prepare(
@@ -265,16 +289,7 @@ export async function readProjectedQueue(
     }>();
   if (mark === null) return null;
 
-  const entries = await db
-    .prepare(
-      `SELECT entry_id, pull_request_number, sponsor_principal_id, state, primary_reason,
-              fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id, head_sha
-         FROM queue_entries_index
-        WHERE github_repository_id = ? AND base_ref = ?
-        ORDER BY fairness_ordinal`,
-    )
-    .bind(repositoryId, baseRef)
-    .all<{
+  type EntryRow = {
       entry_id: string;
       pull_request_number: number;
       sponsor_principal_id: string;
@@ -285,18 +300,46 @@ export async function readProjectedQueue(
       cooldown_until: string | null;
       last_attempt_id: string | null;
       head_sha: string | null;
-    }>();
+  };
 
-  const transitions = await db
-    .prepare(
-      `SELECT transition_sequence, kind, digest, prior_digest, base_sha, attempt_id,
-              witness_count, observed_at
-         FROM queue_transitions_index
-        WHERE github_repository_id = ? AND base_ref = ?
-        ORDER BY transition_sequence`,
-    )
-    .bind(repositoryId, baseRef)
-    .all<{
+  const currentEntryWhere = "github_repository_id = ? AND base_ref = ? AND generation = ?";
+  const pagedEntryWhere = `${currentEntryWhere} AND state NOT IN ('Merged', 'Cancelled')`;
+  const entryCount = pages === undefined
+    ? null
+    : await db
+        .prepare(`SELECT COUNT(*) AS total FROM queue_entries_index WHERE ${pagedEntryWhere}`)
+        .bind(repositoryId, baseRef, mark.generation)
+        .first<{ total: number }>();
+  const entries = pages === undefined
+    ? await db
+        .prepare(
+          `SELECT entry_id, pull_request_number, sponsor_principal_id, state, primary_reason,
+                  fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id, head_sha
+             FROM queue_entries_index
+            WHERE ${currentEntryWhere}
+            ORDER BY length(fairness_ordinal), fairness_ordinal, entry_id`,
+        )
+        .bind(repositoryId, baseRef, mark.generation)
+        .all<EntryRow>()
+    : await db
+        .prepare(
+          `SELECT entry_id, pull_request_number, sponsor_principal_id, state, primary_reason,
+                  fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id, head_sha
+             FROM queue_entries_index
+            WHERE ${pagedEntryWhere}
+            ORDER BY length(fairness_ordinal), fairness_ordinal, entry_id
+            LIMIT ? OFFSET ?`,
+        )
+        .bind(
+          repositoryId,
+          baseRef,
+          mark.generation,
+          pages.pageSize,
+          (pages.entriesPage - 1) * pages.pageSize,
+        )
+        .all<EntryRow>();
+
+  type TransitionRow = {
       transition_sequence: number;
       kind: string;
       digest: string;
@@ -305,9 +348,58 @@ export async function readProjectedQueue(
       attempt_id: string | null;
       witness_count: number;
       observed_at: string | null;
-    }>();
+      pull_request_number: number | null;
+  };
 
-  const head = transitions.results.at(-1);
+  const currentTransitionWhere = "t.github_repository_id = ? AND t.base_ref = ? AND t.queue_epoch = ?";
+  const legacyTransitionWhere = "t.github_repository_id = ? AND t.base_ref = ?";
+  const transitionCount = pages === undefined
+    ? null
+    : await db
+        .prepare(
+          `SELECT COUNT(*) AS total FROM queue_transitions_index AS t WHERE ${currentTransitionWhere}`,
+        )
+        .bind(repositoryId, baseRef, mark.queue_epoch)
+        .first<{ total: number }>();
+  const transitionColumns =
+    `SELECT t.transition_sequence, t.kind, t.digest, t.prior_digest, t.base_sha, t.attempt_id,
+            t.witness_count, t.observed_at,
+            (SELECT e.pull_request_number
+               FROM queue_entries_index AS e
+              WHERE e.github_repository_id = t.github_repository_id
+                AND e.base_ref = t.base_ref
+                AND e.last_attempt_id = t.attempt_id
+              ORDER BY e.generation DESC
+              LIMIT 1) AS pull_request_number
+       FROM queue_transitions_index AS t`;
+  const transitions = pages === undefined
+    ? await db
+        .prepare(`${transitionColumns} WHERE ${legacyTransitionWhere} ORDER BY t.queue_epoch, t.transition_sequence`)
+        .bind(repositoryId, baseRef)
+        .all<TransitionRow>()
+    : await db
+        .prepare(`${transitionColumns} WHERE ${currentTransitionWhere} ORDER BY t.transition_sequence DESC LIMIT ? OFFSET ?`)
+        .bind(
+          repositoryId,
+          baseRef,
+          mark.queue_epoch,
+          pages.pageSize,
+          (pages.transitionsPage - 1) * pages.pageSize,
+        )
+        .all<TransitionRow>();
+
+  // The requested history page might not contain the head. Read it separately
+  // so paging can never make the queue report an older chain position.
+  const head = await db
+    .prepare(
+      `SELECT transition_sequence, digest
+         FROM queue_transitions_index
+        WHERE github_repository_id = ? AND base_ref = ? AND queue_epoch = ?
+        ORDER BY transition_sequence DESC
+        LIMIT 1`,
+    )
+    .bind(repositoryId, baseRef, mark.queue_epoch)
+    .first<{ transition_sequence: number; digest: string }>();
   return {
     source: "projection",
     projectedAt: mark.projected_at,
@@ -320,7 +412,7 @@ export async function readProjectedQueue(
     baseSha: mark.base_sha,
     activeAttemptId: mark.active_attempt_id,
     activeEntryId: null,
-    chainHead: head === undefined ? null : { sequence: head.transition_sequence, digest: head.digest },
+    chainHead: head === null ? null : { sequence: head.transition_sequence, digest: head.digest },
     transitions: transitions.results.map((t) => ({
       transitionSequence: t.transition_sequence,
       kind: t.kind,
@@ -328,6 +420,7 @@ export async function readProjectedQueue(
       priorDigest: t.prior_digest,
       baseSha: t.base_sha,
       attemptId: t.attempt_id,
+      pullRequestNumber: t.pull_request_number,
       witnessPrincipalIds: [],
       recordedAt: t.observed_at,
     })),
@@ -343,5 +436,13 @@ export async function readProjectedQueue(
       lastAttemptId: e.last_attempt_id,
       headSha: e.head_sha,
     })),
+    ...(pages === undefined
+      ? {}
+      : {
+          pagination: {
+            entries: queuePageInfo(pages.entriesPage, pages.pageSize, entryCount?.total ?? 0),
+            transitions: queuePageInfo(pages.transitionsPage, pages.pageSize, transitionCount?.total ?? 0),
+          },
+        }),
   };
 }

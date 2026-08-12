@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectionMessageFrom } from "./routes.js";
+import { pageLiveQueue, parseQueuePages, projectionMessageFrom } from "./routes.js";
 
 /**
  * The projection is what a dashboard, an export, and an audit read. If it says a
@@ -114,5 +114,74 @@ describe("projectionMessageFrom", () => {
   it("carries the object's generation and epoch so a stale message is droppable", () => {
     const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
     expect(message).toMatchObject({ generation: 72, queueEpoch: 2 });
+  });
+});
+
+describe("project Queue pages", () => {
+  it("uses two independent fixed-size page selectors", () => {
+    expect(parseQueuePages(undefined, undefined)).toBeUndefined();
+    expect(parseQueuePages("2", "4")).toEqual({ entriesPage: 2, transitionsPage: 4, pageSize: 20 });
+    expect(parseQueuePages(undefined, "3")).toEqual({ entriesPage: 1, transitionsPage: 3, pageSize: 20 });
+    expect(parseQueuePages("0", "1")).toEqual({
+      error: "entriesPage and transitionsPage must be positive page numbers",
+    });
+    expect(parseQueuePages("1.5", "1")).toEqual({
+      error: "entriesPage and transitionsPage must be positive page numbers",
+    });
+  });
+
+  it("pages an authoritative live snapshot without changing its chain head", () => {
+    const entries = Array.from({ length: 23 }, (_, index) => ({
+      entryId: `entry-${index + 1}`,
+      pullRequestNumber: index + 1,
+      sponsorPrincipalId: "p1",
+      state: index === 0 ? "Merged" : "Ready",
+      primaryReason: null,
+      schedulerEligible: true,
+      fairnessOrdinal: String(index + 1),
+      cooldownUntil: null,
+      lastAttemptId: `att-${index + 1}`,
+      headSha: "a".repeat(40),
+    }));
+    const transitions = Array.from({ length: 42 }, (_, index) => ({
+      transitionSequence: index + 1,
+      kind: "verified",
+      digest: `sha256:${String(index + 1).padStart(64, "0")}`,
+      priorDigest: index === 0 ? null : `sha256:${String(index).padStart(64, "0")}`,
+      baseSha: "b".repeat(40),
+      attemptId: `att-${index + 1}`,
+      witnessPrincipalIds: [],
+      recordedAt: null,
+    }));
+    const page = pageLiveQueue(
+      {
+        generation: 1,
+        attemptRevision: 0,
+        queueEpoch: 0,
+        turnSequence: 0,
+        paused: false,
+        pauseReason: null,
+        rebaselineRequired: false,
+        baseSha: "b".repeat(40),
+        activeAttemptId: null,
+        activeEntryId: null,
+        activeCandidate: null,
+        activeDecisionDigest: null,
+        chainHead: { sequence: 42, digest: transitions[41]!.digest },
+        entries,
+        transitions,
+      },
+      { entriesPage: 2, transitionsPage: 2, pageSize: 20 },
+    );
+
+    expect((page["entries"] as unknown[])).toHaveLength(2);
+    expect((page["transitions"] as Array<{ transitionSequence: number }>).map((row) => row.transitionSequence)).toEqual(
+      Array.from({ length: 20 }, (_, index) => 22 - index),
+    );
+    expect(page["chainHead"]).toEqual({ sequence: 42, digest: transitions[41]!.digest });
+    expect(page["pagination"]).toEqual({
+      entries: { page: 2, pageSize: 20, total: 22, totalPages: 2 },
+      transitions: { page: 2, pageSize: 20, total: 42, totalPages: 3 },
+    });
   });
 });

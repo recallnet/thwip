@@ -97,7 +97,8 @@ describe("the organization project table", () => {
 describe("project navigation", () => {
   it("puts the live queue before repository setup", () => {
     expect(PROJECT_TABS.map(([, label]) => label)).toEqual(["Queue", "Access", "Settings"]);
-    expect(projectPagePanels("queue")).toEqual(["queue", "setup"]);
+    expect(projectPagePanels("queue", true)).toEqual(["queue", "setup"]);
+    expect(projectPagePanels("queue", false)).toEqual(["setup", "queue"]);
     expect(projectPagePanels("settings")).toEqual(["verification"]);
   });
 
