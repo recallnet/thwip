@@ -6,6 +6,7 @@ import { isWorkerOwnedPath } from "./worker-routes.js";
 import { latestVerification } from "./latest-verification.js";
 import { projectsInReach } from "./dashboard-scope.js";
 import { dashboardCounts } from "./dashboard-counts.js";
+import { runDashboardSync } from "./dashboard-sync.js";
 import { publicReusedCiMetrics, reusedCiMetrics } from "./reused-ci-metrics.js";
 import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
@@ -1120,10 +1121,13 @@ app.post("/v1/dashboard/sync", async (c) => {
     .bind(viewer.organizationId)
     .first<{ installation_id: string | null }>();
   if (!org?.installation_id) return c.json({ error: "no installation linked" }, 400);
-  const counts = await syncInstallation(c.env, org.installation_id);
-  const policies = await reconcileInstallationPolicies(c.env, org.installation_id);
-  const proofChecks = await reconcileInstallationProofChecks(c.env, org.installation_id);
-  return c.json({ synced: counts, policies, proofChecks });
+  const result = await runDashboardSync(org.installation_id, {
+    syncInstallation: (installationId) => syncInstallation(c.env, installationId),
+    enqueueReconciliation: async (message) => {
+      await c.env.SYNC_QUEUE.send(message);
+    },
+  });
+  return c.json(result);
 });
 
 // --- Device enrollment -----------------------------------------------------
