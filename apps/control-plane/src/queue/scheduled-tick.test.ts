@@ -10,10 +10,11 @@ import { commandsFor, buildSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { recordHeartbeat } from "./runners.js";
 import { readChain, signReusedIntent } from "./attestation.js";
-import type { RecordFromIntentDeps } from "./record-from-intent.js";
+import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import type { ReconciliationReads } from "./deadlines.js";
 import { serviceKey } from "../service-signing.js";
 import type { Env } from "../env.js";
+import { mergeCommitText } from "./merge-commit.js";
 
 /**
  * The queue moves when something calls it, and nothing called it on a timer.
@@ -1006,11 +1007,17 @@ const ORPHAN_B: OrphanShape = {
 };
 
 /** Every commit fact `commitFacts` may be asked for, across every orphan a test seeds. */
-function commitsFor(...shapes: readonly OrphanShape[]): Record<string, { treeOid: string; parentShas: string[] }> {
-  const commits: Record<string, { treeOid: string; parentShas: string[] }> = {};
+function commitsFor(
+  ...shapes: readonly OrphanShape[]
+): Record<string, { treeOid: string; parentShas: string[]; message: string }> {
+  const commits: Record<string, { treeOid: string; parentShas: string[]; message: string }> = {};
   for (const shape of shapes) {
-    commits[shape.baseSha] = { treeOid: shape.beforeTree, parentShas: ["5c".repeat(20)] };
-    commits[shape.mergeSha] = { treeOid: shape.treeOid, parentShas: [shape.baseSha, shape.headSha] };
+    commits[shape.baseSha] = { treeOid: shape.beforeTree, parentShas: ["5c".repeat(20)], message: "base" };
+    commits[shape.mergeSha] = {
+      treeOid: shape.treeOid,
+      parentShas: [shape.baseSha, shape.headSha],
+      message: mergeCommitText(shape.pullRequestNumber, `merge_${shape.attemptId}`),
+    };
   }
   return commits;
 }
@@ -1107,6 +1114,10 @@ function recordDepsThatRecord(): RecordFromIntentDeps<QueueRouteEnv> {
   return {
     commitFacts: async (_env, _repositoryId, sha) => COMMITS[sha] ?? null,
     baseContainsSha: async () => true,
+    pullRequestMergeState: async (_env, _repositoryId, pullRequestNumber) => {
+      const shape = [ORPHAN, ORPHAN_B].find((candidate) => candidate.pullRequestNumber === pullRequestNumber);
+      return { merged: shape !== undefined, mergeCommitSha: shape?.mergeSha ?? null };
+    },
     activePolicy: async () => ({
       policyDigest: `sha256:${"2".repeat(64)}`,
       pipelineDigest: `sha256:${"3".repeat(64)}`,
@@ -1230,6 +1241,61 @@ describe("settling a merge write whose response was lost", () => {
 
     expect(result.settledWrites).toBe(1);
     expect(await readChain(db, "1", REF)).toHaveLength(1);
+  });
+
+  it("repairs a settled merge whose legacy positioned row has no durable queue link", async () => {
+    const e = env();
+    const db = e.DB as unknown as D1Like;
+    queue("1", 1);
+    await seedIntent();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    await withQueueState(db, "1", REF, async (store) =>
+      store.resolveMergeOperation(`merge_${ORPHAN.attemptId}`, "MERGED", new Date().toISOString()),
+    );
+    const input = {
+      repositoryId: "1",
+      baseRef: REF,
+      mergeSha: ORPHAN.mergeSha,
+      witnessPrincipalId: "prn_thwip_service",
+      reason: "seed the legacy positioned row",
+      attemptId: ORPHAN.attemptId,
+    };
+    const legacy = await recordMergeFromIntent(e, recordDepsThatRecord(), input);
+    if (legacy.status !== "recorded") throw new Error("the legacy record fixture did not record");
+
+    // This is the old store-before-link crash shape: D1 says the attestation is
+    // positioned, but neither the queue authority nor its durable link index
+    // carries it. Recreate the settled operation so the scheduled sweep owns
+    // the missing transition.
+    raw.prepare("DELETE FROM queue_transitions_index").run();
+    raw.prepare("DELETE FROM queue_state").run();
+    raw.prepare("DELETE FROM queue_projection_marks").run();
+    await beginWrite(db, ORPHAN.pullRequestNumber);
+    await withQueueState(db, "1", REF, async (store) =>
+      store.resolveMergeOperation(`merge_${ORPHAN.attemptId}`, "MERGED", new Date().toISOString()),
+    );
+
+    const result = await tickAllQueues(
+      e,
+      {
+        driveQueue: async () => {},
+        onQueueTicked: () => {},
+        onQueueFailed: () => {},
+        reconsiderHead: async () => 0,
+        publishStatusComments: async () => {},
+        retireStatusComments: async () => {},
+      },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+    );
+
+    expect(result.settledWrites).toBe(1);
+    const chain = await readChain(db, "1", REF);
+    expect(chain).toHaveLength(1);
+    expect(chain[0]?.digest).not.toBe(legacy.transitionDigest);
+    expect(
+      raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE digest = ?").get(legacy.transitionDigest),
+    ).toEqual({ sequence: null });
   });
 
   /**
