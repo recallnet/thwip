@@ -240,11 +240,34 @@ export const ORGANIZATION_TABS = [
   ["settings", "Settings"],
 ] as const;
 
-const PROJECT_TABS = [
+export const PROJECT_TABS = [
   ["queue", "Queue"],
   ["access", "Access"],
   ["settings", "Settings"],
 ] as const;
+
+type ProjectPanel = "setup" | "queue" | "access" | "verification";
+
+/** Keep old project links useful while putting each job in its current tab. */
+export function projectSection(segment: string): string {
+  if (segment === "setup") return "queue";
+  if (segment === "overview") return "settings";
+  return segment;
+}
+
+/** The panels each project tab owns, in the order a reader needs them. */
+export function projectPagePanels(segment: string): readonly ProjectPanel[] {
+  switch (projectSection(segment)) {
+    case "queue":
+      return ["setup", "queue"];
+    case "access":
+      return ["access"];
+    case "settings":
+      return ["verification"];
+    default:
+      return [];
+  }
+}
 
 const ADD_ORG = "__add__";
 
@@ -950,7 +973,8 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
     );
   }
 
-  const active = section === "setup" || section === "overview" ? "settings" : section;
+  const active = projectSection(section);
+  const panels = projectPagePanels(section);
   return (
     <DashboardShell
       me={me}
@@ -967,7 +991,8 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           </div>
         ))}
       </dl>
-      {active === "queue" && (
+      {panels.includes("setup") && <ProjectSetup project={project} me={me} />}
+      {panels.includes("queue") && (
         <QueuePanel
           repositoryId={project.github_repository_id}
           baseRef={`refs/heads/${project.default_branch}`}
@@ -975,13 +1000,8 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           canAdminister={isOrgAdmin(me)}
         />
       )}
-      {active === "access" && <ProjectAccess projectId={project.id} me={me} />}
-      {active === "settings" && (
-        <>
-          <ProjectVerification project={project} reload={reload} />
-          <ProjectSetup projectId={project.id} me={me} />
-        </>
-      )}
+      {panels.includes("access") && <ProjectAccess projectId={project.id} me={me} />}
+      {panels.includes("verification") && <ProjectVerification project={project} reload={reload} />}
     </DashboardShell>
   );
 }
@@ -1511,15 +1531,9 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   );
 }
 
-function ProjectSetup({ projectId, me }: { projectId: string; me: Me }) {
-  const { data, error } = useFetch<{ projects: ProjectRow[] }>("/v1/dashboard/projects");
+function ProjectSetup({ project: p, me }: { project: ProjectRow; me: Me }) {
   const [copied, setCopied] = useState(false);
-  if (error) return <p className="thwip-error">{error}</p>;
-  if (!data) return <p className="gp-panel__meta">Loading…</p>;
-  const p = data.projects.find((x) => x.id === projectId);
-  if (!p) return <p className="thwip-error">unknown project</p>;
   const prompt = buildSetupPrompt(p);
-  const role = me.viewer.githubOrgRole;
   return (
     <>
       <Panel
