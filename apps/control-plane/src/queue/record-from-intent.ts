@@ -481,7 +481,6 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   const authorization = await authorizationFor(db, {
     repositoryId,
     baseRef,
-    sha: mergeSha,
     treeOid: facts.treeOid,
     parentShas: facts.parentShas,
     message: facts.message,
