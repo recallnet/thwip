@@ -50,6 +50,9 @@ export interface RepositorySnapshot {
 const SUITE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const te = new TextEncoder();
 
+/** Long enough for a real repository path, bounded before any path work. */
+export const MAX_PIPELINE_MODULE_PATH_LENGTH = 4096;
+
 /** Pinned unless a project names its own. */
 export const DEFAULT_DAGGER_VERSION = "0.21.8";
 
@@ -201,8 +204,25 @@ export function resolveThwipYaml(
   };
 }
 
+/** Remove a slash suffix in one pass, without a regex suffix search. */
+function withoutTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end -= 1;
+  return end === path.length ? path : path.slice(0, end);
+}
+
+/** The exact prefix a repository snapshot uses when listing a directory. */
+export function repositoryDirectoryPrefix(path: string): string {
+  return `${withoutTrailingSlashes(path)}/`;
+}
+
 function normalizeRepositoryPath(path: string): string {
-  const normalized = path.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+  if (path.length > MAX_PIPELINE_MODULE_PATH_LENGTH) {
+    throw new Error(
+      `thwip.yaml: pipeline.module must be ${MAX_PIPELINE_MODULE_PATH_LENGTH} characters or fewer`,
+    );
+  }
+  const normalized = withoutTrailingSlashes(path.replace(/\\/g, "/").replace(/^\.\/+/, ""));
   if (
     normalized.length === 0 ||
     normalized.startsWith("/") ||
@@ -232,7 +252,7 @@ async function moduleDigest(snapshot: RepositorySnapshot, modulePath: string): P
   const root = directoryNode();
   for (const path of paths) {
     const normalized = path.replace(/\\/g, "/").replace(/^\.\/+/, "");
-    const prefix = `${rootPath}/`;
+    const prefix = repositoryDirectoryPrefix(rootPath);
     if (!normalized.startsWith(prefix)) continue;
     const parts = normalized.slice(prefix.length).split("/");
     if (parts.length === 0 || parts.some((part) => part === "node_modules" || part === ".git" || part === "sdk")) {
