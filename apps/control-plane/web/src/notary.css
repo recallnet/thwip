@@ -378,11 +378,18 @@
   margin: 0;
   font-family: var(--num);
   font-variation-settings: "wdth" 116, "wght" 690;
-  font-size: clamp(38px, 7.1vw, 88px);
-  line-height: 0.93;
   letter-spacing: -0.048em;
 }
-.mq-hero__line { display: block; }
+.mq-hero__line {
+  display: block;
+  font-size: clamp(28px, 3.4vw, 46px);
+  line-height: 1;
+}
+.mq-hero__line--lead {
+  margin-bottom: 0.14em;
+  font-size: clamp(34px, 4vw, 56px);
+  line-height: 0.96;
+}
 .mq-hero__lede {
   max-width: 51ch;
   margin: 30px 0 0;

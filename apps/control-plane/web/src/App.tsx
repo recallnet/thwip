@@ -16,7 +16,7 @@ import {
 } from "./proofDefaults.js";
 import { findProjectByGithubName, parseProjectPath, projectPath } from "./projectPath.js";
 import { api, selectedOrg, useFetch, withOrg } from "./api.js";
-import { durationText, metricHistory, type ReusedCiMetrics } from "./metrics.js";
+import { durationText, measuredRunsText, reusedMergesText, type ReusedCiMetrics } from "./metrics.js";
 import { Chip, ConfirmAction, Facts, OutcomeText, Panel, StatusChip } from "./ui.js";
 import {
   activationText,
@@ -638,11 +638,13 @@ export function DashboardMetrics({ metrics, error }: { metrics: ReusedCiMetrics 
               </div>
               <div>
                 <dt>Merges that reused a proof</dt>
-                <dd>{metrics.mergedProofs}</dd>
+                <dd>{metrics.knownReusedMerges}</dd>
               </div>
             </dl>
             <p className="thwip-note">
-              {metricHistory(metrics)}. These are signed run durations, not developer waiting time or money saved.
+              {measuredRunsText(metrics.mergedProofs)}, total signed runtime and verification time. {" "}
+              {reusedMergesText(metrics.knownReusedMerges)}, total count. These are signed run durations, not
+              developer waiting time or money saved.
             </p>
           </>
         )}

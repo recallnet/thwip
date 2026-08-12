@@ -19,7 +19,9 @@ describe("Home", () => {
     const html = render();
 
     expect(html).toContain("A merge queue for agent-built software.");
-    expect(html).toContain('<span class="mq-hero__line">Your agents already ran CI locally.</span>');
+    expect(html).toContain(
+      '<span class="mq-hero__line mq-hero__line--lead">Your agents already ran CI locally.</span>',
+    );
     expect(html).toContain(
       '<span class="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>',
     );
@@ -74,7 +76,10 @@ describe("Home", () => {
     expect(html).toContain("125ms");
     expect(html).toContain("Proof verification overhead");
     expect(html).toContain("Merges that reused a proof");
-    expect(html).toContain("12 measured · 2 older merges have no timing");
+    expect(html).toContain("12 measured runs, total signed runtime");
+    expect(html).toContain("12 measured runs, total verification time");
+    expect(html).toContain("14 signed merge records, total count");
+    expect(html).not.toMatch(/older merge|partial history/i);
     expect(html).not.toMatch(/money saved|developer waiting time/i);
   });
 
