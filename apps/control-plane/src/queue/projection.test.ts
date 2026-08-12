@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrationStatements } from "../../test/d1.js";
-import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
+import { projectQueueState, readProjectedQueue, type D1Like, type ProjectionMessage } from "./projection.js";
 
 /**
  * The projection is fed by an at-least-once queue with no ordering guarantee, so
@@ -229,6 +229,116 @@ describe("projectQueueState", () => {
     expect(await projectQueueState(db, message())).toEqual({ applied: false, reason: "PROJECT_REMOVED", seen: 0 });
     expect((await rows(db, "queue_entries_index")).results).toEqual([]);
     expect((await rows(db, "queue_projection_marks")).results).toEqual([]);
+  });
+});
+
+describe("readProjectedQueue", () => {
+  const transition = (sequence: number) => ({
+    transitionSequence: sequence,
+    kind: "verified",
+    digest: `sha256:${sequence.toString(16).padStart(64, "0")}`,
+    priorDigest: sequence === 1 ? null : `sha256:${(sequence - 1).toString(16).padStart(64, "0")}`,
+    baseSha: sequence.toString(16).padStart(40, "0"),
+    attemptId: `att-${sequence}`,
+    witnessCount: 1,
+    observedAt: `2026-08-12T12:${String(sequence % 60).padStart(2, "0")}:00Z`,
+  });
+  const entry = (sequence: number, state = "Ready") => ({
+    entryId: `e${sequence}`,
+    pullRequestNumber: 100 + sequence,
+    sponsorPrincipalId: "alice",
+    state,
+    primaryReason: null,
+    fairnessOrdinal: String(sequence),
+    schedulerEligible: state === "Ready",
+    cooldownUntil: null,
+    lastAttemptId: `att-${sequence}`,
+    headSha: sequence.toString(16).padStart(40, "f"),
+  });
+
+  it("pages current entries and current-epoch history independently", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        entries: Array.from({ length: 45 }, (_, index) => entry(index + 1)),
+        transitions: Array.from({ length: 45 }, (_, index) => transition(index + 1)),
+      }),
+    );
+
+    const page = await readProjectedQueue(db, message().repositoryId, message().baseRef, {
+      entriesPage: 2,
+      transitionsPage: 3,
+      pageSize: 20,
+    });
+
+    expect(page?.["pagination"]).toEqual({
+      entries: { page: 2, pageSize: 20, total: 45, totalPages: 3 },
+      transitions: { page: 3, pageSize: 20, total: 45, totalPages: 3 },
+    });
+    expect((page?.["entries"] as Array<{ pullRequestNumber: number }>).map((row) => row.pullRequestNumber)).toEqual(
+      Array.from({ length: 20 }, (_, index) => 121 + index),
+    );
+    const history = page?.["transitions"] as Array<{
+      transitionSequence: number;
+      pullRequestNumber: number | null;
+    }>;
+    expect(history.map((row) => row.transitionSequence)).toEqual([5, 4, 3, 2, 1]);
+    expect(history.map((row) => row.pullRequestNumber)).toEqual([105, 104, 103, 102, 101]);
+    expect(page?.["chainHead"]).toEqual({ sequence: 45, digest: transition(45).digest });
+  });
+
+  it("keeps the unpaged API shape for existing CLI callers", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        entries: Array.from({ length: 25 }, (_, index) => entry(index + 1)),
+        transitions: Array.from({ length: 25 }, (_, index) => transition(index + 1)),
+      }),
+    );
+
+    const snapshot = await readProjectedQueue(db, message().repositoryId, message().baseRef);
+
+    expect(snapshot).not.toHaveProperty("pagination");
+    expect(snapshot?.["entries"]).toHaveLength(25);
+    expect((snapshot?.["transitions"] as Array<{ transitionSequence: number }>).map((row) => row.transitionSequence)).toEqual(
+      Array.from({ length: 25 }, (_, index) => index + 1),
+    );
+  });
+
+  it("does not return entries left behind by an older projection generation", async () => {
+    const db = d1();
+    await projectQueueState(db, message({ generation: 5, entries: [entry(1), entry(2)] }));
+    await projectQueueState(db, message({ generation: 6, entries: [entry(3), entry(4, "Merged")] }));
+
+    const page = await readProjectedQueue(db, message().repositoryId, message().baseRef, {
+      entriesPage: 1,
+      transitionsPage: 1,
+      pageSize: 20,
+    });
+
+    expect(page?.["pagination"]).toMatchObject({ entries: { total: 1 } });
+    expect(page?.["entries"]).toEqual([
+      expect.objectContaining({ entryId: "e3", pullRequestNumber: 103 }),
+    ]);
+  });
+
+  it("keeps an older epoch out of the current history page", async () => {
+    const db = d1();
+    await projectQueueState(db, message({ queueEpoch: 0, generation: 5, transitions: [transition(1)] }));
+    const current = { ...transition(1), digest: `sha256:${"9".repeat(64)}` };
+    await projectQueueState(db, message({ queueEpoch: 1, generation: 6, transitions: [current] }));
+
+    const page = await readProjectedQueue(db, message().repositoryId, message().baseRef, {
+      entriesPage: 1,
+      transitionsPage: 1,
+      pageSize: 20,
+    });
+
+    expect(page?.["pagination"]).toMatchObject({ transitions: { total: 1 } });
+    expect(page?.["transitions"]).toEqual([expect.objectContaining({ digest: current.digest })]);
+    expect(page?.["chainHead"]).toEqual({ sequence: 1, digest: current.digest });
   });
 });
 

@@ -256,10 +256,12 @@ export function projectSection(segment: string): string {
 }
 
 /** The panels each project tab owns, in the order a reader needs them. */
-export function projectPagePanels(segment: string): readonly ProjectPanel[] {
+export function projectPagePanels(segment: string, setupComplete = true): readonly ProjectPanel[] {
   switch (projectSection(segment)) {
     case "queue":
-      return ["queue", "setup"];
+      // Required work must be encountered before queue data. Once complete it
+      // becomes a collapsed reference below the data people came here to read.
+      return setupComplete ? ["queue", "setup"] : ["setup", "queue"];
     case "access":
       return ["access"];
     case "settings":
@@ -1006,7 +1008,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
   }
 
   const active = projectSection(section);
-  const panels = projectPagePanels(section);
+  const panels = projectPagePanels(section, project.queue_setup_complete);
   return (
     <DashboardShell
       me={me}
@@ -1023,17 +1025,26 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           </div>
         ))}
       </dl>
-      {panels.includes("queue") && (
-        <QueuePanel
-          repositoryId={project.github_repository_id}
-          baseRef={`refs/heads/${project.default_branch}`}
-          repositoryName={project.github_name}
-          canAdminister={isOrgAdmin(me)}
-        />
-      )}
-      {panels.includes("setup") && <ProjectSetup project={project} me={me} />}
-      {panels.includes("access") && <ProjectAccess projectId={project.id} me={me} />}
-      {panels.includes("verification") && <ProjectVerification project={project} me={me} reload={reload} />}
+      {panels.map((panel) => {
+        switch (panel) {
+          case "queue":
+            return (
+              <QueuePanel
+                key={`${project.github_repository_id}:${project.default_branch}`}
+                repositoryId={project.github_repository_id}
+                baseRef={`refs/heads/${project.default_branch}`}
+                repositoryName={project.github_name}
+                canAdminister={isOrgAdmin(me)}
+              />
+            );
+          case "setup":
+            return <ProjectSetup key={panel} project={project} me={me} />;
+          case "access":
+            return <ProjectAccess key={panel} projectId={project.id} me={me} />;
+          case "verification":
+            return <ProjectVerification key={panel} project={project} me={me} reload={reload} />;
+        }
+      })}
     </DashboardShell>
   );
 }

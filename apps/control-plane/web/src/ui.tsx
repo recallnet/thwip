@@ -28,11 +28,14 @@ import { outcome, whenText, type Tone } from "./vocabulary.js";
 export function Panel({
   title,
   meta,
+  action,
   tone,
   children,
 }: {
   title: string;
   meta?: string;
+  /** A section-wide control, kept at the top right instead of mixed into its data. */
+  action?: React.ReactNode;
   /** A section whose subject is a problem says so in its own name. */
   tone?: "finding";
   children: React.ReactNode;
@@ -41,7 +44,12 @@ export function Panel({
     <section className={tone === undefined ? "thwip-section" : `thwip-section thwip-section--${tone}`}>
       <div className="thwip-section__head">
         {title}
-        {meta && <span>{meta}</span>}
+        {(meta || action) && (
+          <div className="thwip-section__tools">
+            {meta && <span>{meta}</span>}
+            {action}
+          </div>
+        )}
       </div>
       <div className="thwip-section__body">{children}</div>
     </section>
