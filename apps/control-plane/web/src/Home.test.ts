@@ -25,8 +25,11 @@ describe("Home", () => {
     expect(html).toContain(
       '<span class="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>',
     );
-    expect(html).toContain("Thwip verifies signed evidence from those agent runs against your policy.");
+    expect(html).toContain(
+      "Thwip verifies signed evidence from those agent runs and lets you configure what counts as proof.",
+    );
     expect(html).toContain("the protected merge queue moves without repeating the same checks in cloud CI");
+    expect(html).toContain("cloud CI. Simple.");
     expect(html).toContain("Cloud queues repeat work that your agents already finished in parallel.");
     expect(html).toContain("Loading measured results");
     expect(html).not.toContain("14.0s");
