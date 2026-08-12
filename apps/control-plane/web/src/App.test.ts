@@ -6,7 +6,10 @@ import {
   DashboardMetrics,
   GitHubSync,
   ORGANIZATION_TABS,
+  PROJECT_TABS,
   organizationSection,
+  projectPagePanels,
+  projectSection,
   SignedOutDashboard,
 } from "./App.js";
 
@@ -54,6 +57,19 @@ describe("organization navigation", () => {
 
   it("sends old operations links to the recovery control in Settings", () => {
     expect(organizationSection("operations")).toBe("settings");
+  });
+});
+
+describe("project navigation", () => {
+  it("keeps repository setup with the queue job", () => {
+    expect(PROJECT_TABS.map(([, label]) => label)).toEqual(["Queue", "Access", "Settings"]);
+    expect(projectPagePanels("queue")).toEqual(["setup", "queue"]);
+    expect(projectPagePanels("settings")).toEqual(["verification"]);
+  });
+
+  it("sends old setup links to Queue without changing old overview links", () => {
+    expect(projectSection("setup")).toBe("queue");
+    expect(projectSection("overview")).toBe("settings");
   });
 });
 

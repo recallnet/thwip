@@ -174,7 +174,7 @@ for things only I can do.
    CLAUDE.md that already exist. Show me the diff. Do not rewrite instructions
    someone else authored.
 
-6. Start enrolment: the "Set up" tab of this project in the dashboard, or POST
+6. Start enrolment: the "Queue" tab of this project in the dashboard, or POST
    /v1/queue/<repository id>/bootstrap. It enrols the repository and opens a
    setup pull request carrying the two workflows, then stops. Organization
    defaults are inherited; select the repository-override option only when this
