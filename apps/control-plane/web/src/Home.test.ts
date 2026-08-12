@@ -40,6 +40,9 @@ describe("Home", () => {
     expect(html).not.toContain("The proof commits to the tree");
     expect(html).not.toContain("Thwip runs its own merge queue this way.");
     expect(html).not.toContain("Pick an organization default in the dashboard.");
+    expect(html).not.toContain("Stays controlled");
+    expect(html).not.toContain("One writer for");
+    expect(html).not.toContain("Branch writer");
   });
 
   it("states the benefit without promising unsupported savings", () => {
@@ -114,8 +117,8 @@ describe("Home", () => {
   it("runs the lane down every section", () => {
     const html = render();
 
-    expect(html.match(/<section class="mq-row/g)?.length).toBe(7);
-    expect(html.match(/class="mq-row__body"/g)?.length).toBe(7);
+    expect(html.match(/<section class="mq-row/g)?.length).toBe(6);
+    expect(html.match(/class="mq-row__body"/g)?.length).toBe(6);
     expect(html).toContain('<section class="mq-row mq-row--open">');
     expect(html).toContain('<section class="mq-row mq-row--upstream">');
     expect(html).toContain('<section class="mq-row mq-row--end">');

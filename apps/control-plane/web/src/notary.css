@@ -562,25 +562,6 @@
 .mq-strength__on { background: var(--pass); }
 .mq-strength__off { background: var(--rule); }
 
-.mq-ledger { max-width: 720px; margin-top: 30px; border-top: 1px solid var(--ink); }
-.mq-ledger > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 20px;
-  padding: 13px 0;
-  border-bottom: 1px solid var(--rule);
-}
-.mq-ledger span {
-  flex: 0 0 18ch;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  line-height: 2;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.mq-ledger strong { flex: 1 1 20ch; font-size: 15px; font-weight: 500; }
-
 /* ---------- foot ---------- */
 
 .nt-foot {
@@ -658,5 +639,4 @@
   .mq-agent__id { flex: 0 0 100%; }
   .mq-profile h3 { flex: 0 0 100%; }
   .mq-strength { margin-left: 0; }
-  .mq-ledger span { flex: 0 0 100%; line-height: 1.5; }
 }
