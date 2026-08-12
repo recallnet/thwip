@@ -609,6 +609,7 @@ select.gp-btn:hover {
 /* ---------- page rhythm ---------- */
 
 .thwip-actions { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: flex-start; }
+.thwip-projects-actions { margin-top: var(--s4); }
 /* A question takes the whole row, so the button it replaces is not still
    sitting next to it looking like the alternative answer. */
 .thwip-actions > .thwip-confirm { flex: none; width: 100%; box-sizing: border-box; }.thwip-loading { padding: var(--s7) 0; }
