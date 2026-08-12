@@ -175,9 +175,8 @@ export function Home({
         <main>
           <Row eyebrow="A merge queue for agent-built software." variant="open">
             <h1>
-              <span className="mq-hero__line">Your agents ran CI.</span>
-              <span className="mq-hero__line">Merge faster.</span>
-              <span className="mq-hero__line">Avoid repeat CI costs.</span>
+              <span className="mq-hero__line">Your agents already ran CI locally.</span>
+              <span className="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>
             </h1>
             <p className="mq-hero__lede">
               Thwip verifies signed evidence from those agent runs against your policy. When that evidence is enough,
