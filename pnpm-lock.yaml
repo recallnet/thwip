@@ -92,8 +92,8 @@ importers:
         specifier: ^1.6.25
         version: 1.6.25(@cloudflare/workers-types@4.20260702.1)(@prisma/client@5.22.0)(better-sqlite3@13.0.1)(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@3.2.7(@types/debug@4.1.13)(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@10.2.2)(yaml@2.9.0))
       hono:
-        specifier: ^4.6.0
-        version: 4.12.32
+        specifier: ^4.12.34
+        version: 4.12.34
       jose:
         specifier: ^6.0.0
         version: 6.2.4
@@ -3163,8 +3163,8 @@ packages:
   hastscript@9.0.1:
     resolution: {integrity: sha512-g7df9rMFX/SPi34tyGCyUBREQoKkapwdY/T04Qn9TDWfHhAYt4/I0gMVirzK5wEzeUqIjEB+LXC/ypb7Aqno5w==}
 
-  hono@4.12.32:
-    resolution: {integrity: sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg==}
+  hono@4.12.34:
+    resolution: {integrity: sha512-GqXJqY/xJkJmuloTrnV1ZEXG3fqte+VjkUqoRNZXcrUidiUOP4fMSIHHY4tsqZBK++kVyWmt/AAfSUuy57/eSA==}
     engines: {node: '>=16.9.0'}
 
   html-escaper@3.0.3:
@@ -7106,7 +7106,7 @@ snapshots:
       property-information: 7.2.0
       space-separated-tokens: 2.0.2
 
-  hono@4.12.32: {}
+  hono@4.12.34: {}
 
   html-escaper@3.0.3: {}
 
