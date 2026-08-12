@@ -183,6 +183,28 @@ input:focus-visible { outline: 2px solid var(--civic); outline-offset: 3px; }
 }
 .gp-panel p { text-indent: 0; max-width: none; }
 
+/* Completed setup is reference material, not the first job on a live project.
+   The native disclosure keeps it keyboard-accessible and lets an administrator
+   reopen it without adding another custom control. */
+.thwip-setup-disclosure { margin: 0 0 var(--s5); }
+.thwip-setup-disclosure > summary {
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--rule);
+  border-top-color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.thwip-setup-disclosure > summary span {
+  margin-left: var(--s3);
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+.thwip-setup-disclosure[open] > summary { margin-bottom: var(--s3); }
+.thwip-setup-disclosure__body > .gp-panel:last-child { margin-bottom: 0; }
+
 /* The marketing pages' secondary: a civic outline, still an invitation. Quiet
    below is the tertiary control, and grey on purpose. */
 .nt-btn--ghost { background: transparent; color: var(--civic); }
