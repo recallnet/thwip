@@ -96,6 +96,7 @@ describe("CLI release planning", () => {
     expect(workflow).toContain("run: git diff --exit-code");
     expect(workflow).toContain('confirm_install "npm"');
     expect(workflow).toContain('confirm_install "GitHub Packages"');
+    expect(workflow).toContain('(cd "$probe" && ./node_modules/.bin/thwip version)');
   });
 
   it("ships the GitHub Action as a committed bundle, not a consumer build", () => {
