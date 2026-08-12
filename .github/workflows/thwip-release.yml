@@ -205,7 +205,8 @@ jobs:
             max_attempts=18
             while [ "$attempt" -le "$max_attempts" ]; do
               probe=$(mktemp -d)
-              if (cd "$probe" && npm install --userconfig="$config" \
+              if (cd "$probe" && npm install --userconfig="$config" --prefer-online \
+                    --cache="$probe/.npm-cache" \
                     "@recallnet/thwip@$VERSION") &&
                  (cd "$probe" && ./node_modules/.bin/thwip version) | tee "$probe/version" &&
                  grep -F "thwip $VERSION" "$probe/version"; then
