@@ -1,7 +1,7 @@
 import React from "react";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { useFetch } from "./api.js";
-import { durationText, metricHistory, type PublicReusedCiMetrics } from "./metrics.js";
+import { durationText, measuredRunsText, reusedMergesText, type PublicReusedCiMetrics } from "./metrics.js";
 import "./notary.css";
 
 /**
@@ -36,23 +36,23 @@ export function OperatingMeasures({
     );
   }
 
-  const source = metricHistory(metrics);
+  const measuredRuns = measuredRunsText(metrics.mergedProofs);
   return (
     <div className="mq-measures" aria-label="Measured reused CI">
       <article className="mq-measure">
         <strong>{durationText(metrics.signedWallClockDurationMs)}</strong>
         <span>Verified local CI reused</span>
-        <small>{source} · signed run time</small>
+        <small>{measuredRuns}, total signed runtime</small>
       </article>
       <article className="mq-measure">
         <strong>{durationText(metrics.verificationOverheadMs)}</strong>
         <span>Proof verification overhead</span>
-        <small>{source} · control-plane time</small>
+        <small>{measuredRuns}, total verification time</small>
       </article>
       <article className="mq-measure">
-        <strong>{metrics.mergedProofs}</strong>
+        <strong>{metrics.knownReusedMerges}</strong>
         <span>Merges that reused a proof</span>
-        <small>{metrics.status === "partial" ? "Partial history" : "Complete measured history"}</small>
+        <small>{reusedMergesText(metrics.knownReusedMerges)}, total count</small>
       </article>
     </div>
   );
@@ -175,7 +175,7 @@ export function Home({
         <main>
           <Row eyebrow="A merge queue for agent-built software." variant="open">
             <h1>
-              <span className="mq-hero__line">Your agents already ran CI locally.</span>
+              <span className="mq-hero__line mq-hero__line--lead">Your agents already ran CI locally.</span>
               <span className="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>
             </h1>
             <p className="mq-hero__lede">
