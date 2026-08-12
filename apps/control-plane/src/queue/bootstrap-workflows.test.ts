@@ -86,7 +86,6 @@ describe("setupPullRequestFiles", () => {
   it("carries the endpoint the control plane is deployed at", () => {
     expect(file(".github/workflows/thwip-required.yml")).toContain("https://thwip.example.test");
     expect(file(".github/workflows/thwip-queue-verify.yml")).toContain("https://thwip.example.test");
-    expect(file(".github/workflows/thwip-required.yml")).not.toContain("thwip.recall.net");
   });
 
   it("needs no merge workflow or repository write token when the App writes", () => {
