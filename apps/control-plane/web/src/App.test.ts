@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  AddRepositoriesButton,
   completedQueueActivationText,
   AddProject,
   DashboardMetrics,
@@ -11,6 +12,7 @@ import {
   organizationSection,
   projectPagePanels,
   projectSection,
+  ProjectQueueHead,
   SignedOutDashboard,
   RemoveProject,
 } from "./App.js";
@@ -59,6 +61,35 @@ describe("organization navigation", () => {
 
   it("sends old operations links to the recovery control in Settings", () => {
     expect(organizationSection("operations")).toBe("settings");
+  });
+});
+
+describe("the organization project table", () => {
+  it("links a blocked head directly to its pull request", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectQueueHead, {
+        projectName: "recallnet/thwip",
+        enabled: true,
+        head: { pullRequestNumber: 42, state: "Blocked", primaryReason: "CODEOWNER_REVIEW_REQUIRED" },
+      }),
+    );
+
+    expect(html).toContain('href="https://github.com/recallnet/thwip/pull/42"');
+    expect(html).toContain("#42");
+    expect(html).toContain("blocked");
+  });
+
+  it("shows the GitHub repository action as a button without explanatory copy", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddRepositoriesButton, {
+        installUrl: "https://github.com/organizations/recallnet/settings/installations/44",
+      }),
+    );
+
+    expect(html).toContain('class="gp-btn gp-btn--sm"');
+    expect(html).toContain("Add repositories on GitHub");
+    expect(html).not.toContain("Grant the thwip App");
+    expect(html).not.toContain("New repositories import disabled");
   });
 });
 
