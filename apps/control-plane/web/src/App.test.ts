@@ -13,6 +13,7 @@ import {
   projectPagePanels,
   projectSection,
   ProjectQueueHead,
+  ProjectSetupDisclosure,
   SignedOutDashboard,
   RemoveProject,
 } from "./App.js";
@@ -94,10 +95,31 @@ describe("the organization project table", () => {
 });
 
 describe("project navigation", () => {
-  it("keeps repository setup with the queue job", () => {
+  it("puts the live queue before repository setup", () => {
     expect(PROJECT_TABS.map(([, label]) => label)).toEqual(["Queue", "Access", "Settings"]);
-    expect(projectPagePanels("queue")).toEqual(["setup", "queue"]);
+    expect(projectPagePanels("queue")).toEqual(["queue", "setup"]);
     expect(projectPagePanels("settings")).toEqual(["verification"]);
+  });
+
+  it("collapses completed setup and leaves incomplete setup open", () => {
+    const complete = renderToStaticMarkup(
+      createElement(ProjectSetupDisclosure, {
+        complete: true,
+        children: createElement("p", null, "controls"),
+      }),
+    );
+    const incomplete = renderToStaticMarkup(
+      createElement(ProjectSetupDisclosure, {
+        complete: false,
+        children: createElement("p", null, "controls"),
+      }),
+    );
+
+    expect(complete).toContain("Setup");
+    expect(complete).toContain("Complete");
+    expect(complete).not.toContain('open=""');
+    expect(incomplete).toContain("Required");
+    expect(incomplete).toContain('open=""');
   });
 
   it("sends old setup links to Queue without changing old overview links", () => {
@@ -138,6 +160,7 @@ describe("project removal", () => {
     collaborators: 0,
     last_outcome: null,
     last_observed_at: null,
+    queue_setup_complete: false,
   };
   const me = {
     viewer: { githubUserId: "7", githubOrgRole: "owner", activated: true },
