@@ -173,15 +173,15 @@ export function Home({
         <SiteBar me={me} signIn={signIn} />
 
         <main>
-          <Row eyebrow="The fastest merge queue for agent-built software." variant="open">
+          <Row eyebrow="A merge queue for agent-built software." variant="open">
             <h1>
               <span className="mq-hero__line">Your agents ran CI.</span>
-              <span className="mq-hero__line">Your merge queue</span>
-              <span className="mq-hero__line">should use it.</span>
+              <span className="mq-hero__line">Merge faster.</span>
+              <span className="mq-hero__line">Avoid repeat CI costs.</span>
             </h1>
             <p className="mq-hero__lede">
-              Your agents test each branch before it queues. Thwip uses those runs to move pull requests through a
-              protected lane. It does not start a cloud job for each turn.
+              Thwip verifies signed evidence from those agent runs against your policy. When that evidence is enough,
+              the protected merge queue moves without repeating the same checks in cloud CI.
             </p>
             <div className="nt-actions mq-hero__actions">
               <SetupAction me={me} signIn={signIn} />
