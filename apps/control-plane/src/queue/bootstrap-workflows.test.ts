@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
-import { setupPullRequestBody, setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
+import { QUEUE_ACTION_REF, setupPullRequestBody, setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
 import { PROOF_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -26,6 +26,10 @@ function file(path: string): string {
 }
 
 describe("setupPullRequestFiles", () => {
+  it("pins new repositories to the current immutable Action release", () => {
+    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@2c47d61a145c2a7cc245326ccae090c279378962");
+  });
+
   it("offers only the workflows while inheriting organization defaults", () => {
     expect(files.map((f) => f.path).sort()).toEqual([
       ".github/workflows/thwip-queue-verify.yml",
