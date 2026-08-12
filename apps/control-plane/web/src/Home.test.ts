@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -17,10 +18,12 @@ describe("Home", () => {
   it("sells the agent-run CI merge queue and sends a signed-in owner to setup", () => {
     const html = render();
 
-    expect(html).toContain("The fastest merge queue for agent-built software.");
+    expect(html).toContain("A merge queue for agent-built software.");
     expect(html).toContain("Your agents ran CI.");
-    expect(html).toContain('<span class="mq-hero__line">Your merge queue</span>');
-    expect(html).toContain('<span class="mq-hero__line">should use it.</span>');
+    expect(html).toContain('<span class="mq-hero__line">Merge faster.</span>');
+    expect(html).toContain('<span class="mq-hero__line">Avoid repeat CI costs.</span>');
+    expect(html).toContain("Thwip verifies signed evidence from those agent runs against your policy.");
+    expect(html).toContain("the protected merge queue moves without repeating the same checks in cloud CI");
     expect(html).toContain("Cloud queues repeat work that your agents already finished in parallel.");
     expect(html).toContain("Loading measured results");
     expect(html).not.toContain("14.0s");
@@ -31,6 +34,25 @@ describe("Home", () => {
     expect(html).not.toContain("The proof commits to the tree");
     expect(html).not.toContain("Thwip runs its own merge queue this way.");
     expect(html).not.toContain("Pick an organization default in the dashboard.");
+  });
+
+  it("states the benefit without promising unsupported savings", () => {
+    const html = render();
+    const hero = html.slice(html.indexOf('<section class="mq-row mq-row--open">'), html.indexOf("</section>"));
+
+    expect(hero).toMatch(/merge faster/i);
+    expect(hero).toMatch(/avoid repeat CI costs/i);
+    expect(hero).toMatch(/when that evidence is enough/i);
+    expect(hero).not.toMatch(/guaranteed|always|save[s]? \$|developer[- ]time savings/i);
+  });
+
+  it("keeps the speed and repeat-CI cost benefit in page metadata", () => {
+    const index = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+    expect(index).toContain("Merge faster and avoid repeat CI costs");
+    expect(index).toContain("Thwip verifies signed evidence from agent-run checks");
+    expect(index).toContain("When your policy accepts it");
+    expect(index).not.toMatch(/guaranteed|developer[- ]time savings|save[s]? \$/i);
   });
 
   it("shows API-backed measurements and names exactly what they measure", () => {
