@@ -22,11 +22,10 @@ export function durationText(milliseconds: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function metricHistory(metrics: ReusedCiMetrics): string {
-  if (metrics.status === "partial") {
-    const old = metrics.unmeasuredMergedProofs === 1 ? "1 older merge" : `${metrics.unmeasuredMergedProofs} older merges`;
-    const verb = metrics.unmeasuredMergedProofs === 1 ? "has" : "have";
-    return `${metrics.mergedProofs} measured · ${old} ${verb} no timing`;
-  }
-  return metrics.mergedProofs === 1 ? "1 merged proof" : `${metrics.mergedProofs} merged proofs`;
+export function measuredRunsText(count: number): string {
+  return count === 1 ? "1 measured run" : `${count} measured runs`;
+}
+
+export function reusedMergesText(count: number): string {
+  return count === 1 ? "1 signed merge record" : `${count} signed merge records`;
 }

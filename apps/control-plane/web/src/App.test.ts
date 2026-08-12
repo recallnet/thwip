@@ -143,7 +143,7 @@ describe("project removal", () => {
 });
 
 describe("the organization's reused-CI measurements", () => {
-  it("distinguishes loading, empty and partial history", () => {
+  it("distinguishes loading and empty states from aggregate totals", () => {
     const loading = renderToStaticMarkup(createElement(DashboardMetrics, { metrics: null, error: null }));
     const empty = renderToStaticMarkup(
       createElement(DashboardMetrics, {
@@ -178,7 +178,9 @@ describe("the organization's reused-CI measurements", () => {
     expect(empty).toContain("No merge has reused a measured proof yet");
     expect(partial).toContain("Verified local CI reused");
     expect(partial).toContain("6s");
-    expect(partial).toContain("2 measured · 1 older merge has no timing");
+    expect(partial).toContain("2 measured runs, total signed runtime and verification time");
+    expect(partial).toContain("3 signed merge records, total count");
+    expect(partial).not.toMatch(/older merge|partial history/i);
     expect(partial).toContain("not developer waiting time or money saved");
   });
 });
