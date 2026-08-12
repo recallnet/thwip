@@ -3,7 +3,9 @@ import { bytesDigest } from "@thwip/protocol";
 import {
   deriveEffectiveProjectConfig,
   deriveProjectConfig,
+  MAX_PIPELINE_MODULE_PATH_LENGTH,
   parseThwipYaml,
+  repositoryDirectoryPrefix,
   resolveThwipYaml,
   type RepositorySnapshot,
   type ThwipYaml,
@@ -22,7 +24,7 @@ class MemorySnapshot implements RepositorySnapshot {
   }
 
   async listFiles(path: string): Promise<string[]> {
-    const prefix = `${path.replace(/\/+$/, "")}/`;
+    const prefix = repositoryDirectoryPrefix(path);
     return [...this.files.keys()].filter((candidate) => candidate.startsWith(prefix));
   }
 
@@ -152,6 +154,80 @@ pipeline:
   module: ../outside
 `),
     ).toThrow("must stay inside the repository");
+  });
+
+  it("preserves accepted and rejected repository path forms", async () => {
+    const accepted = ["dagger", "./dagger", ".//dagger", "dagger/", "dagger///", ".\\dagger\\"];
+    for (const module of accepted) {
+      const config = await deriveProjectConfig(
+        parseThwipYaml(`
+version: 1
+profile: fast
+required: [check]
+pipeline:
+  module: '${module}'
+`),
+        { ownerId: "10", repositoryId: "20" },
+        new MemorySnapshot({ "dagger/main.ts": "export default {}" }),
+      );
+      expect(config.pipeline.moduleDigest, module).toMatch(/^sha256:/);
+    }
+
+    for (const module of ["", "/", "///", ".", "..", "././dagger", "dagger/./sub", "dagger/../sub"]) {
+      expect(
+        () =>
+          parseThwipYaml(`
+version: 1
+profile: fast
+required: [check]
+pipeline:
+  module: '${module}'
+`),
+        module,
+      ).toThrow(/path to a Dagger module|stay inside the repository/);
+    }
+  });
+
+  it("bounds the module path before normalization", () => {
+    const atLimit = "a".repeat(MAX_PIPELINE_MODULE_PATH_LENGTH);
+    expect(() =>
+      parseThwipYaml(`
+version: 1
+profile: fast
+required: [check]
+pipeline:
+  module: '${atLimit}'
+`),
+    ).not.toThrow();
+
+    const overLimit = `${atLimit}a`;
+    expect(() =>
+      parseThwipYaml(`
+version: 1
+profile: fast
+required: [check]
+pipeline:
+  module: '${overLimit}'
+`),
+    ).toThrow(`pipeline.module must be ${MAX_PIPELINE_MODULE_PATH_LENGTH} characters or fewer`);
+  });
+
+  it("applies the path bound to direct policy derivation too", async () => {
+    const module = "a".repeat(MAX_PIPELINE_MODULE_PATH_LENGTH + 1);
+    await expect(
+      deriveProjectConfig(
+        { version: 1, profile: "fast", required: ["check"], pipeline: { module } },
+        { ownerId: "10", repositoryId: "20" },
+        new MemorySnapshot({}),
+      ),
+    ).rejects.toThrow(`pipeline.module must be ${MAX_PIPELINE_MODULE_PATH_LENGTH} characters or fewer`);
+  });
+
+  it("handles an adversarial slash run followed by a non-slash in linear code", () => {
+    const path = `${"/".repeat(100_000)}x`;
+    expect(repositoryDirectoryPrefix(path)).toBe(`${path}/`);
+    const trailingSlashes = `dagger${"/".repeat(100_000)}`;
+    expect(repositoryDirectoryPrefix(trailingSlashes)).toBe("dagger/");
   });
 
   it("derives a policy from organization defaults when the repository has no yaml", async () => {
