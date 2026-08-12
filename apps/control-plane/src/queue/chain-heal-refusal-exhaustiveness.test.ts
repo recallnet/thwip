@@ -47,7 +47,11 @@ const GAP_TO = "b".repeat(40);
 const deps: HealDeps<QueueRouteEnv> = {
   // One commit in the gap, whose only parent is the near end, so the walk
   // reaches `gap.from` after a single read and calls `authorizationFor` once.
-  commitFacts: async (_e, _r, sha) => ({ treeOid: `tree-${sha}`, parentShas: [GAP_FROM] }),
+  commitFacts: async (_e, _r, sha) => ({
+    treeOid: `tree-${sha}`,
+    parentShas: [GAP_FROM],
+    message: "synthetic merge",
+  }),
 };
 
 const finding: SelfCheckFinding = {

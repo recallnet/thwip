@@ -130,6 +130,7 @@ const QUEUE_SUBCOMMANDS = [
   "bypass",
   "explain",
   "reconcile",
+  "repair",
   "doctor",
   "work",
   "setup",
@@ -141,7 +142,7 @@ const QUEUE_HELP = `Usage: thwip queue <subcommand> [options]
 
 Subcommands:
   status, list, join, leave, pause, resume, rebaseline, eject, bypass,
-  explain, reconcile, doctor, work, setup
+  explain, reconcile, repair, doctor, work, setup
 
 Run \`thwip queue <subcommand> --help\` for its accepted options.
 `;
@@ -170,6 +171,11 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
   reconcile:
     `Usage: thwip queue reconcile --repo OWNER/NAME --observed RESULT --reason TEXT ` +
     `[--merge-sha OID] [--branch BRANCH]\n`,
+  repair:
+    `Usage: thwip queue repair --repo OWNER/NAME --merge-sha OID --reason TEXT ` +
+    `[--attempt-id ID] [--branch BRANCH]\n\n` +
+    `Record an already-landed merge from the queue's stored signed intent and evidence.\n` +
+    `Repository administrator access is required.\n`,
   doctor:
     `Usage: thwip queue doctor --repo OWNER/NAME [--branch BRANCH] [--explain] [--allow-unread] [--json]\n\n` +
     `Report whether thwip is installed here, what the queue is doing on this\n` +

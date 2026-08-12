@@ -1,4 +1,13 @@
-import type { Sha256 } from "@thwip/queue-protocol";
+import {
+  canonicalRecordBytes,
+  envelopeDigest,
+  parseTransitionRecord,
+  parseIntegrationAssignment,
+  recordDigest,
+  requiredSuitesDigest,
+  type MergeIntentV1,
+  type Sha256,
+} from "@thwip/queue-protocol";
 import type { QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
 import { buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
@@ -7,11 +16,19 @@ import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { QueueCommands } from "./commands.js";
 import {
   authorizationFor,
+  clearAttestationChainPosition,
+  durableTransitionForAttempt,
+  placeAttestationInChain,
+  readAttestation,
   recordCoveringCommit,
   signReusedRecord,
+  signVerifiedRecord,
   storeAttestation,
   transitionRecordFor,
+  type VerifiedEvidence,
 } from "./attestation.js";
+import { issuedAssignmentForAttempt } from "./assignment-store.js";
+import { acceptIntegrationReceipt, integrationReceiptDigest } from "./integration-receipt.js";
 
 /**
  * Putting a merge back into the chain from what survives the attempt.
@@ -59,6 +76,7 @@ export type RecordFromIntentResult =
       readonly sequence: number;
       readonly transitionDigest: string;
       readonly mergeIntentDigest: string;
+      readonly repairAuditDigest: string;
     }
   | {
       readonly status: "already";
@@ -66,6 +84,7 @@ export type RecordFromIntentResult =
       readonly attemptId: string | null;
       readonly pullRequestNumber: number | null;
       readonly transitionDigest: string;
+      readonly repairAuditDigest: string | null;
     }
   | { readonly status: "refused"; readonly code: RecordFromIntentRefusal; readonly detail: string };
 
@@ -84,6 +103,11 @@ export interface RecordFromIntentDeps<TEnv extends QueueRouteEnv> {
     sha: string,
   ): Promise<{ treeOid: string; parentShas: string[]; message?: string } | null>;
   baseContainsSha(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
+  pullRequestMergeState(
+    env: TEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
   activePolicy(
     env: TEnv,
     repositoryId: string,
@@ -122,6 +146,235 @@ export async function readQueue(
   return { store: loaded.store, snapshot: buildSnapshot(loaded.store) };
 }
 
+/**
+ * Rebuild the verified evidence from records the queue wrote before the merge.
+ *
+ * The signed intent says what was authorized. The signed assignment says what
+ * the device was told to run. The accepted receipt row says which signed
+ * answer the queue accepted. A repair may use those three stored accounts, but
+ * it must not replace any of them with values from the operator's request.
+ */
+async function verifiedEvidenceForRepair(
+  db: D1Like,
+  input: {
+    readonly repositoryId: string;
+    readonly baseRef: string;
+    readonly intent: Extract<MergeIntentV1, { kind: "verified" }>;
+    readonly organizationId: string;
+  },
+): Promise<{ readonly ok: true; readonly evidence: VerifiedEvidence } | { readonly ok: false; readonly detail: string }> {
+  const assignment = await issuedAssignmentForAttempt(db, input.intent.attemptId);
+  if (assignment === null) {
+    return { ok: false, detail: "the verified intent has no stored assignment" };
+  }
+  if (assignment.receipt === null) {
+    return { ok: false, detail: "the verified intent has no stored accepted receipt" };
+  }
+  if (input.intent.evidence.execution.ranOn !== "device") {
+    return { ok: false, detail: "only a stored device run can authorize a verified repair" };
+  }
+
+  const signedAssignment = await readAttestation(db, input.intent.evidence.assignmentDigest);
+  if (signedAssignment?.kind !== "integration-assignment") {
+    return { ok: false, detail: "the assignment named by the verified intent is not stored" };
+  }
+  const assignmentBytes = await db
+    .prepare("SELECT bytes FROM queue_attestations WHERE digest = ?")
+    .bind(input.intent.evidence.assignmentDigest)
+    .first<{ bytes: string }>();
+  if (
+    assignmentBytes === null ||
+    (await envelopeDigest(new TextEncoder().encode(assignmentBytes.bytes))) !== input.intent.evidence.assignmentDigest
+  ) {
+    return { ok: false, detail: "the stored assignment bytes do not match the digest named by the intent" };
+  }
+  const parsed = parseIntegrationAssignment(signedAssignment.record);
+  if (!parsed.ok) {
+    return { ok: false, detail: `the stored assignment is unreadable: ${parsed.detail}` };
+  }
+  const document = parsed.value;
+  if ((await recordDigest(document)) !== input.intent.evidence.assignmentDigest) {
+    return { ok: false, detail: "the stored assignment bytes do not match the digest named by the intent" };
+  }
+  if (document.execution.mode !== "run") {
+    return { ok: false, detail: "the stored assignment is not a device-run assignment" };
+  }
+
+  const storedReceipt = {
+    assignmentId: assignment.receipt.assignmentId,
+    assignmentDigest: assignment.receipt.assignmentDigest,
+    candidateTreeOid: assignment.receipt.candidateTreeOid,
+    deviceKeyId: assignment.receipt.deviceKeyId,
+    suites: assignment.receipt.suites,
+  };
+  const computedReceiptDigest = await integrationReceiptDigest(storedReceipt);
+  if (computedReceiptDigest !== assignment.receipt.receiptDigest) {
+    return { ok: false, detail: "the stored accepted receipt does not match its content digest" };
+  }
+
+  const receiptVerdict = acceptIntegrationReceipt(
+    storedReceipt,
+    {
+      assignmentId: assignment.assignmentId,
+      digest: assignment.assignmentDigest,
+      candidateTreeOid: assignment.candidateTreeOid,
+      deviceKeyId: assignment.deviceKeyId,
+      requiredSuites: assignment.requiredSuites,
+    },
+  );
+  if (!receiptVerdict.ok) {
+    return { ok: false, detail: `the stored accepted receipt no longer matches its assignment: ${receiptVerdict.detail}` };
+  }
+
+  const suitesDigest = await requiredSuitesDigest(assignment.requiredSuites);
+  const same = (left: readonly string[], right: readonly string[]) =>
+    left.length === right.length && left.every((value, index) => value === right[index]);
+  const mismatches = [
+    assignment.attemptId === input.intent.attemptId ? null : "attempt",
+    assignment.repositoryId === input.repositoryId ? null : "repository",
+    assignment.baseRef === input.baseRef ? null : "base ref",
+    assignment.assignmentId === document.assignmentId ? null : "assignment id",
+    assignment.assignmentDigest === input.intent.evidence.assignmentDigest ? null : "assignment digest",
+    assignment.receipt.receiptDigest === input.intent.evidence.integrationEvidenceDigest
+      ? null
+      : "integration receipt digest",
+    assignment.candidateSha === input.intent.git.candidateSha ? null : "candidate commit",
+    assignment.candidateTreeOid === input.intent.git.candidateTreeOid ? null : "candidate tree",
+    suitesDigest === input.intent.evidence.requiredSuitesDigest ? null : "required suites",
+    document.attemptId === input.intent.attemptId ? null : "signed assignment attempt",
+    document.repository.repositoryId === input.repositoryId ? null : "signed assignment repository",
+    document.repository.baseRef === input.baseRef ? null : "signed assignment base ref",
+    document.queue.pullRequestNumber === input.intent.pullRequestNumber ? null : "signed assignment pull request",
+    document.queue.queueEpoch === input.intent.queueEpoch ? null : "signed assignment queue epoch",
+    document.queue.turnSequence === input.intent.turnSequence ? null : "signed assignment turn",
+    document.git.objectFormat === input.intent.git.objectFormat ? null : "signed assignment object format",
+    document.git.repositoryId === input.intent.git.repositoryId ? null : "signed assignment git repository",
+    document.git.baseRef === input.intent.git.baseRef ? null : "signed assignment git base ref",
+    document.git.candidateSha === input.intent.git.candidateSha ? null : "signed assignment candidate commit",
+    document.git.candidateTreeOid === input.intent.git.candidateTreeOid ? null : "signed assignment candidate tree",
+    document.git.baseSha === input.intent.git.baseSha ? null : "signed assignment base commit",
+    document.git.headRepositoryId === input.intent.git.headRepositoryId
+      ? null
+      : "signed assignment head repository",
+    document.git.headSha === input.intent.git.headSha ? null : "signed assignment head commit",
+    same(document.git.candidateParentOids, input.intent.git.candidateParentOids)
+      ? null
+      : "signed assignment candidate parents",
+    document.policy.digest === input.intent.policyDigest ? null : "signed assignment policy",
+    same(document.policy.requiredSuites, assignment.requiredSuites) ? null : "signed assignment required suites",
+    document.evidence.workReceiptDigest === input.intent.evidence.workReceiptDigest
+      ? null
+      : "signed assignment work receipt",
+    document.evidence.previousTransitionDigest === input.intent.previousTransitionDigest
+      ? null
+      : "signed assignment previous transition",
+    document.execution.deviceKeyId === assignment.deviceKeyId ? null : "signed assignment device",
+    document.execution.runnerPrincipalId === assignment.principalId ? null : "signed assignment runner",
+    input.intent.evidence.execution.deviceKeyId === assignment.deviceKeyId ? null : "verified intent device",
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    return { ok: false, detail: `stored verified evidence disagrees on ${mismatches.join(", ")}` };
+  }
+
+  return {
+    ok: true,
+    evidence: {
+      workReceiptDigest: input.intent.evidence.workReceiptDigest,
+      organizationId: input.organizationId,
+      policyDigest: input.intent.policyDigest,
+      pipelineDigest: input.intent.evidence.pipelineDigest,
+      requiredSuitesDigest: input.intent.evidence.requiredSuitesDigest,
+      assignmentDigest: input.intent.evidence.assignmentDigest,
+      integrationEvidenceDigest: input.intent.evidence.integrationEvidenceDigest,
+      execution: input.intent.evidence.execution,
+    },
+  };
+}
+
+/** First signed audit stored for a repaired transition. */
+export async function repairAuditForTransition(
+  db: D1Like,
+  input: { repositoryId: string; baseRef: string; transitionDigest: string },
+): Promise<{ digest: string; record: unknown; jws: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT digest, bytes, jws FROM queue_attestations
+        WHERE kind = 'transition-repair-audit'
+          AND github_repository_id = ? AND base_ref = ?
+          AND transition_sequence IS NULL
+          AND json_extract(bytes, '$.transitionDigest') = ?
+        ORDER BY created_at, digest
+        LIMIT 1`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.transitionDigest)
+    .first<{ digest: string; bytes: string; jws: string }>();
+  if (row === null) return null;
+  return { digest: row.digest, record: JSON.parse(row.bytes) as unknown, jws: row.jws };
+}
+
+async function storeRepairAudit<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  deps: RecordFromIntentDeps<TEnv>,
+  db: D1Like,
+  input: {
+    digest: string;
+    repositoryId: string;
+    baseRef: string;
+    attemptId: string;
+    actorPrincipalId: string;
+    reason: string;
+  },
+): Promise<string> {
+  const existing = await repairAuditForTransition(db, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    transitionDigest: input.digest,
+  });
+  if (existing !== null) return existing.digest;
+
+  const transition = await readAttestation(db, input.digest);
+  const parsed = transition === null ? null : parseTransitionRecord(transition.record);
+  if (parsed === null || !parsed.ok) throw new Error(`cannot audit unreadable transition ${input.digest}`);
+  const document = {
+    schemaVersion: "1",
+    kind: "transition-repair-audit",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    transitionDigest: input.digest,
+    attemptId: input.attemptId,
+    actorPrincipalId: input.actorPrincipalId,
+    reason: input.reason,
+    recordedAt: new Date().toISOString(),
+  };
+  const bytes = canonicalRecordBytes(document);
+  const digest = await envelopeDigest(bytes);
+  const jws = await deps.signRecordBytes(
+    env,
+    bytes,
+    "urn:thwip:attestation:transition-repair-audit:v1",
+  );
+  await storeAttestation(db, {
+    digest,
+    kind: "transition-repair-audit",
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    transitionSequence: null,
+    attemptId: input.attemptId,
+    bytes,
+    jws,
+  });
+  // Two administrators can reach the query above together. Both signed audits
+  // are true records of actions that happened; lookup is first-wins by stored
+  // time and digest, and sequential retries always return that first record.
+  return (
+    await repairAuditForTransition(db, {
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      transitionDigest: input.digest,
+    })
+  )?.digest ?? digest;
+}
+
 export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   env: TEnv,
   deps: RecordFromIntentDeps<TEnv>,
@@ -130,6 +383,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     readonly baseRef: string;
     readonly mergeSha: string;
     readonly witnessPrincipalId: string;
+    readonly reason: string;
     readonly attemptId?: string;
   },
 ): Promise<RecordFromIntentResult> {
@@ -137,6 +391,9 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
 
   const facts = await deps.commitFacts(env, repositoryId, mergeSha);
   if (facts === null) return { status: "refused", code: "COMMIT_UNREADABLE", detail: "could not read that commit" };
+  if (facts.message === undefined) {
+    return { status: "refused", code: "COMMIT_UNREADABLE", detail: "could not read that commit's message" };
+  }
 
   // A commit that exists is not a commit that landed. The record would say the
   // base branch became this, so the branch is asked, exactly as the merge
@@ -165,24 +422,77 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // GitHub on every tick for as long as the account lives.
   const covered = await recordCoveringCommit(db, repositoryId, baseRef, mergeSha);
   if (covered !== null) {
-    return { status: "already", attemptId: covered.attemptId, pullRequestNumber: null, transitionDigest: covered.digest };
+    if (covered.attemptId !== null) {
+      const link = await durableTransitionForAttempt(db, {
+        repositoryId,
+        baseRef,
+        attemptId: covered.attemptId,
+        mergeSha,
+      });
+      if (link !== null) {
+        if (link.recordKind === "external-transition") {
+          return {
+            status: "already",
+            attemptId: null,
+            pullRequestNumber: null,
+            transitionDigest: link.digest,
+            repairAuditDigest: null,
+          };
+        }
+        if (link.queueAttemptId === null) {
+          const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+            digest: link.digest,
+            repositoryId,
+            baseRef,
+            attemptId: covered.attemptId,
+            actorPrincipalId: input.witnessPrincipalId,
+            reason: input.reason,
+          });
+          return {
+            status: "already",
+            attemptId: covered.attemptId,
+            pullRequestNumber: null,
+            transitionDigest: link.digest,
+            repairAuditDigest,
+          };
+        }
+        return {
+          status: "already",
+          attemptId: covered.attemptId,
+          pullRequestNumber: null,
+          transitionDigest: link.digest,
+          repairAuditDigest: null,
+        };
+      }
+      // A legacy build gave this row a position before the queue accepted the
+      // link. The full durable link index proves the claim never landed.
+      await clearAttestationChainPosition(db, covered.digest);
+    } else {
+      return {
+        status: "already",
+        attemptId: null,
+        pullRequestNumber: null,
+        transitionDigest: covered.digest,
+        repairAuditDigest: null,
+      };
+    }
   }
 
   const authorization = await authorizationFor(db, {
     repositoryId,
     baseRef,
+    sha: mergeSha,
     treeOid: facts.treeOid,
     parentShas: facts.parentShas,
+    message: facts.message,
     ...(typeof input.attemptId === "string" ? { attemptId: input.attemptId } : {}),
   });
   if ("refused" in authorization) {
     return { status: "refused", code: "MERGE_NOT_AUTHORIZED", detail: authorization.refused };
   }
   const intent = authorization.intent;
-  // A verified merge's record binds an Actions run id, which the intent does
-  // not carry, and an override binds an authorization this must not reissue.
-  // Neither can be rebuilt from what survives, so neither is guessed at.
-  if (intent.kind !== "reused" && intent.kind !== "candidate-verified") {
+  // An override binds a human authorization this path must not reissue.
+  if (intent.kind === "override") {
     return {
       status: "refused",
       code: "MERGE_NOT_AUTHORIZED",
@@ -191,12 +501,53 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
   const attemptId = intent.attemptId;
 
-  const already = await transitionRecordFor(db, repositoryId, baseRef, attemptId);
-  if (already !== null) {
-    return { status: "already", attemptId, pullRequestNumber: intent.pullRequestNumber, transitionDigest: already };
+  const { snapshot } = await readQueue(env, repositoryId, baseRef);
+  const pull = await deps.pullRequestMergeState(env, repositoryId, intent.pullRequestNumber);
+  if (pull?.merged !== true || pull.mergeCommitSha !== mergeSha) {
+    return {
+      status: "refused",
+      code: "MERGE_NOT_AUTHORIZED",
+      detail: "GitHub does not confirm this commit as the pull request's merge commit",
+    };
+  }
+  const linked = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
+  if (linked !== null) {
+    const placed = await placeAttestationInChain(db, {
+      digest: linked.digest,
+      repositoryId,
+      baseRef,
+      attemptId,
+      transitionSequence: linked.transitionSequence,
+    });
+    if (!placed) {
+      return {
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "the queue link exists but its signed record could not be placed in the public chain",
+      };
+    }
+    const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+      digest: linked.digest,
+      repositoryId,
+      baseRef,
+      attemptId,
+      actorPrincipalId: input.witnessPrincipalId,
+      reason: input.reason,
+    });
+    return {
+      status: "already",
+      attemptId,
+      pullRequestNumber: intent.pullRequestNumber,
+      transitionDigest: linked.digest,
+      repairAuditDigest,
+    };
   }
 
-  const { snapshot } = await readQueue(env, repositoryId, baseRef);
+  const already = await transitionRecordFor(db, repositoryId, baseRef, attemptId);
+  if (already !== null) {
+    await clearAttestationChainPosition(db, already);
+  }
+
   if (snapshot.activeAttemptId === attemptId) {
     return {
       status: "refused",
@@ -219,8 +570,20 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // The policy the intent bound, not whatever is active now: the record says
   // what this merge rested on, and the policy may have changed since.
   const policy = await deps.activePolicy(env, repositoryId);
-  const verified = intent.kind === "candidate-verified";
-  const signed = await signReusedRecord({
+  const verifiedEvidence =
+    intent.kind === "verified"
+      ? await verifiedEvidenceForRepair(db, {
+          repositoryId,
+          baseRef,
+          intent,
+          organizationId: policy?.organizationId ?? "",
+        })
+      : null;
+  if (verifiedEvidence !== null && !verifiedEvidence.ok) {
+    return { status: "refused", code: "MERGE_NOT_AUTHORIZED", detail: verifiedEvidence.detail };
+  }
+  const candidateVerified = intent.kind === "candidate-verified";
+  const subject = {
     attemptId,
     mergeMethod: intent.mergeMethod,
     git: {
@@ -236,21 +599,29 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       previousTransitionDigest: priorDigest as Sha256 | null,
     },
     pullRequestNumber: intent.pullRequestNumber,
-    evidence: {
-      workReceiptDigest: intent.evidence.workReceiptDigest,
-      organizationId: policy?.organizationId ?? "",
-      policyDigest: intent.policyDigest,
-      pipelineDigest: intent.evidence.pipelineDigest,
-      requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
-      proofCheckRunId: intent.evidence.proofCheckRunId,
-      ...(verified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
-    },
     mergeIntentDigest: authorization.intentDigest,
     before: { baseSha: intent.git.baseSha, treeOid: before.treeOid },
     final: { sha: mergeSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
     observedAt: new Date().toISOString(),
-    signer: { sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ) },
-  });
+    signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
+  };
+  const signed =
+    verifiedEvidence?.ok === true
+      ? await signVerifiedRecord({ ...subject, evidence: verifiedEvidence.evidence })
+      : intent.kind === "verified"
+        ? { error: "the stored verified evidence could not be rebuilt" }
+        : await signReusedRecord({
+            ...subject,
+            evidence: {
+              workReceiptDigest: intent.evidence.workReceiptDigest,
+              organizationId: policy?.organizationId ?? "",
+              policyDigest: intent.policyDigest,
+              pipelineDigest: intent.evidence.pipelineDigest,
+              requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
+              proofCheckRunId: intent.evidence.proofCheckRunId,
+              ...(candidateVerified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
+            },
+          });
   if ("error" in signed) {
     return {
       status: "refused",
@@ -259,12 +630,17 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     };
   }
 
-  const stored = await storeAttestation(db, {
+  await storeAttestation(db, {
     digest: signed.digest,
-    kind: verified ? "candidate-verified-merge" : "reused-proof-merge",
+    kind:
+      verifiedEvidence?.ok === true
+        ? "verified-merge"
+        : candidateVerified
+          ? "candidate-verified-merge"
+          : "reused-proof-merge",
     repositoryId,
     baseRef,
-    transitionSequence,
+    transitionSequence: null,
     attemptId,
     bytes: signed.bytes,
     jws: signed.jws,
@@ -290,15 +666,6 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
               .then(() => undefined),
         }),
   });
-  if (!stored.stored) {
-    return {
-      status: "already",
-      attemptId,
-      pullRequestNumber: intent.pullRequestNumber,
-      transitionDigest: stored.digest,
-    };
-  }
-
   const { result } = await deps.onQueue(env, repositoryId, baseRef, ({ commands, store }) => {
     const tail = store.state().transitions.at(-1);
     // The position this record claims is inside the bytes that were signed,
@@ -312,7 +679,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       moved: false as const,
       transition: commands.recordTransition({
         idempotencyKey: `repair:${attemptId}`,
-        kind: verified ? "verified" : "reused",
+        kind: verifiedEvidence?.ok === true ? "verified" : candidateVerified ? "verified" : "reused",
         transitionSequence,
         priorDigest,
         digest: signed.digest,
@@ -323,24 +690,89 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
         // row that holds it, which is where a reader looks for it.
         attemptId: null,
         witnessPrincipalIds: [input.witnessPrincipalId],
+        reason: input.reason,
       }),
     };
   });
 
   if (result.moved) {
-    // The chain grew between reading the head and recording. The bytes stay:
-    // the queue really did sign them, and destroying signed evidence to tidy
-    // up is a worse habit than keeping a row nothing points at. What goes is
-    // the claim to a position, so the chain never serves a record whose own
-    // sequence disagrees with the one it was served at.
-    await db
-      .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-      .bind(signed.digest)
-      .run();
+    const winner = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
+    if (winner !== null) {
+      const placed = await placeAttestationInChain(db, {
+        digest: winner.digest,
+        repositoryId,
+        baseRef,
+        attemptId,
+        transitionSequence: winner.transitionSequence,
+      });
+      if (placed) {
+        const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+          digest: winner.digest,
+          repositoryId,
+          baseRef,
+          attemptId,
+          actorPrincipalId: input.witnessPrincipalId,
+          reason: input.reason,
+        });
+        return {
+          status: "already",
+          attemptId,
+          pullRequestNumber: intent.pullRequestNumber,
+          transitionDigest: winner.digest,
+          repairAuditDigest,
+        };
+      }
+    }
     return {
       status: "refused",
       code: "CHAIN_MOVED",
       detail: "the chain moved while this record was being signed; try again",
+    };
+  }
+
+  // The projection is the full durable queue chain. It also validates the
+  // linked digest's signed sequence, predecessor and resulting base before a
+  // D1 attestation row is allowed to claim that position.
+  const winner = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
+  if (winner === null) {
+    return {
+      status: "refused",
+      code: "CHAIN_MOVED",
+      detail:
+        result.transition.status === "rejected"
+          ? `the queue refused the transition: ${result.transition.detail}`
+          : "the transition command did not create the signed queue link",
+    };
+  }
+  const placed = await placeAttestationInChain(db, {
+    digest: winner.digest,
+    repositoryId,
+    baseRef,
+    attemptId,
+    transitionSequence: winner.transitionSequence,
+  });
+  if (!placed) {
+    return {
+      status: "refused",
+      code: "CHAIN_MOVED",
+      detail: "the queue linked the record but its public chain position could not be stored",
+    };
+  }
+  const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+    digest: winner.digest,
+    repositoryId,
+    baseRef,
+    attemptId,
+    actorPrincipalId: input.witnessPrincipalId,
+    reason: input.reason,
+  });
+  if (winner.digest !== signed.digest) {
+    return {
+      status: "already",
+      attemptId,
+      pullRequestNumber: intent.pullRequestNumber,
+      transitionDigest: winner.digest,
+      repairAuditDigest,
     };
   }
 
@@ -352,5 +784,6 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     sequence: transitionSequence,
     transitionDigest: signed.digest,
     mergeIntentDigest: authorization.intentDigest,
+    repairAuditDigest,
   };
 }

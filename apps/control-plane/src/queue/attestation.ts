@@ -1,4 +1,5 @@
-import { parseMergeIntent } from "@thwip/queue-protocol";
+import { envelopeDigest, parseMergeIntent, parseTransitionRecord, recordDigest } from "@thwip/queue-protocol";
+import { transitionKindOf } from "@thwip/queue-domain";
 import type { GitSubject, MergeIntentV1, MergeMethod, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
@@ -550,6 +551,170 @@ export async function storeAttestation(
 }
 
 /**
+ * Give an already-stored record the position its queue link actually took.
+ *
+ * Records are first stored without a position. The queue command is the
+ * authority for whether a link exists, so only a link that can be read back
+ * from the queue may call this. This order leaves a harmless unlinked signed
+ * row if the process stops between the two writes; it never leaves a D1 row
+ * claiming a chain position that the queue rejected.
+ */
+export async function placeAttestationInChain(
+  db: D1Like,
+  input: {
+    readonly digest: string;
+    readonly repositoryId: string;
+    readonly baseRef: string;
+    readonly attemptId: string;
+    readonly transitionSequence: number;
+  },
+): Promise<boolean> {
+  try {
+    await db
+      .prepare(
+        `UPDATE queue_attestations
+            SET transition_sequence = ?
+          WHERE digest = ? AND github_repository_id = ? AND base_ref = ? AND attempt_id = ?
+            AND transition_sequence IS NULL`,
+      )
+      .bind(
+        input.transitionSequence,
+        input.digest,
+        input.repositoryId,
+        input.baseRef,
+        input.attemptId,
+      )
+      .run();
+  } catch (error) {
+    if (!isOneRecordPerAttemptViolation(error)) throw error;
+    return false;
+  }
+
+  const placed = await db
+    .prepare(
+      `SELECT transition_sequence AS transitionSequence
+         FROM queue_attestations
+        WHERE digest = ? AND github_repository_id = ? AND base_ref = ? AND attempt_id = ?`,
+    )
+    .bind(input.digest, input.repositoryId, input.baseRef, input.attemptId)
+    .first<{ transitionSequence: number | null }>();
+  return placed?.transitionSequence === input.transitionSequence;
+}
+
+/** Remove a position claim after the queue refused or replaced that link. */
+export async function clearAttestationChainPosition(db: D1Like, digest: string): Promise<void> {
+  await db
+    .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
+    .bind(digest)
+    .run();
+}
+
+/**
+ * The full durable queue link for an attempt, including links compacted out of
+ * the live queue document.
+ *
+ * Repair links deliberately carry a null attempt in the queue reducer because
+ * their original attempt is gone. The signed attestation row still carries the
+ * attempt, so the join covers both normal and repaired records without relying
+ * on the reducer's bounded twenty-link tail.
+ */
+export async function durableTransitionForAttempt(
+  db: D1Like,
+  input: { repositoryId: string; baseRef: string; attemptId: string; mergeSha: string },
+): Promise<{
+  digest: string;
+  transitionSequence: number;
+  priorDigest: string | null;
+  baseSha: string;
+  queueAttemptId: string | null;
+  recordKind: string;
+} | null> {
+  const row = await db
+    .prepare(
+      `SELECT link.digest, link.kind AS linkKind, link.queue_epoch AS queueEpoch,
+              link.transition_sequence AS transitionSequence,
+              link.prior_digest AS priorDigest, link.base_sha AS baseSha,
+              link.attempt_id AS queueAttemptId, record.digest AS recordDigest,
+              record.kind AS recordKind, record.bytes
+         FROM queue_transitions_index AS link
+         JOIN queue_attestations AS record ON record.digest = link.digest
+        WHERE link.github_repository_id = ? AND link.base_ref = ?
+          AND record.github_repository_id = ? AND record.base_ref = ?
+          AND record.attempt_id = ? AND link.base_sha = ?
+        ORDER BY link.queue_epoch DESC, link.transition_sequence DESC
+        LIMIT 1`,
+    )
+    .bind(
+      input.repositoryId,
+      input.baseRef,
+      input.repositoryId,
+      input.baseRef,
+      input.attemptId,
+      input.mergeSha,
+    )
+    .first<{
+      digest: string;
+      linkKind: string;
+      queueEpoch: number;
+      transitionSequence: number;
+      priorDigest: string | null;
+      baseSha: string;
+      queueAttemptId: string | null;
+      recordDigest: string;
+      recordKind: string;
+      bytes: string;
+    }>();
+  if (row === null) return null;
+  let stored: unknown;
+  try {
+    stored = JSON.parse(row.bytes) as unknown;
+  } catch {
+    return null;
+  }
+  const parsed = parseTransitionRecord(stored);
+  if (!parsed.ok) return null;
+  const embeddedAttemptId =
+    parsed.value.kind === "verified-merge"
+      ? parsed.value.verifiedMerge.attemptId
+      : parsed.value.kind === "reused-proof-merge"
+        ? parsed.value.reusedProof.attemptId
+        : parsed.value.kind === "candidate-verified-merge"
+          ? parsed.value.candidateVerified.attemptId
+          : parsed.value.kind === "override-merge"
+            ? parsed.value.override.attemptId
+            : null;
+  const attemptMatches =
+    parsed.value.kind === "external-transition"
+      ? embeddedAttemptId === null && input.attemptId === `movement:${input.mergeSha}`
+      : embeddedAttemptId === input.attemptId;
+  const bytesDigest = await envelopeDigest(new TextEncoder().encode(row.bytes));
+  if (
+    row.digest !== row.recordDigest ||
+    bytesDigest !== row.digest ||
+    !attemptMatches ||
+    (row.queueAttemptId !== null && row.queueAttemptId !== input.attemptId) ||
+    parsed.value.queueEpoch !== row.queueEpoch ||
+    parsed.value.kind !== row.recordKind ||
+    transitionKindOf(parsed.value.kind) !== row.linkKind ||
+    parsed.value.repositoryId !== input.repositoryId ||
+    parsed.value.baseRef !== input.baseRef ||
+    parsed.value.transitionSequence !== row.transitionSequence ||
+    parsed.value.previousTransitionDigest !== row.priorDigest ||
+    parsed.value.after.baseSha !== row.baseSha
+  ) {
+    return null;
+  }
+  return {
+    digest: row.digest,
+    transitionSequence: row.transitionSequence,
+    priorDigest: row.priorDigest,
+    baseSha: row.baseSha,
+    queueAttemptId: row.queueAttemptId,
+    recordKind: row.recordKind,
+  };
+}
+
+/**
  * The transition record this attempt already produced, if any.
  *
  * A merge is reported at least once, and sometimes more: two racing runs can
@@ -702,11 +867,18 @@ export async function authorizationFor(
   input: {
     readonly repositoryId: string;
     readonly baseRef: string;
+    readonly sha: string;
     readonly treeOid: string;
     readonly parentShas: readonly string[];
+    /** Exact commit message GitHub stored, including title and trailer body. */
+    readonly message: string;
     readonly attemptId?: string;
   },
 ): Promise<AuthorizedMerge | AuthorizationRefusal> {
+  const separator = input.message.indexOf("\n\n");
+  const landedTitle = separator < 0 ? input.message : input.message.slice(0, separator);
+  const landedBody = separator < 0 ? "" : input.message.slice(separator + 2);
+  const landedBodyDigest = await recordDigest(landedBody);
   const rows = await db
     .prepare(
       `SELECT digest, bytes FROM queue_attestations
@@ -726,19 +898,23 @@ export async function authorizationFor(
 
   const matched: AuthorizedMerge[] = [];
   for (const row of rows.results) {
+    if ((await envelopeDigest(new TextEncoder().encode(row.bytes))) !== row.digest) continue;
     const parsed = parseMergeIntent(JSON.parse(row.bytes) as unknown);
     if (!parsed.ok) continue;
     const git = parsed.value.git;
     if (git.repositoryId !== input.repositoryId || git.baseRef !== input.baseRef) continue;
+    if (git.candidateSha !== input.sha) continue;
     if (git.candidateParentOids.length !== input.parentShas.length) continue;
     if (git.candidateParentOids.some((oid, at) => oid !== input.parentShas[at])) continue;
+    if (separator < 0 || parsed.value.generatedCommitTitle !== landedTitle) continue;
+    if (parsed.value.generatedCommitMessageDigest !== landedBodyDigest) continue;
     matched.push({ intentDigest: row.digest as Sha256, intent: parsed.value });
   }
 
   if (matched.length === 0) {
     return {
       refused:
-        "no signed merge intent authorizes this commit: the queue never pinned this tree on these parents",
+        "no signed merge intent authorizes this commit: the queue never pinned this tree, parents, title, and message",
       code: "NO_INTENT",
       attemptIds: [],
       intentDigests: [],

@@ -62,7 +62,7 @@ Every mutation goes through a route that writes a record naming who asked.
 | Change | Call |
 | --- | --- |
 | Answer a chain finding | `POST /v1/queue/:repositoryId/heal` with `{ finding, code, reason }` |
-| Record a merge the queue authorized | `POST /v1/queue/:repositoryId/repair` |
+| Record a merge the queue authorized | `thwip queue repair --repo OWNER/NAME --merge-sha OID --reason TEXT [--attempt-id ID]` |
 | Revoke a device key | `POST /v1/devices/:keyId/revoke` |
 | Enrol an organization, project and policy | Install the GitHub App, then `POST /admin/sync` |
 | Pause or resume a lane | `POST /v1/queue/:repositoryId/pause` \| `/resume` |
@@ -75,6 +75,15 @@ SQL writes none of that. A repair carried out with a `wrangler d1 execute` is
 invisible the day after, to the chain and to the next person, so it is not a
 supported way to change anything here. Where a change has no route, the fix is
 the route.
+
+`queue repair` sends only the landed commit, the operator's reason, and an
+optional attempt ID when more than one attempt authorized the same commit. The
+service reads the commit from GitHub and rebuilds the record from its stored
+signed merge intent. The landed commit's tree, ordered parents, generated title,
+and message body must all match that intent. A verified local run also requires the stored signed
+assignment and accepted receipt to agree with that intent. The command cannot
+supply any of those claims. Its actor and reason are kept in a separate signed
+`transition-repair-audit` attestation that names the repaired transition digest.
 
 ## Deploying
 

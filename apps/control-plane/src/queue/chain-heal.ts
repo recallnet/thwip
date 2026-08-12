@@ -1,5 +1,10 @@
-import { recordDigest, type Sha256 } from "@thwip/queue-protocol";
-import { authorizationFor, storeAttestation } from "./attestation.js";
+import { envelopeDigest, parseTransitionRecord, recordDigest, type Sha256 } from "@thwip/queue-protocol";
+import {
+  authorizationFor,
+  durableTransitionForAttempt,
+  placeAttestationInChain,
+  storeAttestation,
+} from "./attestation.js";
 import { buildExternalTransitionRecord, signTransitionRecord } from "./evidence.js";
 import type { D1Like } from "./projection.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
@@ -138,15 +143,23 @@ async function commitsInGap<TEnv extends QueueRouteEnv>(
   repositoryId: string,
   gap: { from: string; to: string },
 ): Promise<
-  | { readonly walked: ReadonlyArray<{ sha: string; treeOid: string; parentShas: readonly string[] }> }
+  | {
+      readonly walked: ReadonlyArray<{
+        sha: string;
+        treeOid: string;
+        parentShas: readonly string[];
+        message: string;
+      }>;
+    }
   | { readonly stopped: string }
 > {
-  const walked: Array<{ sha: string; treeOid: string; parentShas: readonly string[] }> = [];
+  const walked: Array<{ sha: string; treeOid: string; parentShas: readonly string[]; message: string }> = [];
   let cursor = gap.to;
   for (let step = 0; step < HEAL_WALK_LIMIT && cursor !== gap.from; step += 1) {
     const facts = await deps.commitFacts(env, repositoryId, cursor);
     if (facts === null) return { stopped: `${cursor} could not be read from GitHub` };
-    walked.push({ sha: cursor, treeOid: facts.treeOid, parentShas: facts.parentShas });
+    if (facts.message === undefined) return { stopped: `${cursor}'s commit message could not be read from GitHub` };
+    walked.push({ sha: cursor, treeOid: facts.treeOid, parentShas: facts.parentShas, message: facts.message });
     const parent = facts.parentShas[0];
     if (parent === undefined) {
       return { stopped: `the history from ${gap.to} reaches a root commit without passing ${gap.from}` };
@@ -225,8 +238,10 @@ export async function planHeal<TEnv extends QueueRouteEnv>(
     const authorization = await authorizationFor(db, {
       repositoryId,
       baseRef,
+      sha: commit.sha,
       treeOid: commit.treeOid,
       parentShas: commit.parentShas,
+      message: commit.message,
     });
     if ("refused" in authorization) {
       if (authorization.code === "AMBIGUOUS_ATTEMPT") {
@@ -378,6 +393,7 @@ export async function applyHeal<TEnv extends QueueRouteEnv>(
         baseRef,
         mergeSha: step.commitSha,
         witnessPrincipalId: input.actorPrincipalId,
+        reason: input.reason,
         attemptId: step.attemptId,
       });
       if (recorded.status === "refused") {
@@ -421,18 +437,26 @@ function refusalOf(code: string): HealRefusal {
  */
 async function movementAlreadyInChain(
   db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  commitSha: string,
   movementKey: string,
 ): Promise<{ sequence: number; digest: string } | null> {
-  const row = await db
-    .prepare(
-      `SELECT digest, transition_sequence AS sequence FROM queue_attestations
-        WHERE attempt_id = ? AND transition_sequence IS NOT NULL
-        ORDER BY created_at ASC
-        LIMIT 1`,
-    )
-    .bind(movementKey)
-    .first<{ digest: string; sequence: number }>();
-  return row === null ? null : { sequence: row.sequence, digest: row.digest };
+  const linked = await durableTransitionForAttempt(db, {
+    repositoryId,
+    baseRef,
+    attemptId: movementKey,
+    mergeSha: commitSha,
+  });
+  if (linked === null || linked.recordKind !== "external-transition") return null;
+  const placed = await placeAttestationInChain(db, {
+    digest: linked.digest,
+    repositoryId,
+    baseRef,
+    attemptId: movementKey,
+    transitionSequence: linked.transitionSequence,
+  });
+  return placed ? { sequence: linked.transitionSequence, digest: linked.digest } : null;
 }
 
 /**
@@ -460,6 +484,9 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
 
   const facts = await deps.commitFacts(env, repositoryId, commitSha);
   if (facts === null) return { refused: `could not read ${commitSha}`, code: "BASE_UNREADABLE" };
+  if (facts.message === undefined) {
+    return { refused: `could not read ${commitSha}'s commit message`, code: "BASE_UNREADABLE" };
+  }
 
   // The record about to be signed says no signed intent pins this commit. The
   // planner decided that, and a plan travels here as data, so the claim is
@@ -469,8 +496,10 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
   const pinned = await authorizationFor(db, {
     repositoryId,
     baseRef,
+    sha: commitSha,
     treeOid: facts.treeOid,
     parentShas: facts.parentShas,
+    message: facts.message,
   });
   if (!("refused" in pinned) || pinned.code !== "NO_INTENT") {
     const digests = "refused" in pinned ? pinned.intentDigests : [pinned.intentDigest];
@@ -504,79 +533,159 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
   // attempt id to put here and inventing one that looked real would be a lie
   // about where the record came from.
   const movementKey = `movement:${commitSha}`;
-  const already = await movementAlreadyInChain(db, movementKey);
+  const already = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
   if (already !== null) return already;
 
   const { snapshot } = await readQueue(env, repositoryId, baseRef);
   const head = snapshot.transitions.at(-1);
   const transitionSequence = (head?.transitionSequence ?? 0) + 1;
   const priorDigest = (head?.digest ?? null) as Sha256 | null;
-
-  const document = await buildExternalTransitionRecord({
-    repositoryId,
-    baseRef,
-    queueEpoch: snapshot.queueEpoch,
-    transitionSequence,
-    previousTransitionDigest: priorDigest,
-    before: { baseSha: parent, treeOid: before.treeOid },
-    moved: { sha: commitSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
-    // The branch moved and the queue holds nothing that says how. Naming a
-    // stronger code, `unexpected_push` or `ruleset_bypass`, would assert a
-    // mechanism nobody observed.
-    observationReasonCode: "unknown_provider_movement",
-    operatorReasonDigest: await recordDigest({
-      actorPrincipalId: input.actorPrincipalId,
-      reason: input.reason,
-      healedCommit: commitSha,
-    }),
-    observedAt: new Date().toISOString(),
-  });
-
-  const signed = await signTransitionRecord(document, {
-    sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ),
-  });
-  if ("error" in signed) {
-    return { refused: `the queue refused to sign its own record: ${signed.error}`, code: "SIGNING_REFUSED" };
+  const staged = await db
+    .prepare(
+      `SELECT digest, kind, bytes FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ?
+        ORDER BY created_at ASC LIMIT 1`,
+    )
+    .bind(repositoryId, baseRef, movementKey)
+    .first<{ digest: string; kind: string; bytes: string }>();
+  let movementDigest: string | null = null;
+  if (staged !== null) {
+    let document: unknown;
+    try {
+      document = JSON.parse(staged.bytes) as unknown;
+    } catch {
+      return { refused: "the staged movement record is not readable", code: "CHAIN_MOVED" };
+    }
+    const parsed = parseTransitionRecord(document);
+    const bytesDigest = await envelopeDigest(new TextEncoder().encode(staged.bytes));
+    if (
+      !parsed.ok ||
+      parsed.value.kind !== "external-transition" ||
+      staged.kind !== parsed.value.kind ||
+      bytesDigest !== staged.digest ||
+      parsed.value.repositoryId !== repositoryId ||
+      parsed.value.baseRef !== baseRef ||
+      parsed.value.before.baseSha !== parent ||
+      parsed.value.before.treeOid !== before.treeOid ||
+      parsed.value.after.baseSha !== commitSha ||
+      parsed.value.after.treeOid !== facts.treeOid ||
+      JSON.stringify(parsed.value.after.parentOids) !== JSON.stringify(facts.parentShas)
+    ) {
+      return {
+        refused: "the staged movement record does not match the commit it claims",
+        code: "CHAIN_MOVED",
+      };
+    }
+    const liveHeadIsStaged =
+      head?.digest === staged.digest &&
+      head.kind === "external" &&
+      head.transitionSequence === parsed.value.transitionSequence &&
+      head.priorDigest === parsed.value.previousTransitionDigest &&
+      head.baseSha === commitSha;
+    if (liveHeadIsStaged) {
+      // `runOnQueue` commits queue_state before it projects the durable link.
+      // A concurrent retry can therefore see this exact link at the live head
+      // while D1 still has no queue_transitions_index row. Re-run a harmless
+      // queue transaction to project that authoritative state, then promote
+      // only after the same durable-link validation used everywhere else.
+      await deps.onQueue(env, repositoryId, baseRef, () => undefined);
+      const projected = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+      if (projected !== null) return projected;
+      return {
+        refused: "the movement link is live but its durable projection is not available yet; try again",
+        code: "CHAIN_MOVED",
+      };
+    }
+    const positionMatches =
+      parsed.value.queueEpoch === snapshot.queueEpoch &&
+      parsed.value.transitionSequence === transitionSequence &&
+      parsed.value.previousTransitionDigest === priorDigest;
+    if (positionMatches) {
+      // A legacy row may claim a position without a link. Preserve its
+      // synthetic attempt key so another retry cannot detach a concurrent
+      // writer's staged record, but remove the false position until the
+      // durable link is proven.
+      await db
+        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
+        .bind(staged.digest)
+        .run();
+      movementDigest = staged.digest;
+    } else {
+      // The durable-link lookup above proved this record is unlinked, and the
+      // live head has moved past the position it signed. Its old CAS can no
+      // longer succeed, so releasing only this stale synthetic key cannot race
+      // a writer that still has a valid append available.
+      await db
+        .prepare(
+          "UPDATE queue_attestations SET transition_sequence = NULL, attempt_id = NULL WHERE digest = ? AND attempt_id = ?",
+        )
+        .bind(staged.digest, movementKey)
+        .run();
+    }
   }
-
-  const policy = await deps.activePolicy(env, repositoryId);
-  const stored = await storeAttestation(db, {
-    digest: signed.digest,
-    kind: "external-transition",
-    repositoryId,
-    baseRef,
-    transitionSequence,
-    attemptId: movementKey,
-    bytes: signed.bytes,
-    jws: signed.jws,
-    ...(policy === null
-      ? {}
-      : {
-          organizationId: policy.organizationId,
-          mirror: (mirrored: {
-            organizationId: string;
-            repositoryId: string;
-            kind: "merge-intent" | "transition-record";
-            digest: string;
-            bytes: Uint8Array;
-          }) =>
-            deps
-              .storeEvidence(env, {
-                organizationId: mirrored.organizationId,
-                repositoryId: mirrored.repositoryId,
-                kind: mirrored.kind,
-                digest: mirrored.digest as `sha256:${string}`,
-                bytes: mirrored.bytes,
-              })
-              .then(() => undefined),
-        }),
-  });
-  if (!stored.stored) {
-    // Another writer got there first. The position this run computed is the one
-    // it lost the race for, so reporting it would name a link the caller cannot
-    // find. What the caller wants is where the record that won actually sits.
-    const winner = await movementAlreadyInChain(db, movementKey);
-    return winner ?? { sequence: transitionSequence, digest: stored.digest };
+  if (movementDigest === null) {
+    const document = await buildExternalTransitionRecord({
+      repositoryId,
+      baseRef,
+      queueEpoch: snapshot.queueEpoch,
+      transitionSequence,
+      previousTransitionDigest: priorDigest,
+      before: { baseSha: parent, treeOid: before.treeOid },
+      moved: { sha: commitSha, treeOid: facts.treeOid, parentShas: facts.parentShas },
+      observationReasonCode: "unknown_provider_movement",
+      operatorReasonDigest: await recordDigest({
+        actorPrincipalId: input.actorPrincipalId,
+        reason: input.reason,
+        healedCommit: commitSha,
+      }),
+      observedAt: new Date().toISOString(),
+    });
+    const signed = await signTransitionRecord(document, {
+      sign: (bytes, typ) => deps.signRecordBytes(env, bytes, typ),
+    });
+    if ("error" in signed) {
+      return { refused: `the queue refused to sign its own record: ${signed.error}`, code: "SIGNING_REFUSED" };
+    }
+    const policy = await deps.activePolicy(env, repositoryId);
+    const stored = await storeAttestation(db, {
+      digest: signed.digest,
+      kind: "external-transition",
+      repositoryId,
+      baseRef,
+      transitionSequence: null,
+      attemptId: movementKey,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy === null
+        ? {}
+        : {
+            organizationId: policy.organizationId,
+            mirror: (mirrored: {
+              organizationId: string;
+              repositoryId: string;
+              kind: "merge-intent" | "transition-record";
+              digest: string;
+              bytes: Uint8Array;
+            }) =>
+              deps
+                .storeEvidence(env, {
+                  organizationId: mirrored.organizationId,
+                  repositoryId: mirrored.repositoryId,
+                  kind: mirrored.kind,
+                  digest: mirrored.digest as `sha256:${string}`,
+                  bytes: mirrored.bytes,
+                })
+                .then(() => undefined),
+          }),
+    });
+    if (!stored.stored) {
+      const winner = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+      return winner ?? {
+        refused: "another movement record is staged but not linked; try again",
+        code: "CHAIN_MOVED",
+      };
+    }
+    movementDigest = signed.digest;
   }
 
   const { result } = await deps.onQueue(env, repositoryId, baseRef, ({ commands, store }) => {
@@ -584,12 +693,12 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
     if ((tail?.transitionSequence ?? 0) + 1 !== transitionSequence || (tail?.digest ?? null) !== priorDigest) {
       return { moved: true as const };
     }
-    commands.recordTransition({
+    const transition = commands.recordTransition({
       idempotencyKey: `heal:${commitSha}`,
       kind: "external",
       transitionSequence,
       priorDigest,
-      digest: signed.digest,
+      digest: movementDigest,
       baseSha: commitSha,
       // No attempt merged this. The reducer would refuse an attempt whose
       // phase is not MERGED, and there is no attempt to name in the first
@@ -597,20 +706,19 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       attemptId: null,
       witnessPrincipalIds: [input.actorPrincipalId],
     });
-    return { moved: false as const };
+    return { moved: false as const, transition };
   });
 
   if (result.moved) {
-    // The chain grew while this was being signed. The bytes stay, because the
-    // queue really did sign them and destroying signed evidence to tidy up is
-    // a worse habit than keeping a row nothing points at. What goes is the
-    // claim to a position.
-    await db
-      .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-      .bind(signed.digest)
-      .run();
     return { refused: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" };
   }
-
-  return { sequence: transitionSequence, digest: signed.digest };
+  const winner = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+  if (winner !== null) return winner;
+  return {
+    refused:
+      result.transition.status === "rejected"
+        ? `the queue refused the transition: ${result.transition.detail}`
+        : "the transition command did not create the signed queue link",
+    code: "CHAIN_MOVED",
+  };
 }
