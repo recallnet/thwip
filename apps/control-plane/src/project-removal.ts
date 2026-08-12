@@ -154,6 +154,43 @@ function isTerminal(state: string): boolean {
   return (TERMINAL_ENTRY_STATES as readonly string[]).includes(state);
 }
 
+const NON_MUTATING_OUTBOX_KINDS = new Set([
+  "offer-created",
+  "start-workflow",
+  "dispatch-verifier",
+  "reconcile-merge",
+  "publish-transition",
+]);
+
+/**
+ * Old outbox deliveries are diagnostic history after their attempt has ended.
+ * They cannot move the branch because every later queue command refuses a
+ * terminal or missing attempt. A merge write is different: it is safe only
+ * when its durable operation has a confirmed outcome. Unknown work fails
+ * closed so a new branch-mutating delivery cannot silently bypass removal.
+ */
+function pendingOutboxCanAct(
+  store: Awaited<ReturnType<typeof loadQueueState>>["store"],
+  report: ReturnType<typeof diagnose>,
+): boolean {
+  const attempts = new Map(report.attempts.map((attempt) => [attempt.attemptId, attempt]));
+  const operations = new Map(report.mergeOperations.map((operation) => [operation.operationId, operation]));
+
+  return store.pendingOutbox().some((item) => {
+    if (item.kind === "notify-external-transition") return false;
+    if (item.attemptId === undefined) return true;
+
+    const attempt = attempts.get(item.attemptId);
+    if (attempt !== undefined && attempt.outcome === null && attempt.phase !== "MERGED") return true;
+
+    if (item.kind === "merge-write") {
+      if (item.operationId === undefined) return true;
+      return operations.get(item.operationId)?.outcome == null;
+    }
+    return !NON_MUTATING_OUTBOX_KINDS.has(item.kind);
+  });
+}
+
 /** A queue may be erased only when nothing durable can still move its branch. */
 export async function projectQueueRemovalBlocker(
   db: D1Like,
@@ -192,7 +229,11 @@ export async function projectQueueRemovalBlocker(
           "drain or cancel it, then retry removal",
       };
     }
-    if (report.outbox.length > 0 || report.deadlines.length > 0 || report.attempts.some((attempt) => attempt.outcomeUnknown)) {
+    if (
+      pendingOutboxCanAct(store, report) ||
+      report.deadlines.length > 0 ||
+      report.attempts.some((attempt) => attempt.outcomeUnknown)
+    ) {
       return {
         baseRef: row.baseRef,
         detail:
