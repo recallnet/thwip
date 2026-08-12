@@ -4,9 +4,11 @@ import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
   projectQueueState,
+  queuePageInfo,
   readProjectedQueue,
   type D1Like,
   type ProjectionMessage,
+  type QueuePageRequest,
 } from "./projection.js";
 import {
   admit,
@@ -223,6 +225,61 @@ function idempotencyKey(header: string | undefined, fallback: string): string {
 
 function decimal(value: string | undefined): string | null {
   return value !== undefined && /^[0-9]{1,32}$/.test(value) ? value : null;
+}
+
+/** The dashboard deliberately keeps both queue tables short. */
+export const QUEUE_PAGE_SIZE = 20;
+
+export function parseQueuePages(
+  entriesPage: string | undefined,
+  transitionsPage: string | undefined,
+): QueuePageRequest | { readonly error: string } | undefined {
+  if (entriesPage === undefined && transitionsPage === undefined) return undefined;
+  const parse = (value: string | undefined): number | null => {
+    if (value === undefined) return 1;
+    if (!/^[1-9][0-9]{0,5}$/.test(value)) return null;
+    const page = Number(value);
+    return Number.isSafeInteger(page) ? page : null;
+  };
+  const entries = parse(entriesPage);
+  const transitions = parse(transitionsPage);
+  if (entries === null || transitions === null) {
+    return { error: "entriesPage and transitionsPage must be positive page numbers" };
+  }
+  return { entriesPage: entries, transitionsPage: transitions, pageSize: QUEUE_PAGE_SIZE };
+}
+
+/** Apply the same paging contract to an explicit `live=1` read. */
+export function pageLiveQueue(snapshot: QueueSnapshot, pages: QueuePageRequest): Record<string, unknown> {
+  const entries = snapshot.entries
+    .filter((entry) => !(TERMINAL_ENTRY_STATES as readonly string[]).includes(entry.state))
+    .sort((left, right) => {
+      const length = left.fairnessOrdinal.length - right.fairnessOrdinal.length;
+      return length === 0 ? left.fairnessOrdinal.localeCompare(right.fairnessOrdinal) : length;
+    });
+  const pullRequestByAttempt = new Map(
+    snapshot.entries
+      .filter((entry) => entry.lastAttemptId !== null)
+      .map((entry) => [entry.lastAttemptId as string, entry.pullRequestNumber]),
+  );
+  const transitions = [...snapshot.transitions]
+    .sort((left, right) => right.transitionSequence - left.transitionSequence)
+    .map((transition) => ({
+      ...transition,
+      pullRequestNumber:
+        transition.attemptId === null ? null : (pullRequestByAttempt.get(transition.attemptId) ?? null),
+    }));
+  const entryStart = (pages.entriesPage - 1) * pages.pageSize;
+  const transitionStart = (pages.transitionsPage - 1) * pages.pageSize;
+  return {
+    ...snapshot,
+    entries: entries.slice(entryStart, entryStart + pages.pageSize),
+    transitions: transitions.slice(transitionStart, transitionStart + pages.pageSize),
+    pagination: {
+      entries: queuePageInfo(pages.entriesPage, pages.pageSize, entries.length),
+      transitions: queuePageInfo(pages.transitionsPage, pages.pageSize, transitions.length),
+    },
+  };
 }
 
 /**
@@ -946,6 +1003,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const selected = requestedQueue(c);
     if ("error" in selected) return c.json({ error: selected.error }, 400);
     const { repositoryId, baseRef } = selected;
+    const pages = parseQueuePages(c.req.query("entriesPage"), c.req.query("transitionsPage"));
+    if (pages !== undefined && "error" in pages) return c.json({ error: pages.error }, 400);
 
     // Served from the projection, not the object.
     //
@@ -958,9 +1017,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // stale is the wrong answer: an operator checking after a manual repair.
     if (c.req.query("live") === "1") {
       const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-      return c.json({ ...snapshot, source: "queue" });
+      return c.json({ ...(pages === undefined ? snapshot : pageLiveQueue(snapshot, pages)), source: "queue" });
     }
-    const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef);
+    const projected = await readProjectedQueue(c.env.DB as unknown as D1Like, repositoryId, baseRef, pages);
     if (projected !== null) return c.json(projected);
 
     // Nothing projected yet, which is not the same as no queue. Read the
@@ -978,7 +1037,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       // that is never getting backfilled, and that has to be visible.
       console.error(`[queue projection] write failed for ${repositoryId} ${baseRef}:`, error);
     }
-    return c.json({ ...snapshot, source: "queue" });
+    return c.json({ ...(pages === undefined ? snapshot : pageLiveQueue(snapshot, pages)), source: "queue" });
   });
 
   /**

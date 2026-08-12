@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, useFetch } from "./api.js";
 import { ConfirmAction, Panel } from "./ui.js";
 import {
@@ -51,8 +51,16 @@ export interface QueueTransitionView {
   readonly priorDigest: string | null;
   readonly baseSha: string;
   readonly attemptId: string | null;
+  readonly pullRequestNumber?: number | null;
   readonly witnessPrincipalIds: readonly string[];
   readonly recordedAt: string | null;
+}
+
+export interface QueuePageInfo {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly totalPages: number;
 }
 
 export interface QueueSnapshot {
@@ -74,6 +82,10 @@ export interface QueueSnapshot {
   readonly chainHead: { readonly sequence: number; readonly digest: string } | null;
   readonly transitions?: readonly QueueTransitionView[];
   readonly entries: readonly QueueEntryView[];
+  readonly pagination?: {
+    readonly entries: QueuePageInfo;
+    readonly transitions: QueuePageInfo;
+  };
 }
 
 /** The state of an entry, said in words and toned by how worried to be. */
@@ -402,7 +414,7 @@ function RebaselineRecovery({
  * A pause needs a reason because the reason is what the next person to look at a
  * stopped queue reads.
  */
-function QueueControls({
+export function QueueControls({
   repositoryId,
   baseRef,
   paused,
@@ -418,6 +430,8 @@ function QueueControls({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const reasonField = useRef<HTMLTextAreaElement>(null);
 
   const send = async (action: "pause" | "resume", body: unknown) => {
     setBusy(true);
@@ -428,6 +442,7 @@ function QueueControls({
         body: JSON.stringify(body),
       });
       setReason("");
+      dialog.current?.close();
       onChanged();
     } catch (cause) {
       setFailed((cause as Error).message);
@@ -443,40 +458,128 @@ function QueueControls({
   return (
     <div className="thwip-queue-controls">
       {paused ? (
-        <div className="thwip-actions">
-          <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void send("resume", {})}>
-            Resume merging
-          </button>
-        </div>
+        <button className="gp-btn gp-btn--sm" disabled={busy} onClick={() => void send("resume", {})}>
+          Resume merging
+        </button>
       ) : (
         <>
-          <div className="thwip-field">
-            <label htmlFor={`pause-reason-${repositoryId}`}>Reason</label>
-            <input
-              id={`pause-reason-${repositoryId}`}
-              value={reason}
-              disabled={busy}
-              placeholder="why merging should stop"
-              onChange={(event) => setReason(event.target.value)}
-            />
-          </div>
-          <ConfirmAction
-            label="Pause merging"
-            title="Stop this queue merging anything?"
-            consequence={
+          <button
+            className="gp-btn gp-btn--sm gp-btn--danger"
+            disabled={busy}
+            onClick={() => {
+              setFailed(null);
+              dialog.current?.showModal();
+              requestAnimationFrame(() => reasonField.current?.focus());
+            }}
+          >
+            Pause merging
+          </button>
+          <dialog
+            ref={dialog}
+            className="thwip-dialog"
+            aria-labelledby={`pause-title-${repositoryId}`}
+            onCancel={() => setFailed(null)}
+          >
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!busy && reason.trim() !== "") void send("pause", { reason: reason.trim() });
+              }}
+            >
+              <h2 id={`pause-title-${repositoryId}`}>Pause merging on this branch?</h2>
               <p>
-                Nothing merges on this branch until somebody resumes it. Whatever holds the lane keeps its place.
-                Every entry behind it waits where it is.
+                Nothing merges until somebody resumes it. Pull requests keep their place in the queue.
               </p>
-            }
-            confirmLabel="Pause it"
-            busy={busy || reason.trim() === ""}
-            onConfirm={() => void send("pause", { reason: reason.trim() })}
-          />
+              <label htmlFor={`pause-reason-${repositoryId}`}>Reason</label>
+              <textarea
+                ref={reasonField}
+                id={`pause-reason-${repositoryId}`}
+                value={reason}
+                disabled={busy}
+                required
+                rows={4}
+                placeholder="Explain why merging should stop"
+                onChange={(event) => setReason(event.target.value)}
+              />
+              {failed && <p className="thwip-error" role="alert">{failed}</p>}
+              <div className="thwip-actions">
+                <button className="gp-btn gp-btn--sm gp-btn--danger" type="submit" disabled={busy || reason.trim() === ""}>
+                  Pause merging
+                </button>
+                <button
+                  className="gp-btn gp-btn--sm gp-btn--quiet"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => dialog.current?.close()}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </dialog>
         </>
       )}
-      {failed && <p className="thwip-error">{failed}</p>}
+      {paused && failed && <p className="thwip-error" role="alert">{failed}</p>}
     </div>
+  );
+}
+
+export function queueReadPath(repositoryId: string, baseRef: string, entriesPage: number, transitionsPage: number) {
+  const query = new URLSearchParams({
+    ref: baseRef,
+    entriesPage: String(entriesPage),
+    transitionsPage: String(transitionsPage),
+  });
+  return `/v1/queue/${repositoryId}?${query.toString()}`;
+}
+
+export function TablePagination({
+  label,
+  page,
+  onPage,
+}: {
+  label: string;
+  page: QueuePageInfo;
+  onPage: (page: number) => void;
+}) {
+  if (page.totalPages <= 1) return null;
+  return (
+    <nav className="thwip-pagination" aria-label={`${label} pages`}>
+      <button
+        className="gp-btn gp-btn--sm gp-btn--quiet"
+        disabled={page.page <= 1}
+        onClick={() => onPage(page.page - 1)}
+      >
+        Previous
+      </button>
+      <span aria-live="polite">
+        Page {page.page} of {page.totalPages} · {page.total} records
+      </span>
+      <button
+        className="gp-btn gp-btn--sm gp-btn--quiet"
+        disabled={page.page >= page.totalPages}
+        onClick={() => onPage(page.page + 1)}
+      >
+        Next
+      </button>
+    </nav>
+  );
+}
+
+export function QueueTableHeading({
+  id,
+  title,
+  description,
+}: {
+  id: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <>
+      <h3 id={id}>{title}</h3>
+      <p className="gp-panel__meta">{description}</p>
+    </>
   );
 }
 
@@ -493,6 +596,9 @@ export function QueuePanel({
 }) {
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [entriesPage, setEntriesPage] = useState(1);
+  const [transitionsPage, setTransitionsPage] = useState(1);
+  const requestVersion = useRef(0);
   // Who each principal id stands for. The queue snapshot carries ids; the
   // organization projection carries the names that go with them.
   const people = useFetch<{ members: Array<{ github_user_id: string; github_login: string }> }>(
@@ -501,13 +607,23 @@ export function QueuePanel({
   const logins = new Map((people.data?.members ?? []).map((m) => [m.github_user_id, m.github_login]));
 
   const load = useCallback(() => {
-    api<QueueSnapshot>(`/v1/queue/${repositoryId}?ref=${encodeURIComponent(baseRef)}`)
+    const version = ++requestVersion.current;
+    api<QueueSnapshot>(queueReadPath(repositoryId, baseRef, entriesPage, transitionsPage))
       .then((s) => {
+        if (version !== requestVersion.current) return;
         setSnapshot(s);
         setError(null);
+        if (s.pagination !== undefined) {
+          if (entriesPage > s.pagination.entries.totalPages) setEntriesPage(s.pagination.entries.totalPages);
+          if (transitionsPage > s.pagination.transitions.totalPages) {
+            setTransitionsPage(s.pagination.transitions.totalPages);
+          }
+        }
       })
-      .catch((e: Error) => setError(e.message));
-  }, [repositoryId, baseRef]);
+      .catch((e: Error) => {
+        if (version === requestVersion.current) setError(e.message);
+      });
+  }, [repositoryId, baseRef, entriesPage, transitionsPage]);
 
   useEffect(() => {
     load();
@@ -534,6 +650,9 @@ export function QueuePanel({
     start();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      // A page change or navigation must not let an older response overwrite
+      // the newer page after this effect has stopped owning the request.
+      requestVersion.current += 1;
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
@@ -559,9 +678,9 @@ export function QueuePanel({
     );
   }
 
-  const ready = snapshot.entries.filter((e) => e.state === "Ready" && e.schedulerEligible);
-  const waiting = snapshot.entries.filter((e) => !ready.includes(e) && e.state !== "Merged" && e.state !== "Cancelled");
-  const projected = new Map(ready.map((e, i) => [e.entryId, i + 1]));
+  const entries = snapshot.entries.filter((e) => e.state !== "Merged" && e.state !== "Cancelled");
+  const entryPage = snapshot.pagination?.entries.page ?? 1;
+  const entryPageSize = snapshot.pagination?.entries.pageSize ?? entries.length;
   // Newest first: a reader wants the last thing that landed, not the first.
   const history = [...(snapshot.transitions ?? [])].sort(
     (a, b) => b.transitionSequence - a.transitionSequence,
@@ -578,6 +697,17 @@ export function QueuePanel({
       <Panel
         title={`Queue · ${repositoryName} · ${baseRef.replace(/^refs\/heads\//, "")}`}
         meta={snapshot.activeAttemptId === null ? "Nothing integrating" : "Integrating now"}
+        action={
+          canAdminister ? (
+            <QueueControls
+              repositoryId={repositoryId}
+              baseRef={baseRef}
+              paused={snapshot.paused}
+              rebaselineRequired={snapshot.rebaselineRequired}
+              onChanged={load}
+            />
+          ) : undefined
+        }
       >
       <>
         {snapshot.paused && (
@@ -603,114 +733,91 @@ export function QueuePanel({
             onChanged={load}
           />
         )}
-        {canAdminister && (
-          <QueueControls
-            repositoryId={repositoryId}
-            baseRef={baseRef}
-            paused={snapshot.paused}
-            rebaselineRequired={snapshot.rebaselineRequired}
-            onChanged={load}
+        <section className="thwip-table-section" aria-labelledby="queue-entries-title">
+          <QueueTableHeading
+            id="queue-entries-title"
+            title="Pull requests in this queue"
+            description="Ordered by the queue. Ready pull requests can move when the lane is free; blocked ones keep their place."
           />
-        )}
-
-        {snapshot.entries.length === 0 && (
-          <p className="gp-panel__meta">
-            Nothing is queued. Run <code>thwip ship --wait</code> on a branch to join.
-          </p>
-        )}
-
-        {ready.length > 0 && (
-          <>
-            <p className="gp-panel__meta">
-              Projected order, not a reservation: it changes after every review and check.
+          {entries.length === 0 ? (
+            <p>
+              Nothing is queued. Run <code>thwip ship --wait</code> on a branch to join.
             </p>
-            <table className="thwip-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Pull request</th>
-                  <th>Owner</th>
-                  <th>State</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ready.map((entry) => (
-                  <tr key={entry.entryId}>
-                    <td className="gp-mono">{projected.get(entry.entryId)}</td>
-                    <td>
-                      <a
-                        href={`https://github.com/${repositoryName}/pull/${entry.pullRequestNumber}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        #{entry.pullRequestNumber}
-                      </a>
-                    </td>
-                    <td>
-                      <Owner principalId={entry.sponsorPrincipalId} logins={logins} />
-                    </td>
-                    <td>
-                      <EntryState entry={entry} />
-                    </td>
+          ) : (
+            <div className="thwip-table-scroll">
+              <table className="thwip-table thwip-table--queue">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Pull request</th>
+                    <th>Owner</th>
+                    <th>State</th>
+                    <th>What clears it</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </>
-        )}
+                </thead>
+                <tbody>
+                  {entries.map((entry, index) => {
+                    const ready = entry.state === "Ready" && entry.schedulerEligible;
+                    const holdsLane =
+                      snapshot.activeAttemptId !== null && entry.lastAttemptId === snapshot.activeAttemptId;
+                    return (
+                      <tr key={entry.entryId}>
+                        <td className="gp-mono">{(entryPage - 1) * entryPageSize + index + 1}</td>
+                        <td>
+                          <a
+                            href={`https://github.com/${repositoryName}/pull/${entry.pullRequestNumber}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            #{entry.pullRequestNumber}
+                          </a>
+                        </td>
+                        <td>
+                          <Owner principalId={entry.sponsorPrincipalId} logins={logins} />
+                        </td>
+                        <td>
+                          <EntryState entry={entry} />
+                        </td>
+                        <td>
+                          {holdsLane ? (
+                            <span>This pull request holds the lane.</span>
+                          ) : ready ? (
+                            <span>Ready for the scheduler.</span>
+                          ) : (
+                            <Blocker
+                              reason={entry.primaryReason}
+                              source={snapshot.source}
+                              projectedAt={snapshot.projectedAt}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {snapshot.pagination && (
+            <TablePagination
+              label="Queued pull requests"
+              page={snapshot.pagination.entries}
+              onPage={setEntriesPage}
+            />
+          )}
+        </section>
 
-        {waiting.length > 0 && (
-          <>
-            <p className="gp-panel__meta">
-              Holding a place, not currently schedulable. Nothing here has lost its position.
-            </p>
-            <table className="thwip-table">
-              <thead>
-                <tr>
-                  <th>Pull request</th>
-                  <th>Owner</th>
-                  <th>State</th>
-                  <th>What clears it</th>
-                </tr>
-              </thead>
-              <tbody>
-                {waiting.map((entry) => (
-                  <tr key={entry.entryId}>
-                    <td>
-                      <a
-                        href={`https://github.com/${repositoryName}/pull/${entry.pullRequestNumber}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        #{entry.pullRequestNumber}
-                      </a>
-                    </td>
-                    <td>
-                      <Owner principalId={entry.sponsorPrincipalId} logins={logins} />
-                    </td>
-                    <td>
-                      <EntryState entry={entry} />
-                    </td>
-                    <td>
-                      <Blocker
-                        reason={entry.primaryReason}
-                        source={snapshot.source}
-                        projectedAt={snapshot.projectedAt}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </>
-        )}
-
-        {history.length > 0 && (
-          <>
-            <p className="gp-panel__meta">
-              How this branch has moved. Every row is a signed record; the queue merged the ones it verified.
-            </p>
-            <table className="thwip-table">
+        <section className="thwip-table-section" aria-labelledby="queue-history-title">
+          <QueueTableHeading
+            id="queue-history-title"
+            title="Signed branch history"
+            description="Each row is a signed record of a protected-branch move. Newest records appear first."
+          />
+          {history.length === 0 ? (
+            <p>No branch moves have been recorded yet.</p>
+          ) : (
+            <div className="thwip-table-scroll">
+              <table className="thwip-table thwip-table--queue">
               <thead>
                 <tr>
                   <th>#</th>
@@ -723,7 +830,7 @@ export function QueuePanel({
               </thead>
               <tbody>
                 {history.map((t) => {
-                  const pr = t.attemptId === null ? undefined : prForAttempt.get(t.attemptId);
+                  const pr = t.pullRequestNumber ?? (t.attemptId === null ? undefined : prForAttempt.get(t.attemptId));
                   return (
                     <tr key={t.transitionSequence}>
                       <td className="gp-mono">{t.transitionSequence}</td>
@@ -780,9 +887,17 @@ export function QueuePanel({
                   );
                 })}
               </tbody>
-            </table>
-          </>
-        )}
+              </table>
+            </div>
+          )}
+          {snapshot.pagination && (
+            <TablePagination
+              label="Signed branch history"
+              page={snapshot.pagination.transitions}
+              onPage={setTransitionsPage}
+            />
+          )}
+        </section>
       </>
       </Panel>
     </>
