@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../test/d1.js";
 import { projectsInReach } from "./dashboard-scope.js";
+import { BOOTSTRAP_STEPS } from "./queue/rulesets.js";
 
 /**
  * Which repositories the dashboard lists.
@@ -121,5 +122,28 @@ describe("the projects a viewer reaches", () => {
     const rows = await projectsInReach(db, { organizationId: "org_acme", githubUserId: "11" });
 
     expect(rows.every((r) => r.access === "member")).toBe(true);
+  });
+
+  it("reports setup complete only after every durable bootstrap step completed", async () => {
+    database();
+    seed();
+    raw
+      .prepare(
+        `INSERT INTO queue_projects
+           (id, organization_id, github_repository_id, base_ref, bootstrap_progress_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("queue_acme", "org_acme", "111", "refs/heads/main", JSON.stringify({ [BOOTSTRAP_STEPS[0]]: true }));
+
+    const incomplete = await projectsInReach(db, { organizationId: "org_acme", githubUserId: "11" });
+    expect(incomplete.find((project) => project.github_repository_id === "111")?.queue_setup_complete).toBe(false);
+
+    const completeProgress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    raw
+      .prepare("UPDATE queue_projects SET bootstrap_progress_json = ? WHERE id = ?")
+      .run(JSON.stringify(completeProgress), "queue_acme");
+
+    const complete = await projectsInReach(db, { organizationId: "org_acme", githubUserId: "11" });
+    expect(complete.find((project) => project.github_repository_id === "111")?.queue_setup_complete).toBe(true);
   });
 });

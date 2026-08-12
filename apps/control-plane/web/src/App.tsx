@@ -259,7 +259,7 @@ export function projectSection(segment: string): string {
 export function projectPagePanels(segment: string): readonly ProjectPanel[] {
   switch (projectSection(segment)) {
     case "queue":
-      return ["setup", "queue"];
+      return ["queue", "setup"];
     case "access":
       return ["access"];
     case "settings":
@@ -450,6 +450,7 @@ interface ProjectRow {
   collaborators: number;
   last_outcome: string | null;
   last_observed_at: string | null;
+  queue_setup_complete: boolean;
 }
 
 interface QueueSummary {
@@ -1022,7 +1023,6 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           </div>
         ))}
       </dl>
-      {panels.includes("setup") && <ProjectSetup project={project} me={me} />}
       {panels.includes("queue") && (
         <QueuePanel
           repositoryId={project.github_repository_id}
@@ -1031,6 +1031,7 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
           canAdminister={isOrgAdmin(me)}
         />
       )}
+      {panels.includes("setup") && <ProjectSetup project={project} me={me} />}
       {panels.includes("access") && <ProjectAccess projectId={project.id} me={me} />}
       {panels.includes("verification") && <ProjectVerification project={project} me={me} reload={reload} />}
     </DashboardShell>
@@ -1626,11 +1627,28 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
   );
 }
 
+export function ProjectSetupDisclosure({
+  complete,
+  children,
+}: {
+  complete: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="thwip-setup-disclosure" open={!complete}>
+      <summary>
+        Setup <span>{complete ? "Complete" : "Required"}</span>
+      </summary>
+      <div className="thwip-setup-disclosure__body">{children}</div>
+    </details>
+  );
+}
+
 function ProjectSetup({ project: p, me }: { project: ProjectRow; me: Me }) {
   const [copied, setCopied] = useState(false);
   const prompt = buildSetupPrompt(p);
   return (
-    <>
+    <ProjectSetupDisclosure complete={p.queue_setup_complete}>
       <Panel
         title={`Set up ${p.github_name}`}
         meta="paste into your coding agent, in a checkout of this repository"
@@ -1649,7 +1667,7 @@ function ProjectSetup({ project: p, me }: { project: ProjectRow; me: Me }) {
         <pre className="thwip-code-block">{prompt}</pre>
       </Panel>
       <QueueEnrolment project={p} canAdminister={isOrgAdmin(me)} />
-    </>
+    </ProjectSetupDisclosure>
   );
 }
 
