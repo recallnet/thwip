@@ -198,7 +198,7 @@ describe("queueSetupPrompt", () => {
   it("names the request that enrols the repository", () => {
     const prompt = queueSetupPrompt("recallnet/thwip");
     expect(prompt).toContain("/v1/queue/<repository id>/bootstrap");
-    expect(prompt).toMatch(/"Set up" tab/);
+    expect(prompt).toMatch(/"Queue" tab/);
   });
 
   it("inherits organization defaults unless a repository override is explicitly selected", () => {

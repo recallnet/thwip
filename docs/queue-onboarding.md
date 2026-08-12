@@ -69,7 +69,7 @@ for a coding agent. The product flow is:
 2. Run `thwip queue setup --write` in the repository. Review and commit the
    generated `THWIP.md` plus the bounded pointers added to existing agent
    instructions.
-3. In the dashboard's **Set up** tab, select **Set up the queue**. Thwip opens
+3. In the dashboard's **Queue** tab, select **Set up the queue**. Thwip opens
    `Set up Thwip Queue` from `thwip/setup` containing the required proof and
    candidate-verifier workflows. It omits `thwip.yaml` by default.
 4. Review and merge that pull request under the repository's existing controls.
