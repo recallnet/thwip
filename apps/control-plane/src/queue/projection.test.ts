@@ -1,8 +1,6 @@
 import Database from "better-sqlite3";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { migrationStatements } from "../../test/d1.js";
 import { projectQueueState, type D1Like, type ProjectionMessage } from "./projection.js";
 
 /**
@@ -21,28 +19,13 @@ function d1(): D1Like {
   // Build the schema from the migrations rather than restating it here. Two
   // copies drift: a column added to a migration left this file describing a
   // different table, and every test kept passing against the old one.
-  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../../migrations");
-  for (const file of readdirSync(dir).sort()) {
-    if (!file.endsWith(".sql")) continue;
-    // Comments come out before the file is split into statements, not after.
-    // A comment can contain a semicolon of its own — "the Durable Object is
-    // live authority; these tables serve organization-wide reads" — and
-    // splitting first cut a comment mid-sentence, leaving a fragment that
-    // is not SQL in the same chunk as the statement that followed it.
-    const withoutComments = readFileSync(join(dir, file), "utf8")
-      .split("\n")
-      .filter((line) => !line.trim().startsWith("--"))
-      .join("\n");
-    for (const statement of withoutComments.split(";")) {
-      const sql = statement.trim();
-      if (sql.length === 0) continue;
-      try {
-        db.exec(sql);
-      } catch (error) {
-        // Migrations for tables this suite does not exercise reference schema it
-        // never creates. Anything touching a queue projection table must work.
-        if (/queue_(entries|transitions)_index|queue_projection_marks/.test(sql)) throw error;
-      }
+  for (const sql of migrationStatements()) {
+    try {
+      db.exec(sql);
+    } catch (error) {
+      // Migrations for tables this suite does not exercise reference schema it
+      // never creates. Anything touching a queue projection table must work.
+      if (/queue_(entries|transitions)_index|queue_projection_marks/.test(sql)) throw error;
     }
   }
 
@@ -234,6 +217,18 @@ describe("projectQueueState", () => {
     // Two entries and one mark, or none of it.
     expect((await rows(db, "queue_entries_index")).results).toHaveLength(2);
     expect((await rows(db, "queue_projection_marks")).results).toHaveLength(1);
+  });
+
+  it("drops an old projection delivery after project removal", async () => {
+    const db = d1();
+    await db.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").bind().run();
+    await db.prepare(
+      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+    ).bind(message().repositoryId).run();
+
+    expect(await projectQueueState(db, message())).toEqual({ applied: false, reason: "PROJECT_REMOVED", seen: 0 });
+    expect((await rows(db, "queue_entries_index")).results).toEqual([]);
+    expect((await rows(db, "queue_projection_marks")).results).toEqual([]);
   });
 });
 

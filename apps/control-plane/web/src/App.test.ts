@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   completedQueueActivationText,
+  AddProject,
   DashboardMetrics,
   GitHubSync,
   ORGANIZATION_TABS,
@@ -11,6 +12,7 @@ import {
   projectPagePanels,
   projectSection,
   SignedOutDashboard,
+  RemoveProject,
 } from "./App.js";
 
 /**
@@ -86,6 +88,57 @@ describe("the full sync recovery control", () => {
 
     expect(html).not.toContain("Run full sync");
     expect(html).toContain("Only GitHub organization owners can run a full sync.");
+  });
+});
+
+describe("project removal", () => {
+  const project = {
+    id: "prj_gh_1",
+    github_repository_id: "1",
+    github_name: "recallnet/playhouse",
+    default_branch: "main",
+    enabled: 0,
+    activation_state: "disabled",
+    active_policy_digest: null,
+    policy_version: null,
+    policy_profile: null,
+    config_source: null,
+    proof_check_mode: "observe",
+    collaborators: 0,
+    last_outcome: null,
+    last_observed_at: null,
+  };
+  const me = {
+    viewer: { githubUserId: "7", githubOrgRole: "owner", activated: true },
+    principal: null,
+    organization: {
+      id: "org_1",
+      github_login: "recallnet",
+      plan: "free",
+      installation_id: "44",
+      better_auth_org_id: null,
+    },
+    organizations: [],
+    appSlug: "thwip",
+  };
+
+  it("states the destructive scope, sync behavior, re-add behavior, and separate App access", () => {
+    const html = renderToStaticMarkup(createElement(RemoveProject, { project: project as never, me: me as never }));
+    expect(html).toContain("policies, proofs, queue, signed chain, access grants, and measured history");
+    expect(html).toContain("does not uninstall the GitHub App");
+    expect(html).toContain("will not recreate it");
+    expect(html).toContain("new, disabled project with no restored history");
+    expect(html).toContain("recallnet/playhouse");
+    expect(html).toContain("settings/installations/44");
+  });
+
+  it("requires an organization owner to explicitly add a fresh project", () => {
+    const owner = renderToStaticMarkup(createElement(AddProject, { canAdd: true }));
+    const member = renderToStaticMarkup(createElement(AddProject, { canAdd: false }));
+    expect(owner).toContain("OWNER/REPOSITORY");
+    expect(owner).toContain("fresh, disabled project");
+    expect(member).toContain("Only GitHub organization owners can add a project");
+    expect(member).not.toContain(">Add project</button>");
   });
 });
 

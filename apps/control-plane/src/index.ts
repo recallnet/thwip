@@ -10,7 +10,15 @@ import { publicReusedCiMetrics, reusedCiMetrics } from "./reused-ci-metrics.js";
 import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
-import { githubSigningKeys, installationToken, listInstallations, syncInstallation } from "./github-app.js";
+import {
+  githubSigningKeys,
+  installationToken,
+  installedRepository,
+  isCurrentOrganizationOwner,
+  listInstallations,
+  syncInstallation,
+} from "./github-app.js";
+import { addProject, removeProject } from "./project-removal.js";
 import { APP_MANIFEST_PERMISSIONS, REQUIRED_APP_PERMISSIONS } from "./app-permissions.js";
 import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
 import { syncInstallations } from "./admin-sync.js";
@@ -117,6 +125,15 @@ function randomId(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   return `${prefix}_${hex}`;
+}
+
+async function repositoryWasRemoved(env: Env, repositoryId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1",
+  )
+    .bind(repositoryId)
+    .first<{ found: number }>();
+  return row !== null;
 }
 
 async function reconcileProofsForGithubUser(env: Env, githubUserId: string): Promise<void> {
@@ -559,8 +576,13 @@ app.get("/v1/dashboard/projects/:id/metrics", async (c) => {
   const projectId = c.req.param("id");
   const project = await c.env.DB.prepare(
     `SELECT p.id
-       FROM projects p
+      FROM projects p
       WHERE p.id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )
         AND (p.organization_id = ? OR EXISTS (
           SELECT 1 FROM repository_grants g
            WHERE g.project_id = p.id AND g.github_user_id = ? AND g.active = 1
@@ -636,6 +658,37 @@ app.get("/v1/dashboard/projects", async (c) => {
   return c.json({ projects });
 });
 
+app.post("/v1/dashboard/projects", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
+  if (typeof body.name !== "string") return c.json({ error: "name the repository as OWNER/REPOSITORY" }, 400);
+  try {
+    const result = await addProject(
+      c.env,
+      {
+        fullName: body.name.trim(),
+        actor: {
+          organizationId: viewer.organizationId,
+          githubUserId: viewer.githubUserId,
+          githubOrgRole: viewer.githubOrgRole,
+        },
+      },
+      {
+        isCurrentOrganizationOwner: (input) => isCurrentOrganizationOwner(c.env, input),
+        installedRepository: (installationId, fullName) => installedRepository(c.env, installationId, fullName),
+      },
+    );
+    if (!result.ok) return c.json({ error: result.code, detail: result.detail }, result.status);
+    return c.json({ project: { id: result.projectId, githubRepositoryId: result.repositoryId, name: result.name } }, 201);
+  } catch (error) {
+    return c.json(
+      { error: "GITHUB_OWNER_CHECK_FAILED", detail: `GitHub could not confirm ownership: ${String(error)}` },
+      503,
+    );
+  }
+});
+
 /**
  * One line of queue per repository, so the project list can say which of them
  * needs somebody. Read from the projection, which is what it is for: one query
@@ -653,6 +706,17 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const projectId = c.req.param("id");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id FROM projects p WHERE p.id = ? AND p.organization_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM removed_projects r
+         WHERE r.organization_id = p.organization_id
+           AND r.github_repository_id = p.github_repository_id
+      )`,
+  )
+    .bind(projectId, viewer.organizationId)
+    .first<{ id: string }>();
+  if (project === null) return c.json({ error: "project not found" }, 404);
   // Repo admins (from the GitHub projection) or org owners may enable.
   const grant = await c.env.DB.prepare(
     "SELECT permission FROM repository_grants WHERE project_id = ? AND github_user_id = ? AND active = 1",
@@ -666,6 +730,11 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
   const limit = PLAN_LIMITS[plan]!.projects;
   const result = await c.env.DB.prepare(
     `UPDATE projects SET enabled = 1 WHERE id = ? AND organization_id = ?
+     AND NOT EXISTS (
+       SELECT 1 FROM removed_projects r
+        WHERE r.organization_id = projects.organization_id
+          AND r.github_repository_id = projects.github_repository_id
+     )
      AND (SELECT COUNT(*) FROM projects WHERE organization_id = ?2 AND enabled = 1) < ?3`,
   )
     .bind(projectId, viewer.organizationId, limit)
@@ -705,10 +774,16 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
   const project = await c.env.DB.prepare(
     `SELECT p.github_repository_id, o.installation_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
-      WHERE p.id = ? AND p.organization_id = ?`,
+      WHERE p.id = ? AND p.organization_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(projectId, viewer.organizationId)
     .first<{ github_repository_id: string; installation_id: string | null }>();
+  if (project === null) return c.json({ error: "project not found" }, 404);
   await c.env.DB.prepare("UPDATE projects SET enabled = 0 WHERE id = ? AND organization_id = ?")
     .bind(projectId, viewer.organizationId)
     .run();
@@ -724,6 +799,48 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
     });
   }
   return c.json({ enabled: false });
+});
+
+app.post("/v1/dashboard/projects/:id/remove", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
+  const body = (await c.req.json().catch(() => ({}))) as { confirmation?: unknown; repositoryId?: unknown };
+  if (typeof body.confirmation !== "string") {
+    return c.json({ error: "CONFIRMATION_REQUIRED", detail: "type the full OWNER/REPOSITORY name" }, 400);
+  }
+  const repositoryId =
+    typeof body.repositoryId === "string" && /^[0-9]{1,32}$/.test(body.repositoryId) ? body.repositoryId : null;
+  try {
+    const result = await removeProject(
+      c.env,
+      {
+        projectId: c.req.param("id"),
+        repositoryId,
+        confirmation: body.confirmation,
+        actor: {
+          organizationId: viewer.organizationId,
+          githubUserId: viewer.githubUserId,
+          githubOrgRole: viewer.githubOrgRole,
+        },
+      },
+      {
+        now: nowIso,
+        isCurrentOrganizationOwner: (input) => isCurrentOrganizationOwner(c.env, input),
+        retireStatusComments: (repo, baseRef, pullRequestNumbers) =>
+          retireStatusCommentsFor(c.env, repo, baseRef, pullRequestNumbers),
+      },
+    );
+    if (!result.ok) return c.json({ error: result.code, detail: result.detail }, result.status);
+    return c.json({ removed: true, repositoryId: result.repositoryId, alreadyRemoved: result.alreadyRemoved });
+  } catch (error) {
+    return c.json(
+      {
+        error: "PROJECT_REMOVAL_INCOMPLETE",
+        detail: `removal is safe to retry; cleanup stopped before completion: ${String(error)}`,
+      },
+      503,
+    );
+  }
 });
 
 app.post("/v1/dashboard/projects/:id/profile", async (c) => {
@@ -755,8 +872,13 @@ app.post("/v1/dashboard/projects/:id/proof-mode", async (c) => {
   }
   const project = await c.env.DB.prepare(
     `SELECT p.github_repository_id, p.enabled, o.installation_id
-       FROM projects p JOIN organizations o ON o.id = p.organization_id
-      WHERE p.id = ? AND p.organization_id = ?`,
+      FROM projects p JOIN organizations o ON o.id = p.organization_id
+      WHERE p.id = ? AND p.organization_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(projectId, viewer.organizationId)
     .first<{ github_repository_id: string; enabled: number; installation_id: string | null }>();
@@ -840,7 +962,12 @@ app.get("/v1/dashboard/projects/:id/access", async (c) => {
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const projectId = c.req.param("id");
   const project = await c.env.DB.prepare(
-    "SELECT id, github_name FROM projects WHERE id = ? AND organization_id = ?",
+    `SELECT p.id, p.github_name FROM projects p WHERE p.id = ? AND p.organization_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM removed_projects r
+         WHERE r.organization_id = p.organization_id
+           AND r.github_repository_id = p.github_repository_id
+      )`,
   )
     .bind(projectId, viewer.organizationId)
     .first<{ id: string; github_name: string }>();
@@ -910,7 +1037,13 @@ app.get("/v1/dashboard/profile", async (c) => {
   const grants = await c.env.DB.prepare(
     `SELECT p.github_name, g.permission, g.active
      FROM repository_grants g JOIN projects p ON p.id = g.project_id
-     WHERE g.github_user_id = ? AND p.organization_id = ? ORDER BY p.github_name`,
+     WHERE g.github_user_id = ? AND p.organization_id = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM removed_projects r
+          WHERE r.organization_id = p.organization_id
+            AND r.github_repository_id = p.github_repository_id
+       )
+     ORDER BY p.github_name`,
   )
     .bind(viewer.githubUserId, viewer.organizationId)
     .all();
@@ -1188,7 +1321,14 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
   if (!isOrgAdmin(viewer.githubOrgRole)) return c.json({ error: "repository admin required" }, 403);
   const repositoryId = c.req.param("repositoryId");
   if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "invalid repository id" }, 400);
-  const row = await c.env.DB.prepare("SELECT github_name FROM projects WHERE github_repository_id = ?")
+  const row = await c.env.DB.prepare(
+    `SELECT p.github_name FROM projects p WHERE p.github_repository_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM removed_projects r
+         WHERE r.organization_id = p.organization_id
+           AND r.github_repository_id = p.github_repository_id
+      )`,
+  )
     .bind(repositoryId)
     .first<{ github_name: string }>();
   if (row === null) return c.json({ error: "unknown repository" }, 404);
@@ -1226,7 +1366,12 @@ app.get("/v1/resolve-repo", async (c) => {
   if (!/^[\w.-]+\/[\w.-]+$/.test(name)) return c.json({ error: "name must be owner/repo" }, 400);
   const row = await c.env.DB.prepare(
     `SELECT p.github_repository_id, o.github_org_id FROM projects p
-     JOIN organizations o ON o.id = p.organization_id WHERE p.github_name = ?`,
+     JOIN organizations o ON o.id = p.organization_id WHERE p.github_name = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM removed_projects r
+          WHERE r.organization_id = p.organization_id
+            AND r.github_repository_id = p.github_repository_id
+       )`,
   )
     .bind(name)
     .first<{ github_repository_id: string; github_org_id: string }>();
@@ -1244,8 +1389,13 @@ app.get("/v1/project-config/defaults", async (c) => {
             b.config_source, b.source_sha
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
-       LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
-      WHERE p.github_repository_id = ?`,
+      LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
+      WHERE p.github_repository_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(repositoryId)
     .first<{
@@ -1287,7 +1437,13 @@ app.post("/v1/run-leases", async (c) => {
   };
   if (!body.repositoryId || !body.treeOid || !body.deviceKeyId) return c.json({ error: "missing fields" }, 400);
   const project = await c.env.DB.prepare(
-    "SELECT id, active_policy_digest, security_profile FROM projects WHERE github_repository_id = ? AND enabled = 1",
+    `SELECT p.id, p.active_policy_digest, p.security_profile FROM projects p
+      WHERE p.github_repository_id = ? AND p.enabled = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(body.repositoryId)
     .first<{ id: string; active_policy_digest: string; security_profile: string }>();
@@ -1394,7 +1550,14 @@ app.post("/v1/verification-observations", async (c) => {
   const body = (await c.req.json()) as { repositoryId?: string; headSha?: string; outcome?: string; runId?: string };
   if (!body.repositoryId || String(claims.repository_id) !== body.repositoryId) return c.json({ error: "forbidden" }, 403);
   if (!body.headSha || !body.outcome || body.outcome.length > 64) return c.json({ error: "invalid" }, 400);
-  const project = await c.env.DB.prepare("SELECT id FROM projects WHERE github_repository_id = ?")
+  const project = await c.env.DB.prepare(
+    `SELECT p.id FROM projects p WHERE p.github_repository_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM removed_projects r
+         WHERE r.organization_id = p.organization_id
+           AND r.github_repository_id = p.github_repository_id
+      )`,
+  )
     .bind(body.repositoryId)
     .first<{ id: string }>();
   if (!project) return c.json({ error: "unknown project" }, 404);
@@ -1414,7 +1577,12 @@ app.get("/v1/proof-verifications/:id", async (c) => {
             v.verifier_version, v.mode, v.status, v.outcome, v.detail, v.check_name,
             v.check_run_id, v.audit_jws, v.started_at, v.completed_at, p.github_name
        FROM proof_verifications v JOIN projects p ON p.id = v.project_id
-      WHERE v.id = ?`,
+      WHERE v.id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM removed_projects r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
   )
     .bind(c.req.param("id"))
     .first<{
@@ -2987,7 +3155,13 @@ export default {
       activatePolicyFromDefaultBranchPush: (policyPush) => activatePolicyFromDefaultBranchPush(env, policyPush),
       reconcileInstallationPolicies: (id) => reconcileInstallationPolicies(env, id),
       reconcileProjectProofChecks: (id) => reconcileProjectProofChecks(env, id),
-      processAppProof: (request) => processAppProof(env, request),
+      processAppProof: async (request) => {
+        // A delivery may already be in the queue when its project is removed.
+        // Acknowledging it without work is what prevents that old message from
+        // retrying forever or recreating proof data after deletion.
+        if (await repositoryWasRemoved(env, request.repositoryId)) return;
+        await processAppProof(env, request);
+      },
       requestForRerequest: (verificationId) => requestForRerequest(env, verificationId),
       reconsiderHead: (repositoryId, headSha) =>
         reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
