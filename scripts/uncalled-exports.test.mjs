@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -27,6 +27,16 @@ const found = (dir, entries = new Set()) =>
   uncalledExports({ root: dir, entries }).map((d) => `${d.file}#${d.name}`);
 
 describe("uncalled exports", () => {
+  it("ignores a tracked source file deleted before the lint run", () => {
+    const dir = fixture({
+      "gone.ts": "export function gone() {}\n",
+      "live.ts": "export function live() {}\n",
+    });
+    rmSync(join(dir, "gone.ts"));
+
+    expect(found(dir)).toEqual(["live.ts#live"]);
+  });
+
   it("reports an exported function nothing imports", () => {
     const dir = fixture({
       "a.ts": "export function used() {}\nexport function orphan() {}\n",
@@ -165,15 +175,11 @@ describe("entry points", () => {
     expect(entries).toContain("apps/control-plane/web/src/main.tsx");
   });
 
-  /**
-   * `@better-auth/cli generate` reads `src/auth.cli.ts` by path to emit the
-   * auth schema. It never imports through the app's module graph, so the file
-   * had no call site and the devDependency had no user, and two different
-   * tools called each of them dead. The `auth:schema` package script names the
-   * relationship, and this reads it from there rather than excusing the file.
-   */
+  /** Config files passed to build and test tools are entry points. */
   it("counts a source file a package script hands to a tool by path", () => {
-    expect(entryPoints(root)).toContain("apps/control-plane/src/auth.cli.ts");
+    const entries = entryPoints(root);
+    expect(entries).toContain("apps/control-plane/web/vite.config.ts");
+    expect(entries).toContain("apps/control-plane/vitest.workers.config.ts");
   });
 
   /**
@@ -187,4 +193,3 @@ describe("entry points", () => {
     expect(entries).toContain("apps/blog/src/pages/blog/[...slug].md.ts");
   });
 });
-

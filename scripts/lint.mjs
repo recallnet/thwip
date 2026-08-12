@@ -2,7 +2,7 @@
 // Minimal repo lint: every tracked JSON/JSONC manifest parses, and no
 // source file imports node builtins inside the Worker bundle.
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -19,7 +19,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 let failures = 0;
 
-const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).trim().split("\n");
+const files = execFileSync("git", ["ls-files"], { encoding: "utf8" })
+  .trim()
+  .split("\n")
+  .filter(existsSync);
 
 for (const f of files) {
   if (f.endsWith(".json") && !f.endsWith("tsconfig.json") && !f.includes("tsconfig")) {
