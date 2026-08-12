@@ -125,6 +125,26 @@ describe("Home", () => {
   });
 
   /**
+   * The queue junction is nested in the upstream field, while the next marker
+   * belongs to the protected lane. Centering the queue marker on its own left
+   * edge keeps both junctions on the same axis at every breakpoint.
+   */
+  it("centers every queue junction marker on the shared lane axis", () => {
+    const css = readFileSync(new URL("./notary.css", import.meta.url), "utf8");
+    const queueMarker = css.match(/\.mq-lane::before\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const sectionMarker = css.match(/\.mq-row__body::after\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const narrowMarker = css.match(/\.mq-row::before\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+
+    expect(css).toContain("--mq-lane-marker-size: 8px;");
+    expect(queueMarker).toContain("left: 0;");
+    expect(queueMarker).toContain("transform: translateX(-50%);");
+    for (const marker of [queueMarker, sectionMarker, narrowMarker]) {
+      expect(marker).toContain("width: var(--mq-lane-marker-size);");
+      expect(marker).toContain("height: var(--mq-lane-marker-size);");
+    }
+  });
+
+  /**
    * A real agent's verdict is the only claim on the page with a signer
    * behind it. It says the agent kept using the queue after the experiment,
    * and it stays sourced; the link to the full numbers returns when the blog
