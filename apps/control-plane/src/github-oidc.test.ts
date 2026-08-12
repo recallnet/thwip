@@ -1,9 +1,8 @@
 import { generateKeyPair, SignJWT, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
-import { GITHUB_OIDC_ISSUER, githubOidcAudiences } from "./github-oidc.js";
+import { GITHUB_OIDC_ISSUER, githubOidcAudience } from "./github-oidc.js";
 
-const PRIMARY_ORIGIN = "https://thwip.ai";
-const LEGACY_ORIGIN = "https://thwip.recall.net";
+const PUBLIC_ORIGIN = "https://thwip.ai";
 
 async function oidcToken(audience: string, privateKey: CryptoKey): Promise<string> {
   return new SignJWT({ repository_id: "1234" })
@@ -15,52 +14,36 @@ async function oidcToken(audience: string, privateKey: CryptoKey): Promise<strin
     .sign(privateKey);
 }
 
-describe("GitHub OIDC audiences", () => {
-  it("keeps the ordinary one-audience gate without a distinct legacy origin", () => {
-    expect(githubOidcAudiences({ PUBLIC_ORIGIN: PRIMARY_ORIGIN })).toBe(
-      `${PRIMARY_ORIGIN}/api/github-actions`,
-    );
-    expect(
-      githubOidcAudiences({
-        PUBLIC_ORIGIN: PRIMARY_ORIGIN,
-        LEGACY_ORIGIN: PRIMARY_ORIGIN,
-      }),
-    ).toBe(`${PRIMARY_ORIGIN}/api/github-actions`);
+describe("GitHub OIDC audience", () => {
+  it("uses the public origin as the only audience", () => {
+    expect(githubOidcAudience({ PUBLIC_ORIGIN })).toBe(`${PUBLIC_ORIGIN}/api/github-actions`);
   });
 
-  it("accepts the current and legacy audiences during the hostname transition", async () => {
+  it("accepts the public audience", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256");
-    const audiences = githubOidcAudiences({
-      PUBLIC_ORIGIN: PRIMARY_ORIGIN,
-      LEGACY_ORIGIN,
-    });
+    const audience = githubOidcAudience({ PUBLIC_ORIGIN });
 
     await expect(
-      jwtVerify(await oidcToken(`${PRIMARY_ORIGIN}/api/github-actions`, privateKey), publicKey, {
+      jwtVerify(await oidcToken(audience, privateKey), publicKey, {
         issuer: GITHUB_OIDC_ISSUER,
-        audience: audiences,
-      }),
-    ).resolves.toBeDefined();
-    await expect(
-      jwtVerify(await oidcToken(`${LEGACY_ORIGIN}/api/github-actions`, privateKey), publicKey, {
-        issuer: GITHUB_OIDC_ISSUER,
-        audience: audiences,
+        audience,
       }),
     ).resolves.toBeDefined();
   });
 
-  it("rejects an audience outside the configured transition", async () => {
+  it("rejects every other audience", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256");
-    const audiences = githubOidcAudiences({
-      PUBLIC_ORIGIN: PRIMARY_ORIGIN,
-      LEGACY_ORIGIN,
-    });
+    const audience = githubOidcAudience({ PUBLIC_ORIGIN });
 
     await expect(
-      jwtVerify(await oidcToken("https://attacker.example/api/github-actions", privateKey), publicKey, {
-        issuer: GITHUB_OIDC_ISSUER,
-        audience: audiences,
-      }),
+      jwtVerify(
+        await oidcToken("https://unrelated.example/api/github-actions", privateKey),
+        publicKey,
+        {
+          issuer: GITHUB_OIDC_ISSUER,
+          audience,
+        },
+      ),
     ).rejects.toThrow();
   });
 });
