@@ -10,7 +10,7 @@
  * nothing, so a repair carried out that way is invisible the day after.
  *
  * Most of what anyone needs is already an HTTP call. `GET /v1/queue/:id/explain`
- * and `/heal` answer the queue questions, `/admin/schema` says which migrations
+ * and `/heal` answer the queue questions, `/v1/schema` says which migrations
  * the live database has, and `scripts/verify-chain.mjs` checks the chain with no
  * credentials at all. See `docs/production-access.md`. This exists for the
  * reads that have no route yet, and it holds the line at reads.
@@ -19,11 +19,19 @@
  * read before the list is consulted, so a verb nobody thought to ban is refused
  * by the opening rather than waved through by the omission.
  *
- * Usage:  node scripts/d1.mjs "SELECT * FROM mergeOperations LIMIT 5"
+ * Usage: node scripts/d1.mjs --env staging --confirm-live thwip.ai "SELECT ..."
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+
+import { liveD1Target } from "./deploy-identity.mjs";
+import {
+  d1CredentialFromEnv,
+  liveTargetRefusal,
+  preflightD1Credential,
+  wranglerEnvironment,
+} from "./d1-identity.mjs";
 
 /** Verbs that change the database, or reach outside the one being read. */
 const WRITES = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|PRAGMA|ATTACH|REPLACE|TRUNCATE|VACUUM|REINDEX|DETACH|BEGIN|COMMIT|ROLLBACK)\b/i;
@@ -67,22 +75,36 @@ export function commandFor(statement, { database, env }) {
   return ["d1", "execute", database, "--env", env, "--remote", "--json", "--command", statement.trim()];
 }
 
-/** The database `wrangler.jsonc` binds for an environment, so nothing is typed twice. */
-function databaseFor(env) {
-  const config = readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8");
-  const json = JSON.parse(config.replace(/^\s*\/\/.*$/gm, ""));
-  const binding = json.env?.[env]?.d1_databases?.find((db) => db.binding === "DB");
-  if (binding === undefined) throw new Error(`wrangler.jsonc binds no DB for --env ${env}`);
-  return binding.database_name;
+/** Name the deliberate read without echoing SQL literals or selected rows. */
+export function readDiagnostic(statement, target) {
+  const digest = createHash("sha256").update(statement.trim()).digest("hex");
+  const hostname = new URL(target.origin).hostname;
+  return `reading ${target.databaseName} (${target.env}, live at ${hostname}); statement sha256:${digest}`;
+}
+
+/** Run the read without letting Node repeat the SQL from a failed child command. */
+export function executeRead(run, argv, env) {
+  try {
+    run("wrangler", argv, {
+      stdio: ["ignore", "inherit", "inherit"],
+      env,
+    });
+  } catch {
+    throw new Error("The live D1 read failed. Wrangler wrote any available details above; the SQL was not repeated.");
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  let env = "staging";
+  let env = null;
+  let confirmation = null;
   const rest = [];
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--env") {
-      env = args[i + 1] ?? "staging";
+      env = args[i + 1] ?? null;
+      i++;
+    } else if (args[i] === "--confirm-live") {
+      confirmation = args[i + 1] ?? null;
       i++;
     } else {
       rest.push(args[i]);
@@ -90,8 +112,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const statement = rest[0];
 
-  if (statement === undefined) {
-    console.error("usage: node scripts/d1.mjs [--env staging] \"SELECT ...\"");
+  if (env === null || statement === undefined) {
+    console.error('usage: node scripts/d1.mjs --env staging --confirm-live thwip.ai "SELECT ..."');
     process.exit(2);
   }
 
@@ -101,8 +123,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
 
-  const database = databaseFor(env);
-  const argv = commandFor(statement, { database, env });
-  console.error(`reading ${database} (${env}):\n  wrangler ${argv.join(" ")}\n`);
-  execFileSync("wrangler", argv, { stdio: ["ignore", "inherit", "inherit"] });
+  try {
+    const target = liveD1Target(env);
+    const targetRefusal = liveTargetRefusal(target, confirmation);
+    if (targetRefusal !== null) throw new Error(targetRefusal);
+    const selected = d1CredentialFromEnv(process.env, "read");
+    if (selected.refusal !== null) throw new Error(selected.refusal);
+    const credential = selected.credential;
+    const report = await preflightD1Credential({ fetchImpl: fetch, credential, target });
+    console.error(`${readDiagnostic(statement, target)}; token expires ${report.expiresOn}`);
+    const argv = commandFor(statement, { database: target.databaseName, env });
+    executeRead(execFileSync, argv, wranglerEnvironment(process.env, credential));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 }

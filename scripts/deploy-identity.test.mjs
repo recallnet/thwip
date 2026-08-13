@@ -35,17 +35,22 @@ describe("the identity a deploy runs under", () => {
     expect(identity.refusal).toMatch(/CLOUDFLARE_ACCOUNT_ID/);
   });
 
-  it("still deploys under an interactive session, and says the session carries more than a deploy needs", () => {
+  it("refuses the ambient interactive Wrangler session", () => {
     const identity = deployIdentity({});
-    expect(identity.kind).toBe("session");
-    expect(identity.refusal).toBeNull();
-    expect(identity.note).toMatch(/D1/);
-    expect(identity.note).toMatch(/docs\/production-access\.md/);
+    expect(identity.kind).toBe("missing");
+    expect(identity.refusal).toMatch(/never use the ambient Wrangler login/);
+    expect(identity.refusal).toMatch(/no D1 permission/);
   });
 
   it("names the two permissions the token needs, so nobody has to guess in the Cloudflare UI", () => {
-    expect(deployIdentity({}).note).toMatch(/Workers Scripts:Edit/);
-    expect(deployIdentity({}).note).toMatch(/Workers R2 Storage:Edit/);
+    expect(deployIdentity({}).refusal).toMatch(/Workers Scripts:Edit/);
+    expect(deployIdentity({}).refusal).toMatch(/Workers R2 Storage:Edit/);
+  });
+
+  it("does not include a supplied token in its diagnostics", () => {
+    const secret = "private-deploy-token";
+    const identity = deployIdentity({ CLOUDFLARE_API_TOKEN: secret });
+    expect(JSON.stringify(identity)).not.toContain(secret);
   });
 });
 
@@ -79,5 +84,11 @@ describe("what the deploy command does", () => {
   it("keeps applying migrations as its own command", () => {
     expect(scripts["migrate:staging"]).toMatch(/scripts\/migrate\.mjs/);
     expect(scripts["migrate:staging"]).not.toMatch(/d1 migrations apply/);
+  });
+
+  it("preflights the scoped deploy token and its lack of D1 access", () => {
+    const source = readFileSync(fileURLToPath(new URL("./predeploy.mjs", import.meta.url)), "utf8");
+    expect(source).toContain("preflightDeployCredential");
+    expect(source).toContain("liveD1Target(targetEnv)");
   });
 });

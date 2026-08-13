@@ -4,13 +4,21 @@
  * Wrangler applies every pending migration visible in the checkout. It cannot
  * select `before-worker` or `after-worker`, so a tree containing both phases is
  * ambiguous: one phase belongs before a deploy and the other after it. This is
- * the guard between that all-or-nothing command and the live database.
+ * the guard between that all-or-nothing command and the live database. The
+ * command also requires a separate short-lived migration token and a literal
+ * acknowledgement that staging is the live database behind thwip.ai.
  */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildStamp } from "./build-sha.mjs";
-import { liveHealthUrl, liveSchemaUrl } from "./deploy-identity.mjs";
+import { liveD1Target, liveHealthUrl, liveSchemaUrl } from "./deploy-identity.mjs";
+import {
+  d1CredentialFromEnv,
+  liveTargetRefusal,
+  preflightD1Credential,
+  wranglerEnvironment,
+} from "./d1-identity.mjs";
 import { readMigrations, unappliedAgainst, undeclaredMigrations } from "./schema-guard.mjs";
 
 export function migrationPlan(migrations, applied) {
@@ -73,9 +81,13 @@ export async function applyMigrations({
   migrations,
   fetchImpl,
   build,
+  identity,
   run,
   log = console.log,
 }) {
+  if (identity === null || identity === undefined) {
+    throw new Error("Refusing: no explicit D1 migration identity was preflighted.");
+  }
   const undeclared = undeclaredMigrations(migrations);
   if (undeclared.length > 0) {
     throw new Error(
@@ -122,7 +134,9 @@ export async function applyMigrations({
 
   const names = plan.kind === "before-worker" ? plan.before : plan.after;
   log(`applying ${names.length} ${plan.kind} migration(s) to ${env}: ${names.join(", ")}`);
-  run("wrangler", ["d1", "migrations", "apply", database, "--env", env, "--remote"]);
+  run("wrangler", ["d1", "migrations", "apply", database, "--env", env, "--remote"], {
+    env: identity.wranglerEnv,
+  });
   return plan;
 }
 
@@ -134,6 +148,7 @@ function argument(name, fallback = null) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const env = argument("--env", "staging");
   const database = argument("--database");
+  const confirmLive = argument("--confirm-live");
   if (database === null) {
     console.error("Refusing: migrate.mjs requires --database <name>.");
     process.exit(1);
@@ -141,15 +156,29 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
   const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
-  const run = (command, args) => execFileSync(command, args, { stdio: "inherit" });
+  const run = (command, args, options) => execFileSync(command, args, { stdio: "inherit", ...options });
 
   try {
+    const target = liveD1Target(env);
+    if (database !== target.databaseName) {
+      throw new Error(`Refusing: --database must be ${target.databaseName}, the DB binding for --env ${env}.`);
+    }
+    const targetRefusal = liveTargetRefusal(target, confirmLive);
+    if (targetRefusal !== null) throw new Error(targetRefusal);
+    const selected = d1CredentialFromEnv(process.env, "migration");
+    if (selected.refusal !== null) throw new Error(selected.refusal);
+    const credential = selected.credential;
+    const report = await preflightD1Credential({ fetchImpl: fetch, credential, target });
+    console.log(
+      `D1 migration identity is active for ${report.target} until ${report.expiresOn}. No application rows were read.`,
+    );
     await applyMigrations({
       env,
       database,
       migrations: readMigrations(migrationsDir),
       fetchImpl: fetch,
       build: () => buildStamp(git),
+      identity: { wranglerEnv: wranglerEnvironment(process.env, credential) },
       run,
     });
   } catch (error) {
