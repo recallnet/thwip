@@ -150,8 +150,23 @@ describe("Home", () => {
     const queueLane = css.match(/\.mq-lane\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
 
     expect(upstreamBody).toContain("padding-bottom: 0;");
-    expect(queueLane).toContain("padding: 15px 0;");
+    expect(queueLane).toContain("padding: 15px 10px;");
     expect(queueLane).not.toContain("padding-top:");
+  });
+
+  it("uses one continuous lane and branch-like agent tags", () => {
+    const css = readFileSync(new URL("./notary.css", import.meta.url), "utf8");
+    const lane = css.match(/\.mq-row__body\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const agentRow = css.match(/\.mq-agent\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const agentTag = css.match(/\.mq-agent__id\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const agentFeed = css.match(/\.mq-agent__feed\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+
+    expect(lane).toContain("border-left: 2px solid var(--ink);");
+    expect(css).not.toContain("border-left: 1px solid var(--rule);");
+    expect(agentTag).toContain("border: 1px solid var(--ink);");
+    expect(agentTag).toContain("border-radius: 999px;");
+    expect(agentFeed).toContain("margin-right: -14px;");
+    expect(agentRow).not.toContain("border-bottom:");
   });
 
   /**
