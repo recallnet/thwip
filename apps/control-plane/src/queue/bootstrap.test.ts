@@ -40,6 +40,26 @@ function enrollQueueProject(
 }
 
 describe("production setup GitHub writes", () => {
+  it("decodes GitHub workflow content as UTF-8 before exact comparison", async () => {
+    const content = "trusted — candidate report";
+    const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(content))).replace(/.{8}/g, "$&\n");
+    const github = bootstrapGitHub(
+      {
+        async json<T>(path: string): Promise<T> {
+          if (path.endsWith("/git/ref/heads/main")) return { object: { sha: BASE_SHA } } as T;
+          if (path.includes("/contents/.github/workflows/thwip-queue-verify.yml")) {
+            return { sha: "f".repeat(40), content: encoded, encoding: "base64" } as T;
+          }
+          throw new Error(`unexpected ${path}`);
+        },
+      },
+      { owner: "acme", repo: "widgets", baseRef: BASE_REF },
+      { branch: "thwip/setup", title: "Set up", body: "Set up" },
+    );
+
+    await expect(github.verifierWorkflowAtBase?.()).resolves.toMatchObject({ content });
+  });
+
   it("rechecks lifecycle authority before every blob, tree, commit, ref, and pull-request mutation", async () => {
     const writes: string[] = [];
     let checks = 0;
