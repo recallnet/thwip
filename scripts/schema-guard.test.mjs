@@ -57,7 +57,7 @@ describe("what every migration says about deploy order", () => {
         "0032_private_agent_feedback_foundation.sql",
         "0033_verifier_protocol_v3.sql",
       ],
-      barrier: { id: "project-lifecycle-capability-cutover" },
+      barrier: { id: "project-lifecycle-in-place" },
     });
   });
 });

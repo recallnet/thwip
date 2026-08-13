@@ -2,30 +2,34 @@
 -- The 0030 migration is additive so the previous Worker remains healthy while
 -- this release deploys. Once the lifecycle-aware Worker is live, make project
 -- incarnation ownership mandatory and remove the superseded tombstone schema.
--- The migration runner exposes this file only after an operator records proof
--- that the old D1 database, R2 bucket binding, and GitHub App key have been retired.
+-- The migration runner exposes this file only after the exact Worker has served
+-- for one compatibility window and the bounded project-id backfill is complete.
 
--- Phase 2 runs on the imported D1 generation while the Worker still reports
--- maintenance mode. The old database has already been deleted, so its guards
--- can no longer be reached by a paused old invocation. Drop the copied guards
--- before rebuilding tables; the Worker-level maintenance gate keeps the new
--- generation quiet until this migration commits.
+-- This migration runs in place. It enters maintenance in the same transaction
+-- before rebuilding tables. No D1 export/import, R2 bucket replacement, or
+-- GitHub App key rotation is part of the repository lifecycle.
 -- The backfill ledger is the one table this migration must update while the
--- imported database is fenced. Keep every application table guarded, but let
+-- database is fenced. Keep every application table guarded, but let
 -- this migration record and verify the completed backfill.
 CREATE TABLE project_lifecycle_cutover_guard (ready INTEGER NOT NULL CHECK (ready = 1));
 INSERT INTO project_lifecycle_cutover_guard
 SELECT CASE WHEN EXISTS (
   SELECT 1 FROM project_lifecycle_rollout
    WHERE id = 1
-     AND maintenance_mode = 1
+     AND maintenance_mode = 0
      AND worker_activated_at IS NOT NULL
-     AND remote_capabilities_retired_at IS NOT NULL
-     AND remote_capability_evidence IS NOT NULL
-     AND json_valid(remote_capability_evidence) = 1
+     AND unixepoch(worker_activated_at) IS NOT NULL
+     AND unixepoch(worker_activated_at) <= unixepoch('now') - 3600
      AND destructive_schema_ready_at IS NULL
 ) THEN 1 ELSE 0 END;
 DROP TABLE project_lifecycle_cutover_guard;
+
+-- D1 applies this file atomically. Once it commits, every Worker entry point
+-- sees maintenance mode before it can use the rebuilt schema. A failure rolls
+-- this update back together with every schema change.
+UPDATE project_lifecycle_rollout
+   SET maintenance_mode = 1
+ WHERE id = 1 AND maintenance_mode = 0;
 
 DROP TRIGGER IF EXISTS project_lifecycle_maintenance_project_lifecycle_backfills_insert;
 DROP TRIGGER IF EXISTS project_lifecycle_maintenance_project_lifecycle_backfills_update;
@@ -798,26 +802,9 @@ BEFORE INSERT ON queue_projects WHEN
   OR EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = NEW.github_repository_id)
 BEGIN SELECT RAISE(IGNORE); END;
 
--- Move R2 writes onto the new bucket generation only after the old bucket was
--- deleted. A paused put tied to the old generation can no longer complete at
--- this point. Its durable intent is now eligible for bounded cleanup against
--- the copied objects in the new bucket. Future crashed writers remain fenced
--- on the new active generation until a later, explicit bucket rotation.
-UPDATE project_r2_capability_generations
-   SET state = 'retired',
-       retired_at = (SELECT remote_capabilities_retired_at FROM project_lifecycle_rollout WHERE id = 1),
-       retirement_evidence = json_object(
-         'bucket', json_extract((SELECT remote_capability_evidence FROM project_lifecycle_rollout WHERE id = 1), '$.r2.oldBucket'),
-         'deletedAt', json_extract((SELECT remote_capability_evidence FROM project_lifecycle_rollout WHERE id = 1), '$.r2.oldBucketDeletedAt')
-       )
- WHERE state = 'active';
-
-INSERT INTO project_r2_capability_generations (generation, state, activated_at)
-SELECT 'bucket:' || json_extract(remote_capability_evidence, '$.r2.newBucket'),
-       'active',
-       json_extract(remote_capability_evidence, '$.d1.newBindingActivatedAt')
-  FROM project_lifecycle_rollout
- WHERE id = 1;
+-- Keep the existing R2 bucket and active generation. Evidence already uses the
+-- exact project incarnation in its key. Expired write intents are recovered by
+-- the bounded drainer rather than by replacing storage infrastructure.
 
 -- This is the final half of the cleanup gate. Keep service maintenance active:
 -- 0032 and 0033 are the next guarded before-worker phase, and 0034 is the only
@@ -826,4 +813,4 @@ SELECT 'bucket:' || json_extract(remote_capability_evidence, '$.r2.newBucket'),
 -- table triggers removed above and keeps every route, queue, and cron fenced.
 UPDATE project_lifecycle_rollout
    SET destructive_schema_ready_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
- WHERE id = 1 AND maintenance_mode = 1 AND remote_capabilities_retired_at IS NOT NULL;
+ WHERE id = 1 AND maintenance_mode = 1;
