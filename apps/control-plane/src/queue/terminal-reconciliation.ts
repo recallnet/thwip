@@ -1,9 +1,9 @@
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { recoverExactMergeRecord } from "./attestation.js";
 import type { TerminalPullRequestReads } from "./deadlines.js";
-import { buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
+import type { QueueSnapshot } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
-import { projectQueueState, projectionMessageFrom, type D1Like } from "./projection.js";
+import type { D1Like } from "./projection.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
@@ -108,13 +108,11 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
   const db = env.DB as unknown as D1Like;
   const selected = await page(db, input.repositoryId, input.baseRef);
   if (selected.entries.length === 0) {
-    const { store } = await loadQueueState(db, input.repositoryId, input.baseRef);
-    const snapshot = buildSnapshot(store);
     // The previous pass may have committed its last terminal mutation while
     // the best-effort projection write failed. Empty is therefore still work:
     // republish authority instead of returning before the stale dashboard gets
     // another chance to catch up.
-    await projectQueueState(db, projectionMessageFrom(input.repositoryId, input.baseRef, snapshot));
+    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
     return { snapshot, reconciled: 0, examined: 0 };
   }
 
@@ -133,9 +131,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
     return store.claimTerminalReconciliation(selected.nextCursor!, leaseUntil);
   });
   if (claim === false) {
-    const { store } = await loadQueueState(db, input.repositoryId, input.baseRef);
-    const snapshot = buildSnapshot(store);
-    await projectQueueState(db, projectionMessageFrom(input.repositoryId, input.baseRef, snapshot));
+    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
     return { snapshot, reconciled: 0, examined: 0 };
   }
 
@@ -242,8 +238,8 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
     // after authority commits. A heartbeat is the retry owner, so this second
     // publication is deliberately fallible: maintenance reports the failure
     // and the next pass, including an empty one, tries the same generation.
-    await projectQueueState(db, projectionMessageFrom(input.repositoryId, input.baseRef, out.snapshot));
-    return { snapshot: out.snapshot, reconciled: out.result, examined: observations.length };
+    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+    return { snapshot, reconciled: out.result, examined: observations.length };
   } finally {
     await withQueueState(db, input.repositoryId, input.baseRef, (store) => {
       store.releaseTerminalReconciliation(claim);

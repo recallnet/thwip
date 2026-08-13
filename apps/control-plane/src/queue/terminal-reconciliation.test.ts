@@ -87,6 +87,64 @@ async function offered(e: QueueRouteEnv, pr: number): Promise<void> {
   });
 }
 
+/** Keep the target old enough that its terminal transition compacts it at once. */
+async function fillWithNewerTerminals(e: QueueRouteEnv, firstPr = 1_000): Promise<void> {
+  await runOnQueue(e, REPO, REF, ({ commands }) => {
+    for (let offset = 0; offset < 20; offset += 1) {
+      const pr = firstPr + offset;
+      const entryId = `entry_${REPO}_${pr}`;
+      commands.requestQueue({
+        idempotencyKey: `request-${pr}`,
+        entryId,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "1",
+        headSha: pr.toString().repeat(40).slice(0, 40),
+      });
+      commands.cancel({
+        idempotencyKey: `cancel-${pr}`,
+        entryId,
+        actorPrincipalId: "github",
+        reason: "closed on GitHub",
+      });
+    }
+  });
+}
+
+/** Fail only final terminal-entry history writes, not queue authority itself. */
+function failingTerminalHistory(
+  db: D1Like,
+  pullRequestNumber: number,
+  failures: { remaining: number },
+): D1Like {
+  return {
+    prepare(query: string) {
+      const prepared = db.prepare(query);
+      if (!query.includes("INSERT INTO queue_entries_index")) return prepared;
+      return {
+        bind(...values: unknown[]) {
+          const bound = prepared.bind(...values);
+          return {
+            ...bound,
+            async run() {
+              if (
+                failures.remaining > 0 &&
+                values[4] === pullRequestNumber &&
+                (values[6] === "Merged" || values[6] === "Cancelled")
+              ) {
+                failures.remaining -= 1;
+                throw new Error("D1 terminal projection unavailable");
+              }
+              return bound.run();
+            },
+          };
+        },
+      } as ReturnType<D1Like["prepare"]>;
+    },
+    batch: (statements) => db.batch(statements),
+  };
+}
+
 async function seedIntent(pr: number, attemptId = `att_${pr}`): Promise<void> {
   const signed = await signReusedIntent({
     operationId: `merge_${attemptId}`,
@@ -266,6 +324,141 @@ describe("bounded terminal queue reconciliation", () => {
           .get() as { n: number }
       ).n,
     ).toBe(1);
+  });
+
+  it("projects an old merged entry after compaction and repeats without another record", async () => {
+    const e = env();
+    const pr = 243;
+    await seedIntent(pr);
+    await blocked(e, pr);
+    await fillWithNewerTerminals(e);
+    raw
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .run(REPO, REF, pr);
+
+    const first = await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, reads("closed", true), deps(pr));
+    // Reproduce the live deploy-window shape: the terminal event is in recent
+    // authority, but the pre-fix publisher left its older blocked D1 row.
+    raw
+      .prepare(
+        "UPDATE queue_entries_index SET state = 'Blocked', last_attempt_id = NULL WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+      )
+      .run(REPO, REF, pr);
+    const again = await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, reads("open"), deps(pr));
+
+    expect(first).toMatchObject({ reconciled: 1, examined: 1 });
+    expect(again).toMatchObject({ reconciled: 0, examined: 0 });
+    expect((await snapshot(e)).entries.some((entry) => entry.pullRequestNumber === pr)).toBe(false);
+    expect(
+      raw
+        .prepare(
+          "SELECT state, generation FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+        )
+        .get(REPO, REF, pr),
+    ).toMatchObject({ state: "Merged" });
+    expect(
+      (
+        raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge', 'candidate-verified-merge')",
+          )
+          .get() as { n: number }
+      ).n,
+    ).toBe(1);
+    expect(
+      await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) =>
+        store.pendingTerminalEntryProjections(),
+      ),
+    ).toEqual([]);
+  });
+
+  it("recovers a pre-handoff closed-unmerged row from its recent authoritative event", async () => {
+    const e = env();
+    const pr = 245;
+    await blocked(e, pr);
+    await fillWithNewerTerminals(e);
+    raw
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .run(REPO, REF, pr);
+    await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, reads("closed"), deps(pr));
+    raw
+      .prepare(
+        "UPDATE queue_entries_index SET state = 'Blocked' WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+      )
+      .run(REPO, REF, pr);
+
+    const noRead: TerminalPullRequestReads = {
+      pullRequestState: async () => {
+        throw new Error("an empty compatibility retry read GitHub");
+      },
+    };
+    const retry = await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, noRead, deps(pr));
+
+    expect(retry).toMatchObject({ reconciled: 0, examined: 0 });
+    expect(
+      raw
+        .prepare(
+          "SELECT state FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+        )
+        .get(REPO, REF, pr),
+    ).toEqual({ state: "Cancelled" });
+  });
+
+  it("keeps a compacted cancellation pending through D1 failure and publishes it on an empty retry", async () => {
+    const e = env();
+    const pr = 244;
+    await blocked(e, pr);
+    await fillWithNewerTerminals(e);
+    raw
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .run(REPO, REF, pr);
+    const failures = { remaining: 2 };
+    (e as { DB: unknown }).DB = failingTerminalHistory(e.DB as unknown as D1Like, pr, failures);
+
+    await expect(
+      reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, reads("closed"), deps(pr)),
+    ).rejects.toThrow("D1 terminal projection unavailable");
+    expect((await snapshot(e)).entries.some((entry) => entry.pullRequestNumber === pr)).toBe(false);
+    expect(
+      await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) =>
+        store.pendingTerminalEntryProjections().map((row) => row.pullRequestNumber),
+      ),
+    ).toEqual([pr]);
+
+    const noRead: TerminalPullRequestReads = {
+      pullRequestState: async () => {
+        throw new Error("an empty retry read GitHub");
+      },
+    };
+    const retry = await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, noRead, deps(pr));
+    const repeated = await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, noRead, deps(pr));
+    expect(retry).toMatchObject({ reconciled: 0, examined: 0 });
+    expect(repeated).toMatchObject({ reconciled: 0, examined: 0 });
+    const terminal = raw
+      .prepare(
+        "SELECT e.state, e.generation, m.generation AS current_generation FROM queue_entries_index e JOIN queue_projection_marks m ON m.github_repository_id = e.github_repository_id AND m.base_ref = e.base_ref WHERE e.github_repository_id = ? AND e.base_ref = ? AND e.pull_request_number = ?",
+      )
+      .get(REPO, REF, pr) as { state: string; generation: number; current_generation: number };
+    expect(terminal).toMatchObject({ state: "Cancelled" });
+    expect(terminal.generation).toBeLessThan(terminal.current_generation);
+    expect(
+      raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+        )
+        .get(REPO, REF, pr),
+    ).toEqual({ n: 1 });
+    expect(
+      await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) =>
+        store.pendingTerminalEntryProjections(),
+      ),
+    ).toEqual([]);
   });
 
   it("restores a missing link projection and public position before deciding whether to sign", async () => {
