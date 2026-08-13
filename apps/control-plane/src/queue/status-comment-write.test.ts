@@ -57,9 +57,13 @@ function view(over: Partial<CommentView> = {}): CommentView {
  * caller would let one pull request adopt another's, which is the exact bug the
  * marker exists to prevent, and it would report the marker as working.
  */
-function github(existing: Array<{ id: number; body: string }> = []) {
-  const comments = existing.map((comment) => ({ ...comment, pullRequestNumber: 184 }));
+function github(existing: Array<{ id: number; body: string; pullRequestNumber?: number }> = []) {
+  const comments = existing.map((comment) => ({
+    ...comment,
+    pullRequestNumber: comment.pullRequestNumber ?? 184,
+  }));
   const calls: string[] = [];
+  const updates: number[] = [];
   let next = 500;
   const api: CommentApi = {
     async list(pullRequestNumber) {
@@ -77,9 +81,10 @@ function github(existing: Array<{ id: number; body: string }> = []) {
       const found = comments.find((c) => c.id === commentId);
       if (found === undefined) throw new Error(`no comment ${commentId}`);
       found.body = body;
+      updates.push(found.pullRequestNumber);
     },
   };
-  return { api, comments, calls };
+  return { api, comments, calls, updates };
 }
 
 const WHERE = { repositoryId: REPO, baseRef: REF };
@@ -229,6 +234,64 @@ describe("a comment that cannot be written", () => {
 });
 
 describe("comments for entries compacted out of authority", () => {
+  const blockedBody = `${COMMENT_MARKER}\n**thwip** · blocked · Review required\n`;
+
+  async function seedTerminalBacklog(
+    t: TestD1,
+    entries: Array<{
+      entryId: string;
+      pullRequestNumber: number;
+      fairnessOrdinal: string;
+      generation: number;
+    }>,
+    currentGeneration = 1_000,
+  ) {
+    await projectQueueState(t.db, {
+      repositoryId: REPO,
+      baseRef: REF,
+      queueEpoch: 0,
+      generation: currentGeneration,
+      activeAttemptId: null,
+      paused: false,
+      pauseReason: null,
+      rebaselineRequired: false,
+      baseSha: null,
+      entries: [],
+      transitions: [],
+    });
+    await projectTerminalEntryHistory(
+      t.db,
+      REPO,
+      REF,
+      entries.map((entry) => ({
+        ...entry,
+        sponsorPrincipalId: "alice",
+        state: "Merged",
+        primaryReason: null,
+        schedulerEligible: false,
+        cooldownUntil: null,
+        lastAttemptId: null,
+        headSha: entry.pullRequestNumber.toString(16).padStart(40, "0"),
+      })),
+    );
+    for (const entry of entries) {
+      t.raw
+        .prepare(
+          "INSERT INTO queue_status_comments " +
+            "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+            "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+        )
+        .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
+    }
+    return github(
+      entries.map((entry) => ({
+        id: 10_000 + entry.pullRequestNumber,
+        body: blockedBody,
+        pullRequestNumber: entry.pullRequestNumber,
+      })),
+    );
+  }
+
   async function seedTerminal(
     t: TestD1,
     state: "Merged" | "Cancelled",
@@ -360,6 +423,252 @@ describe("comments for entries compacted out of authority", () => {
     ).toEqual(["updated"]);
     expect(gh.comments[0]!.body).toContain("position 1 of 1");
     expect(gh.comments[0]!.body).not.toContain("cancelled");
+  });
+
+  it("closes three recent repairs within a four-write pass over a production-sized backlog", async () => {
+    const t = db();
+    const ancient = Array.from({ length: 121 }, (_, index) => ({
+      entryId: `ancient-${index + 1}`,
+      pullRequestNumber: 1_000 + index,
+      fairnessOrdinal: String(index + 1),
+      generation: 1,
+    }));
+    const repaired = [
+      { entryId: "entry-237", pullRequestNumber: 237, fairnessOrdinal: "172", generation: 999 },
+      { entryId: "entry-238", pullRequestNumber: 238, fairnessOrdinal: "174", generation: 999 },
+      { entryId: "entry-219", pullRequestNumber: 219, fairnessOrdinal: "184", generation: 999 },
+    ];
+    const gh = await seedTerminalBacklog(t, [...ancient, ...repaired]);
+    const retained = Array.from({ length: 20 }, (_, index) => ({
+      entryId: `retained-${index}`,
+      pullRequestNumber: 3_000 + index,
+      sponsorPrincipalId: "alice",
+      state: "Merged",
+      primaryReason: null,
+      schedulerEligible: false,
+      fairnessOrdinal: String(300 + index),
+      cooldownUntil: null,
+      lastAttemptId: null,
+      headSha: (3_000 + index).toString(16).padStart(40, "0"),
+    }));
+    await projectQueueState(t.db, {
+      repositoryId: REPO,
+      baseRef: REF,
+      queueEpoch: 0,
+      generation: 1_000,
+      activeAttemptId: null,
+      paused: false,
+      pauseReason: null,
+      rebaselineRequired: false,
+      baseSha: null,
+      entries: retained,
+      transitions: [],
+    });
+    for (const entry of retained) {
+      t.raw
+        .prepare(
+          "INSERT INTO queue_status_comments " +
+            "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+            "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+        )
+        .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
+      gh.comments.push({
+        id: 10_000 + entry.pullRequestNumber,
+        body: blockedBody,
+        pullRequestNumber: entry.pullRequestNumber,
+      });
+    }
+    const budget = { remaining: 4 };
+
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      gh.api,
+      WHERE,
+      emptySnapshot({ generation: 1_000, entries: retained }),
+      { observing: false, now: NOW },
+      budget,
+    );
+
+    expect(gh.updates).toEqual([237, 238, 219, 1_000]);
+    expect(budget.remaining).toBe(0);
+    for (const pullRequestNumber of [237, 238, 219]) {
+      expect(gh.comments.find((comment) => comment.pullRequestNumber === pullRequestNumber)?.body).toContain(
+        "**thwip** · merged",
+      );
+    }
+    expect(
+      t.raw
+        .prepare("SELECT COUNT(*) AS count FROM queue_entries_index WHERE pull_request_number IN (219, 237, 238)")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      gh.api,
+      WHERE,
+      emptySnapshot({ generation: 1_000, entries: retained }),
+      { observing: false, now: "2026-08-04T21:19:02.000Z" },
+      { remaining: 4 },
+    );
+    for (const pullRequestNumber of [237, 238, 219]) {
+      expect(gh.updates.filter((updated) => updated === pullRequestNumber)).toHaveLength(1);
+    }
+  });
+
+  it("advances the oldest history while three newer repairs arrive on every pass", async () => {
+    const t = db();
+    const ancient = Array.from({ length: 5 }, (_, index) => ({
+      entryId: `ancient-${index + 1}`,
+      pullRequestNumber: 1_000 + index,
+      fairnessOrdinal: String(index + 1),
+      generation: 1,
+    }));
+    const gh = await seedTerminalBacklog(t, ancient);
+
+    for (let pass = 0; pass < ancient.length; pass += 1) {
+      const recent = Array.from({ length: 3 }, (_, index) => ({
+        entryId: `recent-${pass}-${index}`,
+        pullRequestNumber: 2_000 + pass * 3 + index,
+        fairnessOrdinal: String(200 + pass * 3 + index),
+        generation: 900 + pass,
+      }));
+      await projectTerminalEntryHistory(t.db, REPO, REF, recent.map((entry) => ({
+        ...entry,
+        sponsorPrincipalId: "alice",
+        state: "Merged",
+        primaryReason: null,
+        schedulerEligible: false,
+        cooldownUntil: null,
+        lastAttemptId: null,
+        headSha: entry.pullRequestNumber.toString(16).padStart(40, "0"),
+      })));
+      for (const entry of recent) {
+        t.raw
+          .prepare(
+            "INSERT INTO queue_status_comments " +
+              "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+              "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+          )
+          .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
+        gh.comments.push({
+          id: 10_000 + entry.pullRequestNumber,
+          body: blockedBody,
+          pullRequestNumber: entry.pullRequestNumber,
+        });
+      }
+
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        gh.api,
+        WHERE,
+        emptySnapshot({ generation: 1_000 }),
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      );
+    }
+
+    expect(gh.updates.filter((pullRequestNumber) => pullRequestNumber < 2_000)).toEqual([
+      1_000,
+      1_001,
+      1_002,
+      1_003,
+      1_004,
+    ]);
+  });
+
+  it("keeps a failed recent repair durable and retries it before later history", async () => {
+    const t = db();
+    const entries = [
+      { entryId: "recent-fails", pullRequestNumber: 237, fairnessOrdinal: "172", generation: 999 },
+      { entryId: "recent-2", pullRequestNumber: 238, fairnessOrdinal: "174", generation: 999 },
+      { entryId: "recent-3", pullRequestNumber: 219, fairnessOrdinal: "184", generation: 999 },
+      { entryId: "ancient", pullRequestNumber: 1_000, fairnessOrdinal: "1", generation: 1 },
+    ];
+    const gh = await seedTerminalBacklog(t, entries);
+    let failing = true;
+    const flaky: CommentApi = {
+      ...gh.api,
+      update: async (commentId, body) => {
+        const comment = gh.comments.find((candidate) => candidate.id === commentId);
+        if (failing && comment?.pullRequestNumber === 237) throw new Error("GitHub unavailable");
+        await gh.api.update(commentId, body);
+      },
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      flaky,
+      WHERE,
+      emptySnapshot({ generation: 1_000 }),
+      { observing: false, now: NOW },
+      { remaining: 4 },
+    );
+    expect(
+      t.raw.prepare("SELECT state FROM queue_entries_index WHERE pull_request_number = 237").get(),
+    ).toEqual({ state: "Merged" });
+    expect(gh.updates).toEqual([238, 219, 1_000]);
+
+    failing = false;
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      flaky,
+      WHERE,
+      emptySnapshot({ generation: 1_000 }),
+      { observing: false, now: NOW },
+      { remaining: 4 },
+    );
+    expect(gh.updates).toContain(237);
+    expect(
+      t.raw.prepare("SELECT state FROM queue_entries_index WHERE pull_request_number = 237").get(),
+    ).toBeUndefined();
+  });
+
+  it("publishes a reopened live admission before terminal backlog and never restores its old ending", async () => {
+    const t = db();
+    const oldAdmission = {
+      entryId: "old-184",
+      pullRequestNumber: 184,
+      fairnessOrdinal: "1",
+      generation: 999,
+    };
+    const legacy = Array.from({ length: 121 }, (_, index) => ({
+      entryId: `legacy-${index}`,
+      pullRequestNumber: 1_000 + index,
+      fairnessOrdinal: String(index + 2),
+      generation: 1,
+    }));
+    const gh = await seedTerminalBacklog(t, [oldAdmission, ...legacy]);
+    const reopened = emptySnapshot({
+      generation: 1_000,
+      entries: [
+        {
+          entryId: "reopened-184",
+          pullRequestNumber: 184,
+          sponsorPrincipalId: "alice",
+          state: "Ready",
+          primaryReason: null,
+          schedulerEligible: true,
+          fairnessOrdinal: "200",
+          cooldownUntil: null,
+          lastAttemptId: null,
+          headSha: "d".repeat(40),
+        },
+      ],
+    });
+
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      gh.api,
+      WHERE,
+      reopened,
+      { observing: false, now: NOW },
+      { remaining: 4 },
+    );
+
+    expect(gh.updates[0]).toBe(184);
+    expect(gh.comments.find((comment) => comment.pullRequestNumber === 184)?.body).toContain("position 1 of 1");
+    expect(gh.comments.find((comment) => comment.pullRequestNumber === 184)?.body).not.toContain("merged");
   });
 });
 
