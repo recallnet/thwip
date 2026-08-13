@@ -107,9 +107,9 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `checkout than the one you are standing in.\n`,
   doctor:
     `Usage: thwip doctor [--repo OWNER/NAME] [--branch BRANCH] [--allow-unread] [--json]\n\n` +
-    `Check the whole chain in one read-only pass: your session, the key that\n` +
-    `would sign, the policy in force, whether thwip is installed on this\n` +
-    `repository, what the queue is doing, and what the GitHub App is granted.\n` +
+    `Check the whole chain in one read-only pass: the CLI build and path, your\n` +
+    `session, the key that would sign, the local policy against the active remote\n` +
+    `policy, the exact queue project, and the GitHub App and managed rulesets.\n` +
     `Changes nothing.\n\n` +
     `Every check passes, fails, or goes unread, and the exit status is zero only\n` +
     `when every one of them passed. Reading App permissions needs repository\n` +

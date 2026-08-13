@@ -25,7 +25,7 @@ import { reportDoctor, type CheckStatus, type DoctorObservation } from "./queue-
  * fields nothing ever wrote, and every branch on them took its default forever.
  */
 
-export type DoctorCheckName = "session" | "signing-key" | "policy" | "repository" | "queue" | "app";
+export type DoctorCheckName = "cli" | "session" | "signing-key" | "policy" | "repository" | "queue" | "app";
 
 export interface DoctorCheck {
   readonly check: DoctorCheckName;
@@ -55,10 +55,44 @@ export type PolicyRead =
     }
   | { readonly kind: "unread"; readonly detail: string };
 
+/** The stamped build and executable path that are actually running doctor. */
+export interface CliRead {
+  readonly version: string;
+  readonly commit: string;
+  readonly path: string;
+  readonly checkoutRoot: string | null;
+  readonly checkoutMatch: boolean;
+}
+
 export interface LocalReads {
+  readonly cli: CliRead;
   readonly session: "signed-in" | "signed-out";
   readonly signingKey: SigningKeyRead;
   readonly policy: PolicyRead;
+}
+
+function cliCheck(local: LocalReads): DoctorCheck {
+  const cli = local.cli;
+  const facts = {
+    version: cli.version,
+    commit: cli.commit,
+    executablePath: cli.path,
+    checkoutRoot: cli.checkoutRoot,
+    checkoutMatch: cli.checkoutMatch,
+  };
+  if (cli.version === "unknown" || cli.commit === "unknown") {
+    return check("cli", "fail", "LOCAL_FAILURE", facts, [
+      `CLI: ${cli.path} has no valid build stamp. Rebuild and reinstall thwip from this checkout.`,
+    ]);
+  }
+  if (!cli.checkoutMatch) {
+    return check("cli", "fail", "LOCAL_FAILURE", facts, [
+      `CLI: ${cli.path} belongs to another checkout. Reinstall thwip from ${cli.checkoutRoot ?? "this checkout"}.`,
+    ]);
+  }
+  return check("cli", "pass", "PASS", facts, [
+    `CLI: thwip ${cli.version} (${cli.commit}) from ${cli.path}.`,
+  ]);
 }
 
 export interface DoctorFullReport {
@@ -73,6 +107,7 @@ const SEVERITY: ExitCode[] = [
   EXIT.setupInvalid,
   EXIT.permission,
   EXIT.evidenceRejected,
+  EXIT.sourceChanged,
   EXIT.unavailable,
   EXIT.invariant,
   EXIT.ok,
@@ -128,24 +163,58 @@ function signingKeyCheck(local: LocalReads): DoctorCheck {
   return check("signing-key", "pass", "PASS", facts, [`Signing key: ${key.fingerprint}, registered with GitHub.`]);
 }
 
-function policyCheck(local: LocalReads): DoctorCheck {
+function policyCheck(local: LocalReads, observations: readonly DoctorObservation[]): DoctorCheck {
   const policy = local.policy;
   if (policy.kind === "unread") {
     return check("policy", "unread", "LOCAL_FAILURE", { detail: policy.detail }, [
       `Policy: could not be read (${policy.detail}), so nothing knows what a proof here has to cover.`,
     ]);
   }
+  const remote = observations.find((observation) => observation.section === "queue");
+  if (remote === undefined || remote.status === 0 || remote.status >= 400) {
+    const reasonCode: ReasonCode =
+      remote?.status === 401
+        ? "LOGIN_REQUIRED"
+        : remote?.status === 403
+          ? "OWNER_UNAUTHORIZED"
+          : remote !== undefined && remote.status > 0 && remote.status < 500
+            ? "INVARIANT_FAILURE"
+            : "SERVICE_UNAVAILABLE";
+    return check("policy", "unread", reasonCode, {
+      policyDigest: policy.policyDigest,
+      remotePolicyDigest: null,
+    }, ["Policy: the local digest was read, but the active remote digest was not."]);
+  }
+  const remoteDigest = remote.body?.["activePolicyDigest"];
+  if (!(remoteDigest === null || typeof remoteDigest === "string")) {
+    return check("policy", "unread", "INVARIANT_FAILURE", {
+      policyDigest: policy.policyDigest,
+      remotePolicyDigest: null,
+    }, ["Policy: the control plane returned no usable active policy digest."]);
+  }
+  const facts = {
+    policyDigest: policy.policyDigest,
+    remotePolicyDigest: remoteDigest,
+    pipelineDigest: policy.pipelineDigest,
+    version: policy.version,
+    requiredSuites: policy.requiredSuites,
+    configSource: policy.configSource,
+  };
+  if (remoteDigest === null) {
+    return check("policy", "fail", "POLICY_CHANGED", facts, [
+      `Policy: ${policy.policyDigest} is local, but this project has no active remote policy.`,
+    ]);
+  }
+  if (remoteDigest !== policy.policyDigest) {
+    return check("policy", "fail", "POLICY_CHANGED", facts, [
+      `Policy: local ${policy.policyDigest} does not match active remote ${remoteDigest}.`,
+    ]);
+  }
   return check(
     "policy",
     "pass",
     "PASS",
-    {
-      policyDigest: policy.policyDigest,
-      pipelineDigest: policy.pipelineDigest,
-      version: policy.version,
-      requiredSuites: policy.requiredSuites,
-      configSource: policy.configSource,
-    },
+    facts,
     [
       `Policy: v${policy.version} from ${policy.configSource}, ${policy.policyDigest}.`,
       `  Required suites: ${policy.requiredSuites.length === 0 ? "none" : policy.requiredSuites.join(", ")}`,
@@ -174,9 +243,10 @@ export function runDoctor(input: {
   });
 
   const checks: DoctorCheck[] = [
+    cliCheck(input.local),
     sessionCheck(input.local),
     signingKeyCheck(input.local),
-    policyCheck(input.local),
+    policyCheck(input.local, input.observations),
     ...remote.sections.map((section) =>
       check(section.section, section.status, section.reasonCode, section.facts, section.lines),
     ),

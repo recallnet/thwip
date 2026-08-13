@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -46,7 +47,7 @@ import {
   type BuildIdentity,
 } from "./build-identity.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
-import { runDoctor, type LocalReads, type PolicyRead, type SigningKeyRead } from "./doctor.js";
+import { runDoctor, type CliRead, type LocalReads, type PolicyRead, type SigningKeyRead } from "./doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
 import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
@@ -943,7 +944,10 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
 
   for (const probe of doctorProbes({ repo, ref, events: argv.includes("--explain") ? 25 : 5 })) {
     if (probe.path.includes("{repositoryId}") && repositoryId === null) break;
-    const path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    let path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    if (probe.requiresAdmin && observations[0]?.body?.["projectId"] !== undefined) {
+      path += `?projectId=${encodeURIComponent(String(observations[0].body?.["projectId"]))}`;
+    }
     // A section that cannot be read is a fact to report, so a network failure
     // is recorded as status 0 rather than ending the command.
     const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
@@ -963,7 +967,19 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
 
   const report = reportDoctor(observations, { repo, ref, allowUnread });
   if (argv.includes("--json")) {
-    process.stdout.write(JSON.stringify({ repo, ref, sections: observations, unread: report.unread }) + "\n");
+    process.stdout.write(
+      JSON.stringify({
+        repo,
+        ref,
+        sections: report.sections.map((section) => ({
+          section: section.section,
+          status: section.status,
+          reasonCode: section.reasonCode,
+          facts: section.facts,
+        })),
+        unread: report.unread,
+      }) + "\n",
+    );
   } else {
     process.stdout.write(report.lines.join("\n") + "\n");
   }
@@ -988,6 +1004,7 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   const auth = await apiAuthHeader();
 
   const local: LocalReads = {
+    cli: await readCli(cwd),
     session: auth === null ? "signed-out" : "signed-in",
     signingKey: await readSigningKey(cwd),
     policy: await readPolicy(cwd, endpoint, auth),
@@ -1022,6 +1039,24 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   return report.exitCode;
 }
 
+/** The build identity and checkout relationship already enforced at startup. */
+async function readCli(cwd: string): Promise<CliRead> {
+  const identity = await runningBuild();
+  const checkoutRoot = findCliCheckout(cwd, existsSync);
+  return {
+    version: identity.version,
+    commit: identity.commit,
+    path: identity.mainPath,
+    checkoutRoot,
+    checkoutMatch:
+      buildMismatchFailure({
+        runningMainPath: identity.mainPath,
+        checkoutRoot,
+        identity,
+      }) === null,
+  };
+}
+
 /** The key that would sign here, and whether GitHub attributes it to anybody. */
 async function readSigningKey(cwd: string): Promise<SigningKeyRead> {
   try {
@@ -1045,7 +1080,7 @@ async function readSigningKey(cwd: string): Promise<SigningKeyRead> {
 /** What a proof made here would have to cover, from the policy in force. */
 async function readPolicy(cwd: string, endpoint: string, auth: string | null): Promise<PolicyRead> {
   try {
-    const project = await loadProjectConfigAtHead(cwd, endpoint, auth);
+    const project = await loadProjectConfigForRun(cwd, endpoint, auth);
     return {
       kind: "read",
       policyDigest: project.policyDigest,
@@ -1068,9 +1103,11 @@ async function probeRemote(
 ): Promise<DoctorObservation[]> {
   const observations: DoctorObservation[] = [];
   let repositoryId: string | null = null;
+  let projectId: string | null = null;
   for (const probe of doctorProbes({ repo, ref, events: 5 })) {
     if (probe.path.includes("{repositoryId}") && repositoryId === null) break;
-    const path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    let path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
+    if (probe.requiresAdmin && projectId !== null) path += `?projectId=${encodeURIComponent(projectId)}`;
     const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
       headers: { authorization: auth },
     })
@@ -1083,6 +1120,8 @@ async function probeRemote(
     if (probe.section === "repository" && answer.status === 200) {
       const id = answer.body?.["repositoryId"];
       repositoryId = typeof id === "string" ? id : null;
+      const selectedProject = answer.body?.["projectId"];
+      projectId = typeof selectedProject === "string" ? selectedProject : null;
     }
   }
   return observations;

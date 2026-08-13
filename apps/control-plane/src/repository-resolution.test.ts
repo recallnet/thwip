@@ -33,7 +33,7 @@ describe("repository name resolution", () => {
       await expect(resolveRepositoryFor(t.db, { kind: "user", githubUserId: "alice" }, "beta/private"))
         .resolves.toBeNull();
       await expect(resolveRepositoryFor(t.db, { kind: "user", githubUserId: "bob" }, "beta/private"))
-        .resolves.toEqual({ ownerId: "2", repositoryId: "20" });
+        .resolves.toEqual({ ownerId: "2", repositoryId: "20", projectId: "pb" });
 
       t.raw.prepare("UPDATE repository_grants SET active = 0 WHERE project_id = 'pb'").run();
       await expect(resolveRepositoryFor(t.db, { kind: "user", githubUserId: "bob" }, "beta/private"))

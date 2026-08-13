@@ -1,4 +1,4 @@
-import { EXIT, exitCodeFor, nextActionFor, type ExitCode, type ReasonCode } from "./queue-exit.js";
+import { EXIT, exitCodeFor, type ExitCode, type ReasonCode } from "./queue-exit.js";
 
 /**
  * `thwip queue doctor`, as three reads rather than one.
@@ -54,7 +54,7 @@ export function doctorProbes(input: { repo: string; ref: string; events: number 
     {
       section: "queue",
       method: "GET",
-      path: `/v1/queue/{repositoryId}/explain?ref=${encodeURIComponent(input.ref)}&events=${input.events}`,
+      path: `/v1/queue/{repositoryId}/readiness?ref=${encodeURIComponent(input.ref)}`,
       requiresAdmin: false,
     },
     { section: "app", method: "GET", path: "/v1/queue/{repositoryId}/doctor", requiresAdmin: true },
@@ -96,6 +96,8 @@ const SEVERITY: ExitCode[] = [
   EXIT.authRequired,
   EXIT.setupInvalid,
   EXIT.permission,
+  EXIT.sourceChanged,
+  EXIT.invariant,
   EXIT.unavailable,
   EXIT.ok,
 ];
@@ -106,6 +108,10 @@ function worst(codes: readonly ExitCode[]): ExitCode {
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 /**
@@ -153,15 +159,27 @@ function describeRepository(o: DoctorObservation, repo: string): Part {
     };
   }
   const id = record(o.body)["repositoryId"];
+  if (typeof id !== "string") {
+    return {
+      lines: [`The control plane returned no repository id for ${repo}.`],
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+    };
+  }
+  const projectId = record(o.body)["projectId"];
   return {
-    lines: [`thwip is installed on ${repo} (repository ${String(id ?? "unknown")}).`],
+    lines: [`thwip is installed on ${repo} (repository ${id}).`],
     status: "pass",
     reasonCode: "PASS",
-    facts: { repository: repo, repositoryId: typeof id === "string" ? id : null },
+    facts: { repository: repo, repositoryId: id, projectId: typeof projectId === "string" ? projectId : null },
   };
 }
 
-function describeQueue(o: DoctorObservation, ref: string): Part {
+function describeQueue(
+  o: DoctorObservation,
+  ref: string,
+  expected: { repositoryId: string; projectId: string },
+): Part {
   if (o.status === 0) {
     return {
       lines: [`Could not reach the control plane to read the queue for ${ref}.`],
@@ -195,57 +213,85 @@ function describeQueue(o: DoctorObservation, ref: string): Part {
   }
 
   const body = record(o.body);
-  const snapshot = record(body["snapshot"]);
-  const all = Array.isArray(snapshot["entries"]) ? (snapshot["entries"] as Record<string, unknown>[]) : [];
-  // The document keeps merged and cancelled entries, and counting them read as
-  // twenty-two pull requests waiting on a queue that had one live entry.
-  const entries = all.filter((e) => e["state"] !== "Merged" && e["state"] !== "Cancelled");
-  const why = Array.isArray(body["why"]) ? (body["why"] as Record<string, unknown>[]) : [];
-  const lines: string[] = [];
-
-  if (snapshot["paused"] === true) {
-    const reason = snapshot["pauseReason"];
-    lines.push(
-      typeof reason === "string" && reason.length > 0
-        ? `The queue for ${ref} is paused: ${reason}.`
-        : `The queue for ${ref} is paused.`,
-    );
-  } else {
-    const holding = snapshot["activeAttemptId"];
-    lines.push(
-      `The queue for ${ref} is running, with ${entries.length} waiting and ` +
-        (typeof holding === "string" ? "one holding the lane." : "nothing holding the lane."),
-    );
+  const projectId = body["projectId"];
+  const repositoryId = body["repositoryId"];
+  const baseRef = body["baseRef"];
+  const projectEnabled = body["projectEnabled"];
+  const activePolicyDigest = body["activePolicyDigest"];
+  const queueConfigured = body["queueConfigured"];
+  const queueEnabled = body["queueEnabled"];
+  const activationState = body["activationState"];
+  const setupComplete = body["setupComplete"];
+  if (
+    typeof projectId !== "string" ||
+    typeof repositoryId !== "string" ||
+    typeof baseRef !== "string" ||
+    typeof projectEnabled !== "boolean" ||
+    !(activePolicyDigest === null || typeof activePolicyDigest === "string") ||
+    typeof queueConfigured !== "boolean" ||
+    typeof queueEnabled !== "boolean" ||
+    !(activationState === null || typeof activationState === "string") ||
+    typeof setupComplete !== "boolean"
+  ) {
+    return {
+      lines: [`The control plane returned incomplete queue readiness for ${ref}.`],
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+    };
   }
-
-  for (const entry of entries) {
-    const number = entry["pullRequestNumber"];
-    const state = String(entry["state"] ?? "unknown");
-    const blocked = why.find((w) => w["pullRequestNumber"] === number)?.["blockedBy"];
-    const said = typeof blocked === "string" && blocked.length > 0 ? explain(blocked) : "nothing is holding it.";
-    lines.push(`  #${String(number)} ${state}: ${said}`);
+  const facts = {
+    ref: baseRef,
+    projectId,
+    repositoryId,
+    projectEnabled,
+    activePolicyDigest,
+    queueConfigured,
+    queueEnabled,
+    activationState,
+    setupComplete,
+  };
+  if (repositoryId !== expected.repositoryId || projectId !== expected.projectId || baseRef !== ref) {
+    return {
+      lines: [`The control plane returned queue readiness for a different project incarnation or branch than ${ref}.`],
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+      facts,
+    };
   }
-
+  if (!projectEnabled) {
+    return {
+      lines: [`The current project for ${ref} is disabled.`],
+      status: "fail",
+      reasonCode: "PROJECT_DISABLED",
+      facts,
+    };
+  }
+  if (activePolicyDigest === null) {
+    return {
+      lines: [`The current project for ${ref} has no active policy.`],
+      status: "fail",
+      reasonCode: "POLICY_CHANGED",
+      facts,
+    };
+  }
+  if (!queueConfigured || !queueEnabled || activationState !== "enforced" || !setupComplete) {
+    return {
+      lines: [
+        !queueConfigured
+          ? `No queue is configured for ${ref}.`
+          : `The queue for ${ref} is not ready (enabled: ${queueEnabled}, state: ${activationState ?? "none"}, setup complete: ${setupComplete}).`,
+      ],
+      status: "fail",
+      reasonCode: "QUEUE_NOT_CONFIGURED",
+      facts,
+    };
+  }
   return {
-    lines,
+    lines: [`The queue for ${ref} is enabled, fully set up, and enforced.`],
     status: "pass",
     reasonCode: "PASS",
-    facts: {
-      ref,
-      paused: snapshot["paused"] === true,
-      waiting: entries.length,
-      laneHeld: typeof snapshot["activeAttemptId"] === "string",
-    },
+    facts,
   };
-}
-
-/**
- * A blocking reason as the rest of thwip says it. The route answers with a
- * reason code where it has one and a phrase where it does not, and quoting a
- * bare code at a developer is the thing the shared table exists to stop.
- */
-function explain(blockedBy: string): string {
-  return /^[A-Z][A-Z_]+$/.test(blockedBy) ? nextActionFor(blockedBy) : `${blockedBy}.`;
 }
 
 function describeApp(o: DoctorObservation): Part {
@@ -273,6 +319,13 @@ function describeApp(o: DoctorObservation): Part {
       reasonCode: "OWNER_UNAUTHORIZED",
     };
   }
+  if (o.status === 404) {
+    return {
+      lines: ["The Thwip App installation is missing from this repository."],
+      status: "fail",
+      reasonCode: "APP_UNINSTALLED",
+    };
+  }
   if (o.status >= 400) {
     return {
       lines: [`The control plane refused to read App permissions (${o.status}).`],
@@ -282,8 +335,64 @@ function describeApp(o: DoctorObservation): Part {
   }
 
   const body = record(o.body);
+  const missingBody = body["missingPermissions"];
+  const healthBody = body["rulesetHealth"];
+  const workflowBody = body["workflowHealth"];
+  if (
+    missingBody === null ||
+    typeof missingBody !== "object" ||
+    Array.isArray(missingBody) ||
+    typeof body["canPublishMergeCheck"] !== "boolean" ||
+    typeof body["receivesEveryHandledEvent"] !== "boolean" ||
+    healthBody === null ||
+    typeof healthBody !== "object" ||
+    Array.isArray(healthBody) ||
+    typeof (healthBody as Record<string, unknown>)["healthy"] !== "boolean" ||
+    !stringArray((healthBody as Record<string, unknown>)["expectedNames"]) ||
+    !stringArray((healthBody as Record<string, unknown>)["missing"]) ||
+    !stringArray((healthBody as Record<string, unknown>)["duplicate"]) ||
+    !stringArray((healthBody as Record<string, unknown>)["drifted"]) ||
+    typeof (healthBody as Record<string, unknown>)["bypassActorsKnown"] !== "boolean" ||
+    workflowBody === null ||
+    typeof workflowBody !== "object" ||
+    Array.isArray(workflowBody) ||
+    typeof (workflowBody as Record<string, unknown>)["healthy"] !== "boolean" ||
+    !stringArray((workflowBody as Record<string, unknown>)["expectedPaths"]) ||
+    !stringArray((workflowBody as Record<string, unknown>)["missing"]) ||
+    !stringArray((workflowBody as Record<string, unknown>)["drifted"]) ||
+    typeof (workflowBody as Record<string, unknown>)["actionRef"] !== "string" ||
+    typeof (workflowBody as Record<string, unknown>)["actionAccessible"] !== "boolean"
+  ) {
+    return {
+      lines: ["The control plane returned incomplete App or ruleset diagnostics."],
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+    };
+  }
   const missing = Object.keys(record(body["missingPermissions"]));
-  const rulesets = Array.isArray(body["rulesets"]) ? body["rulesets"].length : 0;
+  const rulesetHealth = record(healthBody);
+  const workflowHealth = record(workflowBody);
+  const expectedNames = Array.isArray(rulesetHealth["expectedNames"])
+    ? (rulesetHealth["expectedNames"] as unknown[]).filter((name): name is string => typeof name === "string")
+    : [];
+  const missingRulesets = Array.isArray(rulesetHealth["missing"])
+    ? (rulesetHealth["missing"] as unknown[]).filter((name): name is string => typeof name === "string")
+    : [];
+  const duplicateRulesets = Array.isArray(rulesetHealth["duplicate"])
+    ? (rulesetHealth["duplicate"] as unknown[]).filter((name): name is string => typeof name === "string")
+    : [];
+  const driftedRulesets = Array.isArray(rulesetHealth["drifted"])
+    ? (rulesetHealth["drifted"] as unknown[]).filter((name): name is string => typeof name === "string")
+    : [];
+  const expectedWorkflows = Array.isArray(workflowHealth["expectedPaths"])
+    ? (workflowHealth["expectedPaths"] as unknown[]).filter((path): path is string => typeof path === "string")
+    : [];
+  const missingWorkflows = Array.isArray(workflowHealth["missing"])
+    ? (workflowHealth["missing"] as unknown[]).filter((path): path is string => typeof path === "string")
+    : [];
+  const driftedWorkflows = Array.isArray(workflowHealth["drifted"])
+    ? (workflowHealth["drifted"] as unknown[]).filter((path): path is string => typeof path === "string")
+    : [];
   const lines: string[] = [];
   if (missing.length === 0) {
     lines.push("The Thwip App holds every permission the queue needs.");
@@ -298,16 +407,73 @@ function describeApp(o: DoctorObservation): Part {
   if (body["canComment"] === false) {
     lines.push("It also cannot write the status comment on a queued pull request, so nothing on the page will say why.");
   }
-  lines.push(rulesets === 1 ? "1 ruleset applies to this repository." : `${rulesets} rulesets apply to this repository.`);
-  const bad = missing.length > 0 || body["canPublishMergeCheck"] === false;
+  if (body["receivesEveryHandledEvent"] === false) {
+    lines.push("The App is not subscribed to every GitHub event its handlers require.");
+  }
+  if (rulesetHealth["healthy"] === true) {
+    lines.push(`GitHub is actively enforcing the exact ${expectedNames.join(" and ")} rulesets.`);
+  } else {
+    const findings = [
+      ...missingRulesets.map((name) => `missing ${name}`),
+      ...duplicateRulesets.map((name) => `duplicate ${name}`),
+      ...driftedRulesets.map((name) => `drifted ${name}`),
+    ];
+    lines.push(`The managed branch rulesets are not exact: ${findings.join(", ") || "unknown drift"}.`);
+  }
+  if (rulesetHealth["bypassActorsKnown"] === false) {
+    lines.push("GitHub hid bypass actors from the App, so doctor cannot confirm the managed rulesets are exact.");
+  }
+  if (workflowHealth["healthy"] === true) {
+    lines.push("The default branch has the exact managed workflows and can read the pinned verifier action.");
+  } else {
+    const findings = [
+      ...missingWorkflows.map((path) => `missing ${path}`),
+      ...driftedWorkflows.map((path) => `drifted ${path}`),
+      ...(workflowHealth["actionAccessible"] === false ? ["pinned verifier action is inaccessible"] : []),
+    ];
+    lines.push(`The managed workflows are not ready: ${findings.join(", ") || "unknown drift"}.`);
+  }
+  const appBad =
+    missing.length > 0 ||
+    body["canPublishMergeCheck"] === false ||
+    body["receivesEveryHandledEvent"] === false;
+  const rulesetBad =
+    missingRulesets.length > 0 || duplicateRulesets.length > 0 || driftedRulesets.length > 0;
+  const bypassActorsUnread = !rulesetBad && rulesetHealth["bypassActorsKnown"] === false;
+  const workflowBad = workflowHealth["healthy"] !== true;
+  const bad = appBad || rulesetBad || workflowBad;
   return {
     lines,
-    status: bad ? "fail" : "pass",
-    reasonCode: bad ? "APP_PERMISSION_DRIFT" : "PASS",
+    status: bad ? "fail" : bypassActorsUnread ? "unread" : "pass",
+    reasonCode: appBad
+      ? "APP_PERMISSION_DRIFT"
+      : rulesetBad
+        ? "RULESET_DRIFT"
+        : workflowBad
+          ? "NO_PINNED_VERIFIER"
+          : bypassActorsUnread
+            ? "OWNER_UNAUTHORIZED"
+            : "PASS",
     facts: {
       missingPermissions: missing,
       canPublishMergeCheck: body["canPublishMergeCheck"] === true,
-      rulesets,
+      receivesEveryHandledEvent: body["receivesEveryHandledEvent"] === true,
+      rulesetHealth: {
+        healthy: rulesetHealth["healthy"] === true,
+        expectedNames,
+        missing: missingRulesets,
+        duplicate: duplicateRulesets,
+        drifted: driftedRulesets,
+        bypassActorsKnown: rulesetHealth["bypassActorsKnown"] === true,
+      },
+      workflowHealth: {
+        healthy: workflowHealth["healthy"] === true,
+        expectedPaths: expectedWorkflows,
+        missing: missingWorkflows,
+        drifted: driftedWorkflows,
+        actionRef: typeof workflowHealth["actionRef"] === "string" ? workflowHealth["actionRef"] : null,
+        actionAccessible: workflowHealth["actionAccessible"] === true,
+      },
     },
   };
 }
@@ -331,13 +497,38 @@ export function reportDoctor(
   };
 
   const repository = seen("repository");
-  if (repository !== undefined) add("repository", describeRepository(repository, options.repo));
+  const repositoryPart = describeRepository(
+    repository ?? { section: "repository", status: 0, body: null },
+    options.repo,
+  );
+  add("repository", repositoryPart);
+  const resolvedRepositoryId = repository?.body?.["repositoryId"];
+  const resolvedProjectId = repository?.body?.["projectId"];
+  const exactProject =
+    typeof resolvedRepositoryId === "string" && typeof resolvedProjectId === "string"
+      ? { repositoryId: resolvedRepositoryId, projectId: resolvedProjectId }
+      : null;
 
   const queue = seen("queue");
-  if (queue !== undefined) add("queue", describeQueue(queue, options.ref));
+  if (queue !== undefined && exactProject !== null) add("queue", describeQueue(queue, options.ref, exactProject));
+  else if (queue !== undefined && repositoryPart.status === "pass") {
+    add("queue", {
+      lines: ["The repository lookup returned no exact project incarnation for the readiness check."],
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+    });
+  }
+  else if (repositoryPart.status === "pass") {
+    add("queue", {
+      lines: [`Could not reach the control plane to read the queue for ${options.ref}.`],
+      status: "unread",
+      reasonCode: "SERVICE_UNAVAILABLE",
+    });
+  }
 
   const app = seen("app");
   if (app !== undefined) add("app", describeApp(app));
+  else if (repositoryPart.status === "pass") add("app", describeApp({ section: "app", status: 0, body: null }));
 
   const codes = sections.map((section) => {
     // `--allow-unread` buys off a section this caller has no standing to read
