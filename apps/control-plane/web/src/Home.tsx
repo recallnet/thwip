@@ -175,13 +175,11 @@ export function Home({
         <main>
           <Row eyebrow="A merge queue for agent-built software." variant="open">
             <h1>
-              <span className="mq-hero__line mq-hero__line--lead">Your agents already ran CI locally.</span>
-              <span className="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>
+              <span className="mq-hero__line mq-hero__line--lead">A merge queue built for agent workflows.</span>
             </h1>
             <p className="mq-hero__lede">
-              Thwip verifies signed evidence from those agent runs and lets you configure what counts as proof. When
-              that evidence is enough, the protected merge queue moves without repeating the same checks in cloud CI.
-              Simple.
+              Thwip makes agents prove their work before it enters the queue, then reuses that proof to avoid expensive
+              cloud CI whenever it can. Agents save time. You save money. Simple.
             </p>
             <div className="nt-actions mq-hero__actions">
               <SetupAction me={me} signIn={signIn} />
