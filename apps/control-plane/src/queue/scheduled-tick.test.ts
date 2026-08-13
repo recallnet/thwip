@@ -1,5 +1,5 @@
 // apps/control-plane/src/queue/scheduled-tick.test.ts
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import type { Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
@@ -27,11 +27,22 @@ import { mergeCommitText } from "./merge-commit.js";
 
 const open: Array<{ close(): void }> = [];
 let raw: import("better-sqlite3").Database;
+let fixtureSigningKey: CryptoKey;
+let fixturePublicJwk: Awaited<ReturnType<typeof exportJWK>>;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  fixtureSigningKey = pair.privateKey;
+  fixturePublicJwk = { ...(await exportJWK(pair.publicKey)), kid: "scheduled-tick-fixture", alg: "ES256" };
+});
 
 function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  raw
+    .prepare("INSERT OR IGNORE INTO service_keys (kid, public_jwk) VALUES (?, ?)")
+    .run(fixturePublicJwk.kid, JSON.stringify(fixturePublicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -417,6 +428,182 @@ async function blockedEntry(
     });
   });
 }
+
+describe("terminal pull requests missed by the webhook", () => {
+  it("republishes the queue and status snapshot after cancelling a closed entry", async () => {
+    const e = env();
+    queue("1", 1);
+    await blockedEntry(e.DB as unknown as D1Like, "1", "entry_a", 56, "REVIEW_REQUIRED");
+    const published: Array<{ state: string }[]> = [];
+
+    const result = await tickAllQueues(
+      e,
+      {
+        driveQueue: async () => {},
+        onQueueTicked: () => {},
+        onQueueFailed: () => {},
+        reconsiderHead: async () => 0,
+        publishStatusComments: async (_repositoryId, _baseRef, snapshot) => {
+          published.push(snapshot.entries.map((entry) => ({ state: entry.state })));
+        },
+        retireStatusComments: async () => {},
+      },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+      {
+        pullRequestState: async () => ({
+          state: "closed",
+          merged: false,
+          mergeCommitSha: null,
+          headSha: "h".repeat(40),
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({ terminalEntriesExamined: 1, terminalEntriesReconciled: 1 });
+    expect(published.at(-1)).toEqual([{ state: "Cancelled" }]);
+    const projected = await (e.DB as unknown as D1Like)
+      .prepare(
+        "SELECT state FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND entry_id = ?",
+      )
+      .bind("1", REF, "entry_a")
+      .first<{ state: string }>();
+    expect(projected?.state).toBe("Cancelled");
+  });
+
+  it("publishes the committed terminal status before a later lane drive fails", async () => {
+    const e = env();
+    queue("1", 1);
+    await runOnQueue(e, "1", REF, async ({ commands }) => {
+      for (const [entryId, pr, sponsor] of [
+        ["entry_closed", 56, "alice"],
+        ["entry_next", 57, "bob"],
+      ] as const) {
+        commands.requestQueue({
+          idempotencyKey: `req-${entryId}`,
+          entryId,
+          pullRequestNumber: pr,
+          sponsorPrincipalId: sponsor,
+          sponsorGithubUserId: pr.toString(),
+          headSha: "h".repeat(40),
+        });
+        commands.evaluateReadiness({
+          idempotencyKey: `ready-${entryId}`,
+          entryId,
+          ready: true,
+          schedulerEligible: true,
+          primaryReason: null,
+        });
+      }
+      await commands.tick({ idempotencyKey: "offer-closed-entry" });
+    });
+    const published: string[][] = [];
+    let drives = 0;
+
+    const result = await tickAllQueues(
+      e,
+      {
+        driveQueue: async () => {
+          drives += 1;
+          if (drives > 1) throw new Error("injected drive failure after repair");
+        },
+        onQueueTicked: () => {},
+        onQueueFailed: () => {},
+        reconsiderHead: async () => 0,
+        publishStatusComments: async (_repositoryId, _baseRef, snapshot) => {
+          published.push(snapshot.entries.map((entry) => entry.state));
+        },
+        retireStatusComments: async () => {},
+      },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+      {
+        pullRequestState: async (_environment, _repositoryId, pullRequestNumber) => ({
+          state: pullRequestNumber === 56 ? "closed" : "open",
+          merged: false,
+          mergeCommitSha: null,
+          headSha: "h".repeat(40),
+        }),
+      },
+    );
+
+    expect(result.failed).toBe(1);
+    expect(published.at(-1)).toEqual(["Cancelled", "Offered"]);
+  });
+
+  it("reconciles a closed lane holder even when its first drive fails", async () => {
+    const e = env();
+    queue("1", 1);
+    await runOnQueue(e, "1", REF, async ({ commands }) => {
+      commands.requestQueue({
+        idempotencyKey: "req-closed-holder",
+        entryId: "entry_closed",
+        pullRequestNumber: 56,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "56",
+        headSha: "h".repeat(40),
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: "ready-closed-holder",
+        entryId: "entry_closed",
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+      await commands.tick({ idempotencyKey: "offer-closed-holder" });
+    });
+    const db = e.DB as unknown as D1Like;
+    const published: string[][] = [];
+    const failed: unknown[] = [];
+    let pullRequestReads = 0;
+
+    const result = await tickAllQueues(
+      e,
+      {
+        driveQueue: async () => {
+          throw new Error("injected first drive failure");
+        },
+        onQueueTicked: () => {},
+        onQueueFailed: (_repositoryId, error) => failed.push(error),
+        reconsiderHead: async () => 0,
+        publishStatusComments: async (_repositoryId, _baseRef, snapshot) => {
+          published.push(snapshot.entries.map((entry) => entry.state));
+        },
+        retireStatusComments: async () => {},
+      },
+      readsThatSayMerged(),
+      recordDepsThatRecord(),
+      {
+        pullRequestState: async () => {
+          pullRequestReads += 1;
+          return {
+            state: "closed",
+            merged: false,
+            mergeCommitSha: null,
+            headSha: "h".repeat(40),
+          };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      failed: 1,
+      driven: 0,
+      terminalEntriesExamined: 1,
+      terminalEntriesReconciled: 1,
+    });
+    expect(failed).toHaveLength(1);
+    expect(pullRequestReads).toBe(1);
+    expect(published.at(-1)).toEqual(["Cancelled"]);
+    const projected = await db
+      .prepare(
+        "SELECT state FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND entry_id = ?",
+      )
+      .bind("1", REF, "entry_closed")
+      .first<{ state: string }>();
+    expect(projected?.state).toBe("Cancelled");
+  });
+});
 
 /**
  * Readiness that stopped being true and nothing noticed.
@@ -1124,7 +1311,10 @@ function recordDepsThatRecord(): RecordFromIntentDeps<QueueRouteEnv> {
       requiredSuites: ["unit"],
       organizationId: "org_acme",
     }),
-    signRecordBytes: async () => "jws-record",
+    signRecordBytes: async (_environment, bytes, typ) =>
+      new CompactSign(bytes)
+        .setProtectedHeader({ alg: "ES256", kid: fixturePublicJwk.kid, typ })
+        .sign(fixtureSigningKey),
     storeEvidence: async () => "no-bucket",
     onQueue: runOnQueue,
   };
@@ -1292,10 +1482,14 @@ describe("settling a merge write whose response was lost", () => {
     expect(result.settledWrites).toBe(1);
     const chain = await readChain(db, "1", REF);
     expect(chain).toHaveLength(1);
-    expect(chain[0]?.digest).not.toBe(legacy.transitionDigest);
+    // The authentic staged bytes are recovered. Re-signing here would leave a
+    // second durable record for the same merge after exactly the crash window
+    // this repair owns.
+    expect(chain[0]?.digest).toBe(legacy.transitionDigest);
+    expect(raw.prepare("SELECT digest FROM queue_attestations WHERE kind LIKE '%merge'").all()).toHaveLength(1);
     expect(
       raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE digest = ?").get(legacy.transitionDigest),
-    ).toEqual({ sequence: null });
+    ).toEqual({ sequence: 1 });
   });
 
   /**

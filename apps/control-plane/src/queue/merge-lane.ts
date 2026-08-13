@@ -11,6 +11,7 @@ import {
   reuseEvidenceFor,
   signReusedRecord,
   signVerifiedRecord,
+  recoverExactMergeRecord,
   storeAttestation,
   transitionRecordFor,
   verifiedEvidenceFor,
@@ -21,6 +22,8 @@ import { requiredSuitesDigest, type Sha256, type TransitionRecordKind } from "@t
 import { transitionKindOf, type TransitionKind } from "@thwip/queue-domain";
 import { putEvidence, type R2Like } from "./evidence-store.js";
 import { acceptedReceiptFor } from "./assignment-store.js";
+import { withTransitionSigningLease } from "./transition-signing-lease.js";
+import { projectAuthoritativeQueue } from "./queue-projection.js";
 
 /** How a caller runs commands against one queue document. */
 export type OnQueue<TEnv> = <T>(
@@ -235,6 +238,39 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     );
   }
 
+  const db = env.DB as unknown as D1Like;
+  const signingOwner = `merge-callback:${input.attemptId}:${crypto.randomUUID()}`;
+  const signing = await withTransitionSigningLease(
+    db,
+    {
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      owner: signingOwner,
+    },
+    async (claim) => {
+
+  await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+  if (!(await claim.fence())) {
+    return skip("a later signed transition writer replaced this callback while it restored queue authority");
+  }
+
+  if (input.pullRequestNumber !== null) {
+    const exact = await recoverExactMergeRecord(db, {
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      pullRequestNumber: input.pullRequestNumber,
+      mergeSha: input.mergeSha,
+    });
+    if (exact?.status === "linked") {
+      return {
+        status: "duplicate",
+        sequence: exact.transitionSequence,
+        digest: exact.digest,
+        snapshot: null,
+      };
+    }
+  }
+
   // One merge, one signed record. The domain layer already deduplicates the
   // transition itself by attempt id, but signing used to run again on every
   // call regardless: a fresh `observedAt` made a fresh digest every time, so
@@ -243,7 +279,6 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // anything is built or signed, so a second report of a merge this attempt
   // already produced is idempotent all the way through rather than only at
   // the transition.
-  const db = env.DB as unknown as D1Like;
   const existingDigest = await transitionRecordFor(db, input.repositoryId, input.baseRef, input.attemptId);
   const existingLink = await durableTransitionForAttempt(db, {
     repositoryId: input.repositoryId,
@@ -348,42 +383,88 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     observedAt: new Date().toISOString(),
     signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
   };
-  const signed =
-    "assignmentDigest" in evidence
-      ? await signVerifiedRecord({ ...recordSubject, evidence })
-      : await signReusedRecord({ ...recordSubject, evidence });
-  if ("error" in signed) return skip(`the queue refused to sign its own record: ${signed.error}`);
-
-  // Stored before the link is written, so a link never names a record that
-  // cannot be read back.
   const recordKind: TransitionRecordKind = verifiedMerge
     ? "verified-merge"
     : "verifierResultDigest" in evidence && evidence.verifierResultDigest !== undefined
       ? "candidate-verified-merge"
       : "reused-proof-merge";
-  await storeAttestation(db, {
-    digest: signed.digest,
-    kind: recordKind,
-    repositoryId: input.repositoryId,
-    baseRef: input.baseRef,
-    transitionSequence: null,
-    attemptId: input.attemptId,
-    bytes: signed.bytes,
-    jws: signed.jws,
-    organizationId: evidence.organizationId,
-    mirror: (input) =>
-      storeEvidence(env, {
-        organizationId: input.organizationId,
-        repositoryId: input.repositoryId,
-        kind: input.kind,
-        digest: input.digest as `sha256:${string}`,
-        bytes: input.bytes,
-      }).then(() => undefined),
-  });
-
   const expectedSequence = recordSubject.position.transitionSequence;
   const expectedPrior = recordSubject.position.previousTransitionDigest;
+  if (!(await claim.fence())) {
+    return skip("a later signed transition writer replaced this callback before it could recover staged bytes");
+  }
+  const reusable = await recoverExactMergeRecord(db, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    pullRequestNumber: input.pullRequestNumber,
+    mergeSha: input.mergeSha,
+    staged: {
+      pullRequestNumber: input.pullRequestNumber,
+      mergeTree: input.mergeTree,
+      parentShas: input.parentShas,
+      beforeBaseSha: attempt.baseSha,
+      beforeTree: before?.treeOid ?? null,
+      queueEpoch: input.queueEpoch,
+      transitionSequence: expectedSequence,
+      priorDigest: expectedPrior,
+    },
+  });
+  if (reusable?.status === "linked") {
+    return {
+      status: "duplicate",
+      sequence: reusable.transitionSequence,
+      digest: reusable.digest,
+      snapshot: null,
+    };
+  }
+  let recordDigest = reusable?.digest ?? null;
+  let recordAttemptId = reusable?.status === "staged" ? reusable.attemptId : input.attemptId;
+  let linkingRecordKind = reusable?.status === "staged" ? reusable.recordKind : recordKind;
+  if (recordDigest === null) {
+    if (!(await claim.fence())) {
+      return skip("a later signed transition writer replaced this callback before it could sign");
+    }
+    const signed =
+      "assignmentDigest" in evidence
+        ? await signVerifiedRecord({ ...recordSubject, evidence })
+        : await signReusedRecord({ ...recordSubject, evidence });
+    if ("error" in signed) return skip(`the queue refused to sign its own record: ${signed.error}`);
+    if (!(await claim.fence())) {
+      return skip("a later signed transition writer replaced this callback while it was signing");
+    }
+
+    // Stored before the link is written, so a link never names a record that
+    // cannot be read back.
+    recordDigest = signed.digest;
+    recordAttemptId = input.attemptId;
+    linkingRecordKind = recordKind;
+    await storeAttestation(db, {
+      digest: signed.digest,
+      kind: recordKind,
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      transitionSequence: null,
+      attemptId: input.attemptId,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      organizationId: evidence.organizationId,
+      mirror: (input) =>
+        storeEvidence(env, {
+          organizationId: input.organizationId,
+          repositoryId: input.repositoryId,
+          kind: input.kind,
+          digest: input.digest as `sha256:${string}`,
+          bytes: input.bytes,
+        }).then(() => undefined),
+    });
+  }
+  if (!(await claim.fence())) {
+    return skip("a later signed transition writer replaced this callback before it could link its record");
+  }
   const { result, snapshot } = await input.onQueue(env, input.repositoryId, input.baseRef, ({ commands, store }) => {
+    if (!store.holdsTransitionSigning(signingOwner, new Date().toISOString())) {
+      return { moved: true as const };
+    }
     const tail = store.state().transitions.at(-1);
     if ((tail?.transitionSequence ?? 0) + 1 !== expectedSequence || (tail?.digest ?? null) !== expectedPrior) {
       return { moved: true as const };
@@ -391,24 +472,24 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     return {
       moved: false as const,
       transition: commands.recordTransition({
-        idempotencyKey: `transition:${input.attemptId}`,
-        kind: transitionKindOf(recordKind),
+        idempotencyKey: `transition:${recordAttemptId}`,
+        kind: transitionKindOf(linkingRecordKind),
         transitionSequence: expectedSequence,
         priorDigest: expectedPrior,
-        digest: signed.digest,
+        digest: recordDigest,
         baseSha: input.mergeSha,
-        attemptId: input.attemptId,
+        attemptId: recordAttemptId === input.attemptId ? input.attemptId : null,
         witnessPrincipalIds: input.witnessPrincipalIds,
       }),
     };
   });
-  const linked = await durableTransitionForAttempt(db, {
+  const linked = await recoverExactMergeRecord(db, {
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
-    attemptId: input.attemptId,
+    pullRequestNumber: input.pullRequestNumber,
     mergeSha: input.mergeSha,
   });
-  if (linked === null) {
+  if (linked?.status !== "linked") {
     return skip(
       result.moved
         ? "the chain moved while the transition record was being signed"
@@ -417,20 +498,17 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
         : "the transition command did not create the signed queue link",
     );
   }
-  const placed = await placeAttestationInChain(db, {
-    digest: linked.digest,
-    repositoryId: input.repositoryId,
-    baseRef: input.baseRef,
-    attemptId: input.attemptId,
-    transitionSequence: linked.transitionSequence,
-  });
-  if (!placed) return skip("the queue linked the record but its public chain position could not be stored");
   return {
-    status: result.moved || linked.digest !== signed.digest ? "duplicate" : result.transition.status,
+    status: result.moved || linked.digest !== recordDigest ? "duplicate" : result.transition.status,
     sequence: linked.transitionSequence,
     digest: linked.digest,
     snapshot,
   };
+    },
+  );
+  return signing.acquired
+    ? signing.result
+    : skip("another signed transition writer owns this branch; the heartbeat will retry this record");
 }
 
 /**

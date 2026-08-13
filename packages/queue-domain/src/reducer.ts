@@ -831,6 +831,43 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       break;
     }
 
+    case "EntryMergeReconciled": {
+      const entry = requireEntry(state, event.entryId);
+      if (entry.state === "Merged") return previous;
+      if (entry.state === "Cancelled") {
+        fail(`ENTRY_TERMINAL: entry ${entry.entryId} is Cancelled; it cannot become Merged`);
+      }
+      requireRecordDigest(event.transitionDigest);
+      if (!Number.isSafeInteger(event.transitionSequence) || event.transitionSequence < 1) {
+        fail("a reconciled merge record must have a positive transition sequence");
+      }
+
+      // A stale entry can still own the lane. The signed record is stronger
+      // evidence than that stale ownership: the pull request already merged.
+      // End any different live attempt so the lane is freed. If the recorded
+      // attempt still survives and carries its candidate, repair its terminal
+      // phase too; otherwise the durable record remains the authority and the
+      // compacted attempt is not reconstructed from guesses.
+      if (entry.currentAttemptId !== null) {
+        const current = state.attempts.get(entry.currentAttemptId);
+        if (current !== undefined && current.outcome === null && current.phase !== "MERGED") {
+          terminate(state, current, "SUPERSEDED");
+        }
+      }
+      const recorded = state.attempts.get(event.attemptId);
+      if (recorded !== undefined && recorded.candidateTree !== null) {
+        recorded.outcome = null;
+        recorded.outcomeUnknown = false;
+        recorded.mergeSha = event.mergeSha;
+        recorded.phase = "MERGED";
+      }
+      if (state.activeAttemptId === event.attemptId) state.activeAttemptId = null;
+      entry.currentAttemptId = null;
+      entry.lastAttemptId = event.attemptId;
+      setEntryState(entry, "Merged");
+      break;
+    }
+
     case "ExternalTransitionObserved": {
       // Unexpected base movement pauses the queue (§6.2 invariant 21).
       state.paused = true;

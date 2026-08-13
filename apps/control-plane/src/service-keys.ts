@@ -1,4 +1,4 @@
-import type { JWK } from "jose";
+import { compactVerify, createLocalJWKSet, type JSONWebKeySet, type JWK } from "jose";
 import type { D1Like } from "./queue/projection.js";
 
 /**
@@ -39,4 +39,27 @@ export async function recordActiveKey(db: D1Like, jwk: JWK): Promise<void> {
 export async function verificationKeys(db: D1Like): Promise<JWK[]> {
   const rows = await db.prepare("SELECT public_jwk FROM service_keys ORDER BY created_at").bind().all<{ public_jwk: string }>();
   return rows.results.map((r) => JSON.parse(r.public_jwk) as JWK);
+}
+
+/** Verify that the service signed these exact bytes with any published key. */
+export async function verifyServiceSignature(
+  db: D1Like,
+  bytes: Uint8Array,
+  jws: string,
+  expectedType?: string,
+): Promise<boolean> {
+  // Reading the trust roots is an infrastructure operation. If it fails the
+  // caller must retry; treating that failure as an invalid signature can make
+  // merge recovery sign replacement bytes for a valid staged record.
+  const published: JSONWebKeySet = { keys: await verificationKeys(db) };
+  try {
+    const { payload, protectedHeader } = await compactVerify(jws, createLocalJWKSet(published));
+    return (
+      (expectedType === undefined || protectedHeader.typ === expectedType) &&
+      payload.length === bytes.length &&
+      payload.every((value, index) => value === bytes[index])
+    );
+  } catch {
+    return false;
+  }
 }

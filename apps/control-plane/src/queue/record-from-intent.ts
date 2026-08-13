@@ -8,6 +8,7 @@ import {
   type MergeIntentV1,
   type Sha256,
 } from "@thwip/queue-protocol";
+import { transitionKindOf } from "@thwip/queue-domain";
 import type { QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
 import { buildSnapshot, type QueueSnapshot } from "./queue-operations.js";
@@ -17,18 +18,21 @@ import type { QueueCommands } from "./commands.js";
 import {
   authorizationFor,
   clearAttestationChainPosition,
-  durableTransitionForAttempt,
-  placeAttestationInChain,
+  durableMergeRecordForCommit,
   readAttestation,
   recordCoveringCommit,
+  queueTransitionLinkForDigest,
   signReusedRecord,
   signVerifiedRecord,
+  recoverExactMergeRecord,
   storeAttestation,
   transitionRecordFor,
   type VerifiedEvidence,
 } from "./attestation.js";
 import { issuedAssignmentForAttempt } from "./assignment-store.js";
 import { acceptIntegrationReceipt, integrationReceiptDigest } from "./integration-receipt.js";
+import { withTransitionSigningLease } from "./transition-signing-lease.js";
+import { projectAuthoritativeQueue } from "./queue-projection.js";
 
 /**
  * Putting a merge back into the chain from what survives the attempt.
@@ -394,6 +398,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   if (facts.message === undefined) {
     return { status: "refused", code: "COMMIT_UNREADABLE", detail: "could not read that commit's message" };
   }
+  const commitMessage = facts.message;
 
   // A commit that exists is not a commit that landed. The record would say the
   // base branch became this, so the branch is asked, exactly as the merge
@@ -413,68 +418,91 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
 
   const db = env.DB as unknown as D1Like;
+  const signingOwner = `intent-repair:${input.attemptId ?? mergeSha}:${crypto.randomUUID()}`;
+  const signing = await withTransitionSigningLease<RecordFromIntentResult>(
+    db,
+    {
+      repositoryId,
+      baseRef,
+      owner: signingOwner,
+    },
+    async (claim) => {
+
+  // Recovery reads the transition projection, but queue_state is authority.
+  // Replay authority before deciding that no link exists; this repairs the
+  // commit-before-projection failure without creating new signed bytes.
+  await projectAuthoritativeQueue(db, repositoryId, baseRef);
+  if (!(await claim.fence())) {
+    return {
+      status: "refused",
+      code: "CHAIN_MOVED",
+      detail: "a later signed transition writer replaced this repair while it restored queue authority",
+    };
+  }
 
   // Asked before the authorization, because a chain that already carries this
-  // commit has nothing left to put back and the reason no intent authorizes it
-  // may be the reason a movement record was written for it. The sweep leaves a
-  // row alone whenever this path refuses, so refusing here for a commit that is
-  // already in the chain would keep a settled write open and re-read from
-  // GitHub on every tick for as long as the account lives.
+  // exact, authentic merge has nothing left to put back. This also settles an
+  // orphaned operation for a later attempt after an earlier attempt recorded
+  // the pull request: the commit is the durable identity, not the callback that
+  // happened to notice it. Storage or key-read failure propagates; treating it
+  // as absence could sign a second record.
+  const durableCovered = await durableMergeRecordForCommit(db, { repositoryId, baseRef, mergeSha });
+  if (durableCovered !== null) {
+    const repairAuditDigest =
+      durableCovered.queueAttemptId === null
+        ? await storeRepairAudit(env, deps, db, {
+            digest: durableCovered.digest,
+            repositoryId,
+            baseRef,
+            attemptId: durableCovered.attemptId,
+            actorPrincipalId: input.witnessPrincipalId,
+            reason: input.reason,
+          })
+        : null;
+    return {
+      status: "already",
+      attemptId: durableCovered.attemptId,
+      pullRequestNumber: durableCovered.pullRequestNumber,
+      transitionDigest: durableCovered.digest,
+      repairAuditDigest,
+    };
+  }
+
+  // Keep the legacy positioned-row cleanup and the external-movement shortcut.
+  // A merge row reaches the shortcut above only after its signature, bytes and
+  // queue link all agree. A forged or half-linked merge row is cleared instead
+  // of being accepted as the reason to stop recovery.
   const covered = await recordCoveringCommit(db, repositoryId, baseRef, mergeSha);
   if (covered !== null) {
     if (covered.attemptId !== null) {
-      const link = await durableTransitionForAttempt(db, {
-        repositoryId,
-        baseRef,
-        attemptId: covered.attemptId,
-        mergeSha,
-      });
-      if (link !== null) {
-        if (link.recordKind === "external-transition") {
+      if (await queueTransitionLinkForDigest(db, { repositoryId, baseRef, digest: covered.digest })) {
+        if (covered.attemptId.startsWith("movement:")) {
           return {
             status: "already",
             attemptId: null,
             pullRequestNumber: null,
-            transitionDigest: link.digest,
+            transitionDigest: covered.digest,
             repairAuditDigest: null,
           };
         }
-        if (link.queueAttemptId === null) {
-          const repairAuditDigest = await storeRepairAudit(env, deps, db, {
-            digest: link.digest,
-            repositoryId,
-            baseRef,
-            attemptId: covered.attemptId,
-            actorPrincipalId: input.witnessPrincipalId,
-            reason: input.reason,
-          });
-          return {
-            status: "already",
-            attemptId: covered.attemptId,
-            pullRequestNumber: null,
-            transitionDigest: link.digest,
-            repairAuditDigest,
-          };
-        }
         return {
-          status: "already",
-          attemptId: covered.attemptId,
-          pullRequestNumber: null,
-          transitionDigest: link.digest,
-          repairAuditDigest: null,
+          status: "refused",
+          code: "CHAIN_MOVED",
+          detail: "the queue link and its signed record do not agree on one authentic public position",
         };
       }
       // A legacy build gave this row a position before the queue accepted the
-      // link. The full durable link index proves the claim never landed.
+      // link, or its alleged signature is not authentic. The strict lookup
+      // above proves it cannot settle this merge.
       await clearAttestationChainPosition(db, covered.digest);
-    } else {
+    } else if (await queueTransitionLinkForDigest(db, { repositoryId, baseRef, digest: covered.digest })) {
       return {
-        status: "already",
-        attemptId: null,
-        pullRequestNumber: null,
-        transitionDigest: covered.digest,
-        repairAuditDigest: null,
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "the queue link names a record with no durable signing identity",
       };
+    } else {
+      await clearAttestationChainPosition(db, covered.digest);
     }
   }
 
@@ -483,7 +511,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     baseRef,
     treeOid: facts.treeOid,
     parentShas: facts.parentShas,
-    message: facts.message,
+    message: commitMessage,
     ...(typeof input.attemptId === "string" ? { attemptId: input.attemptId } : {}),
   });
   if ("refused" in authorization) {
@@ -509,33 +537,24 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       detail: "GitHub does not confirm this commit as the pull request's merge commit",
     };
   }
-  const linked = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
-  if (linked !== null) {
-    const placed = await placeAttestationInChain(db, {
-      digest: linked.digest,
-      repositoryId,
-      baseRef,
-      attemptId,
-      transitionSequence: linked.transitionSequence,
-    });
-    if (!placed) {
-      return {
-        status: "refused",
-        code: "CHAIN_MOVED",
-        detail: "the queue link exists but its signed record could not be placed in the public chain",
-      };
-    }
+  const linked = await recoverExactMergeRecord(db, {
+    repositoryId,
+    baseRef,
+    pullRequestNumber: intent.pullRequestNumber,
+    mergeSha,
+  });
+  if (linked?.status === "linked") {
     const repairAuditDigest = await storeRepairAudit(env, deps, db, {
       digest: linked.digest,
       repositoryId,
       baseRef,
-      attemptId,
+      attemptId: linked.attemptId,
       actorPrincipalId: input.witnessPrincipalId,
       reason: input.reason,
     });
     return {
       status: "already",
-      attemptId,
+      attemptId: linked.attemptId,
       pullRequestNumber: intent.pullRequestNumber,
       transitionDigest: linked.digest,
       repairAuditDigest,
@@ -604,68 +623,140 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     observedAt: new Date().toISOString(),
     signer: { sign: (bytes: Uint8Array, typ: string) => deps.signRecordBytes(env, bytes, typ) },
   };
-  const signed =
+  const recordKind =
     verifiedEvidence?.ok === true
-      ? await signVerifiedRecord({ ...subject, evidence: verifiedEvidence.evidence })
-      : intent.kind === "verified"
-        ? { error: "the stored verified evidence could not be rebuilt" }
-        : await signReusedRecord({
-            ...subject,
-            evidence: {
-              workReceiptDigest: intent.evidence.workReceiptDigest,
-              organizationId: policy?.organizationId ?? "",
-              policyDigest: intent.policyDigest,
-              pipelineDigest: intent.evidence.pipelineDigest,
-              requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
-              proofCheckRunId: intent.evidence.proofCheckRunId,
-              ...(candidateVerified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
-            },
-          });
-  if ("error" in signed) {
+      ? "verified-merge"
+      : candidateVerified
+        ? "candidate-verified-merge"
+        : "reused-proof-merge";
+  if (!(await claim.fence())) {
     return {
       status: "refused",
-      code: "SIGNING_REFUSED",
-      detail: `the queue refused to sign its own record: ${signed.error}`,
+      code: "CHAIN_MOVED",
+      detail: "a later signed transition writer replaced this repair before it could use its chain position",
     };
   }
-
-  await storeAttestation(db, {
-    digest: signed.digest,
-    kind:
-      verifiedEvidence?.ok === true
-        ? "verified-merge"
-        : candidateVerified
-          ? "candidate-verified-merge"
-          : "reused-proof-merge",
+  const reusable = await recoverExactMergeRecord(db, {
     repositoryId,
     baseRef,
-    transitionSequence: null,
-    attemptId,
-    bytes: signed.bytes,
-    jws: signed.jws,
-    ...(policy === null
-      ? {}
-      : {
-          organizationId: policy.organizationId,
-          mirror: (mirrored: {
-            organizationId: string;
-            repositoryId: string;
-            kind: "merge-intent" | "transition-record";
-            digest: string;
-            bytes: Uint8Array;
-          }) =>
-            deps
-              .storeEvidence(env, {
-                organizationId: mirrored.organizationId,
-                repositoryId: mirrored.repositoryId,
-                kind: mirrored.kind,
-                digest: mirrored.digest as `sha256:${string}`,
-                bytes: mirrored.bytes,
-              })
-              .then(() => undefined),
-        }),
+    pullRequestNumber: intent.pullRequestNumber,
+    mergeSha,
+    staged: {
+      pullRequestNumber: intent.pullRequestNumber,
+      mergeTree: facts.treeOid,
+      parentShas: facts.parentShas,
+      beforeBaseSha: intent.git.baseSha,
+      beforeTree: before.treeOid,
+      queueEpoch: snapshot.queueEpoch,
+      transitionSequence,
+      priorDigest,
+    },
   });
+  if (reusable?.status === "linked") {
+    const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+      digest: reusable.digest,
+      repositoryId,
+      baseRef,
+      attemptId: reusable.attemptId,
+      actorPrincipalId: input.witnessPrincipalId,
+      reason: input.reason,
+    });
+    return {
+      status: "already",
+      attemptId: reusable.attemptId,
+      pullRequestNumber: intent.pullRequestNumber,
+      transitionDigest: reusable.digest,
+      repairAuditDigest,
+    };
+  }
+  let recordDigest = reusable?.digest ?? null;
+  let recordAttemptId = reusable?.status === "staged" ? reusable.attemptId : attemptId;
+  let linkingRecordKind = reusable?.status === "staged" ? reusable.recordKind : recordKind;
+  if (recordDigest === null) {
+    if (!(await claim.fence())) {
+      return {
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "a later signed transition writer replaced this repair before it could sign",
+      };
+    }
+    const signed =
+      verifiedEvidence?.ok === true
+        ? await signVerifiedRecord({ ...subject, evidence: verifiedEvidence.evidence })
+        : intent.kind === "verified"
+          ? { error: "the stored verified evidence could not be rebuilt" }
+          : await signReusedRecord({
+              ...subject,
+              evidence: {
+                workReceiptDigest: intent.evidence.workReceiptDigest,
+                organizationId: policy?.organizationId ?? "",
+                policyDigest: intent.policyDigest,
+                pipelineDigest: intent.evidence.pipelineDigest,
+                requiredSuitesDigest: intent.evidence.requiredSuitesDigest,
+                proofCheckRunId: intent.evidence.proofCheckRunId,
+                ...(candidateVerified ? { verifierResultDigest: intent.evidence.verifierResultDigest } : {}),
+              },
+            });
+    if ("error" in signed) {
+      return {
+        status: "refused",
+        code: "SIGNING_REFUSED",
+        detail: `the queue refused to sign its own record: ${signed.error}`,
+      };
+    }
+    if (!(await claim.fence())) {
+      return {
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "a later signed transition writer replaced this repair while it was signing",
+      };
+    }
+    recordDigest = signed.digest;
+    recordAttemptId = attemptId;
+    linkingRecordKind = recordKind;
+    await storeAttestation(db, {
+      digest: signed.digest,
+      kind: recordKind,
+      repositoryId,
+      baseRef,
+      transitionSequence: null,
+      attemptId,
+      bytes: signed.bytes,
+      jws: signed.jws,
+      ...(policy === null
+        ? {}
+        : {
+            organizationId: policy.organizationId,
+            mirror: (mirrored: {
+              organizationId: string;
+              repositoryId: string;
+              kind: "merge-intent" | "transition-record";
+              digest: string;
+              bytes: Uint8Array;
+            }) =>
+              deps
+                .storeEvidence(env, {
+                  organizationId: mirrored.organizationId,
+                  repositoryId: mirrored.repositoryId,
+                  kind: mirrored.kind,
+                  digest: mirrored.digest as `sha256:${string}`,
+                  bytes: mirrored.bytes,
+                })
+                .then(() => undefined),
+          }),
+    });
+  }
+  if (!(await claim.fence())) {
+    return {
+      status: "refused",
+      code: "CHAIN_MOVED",
+      detail: "a later signed transition writer replaced this repair before it could link its record",
+    };
+  }
   const { result } = await deps.onQueue(env, repositoryId, baseRef, ({ commands, store }) => {
+    if (!store.holdsTransitionSigning(signingOwner, new Date().toISOString())) {
+      return { moved: true as const };
+    }
     const tail = store.state().transitions.at(-1);
     // The position this record claims is inside the bytes that were signed,
     // and signing is not inside the transaction. A link recorded at a
@@ -677,11 +768,11 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     return {
       moved: false as const,
       transition: commands.recordTransition({
-        idempotencyKey: `repair:${attemptId}`,
-        kind: verifiedEvidence?.ok === true ? "verified" : candidateVerified ? "verified" : "reused",
+        idempotencyKey: `repair:${recordAttemptId}`,
+        kind: transitionKindOf(linkingRecordKind),
         transitionSequence,
         priorDigest,
-        digest: signed.digest,
+        digest: recordDigest,
         baseSha: mergeSha,
         // The reducer chains an attempt only where it can see one whose phase
         // is MERGED, and this attempt was terminated and has since been
@@ -695,32 +786,28 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   });
 
   if (result.moved) {
-    const winner = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
-    if (winner !== null) {
-      const placed = await placeAttestationInChain(db, {
-        digest: winner.digest,
-        repositoryId,
-        baseRef,
-        attemptId,
-        transitionSequence: winner.transitionSequence,
-      });
-      if (placed) {
-        const repairAuditDigest = await storeRepairAudit(env, deps, db, {
+    const winner = await recoverExactMergeRecord(db, {
+      repositoryId,
+      baseRef,
+      pullRequestNumber: intent.pullRequestNumber,
+      mergeSha,
+    });
+    if (winner?.status === "linked") {
+      const repairAuditDigest = await storeRepairAudit(env, deps, db, {
           digest: winner.digest,
           repositoryId,
           baseRef,
-          attemptId,
+          attemptId: winner.attemptId,
           actorPrincipalId: input.witnessPrincipalId,
           reason: input.reason,
-        });
-        return {
-          status: "already",
-          attemptId,
-          pullRequestNumber: intent.pullRequestNumber,
-          transitionDigest: winner.digest,
-          repairAuditDigest,
-        };
-      }
+      });
+      return {
+        status: "already",
+        attemptId: winner.attemptId,
+        pullRequestNumber: intent.pullRequestNumber,
+        transitionDigest: winner.digest,
+        repairAuditDigest,
+      };
     }
     return {
       status: "refused",
@@ -732,8 +819,13 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // The projection is the full durable queue chain. It also validates the
   // linked digest's signed sequence, predecessor and resulting base before a
   // D1 attestation row is allowed to claim that position.
-  const winner = await durableTransitionForAttempt(db, { repositoryId, baseRef, attemptId, mergeSha });
-  if (winner === null) {
+  const winner = await recoverExactMergeRecord(db, {
+    repositoryId,
+    baseRef,
+    pullRequestNumber: intent.pullRequestNumber,
+    mergeSha,
+  });
+  if (winner?.status !== "linked") {
     return {
       status: "refused",
       code: "CHAIN_MOVED",
@@ -743,32 +835,18 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
           : "the transition command did not create the signed queue link",
     };
   }
-  const placed = await placeAttestationInChain(db, {
-    digest: winner.digest,
-    repositoryId,
-    baseRef,
-    attemptId,
-    transitionSequence: winner.transitionSequence,
-  });
-  if (!placed) {
-    return {
-      status: "refused",
-      code: "CHAIN_MOVED",
-      detail: "the queue linked the record but its public chain position could not be stored",
-    };
-  }
   const repairAuditDigest = await storeRepairAudit(env, deps, db, {
     digest: winner.digest,
     repositoryId,
     baseRef,
-    attemptId,
+    attemptId: winner.attemptId,
     actorPrincipalId: input.witnessPrincipalId,
     reason: input.reason,
   });
-  if (winner.digest !== signed.digest) {
+  if (winner.digest !== recordDigest) {
     return {
       status: "already",
-      attemptId,
+      attemptId: winner.attemptId,
       pullRequestNumber: intent.pullRequestNumber,
       transitionDigest: winner.digest,
       repairAuditDigest,
@@ -777,12 +855,22 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
 
   return {
     status: "recorded",
-    attemptId,
+    attemptId: recordAttemptId,
     pullRequestNumber: intent.pullRequestNumber,
     mergeSha,
     sequence: transitionSequence,
-    transitionDigest: signed.digest,
+    transitionDigest: recordDigest,
     mergeIntentDigest: authorization.intentDigest,
     repairAuditDigest,
   };
+    },
+  );
+  if (!signing.acquired) {
+    return {
+      status: "refused",
+      code: "CHAIN_MOVED",
+      detail: "another signed transition writer owns this branch; try again",
+    };
+  }
+  return signing.result;
 }

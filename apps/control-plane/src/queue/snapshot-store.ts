@@ -207,6 +207,14 @@ interface Document {
   /** transitionSequence to the time it was first recorded. */
   transitionsRecordedAt: Record<string, string>;
   events: EventRow[];
+  /** Fairness ordinal after the last terminal-state page examined. */
+  terminalReconciliationCursor?: string | null;
+  /** Monotonic claim generation, including a one-entry walk that wraps in place. */
+  terminalReconciliationPass?: number;
+  /** The claim owner and its crash-safe expiry. */
+  terminalReconciliationLease?: { pass: number; until: string } | null;
+  /** Serializes signed transition-record creation across normal and repair paths. */
+  transitionSigningLease?: { owner: string; until: string } | null;
 }
 
 /** Whether the sweep may read GitHub about this write on a tick at `now`. */
@@ -381,6 +389,89 @@ export class SnapshotQueueStore {
   /** Which transitions the document still remembers a time for. */
   recordedTransitionKeys(): readonly string[] {
     return Object.keys(this.doc.transitionsRecordedAt);
+  }
+
+  /** Where the next bounded walk resumes, and which invocation claimed it. */
+  terminalReconciliationPosition(): {
+    cursor: string | null;
+    pass: number;
+    lease: { pass: number; until: string } | null;
+  } {
+    const pass = this.doc.terminalReconciliationPass;
+    return {
+      cursor: this.doc.terminalReconciliationCursor ?? null,
+      pass: typeof pass === "number" && Number.isSafeInteger(pass) && pass >= 0 ? pass : 0,
+      lease: this.doc.terminalReconciliationLease ?? null,
+    };
+  }
+
+  /**
+   * Claim one page through the same compare-and-swap as queue commands. The
+   * pass increments even when a one-entry walk wraps to the same ordinal, so
+   * overlapping heartbeats cannot both sign a missing record for that entry.
+   * Direct document metadata does not change queue semantics or projection
+   * generation, just as merge-operation settlement does not.
+   */
+  claimTerminalReconciliation(fairnessOrdinal: string, until: string): number {
+    const pass = this.terminalReconciliationPosition().pass + 1;
+    this.doc.terminalReconciliationCursor = fairnessOrdinal;
+    this.doc.terminalReconciliationPass = pass;
+    this.doc.terminalReconciliationLease = { pass, until };
+    this.flush();
+    return pass;
+  }
+
+  /** Release only the claim this invocation owns. */
+  releaseTerminalReconciliation(pass: number): void {
+    if (this.doc.terminalReconciliationLease?.pass !== pass) return;
+    this.doc.terminalReconciliationLease = null;
+    this.flush();
+  }
+
+  /**
+   * Claim the one transition-record signer for this branch.
+   *
+   * Signing happens outside the queue compare-and-swap, but a record binds the
+   * chain position it was signed for. Without a durable claim, the ordinary
+   * merge callback and an automatic repair can both sign different bytes for
+   * the same merge before either one links its record. The queue document is
+   * already the shared authority for both paths, so its compare-and-swap is the
+   * interlock rather than a process-local promise.
+   */
+  claimTransitionSigning(owner: string, now: string, until: string): boolean {
+    const held = this.doc.transitionSigningLease;
+    if (held !== undefined && held !== null && held.owner !== owner && held.until > now) return false;
+    this.doc.transitionSigningLease = { owner, until };
+    this.flush();
+    return true;
+  }
+
+  /**
+   * Extend only the exact claim this caller acquired.
+   *
+   * The owner is a random fencing token, not a friendly process name. If an
+   * expired worker resumes after another worker has taken the claim, the queue
+   * compare-and-swap observes the new token and refuses the stale worker before
+   * it stores or links signed bytes.
+   */
+  renewTransitionSigning(owner: string, until: string): boolean {
+    if (this.doc.transitionSigningLease?.owner !== owner) return false;
+    this.doc.transitionSigningLease = { owner, until };
+    this.flush();
+    return true;
+  }
+
+  /** Whether this exact fencing token may still commit a transition link. */
+  holdsTransitionSigning(owner: string, now: string): boolean {
+    const held = this.doc.transitionSigningLease;
+    return held !== undefined && held !== null && held.owner === owner && held.until > now;
+  }
+
+  /** Release only the signing claim this caller acquired. */
+  releaseTransitionSigning(owner: string): void {
+    if (this.doc.transitionSigningLease?.owner !== owner) return;
+    this.doc.transitionSigningLease = null;
+    this.flush();
   }
 
   /**
