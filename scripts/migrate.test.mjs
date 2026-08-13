@@ -25,6 +25,7 @@ function dependencies(applied, health = null) {
     migrations,
     fetchImpl,
     build: () => "abc123def456",
+    identity: { wranglerEnv: { CLOUDFLARE_API_TOKEN: "migration-token" } },
     run: vi.fn(),
     log: vi.fn(),
   };
@@ -68,15 +69,11 @@ describe("applying a migration plan", () => {
   it("applies a before-worker-only pending set before the deploy", async () => {
     const deps = dependencies(["0022_before.sql", "0023_after.sql", "0023_second_after.sql"]);
     await expect(applyMigrations(deps)).resolves.toMatchObject({ kind: "before-worker" });
-    expect(deps.run).toHaveBeenCalledWith("wrangler", [
-      "d1",
-      "migrations",
-      "apply",
-      "thwip-staging-wnam",
-      "--env",
-      "staging",
-      "--remote",
-    ]);
+    expect(deps.run).toHaveBeenCalledWith(
+      "wrangler",
+      ["d1", "migrations", "apply", "thwip-staging-wnam", "--env", "staging", "--remote"],
+      { env: { CLOUDFLARE_API_TOKEN: "migration-token" } },
+    );
     expect(deps.fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -123,6 +120,14 @@ describe("applying a migration plan", () => {
     const deps = dependencies([]);
     deps.migrations = [{ name: "0025_silent.sql", order: null }];
     await expect(applyMigrations(deps)).rejects.toThrow(/declare a deploy order/);
+    expect(deps.fetchImpl).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("refuses before any live read when no explicit migration identity was preflighted", async () => {
+    const deps = dependencies([]);
+    deps.identity = null;
+    await expect(applyMigrations(deps)).rejects.toThrow(/no explicit D1 migration identity/);
     expect(deps.fetchImpl).not.toHaveBeenCalled();
     expect(deps.run).not.toHaveBeenCalled();
   });

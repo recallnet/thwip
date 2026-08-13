@@ -28,31 +28,33 @@ export const DEPLOY_TOKEN_PERMISSIONS = [
   "Account / Account Settings:Read",
   "User / User Details:Read",
   "User / Memberships:Read",
-  "Zone / Workers Routes:Edit (recall.net)",
-  "and no D1 permission of any kind",
+  "Zone / Workers Routes:Edit (thwip.ai)",
 ];
 
-const SESSION_NOTE = [
-  "Deploying under the interactive wrangler session.",
-  "That session carries everything the account carries, D1 included, and a deploy needs none of it.",
-  "Create a scoped token with exactly these permissions and export CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID:",
+const SCOPED_TOKEN_INSTRUCTIONS = [
+  "Create a scoped deploy token with exactly these permissions:",
   ...DEPLOY_TOKEN_PERMISSIONS.map((permission) => `  ${permission}`),
-  "The token must hold no D1 permission. See docs/production-access.md.",
+  "Give it no D1 permission. Export CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.",
+  "See docs/production-access.md.",
 ].join("\n");
 
 /**
  * Which credential this deploy will use, and what stops it if anything does.
  *
- * A refusal here is a refusal about the identity, not about the Worker. The one
- * case worth refusing is a token with no account: wrangler accepts it, gets
- * most of the way through a publish, and then fails with a message about
- * choosing an account, which reads as a wrangler problem rather than a missing
- * variable.
+ * Ambient Wrangler OAuth is not a deploy identity. It can carry D1 write
+ * authority that a deploy never needs. Falling back to it would silently join
+ * Worker publishing and database administration again.
  */
 export function deployIdentity(env) {
   const token = env.CLOUDFLARE_API_TOKEN ?? "";
   if (token.length === 0) {
-    return { kind: "session", refusal: null, note: SESSION_NOTE };
+    return {
+      kind: "missing",
+      refusal:
+        "Refusing: deploys require an explicit CLOUDFLARE_API_TOKEN and never use the ambient Wrangler login.\n" +
+        SCOPED_TOKEN_INSTRUCTIONS,
+      note: "No scoped deploy token is configured.",
+    };
   }
   const account = env.CLOUDFLARE_ACCOUNT_ID ?? "";
   if (account.length === 0) {
@@ -61,13 +63,35 @@ export function deployIdentity(env) {
       refusal:
         "Refusing: CLOUDFLARE_API_TOKEN is set and CLOUDFLARE_ACCOUNT_ID is not.\n" +
         "wrangler gets most of the way through the publish before it asks which account this is.",
-      note: SESSION_NOTE,
+      note: "The scoped deploy token has no configured account.",
     };
   }
   return {
     kind: "scoped-token",
     refusal: null,
-    note: `Deploying under CLOUDFLARE_API_TOKEN on account ${account}.`,
+    note: "Deploying under the explicit scoped deploy token.",
+  };
+}
+
+/** The complete live D1 target for an environment. */
+export function liveD1Target(env) {
+  const config = readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8");
+  const json = JSON.parse(config.replace(/^\s*\/\/.*$/gm, ""));
+  const configured = json.env?.[env];
+  const origin = configured?.vars?.PUBLIC_ORIGIN;
+  const database = configured?.d1_databases?.find((candidate) => candidate.binding === "DB");
+  if (
+    typeof origin !== "string" ||
+    typeof database?.database_name !== "string" ||
+    typeof database.database_id !== "string"
+  ) {
+    throw new Error(`wrangler.jsonc defines no complete live D1 target for --env ${env}`);
+  }
+  return {
+    env,
+    origin: origin.replace(/\/$/, ""),
+    databaseName: database.database_name,
+    databaseId: database.database_id,
   };
 }
 
@@ -77,13 +101,7 @@ export function deployIdentity(env) {
  * comes to check an environment nobody is deploying.
  */
 function liveOrigin(env) {
-  const config = readFileSync(fileURLToPath(new URL("../wrangler.jsonc", import.meta.url)), "utf8");
-  const json = JSON.parse(config.replace(/^\s*\/\/.*$/gm, ""));
-  const origin = json.env?.[env]?.vars?.PUBLIC_ORIGIN;
-  if (typeof origin !== "string") {
-    throw new Error(`wrangler.jsonc defines no PUBLIC_ORIGIN for --env ${env}`);
-  }
-  return origin.replace(/\/$/, "");
+  return liveD1Target(env).origin;
 }
 
 /** The live Worker's schema endpoint for an environment. */
