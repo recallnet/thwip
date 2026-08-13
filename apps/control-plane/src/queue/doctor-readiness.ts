@@ -1,5 +1,6 @@
 import type { D1Like } from "./projection.js";
 import { nextBootstrapStep, type BootstrapProgress } from "./rulesets.js";
+import { databaseSchemaCapabilities } from "../schema-state.js";
 
 /**
  * The control-plane facts a diagnostic may safely report to somebody who can
@@ -35,10 +36,10 @@ interface ReadinessRow {
   readonly verifier_protocol: number | null;
 }
 
-function setupComplete(row: ReadinessRow): boolean {
+function setupComplete(row: ReadinessRow, v3Ready: boolean): boolean {
   if (row.queue_id === null || row.bootstrap_progress_json === null) return false;
   if (row.verifier_workflow_version !== 2) return false;
-  if (row.verifier_protocol !== 3) return false;
+  if (v3Ready ? row.verifier_protocol !== 3 : row.verifier_protocol !== 2) return false;
   try {
     const parsed: unknown = JSON.parse(row.bootstrap_progress_json);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
@@ -58,6 +59,7 @@ export async function readQueueDoctorReadiness(
   repositoryId: string,
   baseRef: string,
 ): Promise<QueueDoctorReadiness | null> {
+  const v3Ready = (await databaseSchemaCapabilities(db)).verifierProtocolV3;
   const row = await db
     .prepare(
       `SELECT p.id AS project_id,
@@ -68,7 +70,7 @@ export async function readQueueDoctorReadiness(
               q.activation_state,
               q.bootstrap_progress_json,
               q.verifier_workflow_version,
-              q.verifier_protocol
+              ${v3Ready ? "q.verifier_protocol" : "CASE q.verifier_workflow_version WHEN 1 THEN 1 ELSE 2 END"} AS verifier_protocol
          FROM projects p
          JOIN organizations o
            ON o.id = p.organization_id
@@ -107,6 +109,6 @@ export async function readQueueDoctorReadiness(
     queueConfigured: row.queue_id !== null,
     queueEnabled: row.queue_enabled === 1,
     activationState: row.activation_state,
-    setupComplete: setupComplete(row),
+    setupComplete: setupComplete(row, v3Ready),
   };
 }

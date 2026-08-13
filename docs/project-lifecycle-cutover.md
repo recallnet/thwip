@@ -6,7 +6,8 @@ an HTTP Worker can stay alive while its client remains connected.
 
 ## Phase 1: prepare and fail closed
 
-1. Apply migration `0030_github_repository_lifecycle.sql`.
+1. Apply migrations `0029_terminal_comment_priority.sql` and
+   `0030_github_repository_lifecycle.sql` as one contiguous before-worker phase.
 2. Deploy the lifecycle-aware Worker while it still uses the existing R2 bucket
    and GitHub App key.
 3. Confirm `/health` shows `projectLifecycle.cleanupReady: false`.
@@ -153,21 +154,43 @@ token rejection, in the same D1 statement. Keep
 retirement timestamp and `remoteCapabilityEvidenceComplete: true`, while
 `cleanupReady` remains false.
 
-## Phase 2: finish and delete
+## Phase 2: finish the schema while traffic stays fenced
 
 1. Run the migration command again. It must refuse unless the exact reviewed
    Worker is live and the capability evidence is present.
 2. Apply `0031_finish_github_repository_lifecycle.sql`. This removes the legacy
    tombstone schema, makes project incarnation ownership mandatory, sets
-   `destructive_schema_ready_at`, and clears maintenance mode as its final
-   statement.
-3. Confirm `/health` shows `projectLifecycle.cleanupReady: true`.
-4. Run the bounded release drainer. Confirm pending releases remove all D1,
+   `destructive_schema_ready_at`, and deliberately leaves maintenance mode on.
+3. Confirm `/health` and `/v1/schema` still work, every other route returns
+   `503`, queue messages are delayed, scheduled work stops, and
+   `projectLifecycle.cleanupReady` is true.
+4. Run the migration command again. It must apply the contiguous
+   `0032_private_agent_feedback_foundation.sql` and
+   `0033_verifier_protocol_v3.sql` before-worker phase and nothing else.
+5. Deploy the exact current canonical `main` Worker. Do not deploy an older SHA.
+   Confirm signed `/health` reports that full build SHA, maintenance mode, and
+   `schema.capabilities.privateAgentFeedback: true` plus
+   `schema.capabilities.verifierProtocolV3: true`. It must also report a
+   `workerDeploymentId` different from `verifierV3PredeployId`; this is the
+   causal proof that this deploy happened after migration `0033`.
+6. Run the migration command once more. It must select only
+   `0034_reopen_after_project_lifecycle.sql`. The runner and SQL both refuse
+   unless `0031`, `0032`, and `0033` are applied, complete cutover/backfill
+   evidence remains, maintenance is active, and the exact compatible Worker is
+   live. Only the final statement in `0034` clears maintenance mode.
+7. Confirm `/health` reports `projectLifecycle.cleanupReady: true`,
+   `schema.capabilities.lifecycleReopened: true`, and the exact expected build.
+8. Run the bounded release drainer. Confirm pending releases remove all D1,
    Durable Object, and new- and legacy-prefix R2 state while preserving tenant
    billing, principals, and unrelated repositories.
-5. Re-select one removed repository in the GitHub App. Confirm it returns as a
+9. Re-select one removed repository in the GitHub App. Confirm it returns as a
    fresh disabled project with no old policy, proof, queue, grant, metric, or
    evidence state.
+
+There is no traffic window between `0031` and `0034`. The Worker-level
+maintenance gate remains the fence after `0031` removes the imported table
+triggers. Never clear `maintenance_mode` by hand and never run raw Wrangler to
+skip a barrier.
 
 Keep issue #398 open until Phase 2 and its live evidence are complete. The two
 phases should use separate pull requests under the same issue; a separate

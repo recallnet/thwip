@@ -18,6 +18,7 @@
  * failure, not a warning, and it says what is serving instead so the gap is
  * visible without a second fetch.
  */
+import { validDeploymentId } from "./deployment-id.mjs";
 
 /**
  * `build-sha.mjs` marks a dirty working tree with a `-dirty` suffix on the
@@ -51,6 +52,7 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function waitForBuildSha({
   url,
   expectedSha,
+  expectedDeploymentId = null,
   fetchImpl = fetch,
   sleepMs = 3000,
   timeoutMs = 120000,
@@ -71,7 +73,10 @@ export async function waitForBuildSha({
         const body = await response.json();
         lastSha = typeof body.buildSha === "string" ? body.buildSha : null;
         lastError = null;
-        if (lastSha === expectedSha) {
+        const deploymentId = typeof body.projectLifecycle?.workerDeploymentId === "string"
+          ? body.projectLifecycle.workerDeploymentId
+          : null;
+        if (lastSha === expectedSha && (expectedDeploymentId === null || deploymentId === expectedDeploymentId)) {
           return { ok: true, sha: lastSha, attempts, waitedMs: now() - start };
         }
       } else {
@@ -101,8 +106,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   const targetEnv = flag("--env", "staging");
   const expectedSha = flag("--sha", null);
+  const expectedDeploymentId = flag("--deployment-id", null);
   if (!expectedSha) {
     console.error("Refusing: confirm-deploy.mjs needs --sha, the value deploy:staging just passed wrangler.");
+    process.exit(1);
+  }
+  if (!validDeploymentId(expectedDeploymentId)) {
+    console.error("Refusing: confirm-deploy.mjs needs --deployment-id, the exact value passed to wrangler.");
     process.exit(1);
   }
 
@@ -115,6 +125,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const result = await waitForBuildSha({
     url,
     expectedSha,
+    expectedDeploymentId,
     onProgress: ({ attempts, elapsed, lastSha, lastError }) => {
       const seen = lastError ? `error: ${lastError}` : `serving ${lastSha ?? "(no buildSha field)"}`;
       console.log(`  [${Math.round(elapsed / 1000)}s] attempt ${attempts}: ${seen}, waiting for ${expectedSha}`);

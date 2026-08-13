@@ -5,6 +5,8 @@ export interface Env {
   THWIP_ENV: string;
   PUBLIC_ORIGIN: string;
   BUILD_SHA: string;
+  /** Unique nonce created once for this exact Wrangler deployment. */
+  DEPLOYMENT_ID: string;
   /**
    * How this worker got past the deploy gate, when it did not go the usual way.
    *

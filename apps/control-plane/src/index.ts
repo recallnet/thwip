@@ -50,7 +50,7 @@ import { recordVerificationObservation } from "./verification-observation.js";
 import { mintRunLease, withAuthorizedRunLeaseProject } from "./run-lease.js";
 import { principalForRepository, resolveRepositoryFor } from "./repository-resolution.js";
 import { serviceKey, signPayload } from "./service-signing.js";
-import { appliedMigrations } from "./schema-state.js";
+import { databaseSchemaCapabilities, databaseSchemaState } from "./schema-state.js";
 import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { GITHUB_OIDC_ISSUER, githubOidcAudience } from "./github-oidc.js";
@@ -437,12 +437,14 @@ app.get("/health", async (c) => {
   const now = nowIso();
   const ageSeconds = tickAgeSeconds(clock, now);
   const projectLifecycle = await projectLifecycleRollout(c.env.DB as unknown as D1Like);
+  const schema = await databaseSchemaState(c.env.DB as unknown as D1Like);
   const payload = {
     service: "thwip",
     env: c.env.THWIP_ENV,
     buildSha: c.env.BUILD_SHA,
     now,
     projectLifecycle,
+    schema: schema.release,
     tick: {
       finishedAt: clock.finishedAt,
       source: clock.source,
@@ -484,8 +486,12 @@ app.get("/health", async (c) => {
  * back to needing one.
  */
 app.get("/v1/schema", async (c) => {
-  const applied = await appliedMigrations(c.env.DB as unknown as D1Like);
-  return c.json({ applied, buildSha: c.env.BUILD_SHA }, 200, { "cache-control": "no-store" });
+  const schema = await databaseSchemaState(c.env.DB as unknown as D1Like);
+  return c.json(
+    { applied: schema.applied, schema: schema.release, buildSha: c.env.BUILD_SHA },
+    200,
+    { "cache-control": "no-store" },
+  );
 });
 
 /**
@@ -2756,8 +2762,10 @@ const queueDeps = {
     return claims instanceof Response ? null : (claims as unknown as Record<string, unknown>);
   },
   async queueProject(env: Env, repositoryId: string, baseRef: string) {
+    const v3Ready = (await databaseSchemaCapabilities(env.DB as unknown as D1Like)).verifierProtocolV3;
     const row = await env.DB.prepare(
-      `SELECT q.activation_state, q.project_id, q.verifier_protocol
+      `SELECT q.activation_state, q.project_id,
+              ${v3Ready ? "q.verifier_protocol" : "CASE q.verifier_workflow_version WHEN 1 THEN 1 ELSE 2 END"} AS verifier_protocol
          FROM queue_projects q
          JOIN projects p ON p.id = q.project_id AND p.github_repository_id = q.github_repository_id
          JOIN organizations o ON o.id = p.organization_id
@@ -3552,9 +3560,11 @@ const queueDeps = {
       requiredSuites: readonly string[];
     },
   ) {
+    const v3Ready = (await databaseSchemaCapabilities(env.DB as unknown as D1Like)).verifierProtocolV3;
     const project = await env.DB.prepare(
       `SELECT p.github_name, p.default_branch, o.installation_id,
-              q.verifier_protocol, q.verifier_workflow_version
+              ${v3Ready ? "q.verifier_protocol" : "CASE q.verifier_workflow_version WHEN 1 THEN 1 ELSE 2 END"} AS verifier_protocol,
+              q.verifier_workflow_version
          FROM projects p
          JOIN organizations o ON o.id = p.organization_id
          JOIN queue_projects q ON q.project_id = p.id
@@ -3695,7 +3705,7 @@ app.all("*", (c) => {
 
 export default {
   async fetch(request: Request, env: Env, executionCtx: ExecutionContext): Promise<Response> {
-    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like, env.BUILD_SHA, env.DEPLOYMENT_ID);
     if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) {
       const pathname = new URL(request.url).pathname;
       if (pathname !== "/health" && pathname !== "/v1/schema") {
@@ -3708,7 +3718,7 @@ export default {
     return app.fetch(request, env, executionCtx);
   },
   async queue(batch: MessageBatch, env: Env): Promise<void> {
-    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like, env.BUILD_SHA, env.DEPLOYMENT_ID);
     if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) {
       for (const msg of batch.messages) {
         await env.SYNC_QUEUE.send(msg.body, { delaySeconds: 300 });
@@ -3772,7 +3782,7 @@ export default {
     }
   },
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like, env.BUILD_SHA, env.DEPLOYMENT_ID);
     if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) return;
     await drainProjectLifecycleBackfill(env.DB as unknown as D1Like);
     await drainGithubSyncSnapshots(env);

@@ -15,6 +15,7 @@ import { QUEUE_ACTION_REF, verifierWorkflowFile } from "./bootstrap-workflows.js
 import { VERIFIER_WORKFLOW_PATH } from "./bootstrap.js";
 import { storeEvidence } from "./merge-lane.js";
 import type { QueueRouteEnv } from "./routes.js";
+import { databaseSchemaCapabilities } from "../schema-state.js";
 
 const REPORT_JOB_NAME = "register trusted candidate report";
 const PREPARE_JOB_NAME = "prepare trusted suite matrix";
@@ -215,6 +216,9 @@ export async function finalizeCandidateReports(
   now = new Date(),
 ): Promise<{ finalized: number; retried: number; terminal: number }> {
   const db = env.DB as unknown as D1Like;
+  if (!(await databaseSchemaCapabilities(db)).verifierProtocolV3) {
+    return { finalized: 0, retried: 0, terminal: 0 };
+  }
   const claim = crypto.randomUUID();
   const rows = await claimPendingCandidateReports(
     db,

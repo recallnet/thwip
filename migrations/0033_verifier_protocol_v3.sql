@@ -8,6 +8,39 @@
 -- content digest. The only OIDC caller registers a pending report. The App
 -- later reads completed GitHub jobs and derives the verdict itself.
 
+-- Snapshot the deployment generation serving before this barrier. Migration
+-- 0034 requires a different generation, which proves a real post-0033 deploy
+-- even when canonical main still has the same commit SHA.
+UPDATE project_lifecycle_rollout
+   SET verifier_v3_predeploy_id = worker_deployment_id
+ WHERE id = 1 AND maintenance_mode = 1
+   AND length(worker_deployment_id) = 36
+   AND substr(worker_deployment_id, 9, 1) = '-'
+   AND substr(worker_deployment_id, 14, 1) = '-'
+   AND substr(worker_deployment_id, 19, 1) = '-'
+   AND substr(worker_deployment_id, 24, 1) = '-'
+   AND substr(worker_deployment_id, 15, 1) GLOB '[1-8]'
+   AND lower(substr(worker_deployment_id, 20, 1)) GLOB '[89ab]'
+   AND length(replace(worker_deployment_id, '-', '')) = 32
+   AND lower(worker_deployment_id) NOT GLOB '*[^0-9a-f-]*';
+
+CREATE TABLE verifier_v3_deploy_guard (ready INTEGER NOT NULL CHECK (ready = 1));
+INSERT INTO verifier_v3_deploy_guard
+SELECT CASE WHEN EXISTS (
+  SELECT 1 FROM project_lifecycle_rollout
+   WHERE id = 1 AND maintenance_mode = 1
+     AND length(verifier_v3_predeploy_id) = 36
+     AND substr(verifier_v3_predeploy_id, 9, 1) = '-'
+     AND substr(verifier_v3_predeploy_id, 14, 1) = '-'
+     AND substr(verifier_v3_predeploy_id, 19, 1) = '-'
+     AND substr(verifier_v3_predeploy_id, 24, 1) = '-'
+     AND substr(verifier_v3_predeploy_id, 15, 1) GLOB '[1-8]'
+     AND lower(substr(verifier_v3_predeploy_id, 20, 1)) GLOB '[89ab]'
+     AND length(replace(verifier_v3_predeploy_id, '-', '')) = 32
+     AND lower(verifier_v3_predeploy_id) NOT GLOB '*[^0-9a-f-]*'
+) THEN 1 ELSE 0 END;
+DROP TABLE verifier_v3_deploy_guard;
+
 ALTER TABLE queue_projects ADD COLUMN verifier_protocol INTEGER NOT NULL DEFAULT 2
   CHECK (verifier_protocol IN (1, 2, 3));
 

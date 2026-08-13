@@ -133,6 +133,7 @@ import {
   storeEvidence,
 } from "./merge-lane.js";
 import { readQueueDoctorReadiness } from "./doctor-readiness.js";
+import { databaseSchemaCapabilities } from "../schema-state.js";
 
 /**
  * The dependencies `recordMergeFromIntent` needs, assembled from the pieces
@@ -2006,8 +2007,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
     const baseRef = branchRef(typeof rawBody["baseRef"] === "string" ? rawBody["baseRef"] : undefined);
     if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    const v3Ready = (await databaseSchemaCapabilities(c.env.DB as unknown as D1Like)).verifierProtocolV3;
     const protocol = await c.env.DB.prepare(
-      `SELECT verifier_protocol AS protocol FROM queue_projects
+      `SELECT ${v3Ready ? "verifier_protocol" : "CASE verifier_workflow_version WHEN 1 THEN 1 ELSE 2 END"} AS protocol FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?`,
     )
       .bind(repositoryId, baseRef, lease.projectId)
