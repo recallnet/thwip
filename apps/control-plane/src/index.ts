@@ -65,6 +65,7 @@ import {
 } from "./queue/readiness.js";
 import { loadQueueState } from "./queue/queue-state.js";
 import type { D1Like } from "./queue/projection.js";
+import { runPrivateFeedbackRetention } from "./private-agent-feedback.js";
 import type { BlockingReason } from "@thwip/queue-domain";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import {
@@ -364,7 +365,7 @@ app.use("*", async (c, next) => {
     (pathname === "/health" || pathname === "/v1/schema") &&
     (await projectLifecycleMaintenanceMode(db))
   ) return;
-  ctx.waitUntil(
+  ctx.waitUntil(Promise.all([
     tickOwedByTraffic(
       {
         readClock: () => readClock(db),
@@ -376,7 +377,11 @@ app.use("*", async (c, next) => {
       },
       nowIso(),
     ),
-  );
+    runPrivateFeedbackRetention(db).catch((error: unknown) => {
+      console.error(`[private feedback retention] sweep failed: ${String(error)}`);
+      throw error;
+    }),
+  ]).then(() => undefined));
 });
 
 // --- Better Auth (sessions, GitHub login, device flow, Stripe billing) -----
@@ -3392,6 +3397,20 @@ export default {
     if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) return;
     await drainProjectLifecycleBackfill(env.DB as unknown as D1Like);
     await drainGithubSyncSnapshots(env);
+    let privateFeedbackRetentionError: unknown;
+    if (controller.cron === "*/5 * * * *") {
+      try {
+        const result = await runPrivateFeedbackRetention(env.DB as unknown as D1Like);
+        if (!result.skipped && (result.privateRootsDeleted > 0 || result.receiptsDeleted > 0)) {
+          console.log(
+            `[private feedback retention] private=${result.privateRootsDeleted} receipts=${result.receiptsDeleted}`,
+          );
+        }
+      } catch (error) {
+        privateFeedbackRetentionError = error;
+        console.error(`[private feedback retention] sweep failed: ${String(error)}`);
+      }
+    }
     // The delayed continuation is the primary wake-up. This five-minute
     // boundary is the durable fallback if that Queue delivery was lost. Enqueue
     // current GitHub authority before quarantine collection can run.
@@ -3418,6 +3437,7 @@ export default {
       // to the 12:00 one and the queue quietly halves its own cadence.
       if (!(await claimTick(db, startedAt, secondsBefore(startedAt, TICK_INTERVAL_SECONDS - 30), "cron"))) {
         console.log("[queue heartbeat] a tick ran inside the interval, skipping this firing");
+        if (privateFeedbackRetentionError !== undefined) throw privateFeedbackRetentionError;
         return;
       }
       // A throw here used to leave the claim taken and nothing else: the clock
@@ -3438,6 +3458,7 @@ export default {
           `readinessRechecked=${result.readinessRechecked} chainFindings=${result.chainFindings} ` +
           `retiredComments=${result.retiredComments}`,
       );
+      if (privateFeedbackRetentionError !== undefined) throw privateFeedbackRetentionError;
       return;
     }
 

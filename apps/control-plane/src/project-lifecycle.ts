@@ -1092,6 +1092,7 @@ function cleanupStatements(
   cleanupOwner: string,
 ): unknown[] {
   const byProject = ["repository_grants", "proof_verifications", "verification_observations", "policy_bundles"];
+  const privateFeedbackChildren = ["agent_report_events", "agent_report_provenance", "agent_report_content"];
   const byRepository = [
     "team_repos",
     "queue_status_comments",
@@ -1135,6 +1136,37 @@ function cleanupStatements(
       project.projectId,
       cleanupOwner,
     ),
+    db.prepare(
+      `UPDATE agent_report_receipts
+          SET status = 'closed',
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              final_at = COALESCE(final_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+              content_deleted_at = COALESCE(content_deleted_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        WHERE id IN (
+          SELECT root.receipt_id FROM agent_report_private_roots root
+           WHERE root.project_id = ?
+        )
+          AND EXISTS (
+            SELECT 1 FROM project_release_jobs
+             WHERE github_repository_id = ? AND project_id = ? AND cleanup_owner_token = ?
+          )`,
+    ).bind(project.projectId, project.repositoryId, project.projectId, cleanupOwner),
+    ...privateFeedbackChildren.map((table) =>
+      db.prepare(
+        `DELETE FROM ${table} WHERE private_root_id IN (
+           SELECT id FROM agent_report_private_roots WHERE project_id = ?
+         ) AND EXISTS (
+           SELECT 1 FROM project_release_jobs
+            WHERE github_repository_id = ? AND project_id = ? AND cleanup_owner_token = ?
+         )`,
+      ).bind(project.projectId, project.repositoryId, project.projectId, cleanupOwner),
+    ),
+    db.prepare(
+      `DELETE FROM agent_report_private_roots WHERE project_id = ? AND EXISTS (
+         SELECT 1 FROM project_release_jobs
+          WHERE github_repository_id = ? AND project_id = ? AND cleanup_owner_token = ?
+       )`,
+    ).bind(project.projectId, project.repositoryId, project.projectId, cleanupOwner),
     ...byProject.map((table) =>
       db.prepare(
         `DELETE FROM ${table} WHERE project_id = ? AND EXISTS (
