@@ -270,10 +270,9 @@
 /* ---------- merge queue homepage ---------- */
 
 /* The page's left edge is the merge lane.
-   One rule runs from the headline to the foot, ticked where each section joins
-   it. It is a hairline while the work is still upstream of the queue and two
-   pixels once evidence starts deciding turns, so the page's own structure
-   carries the claim before a word of it is read: many agents, one writer. */
+   One uninterrupted rule runs from the headline to the foot, ticked where each
+   section joins it. The consistent weight keeps the diagram readable as one
+   path from many agents to one writer. */
 .mq .nt-page { max-width: 1140px; }
 .mq {
   --mq-lane-marker-size: 8px;
@@ -328,21 +327,16 @@
   background: var(--pass);
 }
 
-/* Upstream of the queue nothing is protected yet, so the lane is a hairline. */
 .mq-row--upstream .mq-row__body {
-  border-left: 1px solid var(--rule);
-  padding-left: 36px;
   padding-bottom: 0;
 }
-.mq-row--upstream .mq-row__body::after { left: -4px; }
 
 .mq-row--open .mq-row__label { padding-top: 56px; }
 .mq-row--open .mq-row__body {
-  border-left: 1px solid var(--rule);
-  padding: 52px 0 0 36px;
+  padding: 52px 0 0 35px;
 }
 .mq-row--open .mq-row__body::before { content: none; }
-.mq-row--open .mq-row__body::after { top: 52px; left: -4px; background: var(--ink); }
+.mq-row--open .mq-row__body::after { top: 52px; background: var(--ink); }
 
 /* An agent's verdict, quoted on the lane. The bar is the lane's own green:
    the claim under it is evidence, the same way a passing run is. */
@@ -481,7 +475,7 @@
   color: var(--muted);
 }
 /* Three checkouts arriving on their own, converging on one rule. */
-.mq-diagram { margin: 38px 0 0 -36px; padding: 0; }
+.mq-diagram { margin: 38px 0 0 -35px; padding: 0; }
 .mq-agent {
   display: flex;
   flex-wrap: wrap;
@@ -489,16 +483,27 @@
   gap: 0 14px;
   min-height: 40px;
   padding: 9px 0;
-  border-bottom: 1px solid var(--rule);
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.2;
 }
-.mq-agent__feed { flex: 0 0 52px; height: 1px; background: var(--ink); }
+.mq-agent__feed {
+  flex: 0 0 52px;
+  height: 1px;
+  margin-right: -14px;
+  background: var(--ink);
+}
 .mq-agent__id {
-  flex: 0 0 11ch;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
   color: var(--ink);
-  letter-spacing: 0.08em;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 .mq-agent__branch { color: var(--muted); }
@@ -511,7 +516,7 @@
   align-items: baseline;
   gap: 6px 16px;
   margin-top: 22px;
-  padding: 15px 0;
+  padding: 15px 10px;
   border-top: 2px solid var(--ink);
   font-family: var(--mono);
 }
@@ -614,10 +619,8 @@
     background: var(--pass);
   }
   .mq-row--open,
-  .mq-row--upstream { padding-left: 21px; border-left: 1px solid var(--rule); }
+  .mq-row--upstream { padding-left: 20px; }
   .mq-row--open { border-top: 0; }
-  .mq-row--open::before,
-  .mq-row--upstream::before { left: -4px; }
   .mq-row--open::before { top: 30px; background: var(--ink); }
   .mq-row__label { flex-basis: 100%; min-width: 0; padding: 26px 0 0; }
   .mq-row--open .mq-row__label { padding-top: 30px; }
@@ -639,10 +642,9 @@
   .mq-hero__lede { font-size: 19px; }
   .mq-measures { grid-template-columns: 1fr; margin-top: 44px; padding-bottom: 12px; }
   .mq-measure { padding-bottom: 24px; }
-  .mq-diagram { margin-left: -21px; }
+  .mq-diagram { margin-left: -20px; }
   .mq-agent { gap: 4px 12px; }
-  .mq-agent__feed { flex-basis: 21px; }
-  .mq-agent__id { flex: 0 0 100%; }
+  .mq-agent__feed { flex-basis: 21px; margin-right: -12px; }
   .mq-profile h3 { flex: 0 0 100%; }
   .mq-strength { margin-left: 0; }
 }
