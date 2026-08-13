@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
@@ -29,11 +30,20 @@ import { mergeCommitText } from "./merge-commit.js";
 
 const open: Array<{ close(): void }> = [];
 let raw: import("better-sqlite3").Database;
+let signingKey: CryptoKey;
+let publicJwk: Awaited<ReturnType<typeof exportJWK>>;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  signingKey = pair.privateKey;
+  publicJwk = { ...(await exportJWK(pair.publicKey)), kid: "chain-repair-test", alg: "ES256" };
+});
 
 function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  raw.prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?)").run(publicJwk.kid, JSON.stringify(publicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -189,7 +199,10 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
       return { merged: merge !== undefined, mergeCommitSha: merge?.mergeSha ?? null };
     },
     proofCheckRunId: async () => "91289436271",
-    signRecordBytes: async () => "jws-record",
+    signRecordBytes: async (_environment, bytes, typ) =>
+      new CompactSign(bytes)
+        .setProtectedHeader({ alg: "ES256", kid: publicJwk.kid, typ })
+        .sign(signingKey),
     ...over,
   });
 }

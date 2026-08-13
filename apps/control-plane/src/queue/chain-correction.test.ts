@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { verifyChain, type Sha256 } from "@thwip/queue-protocol";
 import { testD1 } from "../../test/d1.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -24,11 +25,20 @@ import { mergeCommitText } from "./merge-commit.js";
 
 const open: Array<{ close(): void }> = [];
 let raw: import("better-sqlite3").Database;
+let signingKey: CryptoKey;
+let publicJwk: Awaited<ReturnType<typeof exportJWK>>;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  signingKey = pair.privateKey;
+  publicJwk = { ...(await exportJWK(pair.publicKey)), kid: "chain-correction-test", alg: "ES256" };
+});
 
 function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  raw.prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?)").run(publicJwk.kid, JSON.stringify(publicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -149,7 +159,10 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     baseContainsSha: onMain,
     pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: REAL_MERGE }),
     proofCheckRunId: async () => "91396799250",
-    signRecordBytes: async () => "jws-record",
+    signRecordBytes: async (_environment, bytes, typ) =>
+      new CompactSign(bytes)
+        .setProtectedHeader({ alg: "ES256", kid: publicJwk.kid, typ })
+        .sign(signingKey),
     ...over,
   });
 }

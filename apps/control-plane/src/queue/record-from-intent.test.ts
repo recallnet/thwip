@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import {
   canonicalRecordBytes,
   envelopeDigest,
@@ -26,11 +27,20 @@ import type { D1Like } from "./projection.js";
 
 const open: Array<{ close(): void }> = [];
 let raw: import("better-sqlite3").Database;
+let signingKey: CryptoKey;
+let publicJwk: Awaited<ReturnType<typeof exportJWK>>;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  signingKey = pair.privateKey;
+  publicJwk = { ...(await exportJWK(pair.publicKey)), kid: "record-from-intent-test", alg: "ES256" };
+});
 
 function env(): QueueRouteEnv {
   const t = testD1();
   open.push(t);
   raw = t.raw;
+  raw.prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?)").run(publicJwk.kid, JSON.stringify(publicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -303,7 +313,10 @@ const stubDeps: RecordFromIntentDeps<QueueRouteEnv> = {
     requiredSuites: ["unit"],
     organizationId: "org_acme",
   }),
-  signRecordBytes: async () => "jws-record",
+  signRecordBytes: async (_environment, bytes, typ) =>
+    new CompactSign(bytes)
+      .setProtectedHeader({ alg: "ES256", kid: publicJwk.kid, typ })
+      .sign(signingKey),
   storeEvidence: async () => "no-bucket",
   onQueue: (env, repositoryId, baseRef, decide) => runOnQueue(env, repositoryId, baseRef, decide),
 };
@@ -413,7 +426,11 @@ describe("recordMergeFromIntent", () => {
            FROM queue_attestations WHERE digest = ?`,
       )
       .get(first.repairAuditDigest) as { kind: string; sequence: number | null; bytes: string; jws: string };
-    expect(audit).toMatchObject({ kind: "transition-repair-audit", sequence: null, jws: "jws-record" });
+    expect(audit).toMatchObject({
+      kind: "transition-repair-audit",
+      sequence: null,
+      jws: expect.stringMatching(/^[^.]+\.[^.]+\.[^.]+$/),
+    });
     expect(JSON.parse(audit.bytes)).toMatchObject({
       schemaVersion: "1",
       kind: "transition-repair-audit",
@@ -770,9 +787,74 @@ describe("recordMergeFromIntent", () => {
     expect(replay).toMatchObject({ status: "recorded", sequence: 1 });
     expect(
       raw
-        .prepare("SELECT digest FROM queue_attestations WHERE kind = 'verified-merge' AND transition_sequence IS NOT NULL")
+        .prepare("SELECT digest FROM queue_attestations WHERE kind = 'verified-merge'")
         .all(),
     ).toHaveLength(1);
+  });
+
+  it("does not replace a valid staged row when service-key lookup fails", async () => {
+    const e = env();
+    seed();
+    await seedVerifiedIntent();
+    let throwBeforeLink = true;
+    const interrupted: RecordFromIntentDeps<QueueRouteEnv> = {
+      ...stubDeps,
+      onQueue: async (...args) => {
+        if (throwBeforeLink) {
+          throwBeforeLink = false;
+          throw new Error("injected stop before queue link");
+        }
+        return stubDeps.onQueue(...args);
+      },
+    };
+    const input = {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prn_acme",
+      reason: "test service key outage",
+      attemptId: FIRST.attemptId,
+    };
+    await expect(recordMergeFromIntent(e, interrupted, input)).rejects.toThrow(/injected stop/i);
+
+    const underlying = e.DB as unknown as D1Like;
+    const brokenKeys: D1Like = {
+      prepare: (query) => {
+        if (query.includes("SELECT public_jwk FROM service_keys")) {
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("service key read failed");
+              },
+              first: async () => {
+                throw new Error("service key read failed");
+              },
+              all: async () => {
+                throw new Error("service key read failed");
+              },
+            }),
+          };
+        }
+        return underlying.prepare(query);
+      },
+      batch: (statements) => underlying.batch(statements),
+    };
+    const brokenEnv = { ...e, DB: brokenKeys } as unknown as QueueRouteEnv;
+    let replacementSigns = 0;
+    const noReplacement: RecordFromIntentDeps<QueueRouteEnv> = {
+      ...stubDeps,
+      signRecordBytes: async (...args) => {
+        replacementSigns += 1;
+        return stubDeps.signRecordBytes(...args);
+      },
+    };
+
+    await expect(recordMergeFromIntent(brokenEnv, noReplacement, input)).rejects.toThrow(/service key read failed/i);
+    expect(replacementSigns).toBe(0);
+    expect(raw.prepare("SELECT digest FROM queue_attestations WHERE kind = 'verified-merge'").all()).toHaveLength(1);
+
+    expect(await recordMergeFromIntent(e, stubDeps, input)).toMatchObject({ status: "recorded", sequence: 1 });
+    expect(raw.prepare("SELECT digest FROM queue_attestations WHERE kind = 'verified-merge'").all()).toHaveLength(1);
   });
 
   it("backfills the signed audit when audit signing fails after the durable link", async () => {
@@ -781,9 +863,10 @@ describe("recordMergeFromIntent", () => {
     await seedVerifiedIntent();
     const deps: RecordFromIntentDeps<QueueRouteEnv> = {
       ...stubDeps,
-      signRecordBytes: async (_env, _bytes, typ) => {
+      signRecordBytes: async (...args) => {
+        const typ = args[2];
         if (typ.includes("transition-repair-audit")) throw new Error("injected audit signer outage");
-        return "jws-record";
+        return stubDeps.signRecordBytes(...args);
       },
     };
     const input = {

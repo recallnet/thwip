@@ -159,6 +159,24 @@ export type QueueEvent = EventEnvelope &
         /** Administrator or automatic operator reason for a repaired link. */
         readonly reason?: string;
       }
+    | {
+        /**
+         * GitHub says this pull request merged and the durable chain already
+         * carries the signed record named here.
+         *
+         * This is terminal bookkeeping, not a second merge confirmation. The
+         * original attempt may have ended or been compacted long ago, so this
+         * event deliberately does not move the branch head or append a chain
+         * link. It only brings an entry left behind by a missed webhook into
+         * agreement with evidence the queue already published.
+         */
+        readonly type: "EntryMergeReconciled";
+        readonly entryId: string;
+        readonly attemptId: string;
+        readonly mergeSha: string;
+        readonly transitionDigest: string;
+        readonly transitionSequence: number;
+      }
     | { readonly type: "ExternalTransitionObserved"; readonly observedBaseSha: string }
     | { readonly type: "QueuePaused"; readonly actorPrincipalId: string; readonly reason: string }
     | { readonly type: "QueueResumed"; readonly actorPrincipalId: string }
