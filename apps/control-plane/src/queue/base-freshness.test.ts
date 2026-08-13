@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../../test/d1.js";
-import { queueRouteDeps } from "../../test/queue-deps.js";
+import { fixturePolicy, queueRouteDeps } from "../../test/queue-deps.js";
 import { acceptProof } from "../../test/proof.js";
 import type { MergeIntent } from "./merge-write.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
@@ -349,6 +349,63 @@ describe("the base a merge intent pins", () => {
     // A repeated wake observes the unknown write; it cannot send another one.
     await app.request(`/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
     expect(mergeWrites).toBe(1);
+  });
+
+  it("runs a rebuilt fast candidate after the base moves through an exclusive path", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-08-05T20:55:44.000Z");
+    const e = env();
+    let candidateReads = 0;
+    let pathReads = 0;
+    let dispatches = 0;
+    let mergeWrites = 0;
+    const rebuiltTree = "8".repeat(40);
+    const app = routes({
+      activePolicy: async () =>
+        fixturePolicy({
+          exclusivePaths: ["migrations/**"],
+          verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+        }),
+      integratedCandidate: async () => {
+        candidateReads += 1;
+        return candidateReads === 1
+          ? { status: "blocked" as const, reason: "CANDIDATE_STALE" as const }
+          : {
+              status: "pinned" as const,
+              baseSha: MOVED,
+              headSha: HEAD,
+              candidateSha: CANDIDATE,
+              candidateTreeOid: rebuiltTree,
+            };
+      },
+      candidateChangedPaths: async (_env, _repositoryId, input) => {
+        pathReads += 1;
+        expect(input.candidateTreeOid).toBe(rebuiltTree);
+        return { status: "exact" as const, paths: ["migrations/0033_second.sql"] };
+      },
+      dispatchCandidateVerification: async (_env, _repositoryId, payload) => {
+        dispatches += 1;
+        expect(payload).toMatchObject({ baseSha: MOVED, candidateTreeOid: rebuiltTree });
+        return { ok: true as const };
+      },
+      mergeWrite: async () => {
+        mergeWrites += 1;
+        return { kind: "unknown" as const, detail: "must wait for the rebuilt candidate run" };
+      },
+    });
+
+    await drive(app, e);
+    expect(candidateReads).toBe(1);
+    expect(pathReads).toBe(0);
+    expect(dispatches).toBe(0);
+
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    await app.request(`/v1/queue/${REPO}/tick?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
+
+    expect(candidateReads).toBe(2);
+    expect(pathReads).toBe(1);
+    expect(dispatches).toBe(1);
+    expect(mergeWrites).toBe(0);
   });
 
   it("pins what GitHub says the candidate is, not fields sent to the check API", async () => {

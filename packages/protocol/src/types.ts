@@ -102,6 +102,12 @@ export interface PolicyBundleV1 {
     remoteSuites?: string[];
   };
   proofMaxAgeSeconds: number;
+  /**
+   * Repository-relative path globs whose combined merge candidate must be run
+   * again. Absent and empty mean the same thing, which preserves policy
+   * digests and queue behaviour for repositories that do not opt in.
+   */
+  exclusivePaths?: string[];
 }
 
 export interface EnrolledKey {

@@ -46,6 +46,7 @@ import {
 import type { BlockingReason } from "@thwip/queue-domain";
 import type { ReasonCode } from "@thwip/vocabulary";
 import { DEFAULT_TIMINGS } from "./commands.js";
+import { matchingExclusivePaths, type CandidatePathChanges } from "./exclusive-paths.js";
 import {
   acquireProjectWriteLease,
   repositoryAllowsExternalWrite,
@@ -111,6 +112,12 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     baseRef: string,
     pullRequestNumber: number,
   ): Promise<IntegratedCandidate | null>;
+  /** Exact path changes from the current base tree to the combined candidate tree. */
+  candidateChangedPaths?(
+    env: TEnv,
+    repositoryId: string,
+    input: { baseTreeOid: string; candidateTreeOid: string },
+  ): Promise<CandidatePathChanges>;
   /** Ask the pinned verifier to run the required suites against a candidate. */
   dispatchCandidateVerification(
     env: TEnv,
@@ -703,6 +710,39 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
     }
     const localRun = evidence.evidence.localRun;
 
+    // Exclusive paths protect namespaces where a text merge can be clean while
+    // the combined repository is not. The gate therefore compares the current
+    // base tree with the actual candidate tree, rather than trusting the pull
+    // request's head-only file list. If that exact comparison cannot be made,
+    // an opted-in repository fails closed.
+    const exclusivePaths = policy?.exclusivePaths ?? [];
+    let touchesExclusivePath = false;
+    if (exclusivePaths.length > 0) {
+      const baseCommit = await deps.commitFacts(env, repositoryId, cand.baseSha).catch(() => null);
+      const changes =
+        baseCommit === null || deps.candidateChangedPaths === undefined
+          ? null
+          : await deps
+              .candidateChangedPaths(env, repositoryId, {
+                baseTreeOid: baseCommit.treeOid,
+                candidateTreeOid: cand.candidateTreeOid,
+              })
+              .catch(() => null);
+      if (changes === null || changes.status !== "exact") {
+        return {
+          outcome: "refused",
+          activationState: project.activationState,
+          reason: "CANDIDATE_PATHS_UNREADABLE",
+          detail:
+            changes?.status === "unreadable"
+              ? `the queue could not establish the combined candidate's changed paths: ${changes.detail}`
+              : "the queue could not establish the combined candidate's changed paths",
+          entryId,
+        };
+      }
+      touchesExclusivePath = matchingExclusivePaths(changes.paths, exclusivePaths).length > 0;
+    }
+
     // Under the fast profile the policy's own evidence is the proof on the head,
     // so there is nothing further to establish. Under every other profile the
     // queue is about to claim the integration itself was run, and that claim needs
@@ -715,7 +755,10 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
     // Its suites ran on the device, under an assignment this queue signed, and
     // dispatching those suites to GitHub Actions is a different security profile
     // says `fresh` does not have. `audited` asks for both, and still does.
-    const needsIntegratedRun = policy !== null && requiresRemoteVerification(policy.securityProfile);
+    const needsIntegratedRun =
+      policy !== null &&
+      (requiresRemoteVerification(policy.securityProfile) ||
+        (policy.securityProfile === "fast" && touchesExclusivePath));
     // Null unless something actually ran. Under reuse nothing does, and the
     // constant that used to sit here was stored on the attempt as though a
     // verifier had spoken.

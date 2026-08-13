@@ -25,6 +25,27 @@ candidate pull-request YAML never governs or approves its own proof. A global
 policy can activate immediately when a project is enabled. Without either
 source the App reports the missing policy explicitly and fails closed.
 
+Repositories with namespaces that Git can merge cleanly but the application
+must serialize can opt those paths into combined-candidate verification:
+
+```yaml
+version: 4
+profile: fast
+required: [lint, typecheck, test]
+policy:
+  exclusive_paths:
+    - "migrations/**"
+```
+
+`*` and `?` match within one path segment. A whole `**` segment crosses
+directories. Patterns are rooted at the repository. A fast-profile pull request
+that adds, changes, deletes, renames, or changes the mode of a matching path must
+pass the pinned candidate verifier against its combined tree before it merges.
+The queue processes one candidate at a time, so the next matching pull request
+is rebuilt and checked on the base that includes the first. If GitHub cannot
+return both complete trees, the queue fails closed. With no `exclusive_paths`,
+the queue behaves as before.
+
 Projects begin with the distinct `thwip / proof (observe)` App check. After a
 recent PASS under the active policy, an administrator can enforce it, and the
 App publishes `thwip` from then on.

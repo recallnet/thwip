@@ -63,6 +63,7 @@ export const SERVICE_REASONS = [
   "CANDIDATE_NOT_VERIFIED",
   "CANDIDATE_TREE_MISMATCH",
   "CANDIDATE_BASE_MOVED",
+  "CANDIDATE_PATHS_UNREADABLE",
   "BASE_UNREADABLE",
   // The states candidate resolution can be in when it hands out no candidate
   // and the pull request itself is the reason (apps/control-plane/src/queue/

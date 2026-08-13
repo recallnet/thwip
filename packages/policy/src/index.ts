@@ -17,6 +17,7 @@ export interface ThwipYaml {
     allow_author_as_signer?: boolean;
     allowed_key_algorithms?: string[];
     proof_max_age_seconds?: number;
+    exclusive_paths?: string[];
   };
 }
 
@@ -52,6 +53,10 @@ const te = new TextEncoder();
 
 /** Long enough for a real repository path, bounded before any path work. */
 export const MAX_PIPELINE_MODULE_PATH_LENGTH = 4096;
+
+/** A policy is reviewed by a person, so keep its path surface bounded. */
+export const MAX_EXCLUSIVE_PATHS = 256;
+export const MAX_EXCLUSIVE_PATH_LENGTH = 1024;
 
 /** Pinned unless a project names its own. */
 export const DEFAULT_DAGGER_VERSION = "0.21.8";
@@ -151,6 +156,24 @@ function validatedThwipYaml(value: unknown): ThwipYaml {
     if (maxAge !== undefined && (!Number.isInteger(maxAge) || (maxAge as number) <= 0)) {
       throw new Error("thwip.yaml: policy.proof_max_age_seconds must be a positive integer");
     }
+    const exclusivePaths = policy["exclusive_paths"];
+    if (!Array.isArray(exclusivePaths)) {
+      if (exclusivePaths !== undefined) {
+        throw new Error("thwip.yaml: policy.exclusive_paths must be a list of repository-relative globs");
+      }
+    } else {
+      if (exclusivePaths.length > MAX_EXCLUSIVE_PATHS) {
+        throw new Error(`thwip.yaml: policy.exclusive_paths may contain at most ${MAX_EXCLUSIVE_PATHS} globs`);
+      }
+      const seen = new Set<string>();
+      for (const pattern of exclusivePaths) {
+        validateExclusivePathPattern(pattern);
+        if (seen.has(pattern)) {
+          throw new Error(`thwip.yaml: policy.exclusive_paths contains duplicate glob '${pattern}'`);
+        }
+        seen.add(pattern);
+      }
+    }
   }
   return y;
 }
@@ -233,6 +256,98 @@ function normalizeRepositoryPath(path: string): string {
   return normalized;
 }
 
+/**
+ * Validate the deliberately small path-glob language used by the merge gate.
+ *
+ * `*` and `?` stay within one path segment. `**` is a whole segment and may
+ * cross directories. Patterns are rooted at the repository, use `/`, and may
+ * not escape it. A narrow language is easier for a reviewer to read and keeps
+ * the policy parser and queue matcher from disagreeing.
+ */
+export function validateExclusivePathPattern(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_EXCLUSIVE_PATH_LENGTH) {
+    throw new Error(
+      `thwip.yaml: each policy.exclusive_paths glob must be a non-empty string of at most ${MAX_EXCLUSIVE_PATH_LENGTH} characters`,
+    );
+  }
+  if (value.startsWith("/") || value.includes("\\") || value.includes("\0")) {
+    throw new Error(`thwip.yaml: policy.exclusive_paths glob must be repository-relative and use '/' ('${value}')`);
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`thwip.yaml: policy.exclusive_paths glob must stay inside the repository ('${value}')`);
+  }
+  for (const segment of segments) {
+    if (segment.includes("**") && segment !== "**") {
+      throw new Error(`thwip.yaml: '**' must be a complete path segment in policy.exclusive_paths ('${value}')`);
+    }
+  }
+}
+
+function segmentMatches(pattern: string, value: string): boolean {
+  const memo = new Map<string, boolean>();
+  const visit = (patternIndex: number, valueIndex: number): boolean => {
+    const key = `${patternIndex}:${valueIndex}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    let answer: boolean;
+    if (patternIndex === pattern.length) {
+      answer = valueIndex === value.length;
+    } else if (pattern[patternIndex] === "*") {
+      answer = visit(patternIndex + 1, valueIndex) ||
+        (valueIndex < value.length && visit(patternIndex, valueIndex + 1));
+    } else if (pattern[patternIndex] === "?") {
+      answer = valueIndex < value.length && visit(patternIndex + 1, valueIndex + 1);
+    } else {
+      answer = pattern[patternIndex] === value[valueIndex] && visit(patternIndex + 1, valueIndex + 1);
+    }
+    memo.set(key, answer);
+    return answer;
+  };
+  return visit(0, 0);
+}
+
+/** Match one validated policy glob against one repository-relative path. */
+export function exclusivePathMatches(pattern: string, path: string): boolean {
+  try {
+    validateExclusivePathPattern(pattern);
+  } catch {
+    return false;
+  }
+  if (
+    path.length === 0 ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    return false;
+  }
+
+  const patterns = pattern.split("/");
+  const values = path.split("/");
+  const memo = new Map<string, boolean>();
+  const visit = (patternIndex: number, valueIndex: number): boolean => {
+    const key = `${patternIndex}:${valueIndex}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    let answer: boolean;
+    if (patternIndex === patterns.length) {
+      answer = valueIndex === values.length;
+    } else if (patterns[patternIndex] === "**") {
+      answer = visit(patternIndex + 1, valueIndex) ||
+        (valueIndex < values.length && visit(patternIndex, valueIndex + 1));
+    } else {
+      answer = valueIndex < values.length &&
+        segmentMatches(patterns[patternIndex]!, values[valueIndex]!) &&
+        visit(patternIndex + 1, valueIndex + 1);
+    }
+    memo.set(key, answer);
+    return answer;
+  };
+  return visit(0, 0);
+}
+
 interface DirectoryNode {
   directories: Map<string, DirectoryNode>;
   files: Map<string, string>;
@@ -307,6 +422,10 @@ export async function deriveProjectConfig(
   ids: { ownerId: string; repositoryId: string },
   snapshot: RepositorySnapshot,
 ): Promise<ProjectConfig> {
+  // This function is a public boundary too. Most callers arrive through the
+  // YAML parser, but a typed object must not be able to sign a policy the
+  // control plane would later refuse as malformed.
+  y = validatedThwipYaml(y);
   let pipeline: PipelineDefinition;
   if (y.pipeline !== undefined) {
     pipeline = {
@@ -361,6 +480,9 @@ export async function deriveProjectConfig(
       ...(remoteSuites.length > 0 ? { remoteSuites } : {}),
     },
     proofMaxAgeSeconds: y.policy?.proof_max_age_seconds ?? 86400,
+    ...(y.policy?.exclusive_paths === undefined || y.policy.exclusive_paths.length === 0
+      ? {}
+      : { exclusivePaths: [...y.policy.exclusive_paths].sort() }),
   };
   const policyDigest = await canonicalDigest(policy);
   return { policy, policyDigest, pipeline, pipelineDigest };
