@@ -123,3 +123,19 @@ signed transition record. A green setup response by itself is not sufficient.
   the enforcement handoff.
 - Schema changes fix forward. Do not deploy a Worker that reads columns a
   migration has already dropped.
+
+## Removing a repository
+
+GitHub App repository selection is the project lifecycle. Before removing an
+enforced repository from the App, a repository administrator must disable or
+remove `Thwip Queue Ownership` and `Thwip Repository Policy` while the App can
+still read the repository. The runtime App does not hold the Administration
+permission needed to remove those rulesets after access is revoked.
+
+Then use **Manage repositories on GitHub** in Thwip Settings and remove the
+repository from the installation. An installation that covers all repositories
+must first change to selected repositories. Thwip re-reads the complete GitHub
+selection, stops new project work, and removes the project's policies, proofs,
+queue state, signed records, grants, metrics, and stored evidence. Selecting the
+repository again creates a new disabled project; it does not restore the old
+project.

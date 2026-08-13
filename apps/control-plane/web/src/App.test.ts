@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
   AddRepositoriesButton,
   completedQueueActivationText,
-  AddProject,
   DashboardMetrics,
   GitHubSync,
+  ManageRepositories,
   ORGANIZATION_TABS,
   PROJECT_TABS,
   organizationSection,
@@ -15,7 +15,6 @@ import {
   ProjectQueueHead,
   ProjectSetupDisclosure,
   SignedOutDashboard,
-  RemoveProject,
 } from "./App.js";
 
 /**
@@ -147,24 +146,7 @@ describe("the full sync recovery control", () => {
   });
 });
 
-describe("project removal", () => {
-  const project = {
-    id: "prj_gh_1",
-    github_repository_id: "1",
-    github_name: "recallnet/playhouse",
-    default_branch: "main",
-    enabled: 0,
-    activation_state: "disabled",
-    active_policy_digest: null,
-    policy_version: null,
-    policy_profile: null,
-    config_source: null,
-    proof_check_mode: "observe",
-    collaborators: 0,
-    last_outcome: null,
-    last_observed_at: null,
-    queue_setup_complete: false,
-  };
+describe("GitHub-owned project lifecycle", () => {
   const me = {
     viewer: { githubUserId: "7", githubOrgRole: "owner", activated: true },
     principal: null,
@@ -173,29 +155,39 @@ describe("project removal", () => {
       github_login: "recallnet",
       plan: "free",
       installation_id: "44",
+      repository_selection: "selected",
       better_auth_org_id: null,
     },
     organizations: [],
     appSlug: "thwip",
   };
 
-  it("states the destructive scope, sync behavior, re-add behavior, and separate App access", () => {
-    const html = renderToStaticMarkup(createElement(RemoveProject, { project: project as never, me: me as never }));
+  it("uses GitHub selection alone and states the full cleanup and ruleset prerequisite", () => {
+    const html = renderToStaticMarkup(createElement(ManageRepositories, { me: me as never }));
     expect(html).toContain("policies, proofs, queue, signed chain, access grants, and measured history");
-    expect(html).toContain("does not uninstall the GitHub App");
-    expect(html).toContain("will not recreate it");
-    expect(html).toContain("new, disabled project with no restored history");
-    expect(html).toContain("recallnet/playhouse");
+    expect(html).toContain("disable its two Thwip rulesets");
+    expect(html).toContain("Newly selected repositories arrive disabled");
+    expect(html).toContain("one-hour safety period");
+    expect(html).toContain("Manage repositories on GitHub");
     expect(html).toContain("settings/installations/44");
+    expect(html).not.toContain("Add project");
+    expect(html).not.toContain("Restore");
   });
 
-  it("requires an organization owner to explicitly add a fresh project", () => {
-    const owner = renderToStaticMarkup(createElement(AddProject, { canAdd: true }));
-    const member = renderToStaticMarkup(createElement(AddProject, { canAdd: false }));
-    expect(owner).toContain("OWNER/REPOSITORY");
-    expect(owner).toContain("fresh, disabled project");
-    expect(member).toContain("Only GitHub organization owners can add a project");
-    expect(member).not.toContain(">Add project</button>");
+  it("shows the clean-import deadline reported for the selected organization", () => {
+    const readyAt = "2030-01-01T01:00:00.000Z";
+    const html = renderToStaticMarkup(createElement(ManageRepositories, {
+      me: {
+        ...me,
+        organization: {
+          ...me.organization,
+          pending_reimports: { count: 1, ready_at: readyAt },
+        },
+      } as never,
+    }));
+
+    expect(html).toContain("1 repository is pending a clean import");
+    expect(html).toContain(new Date(readyAt).toLocaleString());
   });
 });
 

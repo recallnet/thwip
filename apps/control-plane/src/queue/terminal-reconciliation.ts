@@ -8,6 +8,7 @@ import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-
 import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
 import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
+import { acquireProjectWriteLease, type ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
  * Three GitHub reads per selected queue keeps this pass below the same bounded
@@ -105,6 +106,25 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
   input: { repositoryId: string; baseRef: string },
   reads: TerminalPullRequestReads,
   recordDeps: RecordFromIntentDeps<TEnv>,
+  existingLease?: ProjectWriteLease,
+): Promise<TerminalReconciliationResult> {
+  const db = env.DB as unknown as D1Like;
+  const borrowed = existingLease !== undefined;
+  const lifecycleLease = existingLease ?? await acquireProjectWriteLease(db, input.repositoryId);
+  if (lifecycleLease === null) throw new Error(`repository ${input.repositoryId} project is unavailable`);
+  try {
+    return await reconcileTerminalEntriesWithLease(env, input, reads, recordDeps, lifecycleLease);
+  } finally {
+    if (!borrowed) await lifecycleLease.release();
+  }
+}
+
+async function reconcileTerminalEntriesWithLease<TEnv extends QueueRouteEnv>(
+  env: TEnv,
+  input: { repositoryId: string; baseRef: string },
+  reads: TerminalPullRequestReads,
+  recordDeps: RecordFromIntentDeps<TEnv>,
+  lifecycleLease: ProjectWriteLease,
 ): Promise<TerminalReconciliationResult> {
   const db = env.DB as unknown as D1Like;
   const selected = await page(db, input.repositoryId, input.baseRef);
@@ -113,7 +133,12 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
     // the best-effort projection write failed. Empty is therefore still work:
     // republish authority instead of returning before the stale dashboard gets
     // another chance to catch up.
-    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+    const snapshot = await projectAuthoritativeQueue(
+      db,
+      input.repositoryId,
+      input.baseRef,
+      lifecycleLease,
+    );
     return { snapshot, reconciled: 0, examined: 0 };
   }
 
@@ -130,9 +155,14 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
     if (current.cursor !== selected.position.cursor || current.pass !== selected.position.pass) return false;
     if (current.lease !== null && current.lease.until > now) return false;
     return store.claimTerminalReconciliation(selected.nextCursor!, leaseUntil);
-  });
+  }, { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease });
   if (claim === false) {
-    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+    const snapshot = await projectAuthoritativeQueue(
+      db,
+      input.repositoryId,
+      input.baseRef,
+      lifecycleLease,
+    );
     return { snapshot, reconciled: 0, examined: 0 };
   }
 
@@ -140,7 +170,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
     // Exact-record lookup reads the durable transition projection. Repair it
     // from queue_state authority before concluding that a merged PR needs any
     // new signed bytes.
-    await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+    await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef, lifecycleLease);
     const observations: Observation[] = [];
     for (const entry of selected.entries) {
       let pull: PullState = null;
@@ -160,6 +190,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
           baseRef: input.baseRef,
           pullRequestNumber: entry.pullRequestNumber,
           mergeSha: pull.mergeCommitSha,
+          projectId: lifecycleLease.projectId,
         });
         record = existing?.status === "linked" ? existing : null;
 
@@ -176,6 +207,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
             mergeSha: pull.mergeCommitSha,
             witnessPrincipalId: "queue",
             reason: `automatic terminal reconciliation for pull request ${entry.pullRequestNumber}`,
+            writeLease: lifecycleLease,
           });
           if (repaired.status === "refused") {
             console.error(
@@ -188,6 +220,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
             baseRef: input.baseRef,
             pullRequestNumber: entry.pullRequestNumber,
             mergeSha: pull.mergeCommitSha,
+            projectId: lifecycleLease.projectId,
           });
           record = recovered?.status === "linked" ? recovered : null;
         }
@@ -233,17 +266,22 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
         }
       }
       return reconciled;
-    });
+    }, undefined, undefined, lifecycleLease);
 
     // `runOnQueue` projects best-effort because an API command must not fail
     // after authority commits. A heartbeat is the retry owner, so this second
     // publication is deliberately fallible: maintenance reports the failure
     // and the next pass, including an empty one, tries the same generation.
-    const snapshot = await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+    const snapshot = await projectAuthoritativeQueue(
+      db,
+      input.repositoryId,
+      input.baseRef,
+      lifecycleLease,
+    );
     return { snapshot, reconciled: out.result, examined: observations.length };
   } finally {
     await withQueueState(db, input.repositoryId, input.baseRef, (store) => {
       store.releaseTerminalReconciliation(claim);
-    });
+    }, { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease });
   }
 }

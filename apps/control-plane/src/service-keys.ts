@@ -29,6 +29,14 @@ export function publicJwkFrom(jwk: JWK): JWK {
  */
 export async function recordActiveKey(db: D1Like, jwk: JWK): Promise<void> {
   const pub = publicJwkFrom(jwk);
+  // The lifecycle D1 cutover enters database-enforced maintenance before it
+  // exports. A cold isolate must still be able to sign /health without issuing
+  // even an INSERT ... ON CONFLICT against the fenced source database.
+  const existing = await db
+    .prepare("SELECT 1 FROM service_keys WHERE kid = ? LIMIT 1")
+    .bind(pub.kid)
+    .first<{ 1: number }>();
+  if (existing !== null) return;
   await db
     .prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?) ON CONFLICT(kid) DO NOTHING")
     .bind(pub.kid, JSON.stringify(pub))

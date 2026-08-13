@@ -109,10 +109,10 @@ function seed(): void {
     .run("proj_1", ORG, REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', ?, ?, ?, 1, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', ?, ?, ?, 1, 'enforced', ?)`,
     )
-    .run(ORG, REPO, REF);
+    .run(ORG, REPO, REF, "proj_1");
   for (const [id, githubUserId] of [
     ["alice", "1"],
     ["bob", "2"],

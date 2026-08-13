@@ -1,4 +1,4 @@
-import { exportJWK, generateKeyPair } from "jose";
+import { exportJWK, exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1, type TestD1 } from "../test/d1.js";
 import worker from "./index.js";
@@ -24,6 +24,12 @@ describe("the public health signal", () => {
 
   it("cannot be served from a cache", async () => {
     opened = testD1();
+    opened.raw.prepare(
+      `UPDATE project_lifecycle_rollout
+          SET worker_activated_at = NULL, remote_capabilities_retired_at = NULL,
+              remote_capability_evidence = NULL, destructive_schema_ready_at = NULL
+        WHERE id = 1`,
+    ).run();
     const now = new Date().toISOString();
     opened.raw
       .prepare("UPDATE queue_clock SET started_at = ?, finished_at = ?, source = 'cron' WHERE id = 'tick'")
@@ -58,7 +64,100 @@ describe("the public health signal", () => {
       service: "thwip",
       env: "test",
       buildSha: "health-test-build",
+      projectLifecycle: {
+        maintenanceMode: false,
+        workerActivatedAt: expect.any(String),
+        remoteCapabilitiesRetiredAt: null,
+        remoteCapabilityEvidenceComplete: false,
+        destructiveSchemaReadyAt: null,
+        cleanupReady: false,
+      },
       jws: expect.any(String),
     });
+  });
+
+  it("re-enqueues an installation sync at GitHub's primary rate-limit reset", async () => {
+    opened = testD1();
+    const pair = await generateKeyPair("RS256", { extractable: true });
+    const sends = vi.fn(async (_body: unknown, _options?: { delaySeconds: number }) => undefined);
+    const acknowledge = vi.fn();
+    const retry = vi.fn();
+    const resetAt = Math.floor(Date.now() / 1_000) + 600;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("primary rate limit exhausted", {
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(resetAt),
+        },
+      }),
+    );
+    const body = { installationId: "42", syncInstallation: true };
+    const env = {
+      DB: opened.db,
+      GITHUB_APP_ID: "1",
+      GITHUB_APP_PRIVATE_KEY: await exportPKCS8(pair.privateKey),
+      SYNC_QUEUE: { send: sends },
+    } as unknown as Env;
+
+    await worker.queue(
+      { messages: [{ body, ack: acknowledge, retry }] } as unknown as MessageBatch,
+      env,
+    );
+
+    expect(sends).toHaveBeenCalledOnce();
+    expect(sends.mock.calls[0]?.[0]).toEqual(body);
+    const delaySeconds = (sends.mock.calls[0]?.[1] as { delaySeconds?: number } | undefined)?.delaySeconds;
+    expect(delaySeconds).toBeGreaterThanOrEqual(600);
+    expect(delaySeconds).toBeLessThanOrEqual(602);
+    expect(acknowledge).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("serves only health and schema while the D1 generation is fenced", async () => {
+    opened = testD1({ upTo: "0031_finish_github_repository_lifecycle.sql" });
+    const pair = await generateKeyPair("ES256", { extractable: true });
+    const privateJwk = {
+      ...(await exportJWK(pair.privateKey)),
+      kid: `maintenance-test-${crypto.randomUUID()}`,
+      alg: "ES256",
+    };
+    const sends = vi.fn(async (_body: unknown, _options?: { delaySeconds: number }) => undefined);
+    const env = {
+      DB: opened.db,
+      THWIP_ENV: "test",
+      BUILD_SHA: "maintenance-test-build",
+      THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(privateJwk),
+      SYNC_QUEUE: { send: sends },
+    } as unknown as Env;
+    const pending: Promise<unknown>[] = [];
+    const execution = {
+      waitUntil(promise: Promise<unknown>) { pending.push(promise); },
+      passThroughOnException() {},
+    } as unknown as ExecutionContext;
+
+    // Seed the public signing key before the database-level fence closes.
+    expect((await worker.fetch(new Request("https://thwip.test/health"), env, execution)).status).toBe(200);
+    await Promise.all(pending.splice(0));
+    opened.raw.prepare("UPDATE project_lifecycle_rollout SET maintenance_mode = 1 WHERE id = 1").run();
+
+    const blocked = await worker.fetch(new Request("https://thwip.test/v1/metrics"), env, execution);
+    expect(blocked.status).toBe(503);
+    expect(blocked.headers.get("retry-after")).toBe("300");
+    const health = await worker.fetch(new Request("https://thwip.test/health"), env, execution);
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toMatchObject({ projectLifecycle: { maintenanceMode: true } });
+    expect((await worker.fetch(new Request("https://thwip.test/v1/schema"), env, execution)).status).toBe(200);
+
+    const acknowledge = vi.fn();
+    const retry = vi.fn();
+    const body = { installationId: "42", syncInstallation: true };
+    await worker.queue(
+      { messages: [{ body, ack: acknowledge, retry }] } as unknown as MessageBatch,
+      env,
+    );
+    expect(sends).toHaveBeenCalledWith(body, { delaySeconds: 300 });
+    expect(acknowledge).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 });

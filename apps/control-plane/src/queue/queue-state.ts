@@ -1,5 +1,6 @@
 import type { D1Like } from "./projection.js";
 import { cellOf, SnapshotQueueStore } from "./snapshot-store.js";
+import { acquireProjectWriteLease, type ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
  * Read the queue document, run commands against it, write it back if it changed.
@@ -22,6 +23,8 @@ const MAX_ATTEMPTS = 5;
 
 export interface LoadedQueueState {
   readonly store: SnapshotQueueStore;
+  /** Project incarnation that owns this queue document. */
+  readonly projectId: string | null;
   /** `unchanged` when the commands wrote nothing, so a read costs no write. */
   save(): Promise<"saved" | "conflict" | "unchanged" | "removed">;
 }
@@ -29,23 +32,31 @@ export interface LoadedQueueState {
 interface StateRow {
   generation: number;
   document: string;
+  projectId: string | null;
 }
 
 function identityOf(repositoryId: string, baseRef: string) {
   return { queueKey: `${repositoryId}:${baseRef}`, repositoryId, baseRef };
 }
 
-export class QueueProjectRemovedError extends Error {
+export class QueueProjectUnavailableError extends Error {
   constructor(readonly repositoryId: string) {
-    super(`repository ${repositoryId} has been removed from thwip`);
-    this.name = "QueueProjectRemovedError";
+    super(`repository ${repositoryId} has been unavailable in thwip`);
+    this.name = "QueueProjectUnavailableError";
   }
 }
 
-async function projectWasRemoved(db: D1Like, repositoryId: string): Promise<boolean> {
+async function projectIsUnavailable(db: D1Like, repositoryId: string): Promise<boolean> {
   const row = await db
-    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
-    .bind(repositoryId)
+    .prepare(
+      `SELECT 1 AS found
+         WHERE EXISTS (SELECT 1 FROM project_release_jobs WHERE github_repository_id = ?)
+            OR NOT EXISTS (
+              SELECT 1 FROM projects p JOIN organizations o ON o.id = p.organization_id
+               WHERE p.github_repository_id = ? AND o.status = 'active'
+            )`,
+    )
+    .bind(repositoryId, repositoryId)
     .first<{ found: number }>();
   return row !== null;
 }
@@ -56,9 +67,21 @@ export async function loadQueueState(
   baseRef: string,
 ): Promise<LoadedQueueState> {
   const row = await db
-    .prepare("SELECT generation, document FROM queue_state WHERE github_repository_id = ? AND base_ref = ?")
+    .prepare(
+      "SELECT generation, document, project_id AS projectId FROM queue_state WHERE github_repository_id = ? AND base_ref = ?",
+    )
     .bind(repositoryId, baseRef)
     .first<StateRow>();
+  const currentProject = await db
+    .prepare(
+      `SELECT p.id
+         FROM projects p JOIN organizations o ON o.id = p.organization_id
+        WHERE p.github_repository_id = ? AND o.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = p.github_repository_id)`,
+    )
+    .bind(repositoryId)
+    .first<{ id: string }>();
+  const projectId = row?.projectId ?? currentProject?.id ?? null;
 
   const cell = cellOf(row?.document ?? null);
   const store = SnapshotQueueStore.open(cell, identityOf(repositoryId, baseRef));
@@ -70,42 +93,61 @@ export async function loadQueueState(
 
   return {
     store,
+    projectId,
     async save() {
       const document = cell.read();
       if (document === null || document === loadedDocument) return "unchanged";
       const at = new Date().toISOString();
 
       if (loadedGeneration === null) {
+        if (projectId === null) return "removed";
         // No row yet. Two writers can reach here at once, so the insert has to
         // lose quietly rather than raise, and the loser retries against the row
         // the winner created.
         const result = await db
           .prepare(
-            `INSERT INTO queue_state (github_repository_id, base_ref, generation, document, updated_at)
-             SELECT ?, ?, 1, ?, ?
-              WHERE NOT EXISTS (
-                SELECT 1 FROM removed_projects WHERE github_repository_id = ?
+            `INSERT INTO queue_state (github_repository_id, base_ref, generation, document, updated_at, project_id)
+             SELECT ?, ?, 1, ?, ?, ?
+              WHERE EXISTS (
+                SELECT 1 FROM projects p JOIN organizations o ON o.id = p.organization_id
+                 WHERE p.id = ? AND p.github_repository_id = ? AND o.status = 'active'
+              ) AND NOT EXISTS (
+                SELECT 1 FROM project_release_jobs WHERE github_repository_id = ?
               )
              ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
           )
-          .bind(repositoryId, baseRef, document, at, repositoryId)
+          .bind(repositoryId, baseRef, document, at, projectId, projectId, repositoryId, repositoryId)
           .run();
         if (changed(result)) return "saved";
-        return (await projectWasRemoved(db, repositoryId)) ? "removed" : "conflict";
+        return (await projectIsUnavailable(db, repositoryId)) ? "removed" : "conflict";
       }
 
       const result = await db
         .prepare(
           `UPDATE queue_state SET generation = ?, document = ?, updated_at = ?
-            WHERE github_repository_id = ? AND base_ref = ? AND generation = ?
-              AND NOT EXISTS (
-                SELECT 1 FROM removed_projects WHERE github_repository_id = ?
+            WHERE github_repository_id = ? AND base_ref = ? AND generation = ? AND project_id = ?
+              AND EXISTS (
+                SELECT 1 FROM projects p JOIN organizations o ON o.id = p.organization_id
+                 WHERE p.id = ? AND p.github_repository_id = ? AND o.status = 'active'
+              ) AND NOT EXISTS (
+                SELECT 1 FROM project_release_jobs WHERE github_repository_id = ?
               )`,
         )
-        .bind(loadedGeneration + 1, document, at, repositoryId, baseRef, loadedGeneration, repositoryId)
+        .bind(
+          loadedGeneration + 1,
+          document,
+          at,
+          repositoryId,
+          baseRef,
+          loadedGeneration,
+          projectId,
+          projectId,
+          repositoryId,
+          repositoryId,
+        )
         .run();
       if (changed(result)) return "saved";
-      return (await projectWasRemoved(db, repositoryId)) ? "removed" : "conflict";
+      return (await projectIsUnavailable(db, repositoryId)) ? "removed" : "conflict";
     },
   };
 }
@@ -115,6 +157,10 @@ function changed(result: unknown): boolean {
 }
 
 export interface WithQueueStateOptions {
+  /** Reject work queued for an earlier project incarnation. */
+  readonly expectedProjectId?: string;
+  /** Reuse the lease held by a larger operation, including during release drain. */
+  readonly lease?: ProjectWriteLease;
   /**
    * Runs between deciding and committing.
    *
@@ -141,16 +187,31 @@ export async function withQueueState<T>(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
-  decide: (store: SnapshotQueueStore) => T | Promise<T>,
+  decide: (store: SnapshotQueueStore, projectId: string | null) => T | Promise<T>,
   options: WithQueueStateOptions = {},
 ): Promise<T> {
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const loaded = await loadQueueState(db, repositoryId, baseRef);
-    const result = await decide(loaded.store);
-    if (options.beforeSave !== undefined) await options.beforeSave();
-    const outcome = await loaded.save();
-    if (outcome === "removed") throw new QueueProjectRemovedError(repositoryId);
-    if (outcome !== "conflict") return result;
+  let loaded = await loadQueueState(db, repositoryId, baseRef);
+  const expectedProjectId = options.expectedProjectId ?? loaded.projectId ?? undefined;
+  const borrowed = options.lease !== undefined;
+  const lease = options.lease ?? await acquireProjectWriteLease(db, repositoryId, expectedProjectId);
+  if (lease === null || loaded.projectId !== lease.projectId) {
+    if (!borrowed) await lease?.release();
+    throw new QueueProjectUnavailableError(repositoryId);
+  }
+  try {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      if (attempt > 1) loaded = await loadQueueState(db, repositoryId, baseRef);
+      if (loaded.projectId !== lease.projectId) throw new QueueProjectUnavailableError(repositoryId);
+      await lease.renew();
+      const result = await decide(loaded.store, loaded.projectId);
+      if (options.beforeSave !== undefined) await options.beforeSave();
+      await lease.renew();
+      const outcome = await loaded.save();
+      if (outcome === "removed") throw new QueueProjectUnavailableError(repositoryId);
+      if (outcome !== "conflict") return result;
+    }
+  } finally {
+    if (!borrowed) await lease.release();
   }
   // Losing five times in a row is not contention, it is something writing to this
   // queue continuously. Failing here turns that into a retryable error for the

@@ -1,14 +1,17 @@
 /**
  * Apply migrations only when their declared deploy order makes the operation safe.
  *
- * Wrangler applies every pending migration visible in the checkout. It cannot
- * select `before-worker` or `after-worker`, so a tree containing both phases is
- * ambiguous: one phase belongs before a deploy and the other after it. This is
- * the guard between that all-or-nothing command and the live database. The
- * command also requires a separate short-lived migration token and a literal
- * acknowledgement that staging is the live database behind thwip.ai.
+ * Wrangler applies every pending migration visible in its configured directory.
+ * This command exposes only the next contiguous deploy phase, so one reviewed
+ * tree may safely carry the additive migration, its Worker, and the finishing
+ * migration without applying both sides of the deploy at once. It also requires
+ * a separate short-lived migration token and a literal acknowledgement that
+ * staging is the live database behind thwip.ai.
  */
 import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildStamp } from "./build-sha.mjs";
@@ -21,36 +24,27 @@ import {
 } from "./d1-identity.mjs";
 import { readMigrations, unappliedAgainst, undeclaredMigrations } from "./schema-guard.mjs";
 
+const PROJECT_LIFECYCLE_FINISH_MIGRATION = "0031_finish_github_repository_lifecycle.sql";
+
 export function migrationPlan(migrations, applied) {
   const pendingNames = new Set(unappliedAgainst(migrations, applied));
   const pending = migrations.filter((migration) => pendingNames.has(migration.name));
-  const before = pending.filter((migration) => migration.order === "before-worker").map((migration) => migration.name);
-  const after = pending.filter((migration) => migration.order === "after-worker").map((migration) => migration.name);
-
-  if (pending.length === 0) return { kind: "current", before, after };
-  if (before.length > 0 && after.length > 0) return { kind: "mixed", before, after };
-  return { kind: before.length > 0 ? "before-worker" : "after-worker", before, after };
-}
-
-export function formatMixedPhaseRefusal(plan, env) {
-  const ordered = [
-    ...plan.before.map((name) => ({ name, order: "before-worker" })),
-    ...plan.after.map((name) => ({ name, order: "after-worker" })),
-  ].sort((a, b) => a.name.localeCompare(b.name));
-  return [
-    `Refusing: ${env} has pending migrations on both sides of a Worker deploy.`,
-    "",
-    "Pending in repository order:",
-    ...ordered.map(({ name, order }) => `  ${order.padEnd(13)} ${name}`),
-    "",
-    "Wrangler applies every pending migration in the checkout, so running it here",
-    "would put at least one of these phases on the wrong side of its Worker.",
-    "",
-    "Use reviewed intermediate commits to expose one pending phase at a time, in",
-    "migration order. For a before-worker batch: migrate, then deploy that commit.",
-    "For an after-worker batch: deploy that commit, then migrate. Repeat until this",
-    "tree has no mixed pending set. Do not bypass this with raw wrangler.",
-  ].join("\n");
+  if (pending.length === 0) return { kind: "current", before: [], after: [], deferred: [] };
+  // Only one contiguous phase may move. A before/after pair in one reviewed
+  // tree is safe when the first command exposes only the before files to
+  // Wrangler, the Worker deploys, and the next command exposes only the after
+  // files. Never skip an earlier phase to reach a later file.
+  const kind = pending[0].order;
+  const selected = pending.slice(0, pending.findIndex((migration) => migration.order !== kind) === -1
+    ? pending.length
+    : pending.findIndex((migration) => migration.order !== kind));
+  const names = selected.map((migration) => migration.name);
+  return {
+    kind,
+    before: kind === "before-worker" ? names : [],
+    after: kind === "after-worker" ? names : [],
+    deferred: pending.slice(selected.length).map((migration) => migration.name),
+  };
 }
 
 async function readJson(fetchImpl, url, description) {
@@ -109,8 +103,6 @@ export async function applyMigrations({
     log(`schema: ${env} is level with this tree; nothing to apply.`);
     return plan;
   }
-  if (plan.kind === "mixed") throw new Error(formatMixedPhaseRefusal(plan, env));
-
   if (plan.kind === "after-worker") {
     const expectedBuild = build();
     if (expectedBuild.endsWith("-dirty")) {
@@ -130,14 +122,76 @@ export async function applyMigrations({
         ].join("\n"),
       );
     }
+    if (
+      plan.after.includes(PROJECT_LIFECYCLE_FINISH_MIGRATION)
+      && (
+        typeof health.projectLifecycle?.remoteCapabilitiesRetiredAt !== "string"
+        || health.projectLifecycle?.remoteCapabilityEvidenceComplete !== true
+        || health.projectLifecycle?.maintenanceMode !== true
+        || health.projectLifecycle?.backfillReady !== true
+      )
+    ) {
+      throw new Error(
+        [
+          "Refusing: the remote capability cutover has not been recorded.",
+          "Migration 0031 removes compatibility objects that an already-started previous Worker may still use.",
+          "Retire the old D1 database, R2 bucket binding, and GitHub App private key; record the reviewed evidence,",
+          "then confirm /health reports maintenanceMode=true, remoteCapabilitiesRetiredAt,",
+          "and remoteCapabilityEvidenceComplete=true plus backfillReady=true from the new D1 generation.",
+        ].join("\n"),
+      );
+    }
   }
 
   const names = plan.kind === "before-worker" ? plan.before : plan.after;
   log(`applying ${names.length} ${plan.kind} migration(s) to ${env}: ${names.join(", ")}`);
-  run("wrangler", ["d1", "migrations", "apply", database, "--env", env, "--remote"], {
-    env: identity.wranglerEnv,
-  });
+  run(names);
   return plan;
+}
+
+/**
+ * Give Wrangler only the contiguous phase selected above.
+ *
+ * Wrangler has no migration-file selector. A temporary config and migration
+ * directory make the selected filenames the complete visible set, while D1's
+ * normal migration table still records their real names. The next invocation
+ * reads `/v1/schema` again before exposing the next phase.
+ */
+export function selectedMigrationConfig(source, env, database) {
+  const parsed = JSON.parse(source.replace(/^\s*\/\/.*$/gm, ""));
+  const original = parsed.env?.[env]?.d1_databases?.find((entry) => entry.binding === "DB");
+  if (original === undefined || original.database_name !== database) {
+    throw new Error(`wrangler.jsonc binds no ${database} database for --env ${env}`);
+  }
+  return {
+    name: "thwip-migration-phase",
+    compatibility_date: parsed.compatibility_date,
+    env: {
+      [env]: {
+        d1_databases: [{ ...original, migrations_dir: "migrations" }],
+      },
+    },
+  };
+}
+
+export function applySelectedMigrationFiles({ names, env, database, migrationsDir, configPath, wranglerEnv }) {
+  const temporary = mkdtempSync(join(tmpdir(), "thwip-migration-phase-"));
+  try {
+    const selectedDir = join(temporary, "migrations");
+    mkdirSync(selectedDir);
+    for (const name of names) copyFileSync(join(migrationsDir, name), join(selectedDir, name));
+
+    const config = selectedMigrationConfig(readFileSync(configPath, "utf8"), env, database);
+    const temporaryConfig = join(temporary, "wrangler.json");
+    writeFileSync(temporaryConfig, JSON.stringify(config));
+    execFileSync(
+      "wrangler",
+      ["d1", "migrations", "apply", database, "--env", env, "--remote", "--config", temporaryConfig],
+      { stdio: "inherit", cwd: temporary, env: wranglerEnv },
+    );
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 function argument(name, fallback = null) {
@@ -155,8 +209,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
+  const configPath = fileURLToPath(new URL("../wrangler.jsonc", import.meta.url));
   const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
-  const run = (command, args, options) => execFileSync(command, args, { stdio: "inherit", ...options });
 
   try {
     const target = liveD1Target(env);
@@ -172,13 +226,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(
       `D1 migration identity is active for ${report.target} until ${report.expiresOn}. No application rows were read.`,
     );
+    const wranglerEnv = wranglerEnvironment(process.env, credential);
+    const run = (names) => applySelectedMigrationFiles({
+      names,
+      env,
+      database,
+      migrationsDir,
+      configPath,
+      wranglerEnv,
+    });
     await applyMigrations({
       env,
       database,
       migrations: readMigrations(migrationsDir),
       fetchImpl: fetch,
       build: () => buildStamp(git),
-      identity: { wranglerEnv: wranglerEnvironment(process.env, credential) },
+      identity: { wranglerEnv },
       run,
     });
   } catch (error) {

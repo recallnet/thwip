@@ -22,6 +22,7 @@ import { POLICY_RULESET_NAME, type Ruleset } from "./rulesets.js";
 
 const REPOSITORY_ID = "987654321";
 const APP_INTEGRATION_ID = 4419870;
+const viewer = (githubOrgRole: string) => ({ organizationId: "org_1", githubOrgRole });
 
 let d1: TestD1;
 
@@ -60,6 +61,7 @@ function seedInstalledRepository(options: { installationId?: string | null } = {
 class FakeGitHub implements BootstrapGitHub {
   rulesets = new Map<string, StoredRuleset>();
   pull: SetupPullRequestState | null = null;
+  upgradePull: SetupPullRequestState | null = null;
   openedFiles: string[] = [];
   private nextId = 100;
 
@@ -75,6 +77,16 @@ class FakeGitHub implements BootstrapGitHub {
     this.openedFiles = input.files.map((file) => file.path);
     this.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
     return this.pull;
+  }
+
+  async verifierUpgradePullRequest(): Promise<SetupPullRequestState | null> {
+    return this.upgradePull;
+  }
+
+  async openVerifierUpgradePullRequest(input: { files: ReadonlyArray<{ path: string }> }): Promise<SetupPullRequestState> {
+    this.openedFiles = input.files.map((file) => file.path);
+    this.upgradePull = { number: 8, merged: false, headSha: "d".repeat(40) };
+    return this.upgradePull;
   }
 
   async rulesetNamed(name: string): Promise<StoredRuleset | null> {
@@ -130,7 +142,7 @@ async function postThroughManualSetup(
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole },
+      viewer(githubOrgRole),
       REPOSITORY_ID,
       {
         ...(confirmQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
@@ -163,7 +175,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     seedInstalledRepository();
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "member" },
+      viewer("member"),
       REPOSITORY_ID,
       {},
       port,
@@ -175,10 +187,53 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(github.rulesets.size).toBe(0);
   });
 
+  it("does not let an owner read or set up another organization's repository", async () => {
+    d1.raw
+      .prepare("INSERT INTO organizations (id, github_org_id, github_login, installation_id) VALUES (?, ?, ?, ?)")
+      .run("org_a", "41", "alpha", "5000");
+    d1.raw
+      .prepare("INSERT INTO organizations (id, github_org_id, github_login, installation_id) VALUES (?, ?, ?, ?)")
+      .run("org_b", "42", "beta", "5001");
+    d1.raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run("proj_b", "org_b", REPOSITORY_ID, "beta/widgets", "main");
+
+    let portCalls = 0;
+    const countedPort = async (): Promise<BootstrapGitHub> => {
+      portCalls += 1;
+      return github;
+    };
+    await bootstrapRouteResponse(
+      env(),
+      { organizationId: "org_b", githubOrgRole: "owner" },
+      REPOSITORY_ID,
+      {},
+      countedPort,
+    );
+    const before = d1.raw
+      .prepare("SELECT * FROM queue_projects WHERE github_repository_id = ?")
+      .get(REPOSITORY_ID);
+    expect(before).toBeDefined();
+    portCalls = 0;
+
+    const otherOwner = { organizationId: "org_a", githubOrgRole: "owner" };
+    const post = await bootstrapRouteResponse(env(), otherOwner, REPOSITORY_ID, {}, countedPort);
+    const get = await bootstrapStatusResponse(env(), otherOwner, REPOSITORY_ID);
+
+    expect(post.status).toBe(404);
+    expect(get.status).toBe(404);
+    expect(portCalls).toBe(0);
+    expect(
+      d1.raw.prepare("SELECT * FROM queue_projects WHERE github_repository_id = ?").get(REPOSITORY_ID),
+    ).toEqual(before);
+  });
+
   it("answers 404 for a repository the App is not installed on", async () => {
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       "1234",
       {},
       port,
@@ -217,7 +272,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     seedInstalledRepository();
     const first = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       { chainPublic: true },
       port,
@@ -225,12 +280,12 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     expect(first.body).toMatchObject({ chainPublic: true });
     expect(queueProjectRow()?.chain_public).toBe(1);
 
-    const read = await bootstrapStatusResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID);
+    const read = await bootstrapStatusResponse(env(), viewer("admin"), REPOSITORY_ID);
     expect(read.body).toMatchObject({ chainPublic: true });
 
     const changed = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       { chainPublic: false },
       port,
@@ -282,7 +337,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
     const started = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       { confirmQueueEnforcement: true },
       port,
@@ -292,7 +347,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("omits repository policy by default and adds it only on explicit request", async () => {
     seedInstalledRepository();
-    await bootstrapRouteResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID, {}, port);
+    await bootstrapRouteResponse(env(), viewer("admin"), REPOSITORY_ID, {}, port);
     expect(github.openedFiles).not.toContain("thwip.yaml");
   });
 
@@ -300,12 +355,36 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     seedInstalledRepository();
     await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       { includeRepositoryConfig: true },
       port,
     );
     expect(github.openedFiles).toContain("thwip.yaml");
+  });
+
+  it("does not open the setup pull request after GitHub access removal is requested", async () => {
+    seedInstalledRepository();
+    github.baseSha = async () => {
+      d1.raw.prepare(
+        `INSERT INTO project_release_requests
+           (github_repository_id, project_id, organization_id, github_name, default_branch)
+         VALUES (?, 'proj_1', 'org_1', 'acme/widgets', 'main')`,
+      ).run(REPOSITORY_ID);
+      return "b".repeat(40);
+    };
+
+    const response = await bootstrapRouteResponse(
+      env(),
+      viewer("admin"),
+      REPOSITORY_ID,
+      {},
+      port,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "repository access was removed during setup" } });
+    expect(github.pull).toBeNull();
+    expect(github.openedFiles).toEqual([]);
   });
 
   it("returns an exact manual ruleset payload without writing it as the App", async () => {
@@ -314,7 +393,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       {},
       port,
@@ -352,7 +431,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       {},
       port,
@@ -380,7 +459,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     };
     const response = await bootstrapRouteResponse(
       env(),
-      { githubOrgRole: "admin" },
+      viewer("admin"),
       REPOSITORY_ID,
       {},
       port,
@@ -399,14 +478,14 @@ describe("GET /v1/queue/:repositoryId/bootstrap", () => {
   it("refuses a member who does not administer the organization", async () => {
     seedInstalledRepository();
     expect(
-      (await bootstrapStatusResponse(env(), { githubOrgRole: "member" }, REPOSITORY_ID)).status,
+      (await bootstrapStatusResponse(env(), viewer("member"), REPOSITORY_ID)).status,
     ).toBe(403);
   });
 
   it("answers 404 before the repository is enrolled", async () => {
     seedInstalledRepository();
     expect(
-      (await bootstrapStatusResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID)).status,
+      (await bootstrapStatusResponse(env(), viewer("admin"), REPOSITORY_ID)).status,
     ).toBe(404);
   });
 
@@ -416,9 +495,9 @@ describe("GET /v1/queue/:repositoryId/bootstrap", () => {
       github.pull = { number: 7, merged: false, headSha: "c".repeat(40) };
       return github.pull;
     };
-    await bootstrapRouteResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID, {}, port);
+    await bootstrapRouteResponse(env(), viewer("admin"), REPOSITORY_ID, {}, port);
 
-    const status = await bootstrapStatusResponse(env(), { githubOrgRole: "admin" }, REPOSITORY_ID);
+    const status = await bootstrapStatusResponse(env(), viewer("admin"), REPOSITORY_ID);
     expect(status.status).toBe(200);
     expect(status.body).toMatchObject({ nextStep: "merge-setup-pr", complete: false, enabled: false });
     // Reading state opens nothing: the pull request the run left behind is the

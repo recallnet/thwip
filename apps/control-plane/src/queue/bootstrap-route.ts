@@ -13,11 +13,17 @@ import {
   SETUP_BRANCH,
   SETUP_PULL_REQUEST_TITLE,
   setupPullRequestBody,
+  verifierUpgradePullRequestBody,
 } from "./bootstrap-workflows.js";
 import { githubHttp } from "./github-port.js";
 import type { D1Like } from "./projection.js";
 import { isOrgAdmin } from "./repository-access.js";
 import type { Env } from "../env.js";
+import {
+  acquireProjectWriteLease,
+  repositoryAllowsExternalWrite,
+  type ProjectWriteLease,
+} from "../project-lifecycle.js";
 
 /**
  * The HTTP shape of enrolment.
@@ -48,34 +54,41 @@ export type BootstrapRouteEnv = Pick<
   "DB" | "PUBLIC_ORIGIN" | "GITHUB_APP_ID" | "GITHUB_APP_PRIVATE_KEY"
 >;
 
-/** The viewer as far as setup cares: which role the selected organization gave them. */
+/** The viewer as far as setup cares: which selected organization gave them this role. */
 export interface BootstrapViewer {
+  readonly organizationId: string | null;
   readonly githubOrgRole: string | null;
 }
 
 interface RepositoryRow {
+  id: string;
   github_name: string;
   default_branch: string | null;
   installation_id: string | null;
 }
 
+const VERIFIER_UPGRADE_BRANCH = "thwip/upgrade-verifier-v2";
+const VERIFIER_UPGRADE_PULL_REQUEST_TITLE = "Upgrade Thwip verifier protocol";
+
 /** The repository a request names, or nothing to act on. */
 async function repositoryFor(
   env: BootstrapRouteEnv,
   repositoryId: string,
-): Promise<{ owner: string; repo: string; baseRef: string; installationId: string } | null> {
+  organizationId: string,
+): Promise<{ projectId: string; repositoryId: string; owner: string; repo: string; baseRef: string; installationId: string } | null> {
   const row = await env.DB.prepare(
-    `SELECT p.github_name, p.default_branch, o.installation_id
+    `SELECT p.id, p.github_name, p.default_branch, o.installation_id
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
-      WHERE p.github_repository_id = ?
+      WHERE p.github_repository_id = ? AND p.organization_id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
-    .bind(repositoryId)
+    .bind(repositoryId, organizationId)
     .first<RepositoryRow>();
   if (row === null) return null;
   // No installation means no token, so nothing can be written to the repository
@@ -84,6 +97,8 @@ async function repositoryFor(
   const [owner, repo] = row.github_name.split("/");
   if (owner === undefined || repo === undefined) return null;
   return {
+    projectId: row.id,
+    repositoryId,
     owner,
     repo,
     baseRef: `refs/heads/${row.default_branch ?? "main"}`,
@@ -94,14 +109,15 @@ async function repositoryFor(
 /** How the route reaches a repository. Replaced in tests, never in production. */
 export type BootstrapPort = (
   env: BootstrapRouteEnv,
-  repo: { owner: string; repo: string; baseRef: string; installationId: string },
+  repo: { projectId: string; repositoryId: string; owner: string; repo: string; baseRef: string; installationId: string },
   setup?: { readonly includeRepositoryConfig?: boolean },
+  beforeWrite?: () => Promise<void>,
 ) => Promise<BootstrapGitHub>;
 
-const githubPort: BootstrapPort = async (env, repo, setup = {}) => {
+const githubPort: BootstrapPort = async (env, repo, setup = {}, beforeWrite) => {
   // `installationToken` asks for the whole binding and reads two fields of it,
   // both of which are here.
-  const token = await installationToken(env as Env, repo.installationId);
+  const token = await installationToken(env as Env, repo.installationId, undefined, repo.repositoryId);
   return bootstrapGitHub(
     githubHttp(token),
     { owner: repo.owner, repo: repo.repo, baseRef: repo.baseRef },
@@ -113,13 +129,56 @@ const githubPort: BootstrapPort = async (env, repo, setup = {}) => {
         actionRef: QUEUE_ACTION_REF,
         ...(setup.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       }),
+      verifierUpgrade: {
+        branch: VERIFIER_UPGRADE_BRANCH,
+        title: VERIFIER_UPGRADE_PULL_REQUEST_TITLE,
+        body: verifierUpgradePullRequestBody({
+          endpoint: env.PUBLIC_ORIGIN,
+          actionRef: QUEUE_ACTION_REF,
+        }),
+      },
     },
+    beforeWrite,
   );
 };
 
 const UNAUTHORIZED: BootstrapResponse = { status: 401, body: { error: "unauthorized" } };
 const FORBIDDEN: BootstrapResponse = { status: 403, body: { error: "repository admin required" } };
 const UNKNOWN: BootstrapResponse = { status: 404, body: { error: "unknown repository" } };
+
+class ProjectReleaseDuringSetup extends Error {}
+
+function lifecycleBoundGitHub(
+  db: D1Like,
+  repositoryId: string,
+  lease: ProjectWriteLease,
+  github: BootstrapGitHub,
+): BootstrapGitHub {
+  const beforeWrite = async () => {
+    await lease.renew();
+    if (!(await repositoryAllowsExternalWrite(db, repositoryId, lease.projectId))) {
+      throw new ProjectReleaseDuringSetup("repository access was removed during setup");
+    }
+  };
+  return {
+    baseSha: () => github.baseSha(),
+    setupPullRequest: () => github.setupPullRequest(),
+    verifierUpgradePullRequest: () => github.verifierUpgradePullRequest(),
+    rulesetNamed: (name) => github.rulesetNamed(name),
+    async openSetupPullRequest(input) {
+      await beforeWrite();
+      return github.openSetupPullRequest(input);
+    },
+    async openVerifierUpgradePullRequest(input) {
+      await beforeWrite();
+      return github.openVerifierUpgradePullRequest(input);
+    },
+    async publishBootstrapCheck(run) {
+      await beforeWrite();
+      return github.publishBootstrapCheck(run);
+    },
+  };
+}
 
 function failureDetail(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 500);
@@ -161,29 +220,57 @@ export async function bootstrapRouteResponse(
   if (!/^[0-9]{1,32}$/.test(repositoryId)) {
     return { status: 400, body: { error: "invalid repository id" } };
   }
-  const repo = await repositoryFor(env, repositoryId);
+  if (viewer.organizationId === null) return UNKNOWN;
+  const repo = await repositoryFor(env, repositoryId, viewer.organizationId);
   if (repo === null) return UNKNOWN;
+  const lease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    repositoryId,
+    repo.projectId,
+  );
+  if (lease === null) {
+    return { status: 409, body: { error: "repository access is being removed" } };
+  }
 
   try {
+    const beforeWrite = async () => {
+      await lease.renew();
+      if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lease.projectId))) {
+        throw new ProjectReleaseDuringSetup("repository access was removed during setup");
+      }
+    };
+    const github = lifecycleBoundGitHub(
+      env.DB as unknown as D1Like,
+      repositoryId,
+      lease,
+      await port(env, repo, {
+        ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
+      }, beforeWrite),
+    );
     return await handleBootstrapRequest({
       db: env.DB as unknown as D1Like,
-      github: await port(env, repo, {
-        ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
-      }),
+      github,
       integrationId: Number(env.GITHUB_APP_ID),
       endpoint: env.PUBLIC_ORIGIN,
       actionRef: QUEUE_ACTION_REF,
       repositoryId,
       baseRef: repo.baseRef,
+      expectedProjectId: repo.projectId,
+      expectedOrganizationId: viewer.organizationId,
       ...(typeof body.chainPublic === "boolean" ? { chainPublic: body.chainPublic } : {}),
       ...(body.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
       ...(body.confirmQueueEnforcement === true ? { confirmQueueEnforcement: true } : {}),
       ...(body.confirmRulesetBypassActors === true ? { confirmRulesetBypassActors: true } : {}),
     });
   } catch (error) {
+    if (error instanceof ProjectReleaseDuringSetup) {
+      return { status: 409, body: { error: error.message } };
+    }
     const failure = githubSetupFailure(error);
     if (failure !== null) return failure;
     throw error;
+  } finally {
+    await lease.release();
   }
 }
 
@@ -205,10 +292,14 @@ export async function bootstrapStatusResponse(
     return { status: 400, body: { error: "invalid repository id" } };
   }
 
-  const repo = await repositoryFor(env, repositoryId);
+  if (viewer.organizationId === null) return UNKNOWN;
+  const repo = await repositoryFor(env, repositoryId, viewer.organizationId);
   if (repo === null) return UNKNOWN;
 
-  const project = await readQueueProject(env.DB as unknown as D1Like, repositoryId, repo.baseRef);
+  const project = await readQueueProject(env.DB as unknown as D1Like, repositoryId, repo.baseRef, {
+    projectId: repo.projectId,
+    organizationId: viewer.organizationId,
+  });
   if (project === null) return { status: 404, body: { error: "the repository is not enrolled" } };
   return { status: 200, body: bootstrapStatus(project) };
 }

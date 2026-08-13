@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import { queueExternalMove } from "./external-move.js";
 import { loadQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
@@ -19,6 +19,7 @@ let raw: import("better-sqlite3").Database;
 
 function env(): QueueRouteEnv {
   const t = testD1();
+  seedActiveProject(t, { repositoryId: REPO, organizationId: "org_1", projectId: "proj_1" });
   open.push(t);
   raw = t.raw;
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
@@ -35,10 +36,10 @@ const MOVED = "e".repeat(40);
 function queueConfigured() {
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced', ?)`,
     )
-    .run(REPO, REF);
+    .run(REPO, REF, "proj_1");
 }
 
 async function state(e: QueueRouteEnv) {
@@ -110,10 +111,10 @@ describe("being told the branch moved", () => {
     const e = env();
     raw
       .prepare(
-        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-         VALUES ('qp_1', 'org_1', ?, ?, 0, 'configured')`,
+        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+         VALUES ('qp_1', 'org_1', ?, ?, 0, 'configured', ?)`,
       )
-      .run(REPO, REF);
+      .run(REPO, REF, "proj_1");
     expect(await queueExternalMove(e, { repositoryId: REPO, baseRef: REF, observedBaseSha: MOVED })).toMatchObject(
       { handled: false },
     );

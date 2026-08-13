@@ -116,7 +116,7 @@ async function project(profile: ThwipYaml["profile"]) {
     PUBLIC_ORIGIN: "https://thwip.example",
     GITHUB_SYNC_TOKEN: "token",
   } as unknown as Env;
-  return { env, derived };
+  return { env, derived, raw: t.raw };
 }
 
 const TREE = "1".repeat(40);
@@ -201,7 +201,7 @@ describe("a repository on fresh", () => {
   it("accepts a proof whose run happened inside a lease this service minted", async () => {
     const { env, derived } = await project("fresh");
     const lease = await mintRunLease(env, {
-      project: { activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
       request: { repositoryId: REPO, treeOid: TREE, parentOids: [PARENT], baseSha: BASE, deviceKeyId: fingerprint },
       leaseSeconds: derived.policy.lease.maxAgeSeconds,
     });
@@ -218,7 +218,7 @@ describe("a repository on fresh", () => {
   it("refuses a lease minted for a different tree", async () => {
     const { env, derived } = await project("fresh");
     const lease = await mintRunLease(env, {
-      project: { activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
       request: {
         repositoryId: REPO,
         treeOid: "9".repeat(40),
@@ -235,7 +235,7 @@ describe("a repository on fresh", () => {
   it("refuses a lease minted on another device", async () => {
     const { env, derived } = await project("fresh");
     const lease = await mintRunLease(env, {
-      project: { activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
       request: {
         repositoryId: REPO,
         treeOid: TREE,
@@ -253,7 +253,7 @@ describe("a repository on fresh", () => {
     const { env, derived } = await project("fresh");
     const impostor = await project("fresh");
     const lease = await mintRunLease(impostor.env, {
-      project: { activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
       request: { repositoryId: REPO, treeOid: TREE, parentOids: [PARENT], baseSha: BASE, deviceKeyId: fingerprint },
       leaseSeconds: derived.policy.lease.maxAgeSeconds,
     });
@@ -264,7 +264,7 @@ describe("a repository on fresh", () => {
   it("refuses a lease wrapped around a run that had already finished", async () => {
     const { env, derived } = await project("fresh");
     const lease = await mintRunLease(env, {
-      project: { activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
       request: { repositoryId: REPO, treeOid: TREE, parentOids: [PARENT], baseSha: BASE, deviceKeyId: fingerprint },
       leaseSeconds: derived.policy.lease.maxAgeSeconds,
     });
@@ -273,6 +273,40 @@ describe("a repository on fresh", () => {
       await proofCommit(derived, lease, { startedAt: yesterday, finishedAt: yesterday }),
       await bundleFor(env),
     );
+    expect(result.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("refuses an old lease after the same repository and policy are reselected as a fresh project", async () => {
+    const { env, derived, raw } = await project("fresh");
+    const lease = await mintRunLease(env, {
+      project: { id: "prj_1", activePolicyDigest: derived.policyDigest, securityProfile: "fresh" },
+      request: { repositoryId: REPO, treeOid: TREE, parentOids: [PARENT], baseSha: BASE, deviceKeyId: fingerprint },
+      leaseSeconds: derived.policy.lease.maxAgeSeconds,
+    });
+
+    raw.prepare("DELETE FROM repository_grants WHERE project_id = 'prj_1'").run();
+    raw.prepare("DELETE FROM policy_bundles WHERE project_id = 'prj_1'").run();
+    raw.prepare("DELETE FROM projects WHERE id = 'prj_1'").run();
+    raw
+      .prepare(
+        `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch, enabled, active_policy_digest, security_profile)
+         VALUES ('prj_2', 'org_1', ?, 'recallnet/thwip', 'main', 1, ?, 'fresh')`,
+      )
+      .run(REPO, derived.policyDigest);
+    raw
+      .prepare(
+        "INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status, config_source) VALUES (?, 'prj_2', 1, ?, 'active', 'repository-override')",
+      )
+      .run(derived.policyDigest, JSON.stringify(derived.policy));
+    raw
+      .prepare(
+        "INSERT INTO repository_grants (project_id, github_user_id, github_login, permission, active, synced_at) VALUES ('prj_2', ?, ?, 'write', 1, ?)",
+      )
+      .run(USER, LOGIN, new Date().toISOString());
+
+    const bundle = await bundleFor(env);
+    expect(bundle.projectId).toBe("prj_2");
+    const result = await verify(await proofCommit(derived, lease, window()), bundle);
     expect(result.code).toBe("LEASE_CONTEXT_MISMATCH");
   });
 });

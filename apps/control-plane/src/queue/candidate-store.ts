@@ -22,26 +22,32 @@ export async function recordCandidateVerdict(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  projectId: string,
   verdict: CandidateVerdict,
-): Promise<{ status: "applied" | "duplicate" }> {
-  const existing = await candidateVerdict(db, repositoryId, baseRef, verdict.candidateTreeOid);
+): Promise<{ status: "applied" | "duplicate" | "unavailable" }> {
+  const existing = await candidateVerdict(db, repositoryId, baseRef, verdict.candidateTreeOid, projectId);
   if (existing !== null) return { status: "duplicate" };
 
   // First writer wins. A second verdict for the same tree is either a retry or a
   // second run reaching the same place; letting a later one overwrite would let a
   // re-dispatched workflow turn a refusal into an acceptance.
-  await db
+  const inserted = await db
     .prepare(
       `INSERT INTO candidate_verdicts (
-         github_repository_id, base_ref, candidate_tree_oid, candidate_sha, base_sha,
+         github_repository_id, base_ref, project_id, candidate_tree_oid, candidate_sha, base_sha,
          pull_request_number, accepted, result_digest, policy_digest, suites,
          reason_codes, workflow_ref, workflow_sha, run_id, observed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM projects p
+             WHERE p.id = ? AND p.github_repository_id = ?
+          )
        ON CONFLICT (github_repository_id, base_ref, candidate_tree_oid) DO NOTHING`,
     )
     .bind(
       repositoryId,
       baseRef,
+      projectId,
       verdict.candidateTreeOid,
       verdict.candidateSha,
       verdict.baseSha,
@@ -55,9 +61,16 @@ export async function recordCandidateVerdict(
       verdict.workflowSha,
       verdict.runId,
       verdict.observedAt,
+      projectId,
+      repositoryId,
     )
     .run();
-  return { status: "applied" };
+  if (((inserted as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1) {
+    return { status: "applied" };
+  }
+  return (await candidateVerdict(db, repositoryId, baseRef, verdict.candidateTreeOid, projectId)) === null
+    ? { status: "unavailable" }
+    : { status: "duplicate" };
 }
 
 export async function candidateVerdict(
@@ -65,13 +78,15 @@ export async function candidateVerdict(
   repositoryId: string,
   baseRef: string,
   candidateTreeOid: string,
+  projectId?: string,
 ): Promise<CandidateVerdict | null> {
   const row = await db
     .prepare(
       `SELECT * FROM candidate_verdicts
-        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?`,
+        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
+          AND (? IS NULL OR project_id = ?)`,
     )
-    .bind(repositoryId, baseRef, candidateTreeOid)
+    .bind(repositoryId, baseRef, candidateTreeOid, projectId ?? null, projectId ?? null)
     .first<{
       candidate_tree_oid: string;
       candidate_sha: string;
@@ -116,6 +131,9 @@ export async function claimCandidateDispatch(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  projectId: string,
+  attemptId: string,
+  workflowProtocol: 1 | 2,
   candidateTreeOid: string,
   at: string,
   staleAfterMs: number,
@@ -123,9 +141,10 @@ export async function claimCandidateDispatch(
   const row = await db
     .prepare(
       `SELECT dispatched_at FROM candidate_dispatches
-        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?`,
+        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
+          AND project_id = ?`,
     )
-    .bind(repositoryId, baseRef, candidateTreeOid)
+    .bind(repositoryId, baseRef, candidateTreeOid, projectId)
     .first<{ dispatched_at: string }>();
 
   if (row !== null) {
@@ -133,14 +152,71 @@ export async function claimCandidateDispatch(
     if (Number.isFinite(age) && age < staleAfterMs) return false;
   }
 
-  await db
+  const written = await db
     .prepare(
-      `INSERT INTO candidate_dispatches (github_repository_id, base_ref, candidate_tree_oid, dispatched_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO candidate_dispatches
+         (github_repository_id, base_ref, project_id, attempt_id, workflow_protocol, candidate_tree_oid, dispatched_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM projects p WHERE p.id = ? AND p.github_repository_id = ?)
        ON CONFLICT (github_repository_id, base_ref, candidate_tree_oid)
-       DO UPDATE SET dispatched_at = excluded.dispatched_at`,
+       DO UPDATE SET dispatched_at = excluded.dispatched_at,
+                     attempt_id = excluded.attempt_id,
+                     workflow_protocol = excluded.workflow_protocol
+        WHERE candidate_dispatches.project_id = excluded.project_id`,
     )
-    .bind(repositoryId, baseRef, candidateTreeOid, at)
+    .bind(
+      repositoryId,
+      baseRef,
+      projectId,
+      attemptId,
+      workflowProtocol,
+      candidateTreeOid,
+      at,
+      projectId,
+      repositoryId,
+    )
     .run();
-  return true;
+  return ((written as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1;
+}
+
+export interface CandidateDispatchBinding {
+  readonly projectId: string;
+  readonly attemptId: string | null;
+  readonly workflowProtocol: 1 | 2;
+}
+
+/** The durable authority for accepting one verifier callback. */
+export async function candidateDispatchBinding(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  candidateTreeOid: string,
+  projectId: string,
+): Promise<CandidateDispatchBinding | null> {
+  const row = await db
+    .prepare(
+      `SELECT d.project_id AS projectId, d.attempt_id AS attemptId,
+              d.workflow_protocol AS workflowProtocol
+         FROM candidate_dispatches d
+         JOIN projects p ON p.id = d.project_id
+        WHERE d.github_repository_id = ? AND d.base_ref = ?
+          AND d.candidate_tree_oid = ? AND d.project_id = ?
+          AND p.github_repository_id = d.github_repository_id
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_requests r
+             WHERE r.github_repository_id = d.github_repository_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_jobs r
+             WHERE r.github_repository_id = d.github_repository_id
+          )`,
+    )
+    .bind(repositoryId, baseRef, candidateTreeOid, projectId)
+    .first<{ projectId: string; attemptId: string | null; workflowProtocol: number }>();
+  if (row === null || (row.workflowProtocol !== 1 && row.workflowProtocol !== 2)) return null;
+  return {
+    projectId: row.projectId,
+    attemptId: row.attemptId,
+    workflowProtocol: row.workflowProtocol,
+  };
 }

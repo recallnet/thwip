@@ -473,6 +473,9 @@ async function checkLease(input: LeaseCheckInput): Promise<VerifyResult | undefi
   if (claims["repositoryId"] !== facts.repositoryId) {
     return mismatch("repository", claims["repositoryId"], facts.repositoryId);
   }
+  if (claims["projectId"] !== bundle.projectId) {
+    return mismatch("project incarnation", claims["projectId"], bundle.projectId);
+  }
   if (claims["treeOid"] !== facts.treeOid) return mismatch("tree", claims["treeOid"], facts.treeOid);
   if (claims["baseSha"] !== null && claims["baseSha"] !== undefined && claims["baseSha"] !== facts.baseSha) {
     return mismatch("base", claims["baseSha"], facts.baseSha);

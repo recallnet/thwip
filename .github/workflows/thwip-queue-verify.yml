@@ -1,5 +1,7 @@
 name: thwip-queue-verify
 
+# Thwip verifier callback protocol: 2
+
 run-name: >-
   thwip: verify candidate ${{ github.event.client_payload.candidateSha }}
   for PR #${{ github.event.client_payload.pullRequestNumber }}
@@ -116,6 +118,8 @@ jobs:
           SUITES: ${{ steps.suites.outputs.suites }}
           ACCEPTED: ${{ steps.suites.outputs.accepted }}
           PR: ${{ github.event.client_payload.pullRequestNumber }}
+          PROJECT_ID: ${{ github.event.client_payload.projectId }}
+          ATTEMPT_ID: ${{ github.event.client_payload.attemptId }}
           BASE_REF: ${{ github.event.client_payload.baseRef }}
           BASE_SHA: ${{ github.event.client_payload.baseSha }}
           CANDIDATE_SHA: ${{ github.event.client_payload.candidateSha }}
@@ -145,10 +149,11 @@ jobs:
           fi
 
           body=$(jq -nc \
+            --arg project "$PROJECT_ID" --arg attempt "$ATTEMPT_ID" \
             --arg base "$BASE_REF" --argjson pr "$PR" \
             --arg bsha "$BASE_SHA" --arg csha "$CANDIDATE_SHA" --arg tree "$CANDIDATE_TREE" \
             --argjson accepted "$accepted" --argjson suites "$suites" --argjson reasons "$reasons" \
-            '{baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
+            '{projectId:$project, attemptId:$attempt, baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
               candidateTreeOid:$tree, accepted:$accepted, suites:$suites, reasonCodes:$reasons}')
 
           out=$(curl -sS -w '\n%{http_code}' -X POST \

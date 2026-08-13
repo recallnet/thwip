@@ -57,10 +57,10 @@ function seed(): void {
       .run(id, "org_acme", repositoryId, name);
     raw
       .prepare(
-        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public)
-         VALUES (?, ?, ?, ?, 1, 'enforced', 0)`,
+        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, project_id)
+         VALUES (?, ?, ?, ?, 1, 'enforced', 0, ?)`,
       )
-      .run(`qp_${id}`, "org_acme", repositoryId, REF);
+      .run(`qp_${id}`, "org_acme", repositoryId, REF, id);
   }
   // The shadow principal installation sync writes for anyone with a grant. It
   // sits in the owning organization and says, in `github_org_role`, that being
@@ -75,6 +75,13 @@ function seed(): void {
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, github_org_role, activated_at) VALUES (?, ?, ?, ?, 'member', datetime('now'))",
     )
     .run("prn_bravo", "org_bravo", "21", "bruno");
+  // The same GitHub person has a tenant-local shadow identity wherever they
+  // collaborate. Their browser session may still be selected to Bravo.
+  raw
+    .prepare(
+      "INSERT INTO principals (id, organization_id, github_user_id, github_login, github_org_role) VALUES (?, ?, ?, ?, 'outside')",
+    )
+    .run("prn_bruno_acme", "org_acme", "21", "bruno");
 }
 
 function grant(permission: string, projectId = "proj_acme", githubUserId = "31"): void {
@@ -100,7 +107,7 @@ function routes(session: { principalId: string; githubUserId: string; isAdmin?: 
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_acme" }),
     principalFor: async () => null,
     pullRequestPlacement: async () => ({ authorGithubUserId: "31", baseRef: REF, authorIsBot: false }),
     commitFacts: async () => null,
@@ -325,5 +332,32 @@ describe("a member of another organization", () => {
 
     expect(await refusal(response)).not.toBe(REPOSITORY_FORBIDDEN);
     expect(response.status).not.toBe(403);
+  });
+
+  it("records the repository tenant's principal, not the session tenant's principal", async () => {
+    const e = env();
+    seed();
+    grant("write", "proj_acme", "21");
+    const deviceKeyId = `SHA256:${"b".repeat(43)}`;
+    raw
+      .prepare(
+        "INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label) VALUES (?, ?, 'ssh-ed25519', 'ssh-ed25519 AAAA', ?, 'laptop')",
+      )
+      .run(deviceKeyId, "21", deviceKeyId);
+
+    const response = await routes(BRUNO).request(
+      `/v1/queue/${GRANTED_REPO}/runners/heartbeat`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceKeyId }),
+      },
+      e,
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      raw.prepare("SELECT principal_id AS principalId FROM queue_runners WHERE github_repository_id = ?").get(GRANTED_REPO),
+    ).toEqual({ principalId: "prn_bruno_acme" });
   });
 });

@@ -153,15 +153,15 @@ describe("what a contributor gets over HTTP", () => {
     raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run("org_1", "1", "acme");
     raw
       .prepare(
-        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-         VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced')`,
-      )
-      .run(IDENTITY.repositoryId, IDENTITY.baseRef);
-    raw
-      .prepare(
         "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('proj_1', 'org_1', ?, 'acme/repo', 1)",
       )
       .run(IDENTITY.repositoryId);
+    raw
+      .prepare(
+        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+         VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced', 'proj_1')`,
+      )
+      .run(IDENTITY.repositoryId, IDENTITY.baseRef);
     raw
       .prepare(
         "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES ('alice', 'org_1', '1', 'alice', datetime('now'))",
@@ -176,7 +176,7 @@ describe("what a contributor gets over HTTP", () => {
       pinnedVerifier: async () => null,
       activePolicy: async () => null,
       dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced" }),
+      queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
       principalFor: async () => null,
       pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: IDENTITY.baseRef, authorIsBot: false }),
       commitFacts: async () => null,

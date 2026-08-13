@@ -87,4 +87,11 @@ describe("the keys a bundle offers for checking a lease", () => {
       VerificationBundleError,
     );
   });
+
+  it("refuses a resolver that holds an earlier project incarnation", async () => {
+    const current = await env(policyFor({ required: false, maxAgeSeconds: 1800 }));
+    await expect(
+      resolveVerificationBundle(current, { repositoryId: REPO, expectedProjectId: "prj_removed" }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
 });

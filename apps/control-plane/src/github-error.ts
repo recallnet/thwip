@@ -21,6 +21,17 @@ export class GithubApiError extends Error {
   }
 }
 
+/** A GitHub throttle response whose retry boundary is safe to carry onto the queue. */
+export class GithubRateLimitError extends GithubApiError {
+  readonly retryAfterSeconds: number;
+
+  constructor(path: string, status: number, body: string, retryAfterSeconds: number) {
+    super(path, status, body);
+    this.name = "GithubRateLimitError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 /** The status of a failure, from the object if it carries one and the message if not. */
 export function githubStatusOf(error: unknown): number | null {
   if (error instanceof GithubApiError) return error.status;

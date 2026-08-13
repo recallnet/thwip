@@ -126,7 +126,13 @@ const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(
 export async function performMergeWrite(
   github: MergeWriteGithub,
   intent: MergeIntent,
-  options: { sleep?: (ms: number) => Promise<void> } = {},
+  options: {
+    sleep?: (ms: number) => Promise<void>;
+    /** Recheck the project lifecycle immediately before composing a Git object. */
+    beforeCreateCommit?: () => Promise<boolean>;
+    /** Recheck the project lifecycle at the last safe moment before each ref move. */
+    beforeRefUpdate?: () => Promise<boolean>;
+  } = {},
 ): Promise<MergeWriteOutcome> {
   // Refused before anything is written. A commit whose first parent is not the
   // pinned base is not bindable to that base by a ref update, so composing it
@@ -152,6 +158,10 @@ export async function performMergeWrite(
     if (concluded !== false) break;
   }
 
+  if (options.beforeCreateCommit !== undefined && !(await options.beforeCreateCommit())) {
+    return { kind: "refused", detail: "project release requested before merge commit creation" };
+  }
+
   const composed = await github.createCommit({
     message: intent.message,
     tree: intent.treeOid,
@@ -169,11 +179,17 @@ export async function performMergeWrite(
 
   // The same commit object every time. Composing a fresh one per retry leaves an
   // orphan on the repository for each attempt that GitHub refused.
-  let landed = await github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+  const updateRef = async () => {
+    if (options.beforeRefUpdate !== undefined && !(await options.beforeRefUpdate())) {
+      return { ok: false as const, status: 409, message: "project release requested before branch update" };
+    }
+    return github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+  };
+  let landed = await updateRef();
   for (let i = 1; i < REF_UPDATE_ATTEMPTS; i += 1) {
     if (landed.ok || landed.status !== 422 || !CHECK_IN_PROGRESS.test(landed.message)) break;
     await sleep(REF_UPDATE_DELAYS_MS[Math.min(i - 1, REF_UPDATE_DELAYS_MS.length - 1)] ?? 1000);
-    landed = await github.updateRef(intent.baseRef, { sha: composed.sha, force: false });
+    landed = await updateRef();
   }
   if (landed.ok) return { kind: "merged", mergeSha: landed.sha };
 

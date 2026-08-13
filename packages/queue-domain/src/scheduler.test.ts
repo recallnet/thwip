@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { queueKey, selectNext, type EligibleEntry } from "./scheduler.js";
+import { projectQueueObjectName, queueKey, selectNext, type EligibleEntry } from "./scheduler.js";
 
 function entry(over: Partial<EligibleEntry> & { entryId: string }): EligibleEntry {
   return {
@@ -28,6 +28,22 @@ describe("queueKey", () => {
 
   it("separates repositories that share a base ref name", async () => {
     expect(await queueKey("42", "refs/heads/main")).not.toEqual(await queueKey("43", "refs/heads/main"));
+  });
+});
+
+describe("projectQueueObjectName", () => {
+  it("separates project incarnations of the same repository branch", () => {
+    const oldProject = projectQueueObjectName("project-old", "42", "refs/heads/main");
+    const newProject = projectQueueObjectName("project-new", "42", "refs/heads/main");
+
+    expect(oldProject).not.toEqual(newProject);
+    expect(oldProject).toEqual("project/project-old/repo/42/ref/refs%2Fheads%2Fmain");
+  });
+
+  it("encodes identity components without ambiguous separators", () => {
+    expect(projectQueueObjectName("project/a", "42", "refs/heads/a/b")).toEqual(
+      "project/project%2Fa/repo/42/ref/refs%2Fheads%2Fa%2Fb",
+    );
   });
 });
 

@@ -17,6 +17,8 @@ import type { D1Like } from "./queue/projection.js";
  * verification the policy had never asked for.
  */
 export interface ActivePolicy {
+  /** Project incarnation that owns every write made under this policy. */
+  readonly projectId: string;
   readonly policyDigest: string;
   /** The pipeline the proof had to satisfy, which a merge record binds. */
   readonly pipelineDigest: string | null;
@@ -37,20 +39,21 @@ export interface ActivePolicy {
 export async function readActivePolicy(db: D1Like, repositoryId: string): Promise<ActivePolicy | null> {
   const row = await db
     .prepare(
-      `SELECT p.active_policy_digest AS digest, p.organization_id AS org,
+      `SELECT p.id AS projectId, p.active_policy_digest AS digest, p.organization_id AS org,
               b.canonical_json AS bundle, q.verifier_json AS verifier
          FROM projects p
          JOIN policy_bundles b ON b.digest = p.active_policy_digest
          LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
         WHERE p.github_repository_id = ?
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
-            SELECT 1 FROM removed_projects r
+            SELECT 1 FROM project_release_jobs r
              WHERE r.organization_id = p.organization_id
                AND r.github_repository_id = p.github_repository_id
           )`,
     )
     .bind(repositoryId)
-    .first<{ digest: string; org: string; bundle: string; verifier: string | null }>();
+    .first<{ projectId: string; digest: string; org: string; bundle: string; verifier: string | null }>();
   if (row === null) return null;
 
   const bundle = JSON.parse(row.bundle) as {
@@ -76,6 +79,7 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
       : null;
 
   return {
+    projectId: row.projectId,
     policyDigest: row.digest,
     pipelineDigest: bundle.pipeline?.digest ?? null,
     requiredSuites: bundle.pipeline?.requiredSuites ?? [],

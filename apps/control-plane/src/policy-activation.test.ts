@@ -93,6 +93,7 @@ function fixture(): { database: Database.Database; env: Env } {
       github_org_id TEXT NOT NULL UNIQUE,
       github_login TEXT NOT NULL,
       installation_id TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
       proof_defaults_json TEXT
     );
     CREATE TABLE projects (
@@ -105,12 +106,26 @@ function fixture(): { database: Database.Database; env: Env } {
       active_policy_digest TEXT,
       security_profile TEXT NOT NULL DEFAULT 'fast'
     );
-    CREATE TABLE removed_projects (
+    CREATE TABLE project_release_jobs (
+      github_repository_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL UNIQUE,
       organization_id TEXT NOT NULL,
+      github_name TEXT NOT NULL,
+      default_branch TEXT NOT NULL
+    );
+    CREATE TABLE project_release_requests (
+      github_repository_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL UNIQUE,
+      organization_id TEXT NOT NULL,
+      github_name TEXT NOT NULL,
+      default_branch TEXT NOT NULL
+    );
+    CREATE TABLE project_write_leases (
       github_repository_id TEXT NOT NULL,
-      deleted_at TEXT NOT NULL,
-      deleted_by_github_user_id TEXT NOT NULL,
-      PRIMARY KEY (organization_id, github_repository_id)
+      project_id TEXT NOT NULL,
+      owner_token TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      PRIMARY KEY (github_repository_id, owner_token)
     );
     CREATE TABLE policy_bundles (
       digest TEXT PRIMARY KEY,

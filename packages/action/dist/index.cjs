@@ -1793,6 +1793,9 @@ async function checkLease(input) {
   if (claims["repositoryId"] !== facts.repositoryId) {
     return mismatch("repository", claims["repositoryId"], facts.repositoryId);
   }
+  if (claims["projectId"] !== bundle.projectId) {
+    return mismatch("project incarnation", claims["projectId"], bundle.projectId);
+  }
   if (claims["treeOid"] !== facts.treeOid)
     return mismatch("tree", claims["treeOid"], facts.treeOid);
   if (claims["baseSha"] !== null && claims["baseSha"] !== void 0 && claims["baseSha"] !== facts.baseSha) {
@@ -1828,7 +1831,7 @@ function record(value) {
 function parseBundleResolutionBody(value) {
   if (!record(value)) throw new Error("BUNDLE_UNAVAILABLE: resolver returned a non-object");
   if (value["state"] === "bootstrap_pending") {
-    if (value["code"] !== "POLICY_AWAITING_FIRST_MERGE" || typeof value["repository"] !== "string" || typeof value["repositoryId"] !== "string" || typeof value["defaultBranch"] !== "string") {
+    if (value["code"] !== "POLICY_AWAITING_FIRST_MERGE" || typeof value["repository"] !== "string" || typeof value["repositoryId"] !== "string" || typeof value["projectId"] !== "string" || typeof value["defaultBranch"] !== "string") {
       throw new Error("BUNDLE_UNAVAILABLE: malformed bootstrap state");
     }
     return {
@@ -1836,6 +1839,7 @@ function parseBundleResolutionBody(value) {
       code: value["code"],
       repository: value["repository"],
       repositoryId: value["repositoryId"],
+      projectId: value["projectId"],
       defaultBranch: value["defaultBranch"]
     };
   }
@@ -1969,7 +1973,7 @@ async function main() {
     summary(
       `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`
     );
-    await recordObservation(repositoryId, commit.sha, "BOOTSTRAP_PENDING");
+    await recordObservation(repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING");
     process.exit(0);
   }
   const bundle = resolution.bundle;
@@ -2011,11 +2015,11 @@ async function main() {
     });
   }
   if (result.code !== "VERIFICATION_PENDING") {
-    await recordObservation(repositoryId, commit.sha, result.code);
+    await recordObservation(repositoryId, bundle.projectId, commit.sha, result.code);
   }
   process.exit(result.code === "PASS" ? 0 : 1);
 }
-async function recordObservation(repositoryId, headSha, outcome) {
+async function recordObservation(repositoryId, projectId, headSha, outcome) {
   try {
     const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
     await fetch(`${ENDPOINT}/v1/verification-observations`, {
@@ -2023,6 +2027,7 @@ async function recordObservation(repositoryId, headSha, outcome) {
       headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
       body: JSON.stringify({
         repositoryId,
+        projectId,
         headSha,
         outcome,
         runId: process.env["GITHUB_RUN_ID"] ?? null

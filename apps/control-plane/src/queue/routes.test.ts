@@ -65,17 +65,17 @@ describe("projectionMessageFrom", () => {
   };
 
   it("projects every recorded transition, not only the head", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.transitionSequence)).toEqual([1, 2, 3]);
   });
 
   it("reports each transition's real kind", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.kind)).toEqual(["verified", "external", "override"]);
   });
 
   it("carries the prior digest so the chain can be checked from the projection", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     for (const transition of message.transitions) {
       const prior = message.transitions.find((t) => t.transitionSequence === transition.transitionSequence - 1);
       expect(transition.priorDigest).toBe(prior?.digest ?? null);
@@ -83,13 +83,13 @@ describe("projectionMessageFrom", () => {
   });
 
   it("attributes each transition to the attempt that produced it, not the live one", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.attemptId)).toEqual(["att_one", null, "att_three"]);
     expect(message.transitions.some((t) => t.attemptId === snapshot.activeAttemptId)).toBe(false);
   });
 
   it("records each transition's own base, not the current one", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.baseSha)).toEqual([
       "a".repeat(40),
       "b".repeat(40),
@@ -98,12 +98,12 @@ describe("projectionMessageFrom", () => {
   });
 
   it("counts witnesses instead of reporting none", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.witnessCount)).toEqual([2, 0, 1]);
   });
 
   it("passes an unknown observation time through as null rather than inventing one", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message.transitions.map((t) => t.observedAt)).toEqual([
       "2026-07-29T00:00:00Z",
       null,
@@ -112,7 +112,7 @@ describe("projectionMessageFrom", () => {
   });
 
   it("carries the object's generation and epoch so a stale message is droppable", () => {
-    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot);
+    const message = projectionMessageFrom("1315419165", "refs/heads/main", snapshot, "prj_routes");
     expect(message).toMatchObject({ generation: 72, queueEpoch: 2 });
   });
 });

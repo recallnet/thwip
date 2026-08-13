@@ -1,3 +1,5 @@
+import type { ProjectWriteLease } from "../project-lifecycle.js";
+
 /**
  * D1 projection of queue state.
  *
@@ -57,6 +59,8 @@ export interface ProjectionTransition {
 
 export interface ProjectionMessage {
   readonly repositoryId: string;
+  /** Project incarnation that produced this snapshot. */
+  readonly projectId: string;
   readonly baseRef: string;
   readonly queueEpoch: number;
   /** The Durable Object generation this snapshot was taken at. */
@@ -87,9 +91,11 @@ export function projectionMessageFrom(
   repositoryId: string,
   baseRef: string,
   snapshot: QueueSnapshot,
+  projectId: string,
 ): ProjectionMessage {
   return {
     repositoryId,
+    projectId,
     baseRef,
     queueEpoch: snapshot.queueEpoch,
     generation: snapshot.generation,
@@ -163,16 +169,20 @@ function entryProjectionStatement(
   baseRef: string,
   generation: number,
   entry: ProjectionEntry,
+  projectId?: string,
   terminalCommentPriority = false,
 ): unknown {
   return db
     .prepare(
       `INSERT INTO queue_entries_index (
-         id, github_repository_id, base_ref, entry_id, pull_request_number,
+         id, github_repository_id, project_id, base_ref, entry_id, pull_request_number,
          sponsor_principal_id, state, primary_reason, fairness_ordinal,
          scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation,
          terminal_comment_priority, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       )
+       SELECT ?, ?, p.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
+         FROM projects p
+        WHERE p.github_repository_id = ? AND (? IS NULL OR p.id = ?)
        ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
          state = excluded.state,
          primary_reason = excluded.primary_reason,
@@ -198,7 +208,8 @@ function entryProjectionStatement(
          -- is the only thing anybody can say about it without guessing.
          generation = excluded.generation,
          updated_at = excluded.updated_at
-       WHERE excluded.generation >= queue_entries_index.generation`,
+       WHERE excluded.generation >= queue_entries_index.generation
+         AND queue_entries_index.project_id = excluded.project_id`,
     )
     .bind(
       rowKey("qei", repositoryId, baseRef, entry.entryId),
@@ -216,6 +227,9 @@ function entryProjectionStatement(
       entry.headSha,
       generation,
       terminalCommentPriority ? 1 : 0,
+      repositoryId,
+      projectId ?? null,
+      projectId ?? null,
     );
 }
 
@@ -231,6 +245,7 @@ export async function projectTerminalEntryHistory(
   repositoryId: string,
   baseRef: string,
   entries: readonly TerminalProjectionEntry[],
+  projectId?: string,
 ): Promise<void> {
   if (entries.length === 0) return;
   await db.batch(
@@ -241,6 +256,7 @@ export async function projectTerminalEntryHistory(
         baseRef,
         entry.generation,
         entry,
+        projectId,
         entry.terminalCommentPriority === true,
       ),
     ),
@@ -405,11 +421,14 @@ export async function pruneTerminalEntryHistory(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  projectId?: string,
 ): Promise<void> {
   await db
     .prepare(
       `DELETE FROM queue_entries_index AS terminal
         WHERE terminal.github_repository_id = ? AND terminal.base_ref = ?
+          AND (? IS NULL OR terminal.project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = terminal.project_id)
           AND terminal.state IN ('Merged', 'Cancelled')
           AND terminal.generation < (
             SELECT generation FROM queue_projection_marks
@@ -438,7 +457,7 @@ export async function pruneTerminalEntryHistory(
             )
           )`,
     )
-    .bind(repositoryId, baseRef)
+    .bind(repositoryId, baseRef, projectId ?? null, projectId ?? null)
     .run();
 }
 
@@ -449,6 +468,7 @@ export async function acknowledgeTerminalEntryStatus(
   baseRef: string,
   entryId: string,
   fairnessOrdinal: string,
+  projectId?: string,
 ): Promise<void> {
   await db.batch([
     db
@@ -456,22 +476,36 @@ export async function acknowledgeTerminalEntryStatus(
         `DELETE FROM queue_entries_index
         WHERE github_repository_id = ? AND base_ref = ?
           AND entry_id = ? AND fairness_ordinal = ?
+          AND (? IS NULL OR project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_entries_index.project_id)
           AND state IN ('Merged', 'Cancelled')
           AND generation < (
             SELECT generation FROM queue_projection_marks
              WHERE github_repository_id = ? AND base_ref = ?
+               AND project_id = queue_entries_index.project_id
           )`,
       )
-      .bind(repositoryId, baseRef, entryId, fairnessOrdinal, repositoryId, baseRef),
+      .bind(
+        repositoryId,
+        baseRef,
+        entryId,
+        fairnessOrdinal,
+        projectId ?? null,
+        projectId ?? null,
+        repositoryId,
+        baseRef,
+      ),
     db
       .prepare(
         `UPDATE queue_entries_index
             SET terminal_comment_priority = 0
           WHERE github_repository_id = ? AND base_ref = ?
             AND entry_id = ? AND fairness_ordinal = ?
+            AND (? IS NULL OR project_id = ?)
+            AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_entries_index.project_id)
             AND state IN ('Merged', 'Cancelled')`,
       )
-      .bind(repositoryId, baseRef, entryId, fairnessOrdinal),
+      .bind(repositoryId, baseRef, entryId, fairnessOrdinal, projectId ?? null, projectId ?? null),
   ]);
 }
 
@@ -489,6 +523,7 @@ export async function acknowledgeTerminalEntryStatusForbidden(
   baseRef: string,
   entryId: string,
   fairnessOrdinal: string,
+  projectId?: string,
 ): Promise<void> {
   await db
     .prepare(
@@ -496,9 +531,11 @@ export async function acknowledgeTerminalEntryStatusForbidden(
           SET terminal_comment_priority = 2
         WHERE github_repository_id = ? AND base_ref = ?
           AND entry_id = ? AND fairness_ordinal = ?
+          AND (? IS NULL OR project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_entries_index.project_id)
           AND state IN ('Merged', 'Cancelled')`,
     )
-    .bind(repositoryId, baseRef, entryId, fairnessOrdinal)
+    .bind(repositoryId, baseRef, entryId, fairnessOrdinal, projectId ?? null, projectId ?? null)
     .run();
 }
 
@@ -507,6 +544,7 @@ export async function terminalCommentRepairState(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  projectId?: string,
 ): Promise<{ priority: Set<string>; acknowledged: Set<string> }> {
   const rows = await db
     .prepare(
@@ -516,7 +554,10 @@ export async function terminalCommentRepairState(
            ON c.github_repository_id = e.github_repository_id
           AND c.base_ref = e.base_ref
           AND c.pull_request_number = e.pull_request_number
+          AND c.project_id = e.project_id
         WHERE e.github_repository_id = ? AND e.base_ref = ?
+          AND (? IS NULL OR e.project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = e.project_id)
           AND e.state IN ('Merged', 'Cancelled')
           AND e.terminal_comment_priority IN (1, 2)
           AND NOT EXISTS (
@@ -524,14 +565,16 @@ export async function terminalCommentRepairState(
              JOIN queue_projection_marks m
                ON m.github_repository_id = current.github_repository_id
               AND m.base_ref = current.base_ref
+              AND m.project_id = current.project_id
              WHERE current.github_repository_id = e.github_repository_id
                AND current.base_ref = e.base_ref
                AND current.pull_request_number = e.pull_request_number
+               AND current.project_id = e.project_id
                AND current.generation = m.generation
                AND current.state NOT IN ('Merged', 'Cancelled')
           )`,
     )
-    .bind(repositoryId, baseRef)
+    .bind(repositoryId, baseRef, projectId ?? null, projectId ?? null)
     .all<{ entry_id: string; terminal_comment_priority: number }>();
   return {
     priority: new Set(
@@ -553,6 +596,7 @@ export async function trackedTerminalEntries(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  projectId?: string,
 ): Promise<TrackedTerminalEntry[]> {
   const rows = await db
     .prepare(
@@ -568,15 +612,20 @@ export async function trackedTerminalEntries(
            ON c.github_repository_id = e.github_repository_id
           AND c.base_ref = e.base_ref
           AND c.pull_request_number = e.pull_request_number
+          AND c.project_id = e.project_id
          JOIN queue_projection_marks m
            ON m.github_repository_id = e.github_repository_id
           AND m.base_ref = e.base_ref
+          AND m.project_id = e.project_id
          LEFT JOIN queue_transitions_index t
            ON t.github_repository_id = e.github_repository_id
           AND t.base_ref = e.base_ref
+          AND t.project_id = e.project_id
           AND t.queue_epoch = m.queue_epoch
           AND t.attempt_id = e.last_attempt_id
         WHERE e.github_repository_id = ? AND e.base_ref = ?
+          AND (? IS NULL OR e.project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = e.project_id)
           AND e.state IN ('Merged', 'Cancelled')
           AND e.terminal_comment_priority <> 2
           AND e.generation < m.generation
@@ -585,12 +634,13 @@ export async function trackedTerminalEntries(
              WHERE current.github_repository_id = e.github_repository_id
                AND current.base_ref = e.base_ref
                AND current.pull_request_number = e.pull_request_number
+               AND current.project_id = e.project_id
                AND current.generation = m.generation
                AND current.state NOT IN ('Merged', 'Cancelled')
           )
         ORDER BY length(e.fairness_ordinal), e.fairness_ordinal, e.entry_id`,
     )
-    .bind(repositoryId, baseRef)
+    .bind(repositoryId, baseRef, projectId ?? null, projectId ?? null)
     .all<{
       entry_id: string;
       pull_request_number: number;
@@ -647,23 +697,40 @@ export async function trackedTerminalEntries(
 export type ProjectionResult =
   | { readonly applied: true; readonly entries: number; readonly transitions: number }
   | { readonly applied: false; readonly reason: "STALE_GENERATION"; readonly seen: number }
-  | { readonly applied: false; readonly reason: "PROJECT_REMOVED"; readonly seen: 0 };
+  | { readonly applied: false; readonly reason: "PROJECT_UNAVAILABLE"; readonly seen: 0 };
 
 /**
  * Apply a projection message. Idempotent and order-independent: replaying an old
  * message is a no-op, and replaying the current one changes nothing.
  */
-export async function projectQueueState(db: D1Like, message: ProjectionMessage): Promise<ProjectionResult> {
-  const removed = await db
-    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
-    .bind(message.repositoryId)
-    .first<{ found: number }>();
-  if (removed !== null) return { applied: false, reason: "PROJECT_REMOVED", seen: 0 };
+export async function projectQueueState(
+  db: D1Like,
+  message: ProjectionMessage,
+  writeLease?: ProjectWriteLease,
+): Promise<ProjectionResult> {
+  if (writeLease !== undefined) {
+    if (writeLease.projectId !== message.projectId) return { applied: false, reason: "PROJECT_UNAVAILABLE", seen: 0 };
+    await writeLease.renew();
+  }
+  const project = await db
+    .prepare(
+      `SELECT p.id
+         FROM projects p JOIN organizations o ON o.id = p.organization_id
+        WHERE p.github_repository_id = ? AND o.status = 'active'
+          AND p.id = ?
+          AND (? = 1 OR NOT EXISTS (
+            SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id
+          ))
+          AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = p.github_repository_id)`,
+    )
+    .bind(message.repositoryId, message.projectId, writeLease === undefined ? 0 : 1)
+    .first<{ id: string }>();
+  if (project === null) return { applied: false, reason: "PROJECT_UNAVAILABLE", seen: 0 };
   const marker = await db
     .prepare(
-      "SELECT MAX(generation) AS generation FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ?",
+      "SELECT MAX(generation) AS generation FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?",
     )
-    .bind(message.repositoryId, message.baseRef)
+    .bind(message.repositoryId, message.baseRef, message.projectId)
     .first<{ generation: number | null }>();
 
   const seen = marker?.generation ?? 0;
@@ -674,7 +741,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
   const statements: unknown[] = [];
 
   for (const entry of message.entries) {
-    statements.push(entryProjectionStatement(db, message.repositoryId, message.baseRef, message.generation, entry));
+    statements.push(entryProjectionStatement(db, message.repositoryId, message.baseRef, message.generation, entry, message.projectId));
   }
 
   for (const transition of message.transitions) {
@@ -687,9 +754,11 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
       db
         .prepare(
           `INSERT INTO queue_transitions_index (
-             id, github_repository_id, base_ref, queue_epoch, transition_sequence,
+             id, github_repository_id, project_id, base_ref, queue_epoch, transition_sequence,
              kind, digest, prior_digest, base_sha, attempt_id, witness_count, observed_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           )
+           SELECT ?, ?, p.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             FROM projects p WHERE p.id = ? AND p.github_repository_id = ?
            ON CONFLICT (github_repository_id, base_ref, queue_epoch, transition_sequence) DO NOTHING`,
         )
         .bind(
@@ -705,6 +774,8 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
           transition.attemptId,
           transition.witnessCount,
           transition.observedAt,
+          message.projectId,
+          message.repositoryId,
         ),
     );
   }
@@ -713,9 +784,11 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
     db
       .prepare(
         `INSERT INTO queue_projection_marks (
-           github_repository_id, base_ref, generation, projected_at,
+           github_repository_id, project_id, base_ref, generation, projected_at,
            active_attempt_id, paused, pause_reason, rebaseline_required, base_sha, queue_epoch
-         ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)
+         )
+         SELECT ?, p.id, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?
+           FROM projects p WHERE p.id = ? AND p.github_repository_id = ?
          ON CONFLICT (github_repository_id, base_ref) DO UPDATE SET
            generation = excluded.generation,
            projected_at = excluded.projected_at,
@@ -724,7 +797,8 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
            pause_reason = excluded.pause_reason,
            rebaseline_required = excluded.rebaseline_required,
            base_sha = excluded.base_sha,
-           queue_epoch = excluded.queue_epoch`,
+           queue_epoch = excluded.queue_epoch
+         WHERE queue_projection_marks.project_id = excluded.project_id`,
       )
       .bind(
         message.repositoryId,
@@ -736,11 +810,22 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
         message.rebaselineRequired ? 1 : 0,
         message.baseSha,
         message.queueEpoch,
+        message.projectId,
+        message.repositoryId,
       ),
   );
 
   await db.batch(statements);
-  return { applied: true, entries: message.entries.length, transitions: message.transitions.length };
+  const applied = await db
+    .prepare(
+      `SELECT 1 AS found FROM queue_projection_marks
+        WHERE github_repository_id = ? AND base_ref = ? AND project_id = ? AND generation = ?`,
+    )
+    .bind(message.repositoryId, message.baseRef, message.projectId, message.generation)
+    .first<{ found: number }>();
+  return applied === null
+    ? { applied: false, reason: "PROJECT_UNAVAILABLE", seen: 0 }
+    : { applied: true, entries: message.entries.length, transitions: message.transitions.length };
 }
 
 /**
@@ -763,7 +848,14 @@ export async function readProjectedQueue(
     .prepare(
       `SELECT generation, queue_epoch, active_attempt_id, paused, pause_reason,
               rebaseline_required, base_sha, projected_at
-         FROM queue_projection_marks WHERE github_repository_id = ? AND base_ref = ?`,
+         FROM queue_projection_marks m
+        WHERE m.github_repository_id = ? AND m.base_ref = ?
+          AND EXISTS (
+            SELECT 1 FROM projects p JOIN organizations o ON o.id = p.organization_id
+             WHERE p.github_repository_id = m.github_repository_id AND o.status = 'active'
+          )
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = m.github_repository_id)
+          AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = m.github_repository_id)`,
     )
     .bind(repositoryId, baseRef)
     .first<{

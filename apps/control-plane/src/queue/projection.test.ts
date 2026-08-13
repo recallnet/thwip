@@ -37,6 +37,10 @@ function d1(): D1Like {
       if (/queue_(entries|transitions)_index|queue_projection_marks/.test(sql)) throw error;
     }
   }
+  db.prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+  db.prepare(
+    "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project', 'org', '1315419165', 'owner/repo')",
+  ).run();
 
   const prepare = (query: string) => ({
     bind: (...values: unknown[]) => ({
@@ -72,6 +76,7 @@ afterEach(() => {
 function message(over: Partial<ProjectionMessage> = {}): ProjectionMessage {
   return {
     repositoryId: "1315419165",
+    projectId: "project",
     baseRef: "refs/heads/main",
     queueEpoch: 0,
     generation: 5,
@@ -242,12 +247,30 @@ describe("projectQueueState", () => {
 
   it("drops an old projection delivery after project removal", async () => {
     const db = d1();
-    await db.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").bind().run();
     await db.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org', ?, 'project', 'owner/repo', 'main')",
     ).bind(message().repositoryId).run();
 
-    expect(await projectQueueState(db, message())).toEqual({ applied: false, reason: "PROJECT_REMOVED", seen: 0 });
+    expect(await projectQueueState(db, message())).toEqual({ applied: false, reason: "PROJECT_UNAVAILABLE", seen: 0 });
+    expect((await rows(db, "queue_entries_index")).results).toEqual([]);
+    expect((await rows(db, "queue_projection_marks")).results).toEqual([]);
+  });
+
+  it("does not let an old snapshot overwrite a reselected project", async () => {
+    const db = d1();
+    await db.prepare("DELETE FROM projects WHERE id = 'project'").bind().run();
+    await db
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project_new', 'org', '1315419165', 'owner/repo')",
+      )
+      .bind()
+      .run();
+
+    expect(await projectQueueState(db, message({ generation: 99 }))).toEqual({
+      applied: false,
+      reason: "PROJECT_UNAVAILABLE",
+      seen: 0,
+    });
     expect((await rows(db, "queue_entries_index")).results).toEqual([]);
     expect((await rows(db, "queue_projection_marks")).results).toEqual([]);
   });
@@ -299,7 +322,7 @@ describe("compacted terminal history", () => {
     ]);
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'old', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'old', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -316,7 +339,7 @@ describe("compacted terminal history", () => {
     await projectQueueState(db, message({ generation: 6, entries: [] }));
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -352,7 +375,7 @@ describe("compacted terminal history", () => {
     await projectQueueState(db, message({ generation: 6, entries: [] }));
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -399,7 +422,7 @@ describe("compacted terminal history", () => {
     await projectQueueState(db, message({ generation: 6, entries: [] }));
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -463,7 +486,7 @@ describe("compacted terminal history", () => {
     await projectQueueState(db, message({ generation: 6, entries: [] }));
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -580,7 +603,7 @@ describe("compacted terminal history", () => {
     await projectQueueState(db, message({ generation: 6, entries: [] }));
     await db
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
       )
       .bind(message().repositoryId, message().baseRef)
       .run();
@@ -641,7 +664,7 @@ describe("compacted terminal history", () => {
     for (const entry of entries) {
       await bounded
         .prepare(
-          "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, ?, 'blocked', '2026-08-12T12:00:00Z')",
+          "INSERT INTO queue_status_comments (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, 'project', ?, ?, ?, 'blocked', '2026-08-12T12:00:00Z')",
         )
         .bind(message().repositoryId, message().baseRef, entry.pullRequestNumber, entry.pullRequestNumber)
         .run();

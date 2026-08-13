@@ -239,13 +239,13 @@ export function blockerFreshness(
 /* ---------- owners ---------- */
 
 /**
- * `prn_gh_370259` is a row id. A person reading a queue wants a person.
- * The id already carries the GitHub user id, so a login from the organization
- * projection resolves it; without one, it is at least stated as a GitHub user
- * rather than as a key.
+ * `prn_gh_370259_org_42` is a row id. A person reading a queue wants a
+ * person. The organization suffix keeps one GitHub user distinct across
+ * installations; the leading user id still lets the organization projection
+ * resolve the login.
  */
 export function ownerName(principalId: string, loginByGithubUserId: ReadonlyMap<string, string>): string {
-  const githubUserId = /^prn_gh_(\d+)$/.exec(principalId)?.[1];
+  const githubUserId = /^prn_gh_(\d+)(?:_org_[A-Za-z0-9_-]+)?$/.exec(principalId)?.[1];
   if (githubUserId === undefined) return principalId;
   return loginByGithubUserId.get(githubUserId) ?? `GitHub user ${githubUserId}`;
 }
@@ -254,7 +254,7 @@ export function ownerGithubUrl(
   principalId: string,
   loginByGithubUserId: ReadonlyMap<string, string>,
 ): string | null {
-  const githubUserId = /^prn_gh_(\d+)$/.exec(principalId)?.[1];
+  const githubUserId = /^prn_gh_(\d+)(?:_org_[A-Za-z0-9_-]+)?$/.exec(principalId)?.[1];
   if (githubUserId === undefined) return null;
   const login = loginByGithubUserId.get(githubUserId);
   return login === undefined ? null : `https://github.com/${login}`;

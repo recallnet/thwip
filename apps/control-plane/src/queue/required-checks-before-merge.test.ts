@@ -67,6 +67,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     verifyOidc: async () => ({ repository_id: REPO }),
     pinnedVerifier: async () => null,
     activePolicy: async () => ({
+      projectId: "proj_1",
       policyDigest: `sha256:${"b".repeat(64)}`,
       pipelineDigest: `sha256:${"c".repeat(64)}`,
       requiredSuites: ["unit"],
@@ -77,8 +78,8 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
-    principalFor: async (_e, githubUserId) => `principal_${githubUserId}`,
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
+    principalFor: async (_e, _repositoryId, githubUserId) => `principal_${githubUserId}`,
     pullRequestPlacement: async () => ({
       authorGithubUserId: "1",
       baseRef: REF,

@@ -249,18 +249,18 @@ record. Never paste query results or the token secret into it.
 
 The command is a repository guard around Wrangler, not an alias for it. Wrangler
 applies every pending migration it can see and has no phase selector. The guard
-first reads the complete applied filenames from the live Worker and then:
+first reads the complete applied filenames from the live Worker, exposes only
+the next contiguous phase through a temporary Wrangler configuration, and then:
 
 - applies a pending set containing only `before-worker` migrations;
 - applies a pending set containing only `after-worker` migrations only when the
-  exact clean commit in the checkout is already live; or
-- refuses without touching D1 when both phases are pending, listing every file
-  and the staged sequence required to separate them.
+  exact clean commit in the checkout is already live;
+- leaves every later phase hidden until the next invocation reads the new live
+  schema again.
 
 Never work around a refusal with raw `wrangler d1 migrations apply`. For a mixed
-set, use reviewed intermediate commits to expose one phase at a time in migration
-order. Apply a `before-worker` batch and then deploy that commit; deploy an
-`after-worker` batch and then apply it. Repeat until the current tree is level.
+tree, run the guarded command, deploy when the next phase is `after-worker`, then
+run the guarded command again. Repeat until the current tree is level.
 Historic filename collisions such as `0008` and `0023` are safe because the
 guard, like D1, compares complete filenames rather than numeric prefixes.
 

@@ -1,6 +1,7 @@
 import { envelopeDigest, parseTransitionRecord, recordDigest, type Sha256 } from "@thwip/queue-protocol";
 import {
   authorizationFor,
+  clearAttestationChainPosition,
   durableTransitionForAttempt,
   placeAttestationInChain,
   storeAttestation,
@@ -10,6 +11,7 @@ import type { D1Like } from "./projection.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import type { QueueRouteEnv } from "./routes.js";
 import type { SelfCheckFinding } from "./chain-self-check.js";
+import type { ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
  * Turning a chain finding into the call that answers it.
@@ -372,6 +374,7 @@ export async function applyHeal<TEnv extends QueueRouteEnv>(
     readonly plan: HealPlan;
     readonly actorPrincipalId: string;
     readonly reason: string;
+    readonly writeLease?: ProjectWriteLease | undefined;
   },
 ): Promise<HealOutcome> {
   const { plan, repositoryId, baseRef } = input;
@@ -394,6 +397,7 @@ export async function applyHeal<TEnv extends QueueRouteEnv>(
         witnessPrincipalId: input.actorPrincipalId,
         reason: input.reason,
         attemptId: step.attemptId,
+        ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
       });
       if (recorded.status === "refused") {
         return { status: "refused", code: refusalOf(recorded.code), detail: recorded.detail };
@@ -411,6 +415,7 @@ export async function applyHeal<TEnv extends QueueRouteEnv>(
       commitSha: step.commitSha,
       actorPrincipalId: input.actorPrincipalId,
       reason: input.reason,
+      writeLease: input.writeLease,
     });
     if ("refused" in movement) return { status: "refused", code: movement.code, detail: movement.refused };
     wrote.push({ commitSha: step.commitSha, kind: "external-transition", sequence: movement.sequence });
@@ -440,6 +445,7 @@ async function movementAlreadyInChain(
   baseRef: string,
   commitSha: string,
   movementKey: string,
+  projectId?: string,
 ): Promise<{ sequence: number; digest: string } | null> {
   const linked = await durableTransitionForAttempt(db, {
     repositoryId,
@@ -454,6 +460,7 @@ async function movementAlreadyInChain(
     baseRef,
     attemptId: movementKey,
     transitionSequence: linked.transitionSequence,
+    projectId,
   });
   return placed ? { sequence: linked.transitionSequence, digest: linked.digest } : null;
 }
@@ -476,6 +483,7 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
     readonly commitSha: string;
     readonly actorPrincipalId: string;
     readonly reason: string;
+    readonly writeLease?: ProjectWriteLease | undefined;
   },
 ): Promise<{ sequence: number; digest: string } | { refused: string; code: HealRefusal }> {
   const { repositoryId, baseRef, commitSha } = input;
@@ -531,7 +539,14 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
   // attempt id to put here and inventing one that looked real would be a lie
   // about where the record came from.
   const movementKey = `movement:${commitSha}`;
-  const already = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+  const already = await movementAlreadyInChain(
+    db,
+    repositoryId,
+    baseRef,
+    commitSha,
+    movementKey,
+    input.writeLease?.projectId,
+  );
   if (already !== null) return already;
 
   const { snapshot } = await readQueue(env, repositoryId, baseRef);
@@ -542,9 +557,10 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
     .prepare(
       `SELECT digest, kind, bytes FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ?
+          AND (? IS NULL OR project_id = ?)
         ORDER BY created_at ASC LIMIT 1`,
     )
-    .bind(repositoryId, baseRef, movementKey)
+    .bind(repositoryId, baseRef, movementKey, input.writeLease?.projectId ?? null, input.writeLease?.projectId ?? null)
     .first<{ digest: string; kind: string; bytes: string }>();
   let movementDigest: string | null = null;
   if (staged !== null) {
@@ -586,8 +602,15 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       // while D1 still has no queue_transitions_index row. Re-run a harmless
       // queue transaction to project that authoritative state, then promote
       // only after the same durable-link validation used everywhere else.
-      await deps.onQueue(env, repositoryId, baseRef, () => undefined);
-      const projected = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+      await deps.onQueue(env, repositoryId, baseRef, () => undefined, undefined, undefined, input.writeLease);
+      const projected = await movementAlreadyInChain(
+        db,
+        repositoryId,
+        baseRef,
+        commitSha,
+        movementKey,
+        input.writeLease?.projectId,
+      );
       if (projected !== null) return projected;
       return {
         refused: "the movement link is live but its durable projection is not available yet; try again",
@@ -603,10 +626,7 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       // synthetic attempt key so another retry cannot detach a concurrent
       // writer's staged record, but remove the false position until the
       // durable link is proven.
-      await db
-        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-        .bind(staged.digest)
-        .run();
+      await clearAttestationChainPosition(db, staged.digest, input.writeLease?.projectId);
       movementDigest = staged.digest;
     } else {
       // The durable-link lookup above proved this record is unlinked, and the
@@ -615,9 +635,16 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       // a writer that still has a valid append available.
       await db
         .prepare(
-          "UPDATE queue_attestations SET transition_sequence = NULL, attempt_id = NULL WHERE digest = ? AND attempt_id = ?",
+          `UPDATE queue_attestations SET transition_sequence = NULL, attempt_id = NULL
+            WHERE digest = ? AND attempt_id = ? AND (? IS NULL OR project_id = ?)
+              AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_attestations.project_id)`,
         )
-        .bind(staged.digest, movementKey)
+        .bind(
+          staged.digest,
+          movementKey,
+          input.writeLease?.projectId ?? null,
+          input.writeLease?.projectId ?? null,
+        )
         .run();
     }
   }
@@ -649,6 +676,7 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       digest: signed.digest,
       kind: "external-transition",
       repositoryId,
+      projectId: input.writeLease?.projectId ?? policy?.projectId,
       baseRef,
       transitionSequence: null,
       attemptId: movementKey,
@@ -667,6 +695,8 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
             }) =>
               deps
                 .storeEvidence(env, {
+                  projectId: policy.projectId,
+                  ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
                   organizationId: mirrored.organizationId,
                   repositoryId: mirrored.repositoryId,
                   kind: mirrored.kind,
@@ -677,7 +707,14 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
           }),
     });
     if (!stored.stored) {
-      const winner = await movementAlreadyInChain(db, repositoryId, baseRef, commitSha, movementKey);
+      const winner = await movementAlreadyInChain(
+        db,
+        repositoryId,
+        baseRef,
+        commitSha,
+        movementKey,
+        input.writeLease?.projectId,
+      );
       return winner ?? {
         refused: "another movement record is staged but not linked; try again",
         code: "CHAIN_MOVED",
@@ -705,7 +742,7 @@ async function recordMovement<TEnv extends QueueRouteEnv>(
       witnessPrincipalIds: [input.actorPrincipalId],
     });
     return { moved: false as const, transition };
-  });
+  }, undefined, undefined, input.writeLease);
 
   if (result.moved) {
     return { refused: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" };
