@@ -58,7 +58,7 @@ import { capabilityFor, enrolDeviceKey } from "./queue/runners.js";
 import { atLeast, isOrgAdmin, repositoryAccess } from "./queue/repository-access.js";
 import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
 import { managedRulesetHealth, type StoredDoctorRuleset } from "./queue/doctor-rulesets.js";
-import { managedWorkflowHealth } from "./queue/doctor-workflows.js";
+import { actionCommitUsesInstallationToken, managedWorkflowHealth } from "./queue/doctor-workflows.js";
 import { QUEUE_ACTION_REF, setupPullRequestFiles, verifierWorkflowFile } from "./queue/bootstrap-workflows.js";
 import { VERIFIER_WORKFLOW_PATH } from "./queue/bootstrap.js";
 import {
@@ -1483,10 +1483,15 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
   if (action === null) {
     return Response.json({ error: "the configured queue action is not commit-pinned", code: "INVARIANT_FAILURE" }, { status: 500 });
   }
-  // The target repository token is deliberately scoped to that one repository.
-  // The published action is public, so test its exact commit without pretending
-  // the target installation token can read a different repository.
-  const actionCommit = await gh<unknown>(`/repos/${action[1]}/git/commits/${action[2]}`, false);
+  const actionRepository = action[1]!;
+  const actionSha = action[2]!;
+  // The installation token is scoped to the target repository. It can read a
+  // pinned Action hosted in that same repository; a foreign Action must remain
+  // readable without borrowing credentials the target repository does not have.
+  const actionCommit = await gh<unknown>(
+    `/repos/${actionRepository}/git/commits/${actionSha}`,
+    actionCommitUsesInstallationToken(actionRepository, repo),
+  );
   let actionAccessible = true;
   if (!actionCommit.ok) {
     if (actionCommit.status === 404) actionAccessible = false;
@@ -1500,12 +1505,13 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
     actionCommit.value === null ||
     typeof actionCommit.value !== "object" ||
     Array.isArray(actionCommit.value) ||
-    (actionCommit.value as Record<string, unknown>)["sha"] !== action[2]
+    (actionCommit.value as Record<string, unknown>)["sha"] !== actionSha
   ) {
     return Response.json({ error: "GitHub returned an invalid queue action commit", code: "GITHUB_WORKFLOWS_UNAVAILABLE" }, { status: 502 });
   }
   const workflowHealth = managedWorkflowHealth({
     endpoint: env.PUBLIC_ORIGIN,
+    installedRepository: repo,
     files: liveWorkflows,
     actionAccessible,
   });

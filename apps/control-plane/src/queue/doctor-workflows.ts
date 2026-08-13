@@ -1,4 +1,8 @@
-import { QUEUE_ACTION_REF, setupPullRequestFiles } from "./bootstrap-workflows.js";
+import {
+  QUEUE_ACTION_REF,
+  setupPullRequestFiles,
+  sourceRepositoryRequiredWorkflowFile,
+} from "./bootstrap-workflows.js";
 
 export interface ManagedWorkflowHealth {
   readonly healthy: boolean;
@@ -9,13 +13,26 @@ export interface ManagedWorkflowHealth {
   readonly actionAccessible: boolean;
 }
 
+/** A repository-scoped App token may read an Action only from that repository. */
+export function actionCommitUsesInstallationToken(actionRepository: string, installedRepository: string): boolean {
+  return actionRepository.toLowerCase() === installedRepository.toLowerCase();
+}
+
 /** Compare the default branch's live workflow bytes with the setup payload. */
 export function managedWorkflowHealth(input: {
   readonly endpoint: string;
+  readonly installedRepository: string;
   readonly files: Readonly<Record<string, string | null>>;
   readonly actionAccessible: boolean;
 }): ManagedWorkflowHealth {
-  const expected = setupPullRequestFiles({ endpoint: input.endpoint, actionRef: QUEUE_ACTION_REF });
+  const setupInput = { endpoint: input.endpoint, actionRef: QUEUE_ACTION_REF };
+  const expected = [...setupPullRequestFiles(setupInput)];
+  const actionRepository = QUEUE_ACTION_REF.split("@")[0] ?? "";
+  if (actionCommitUsesInstallationToken(actionRepository, input.installedRepository)) {
+    const required = sourceRepositoryRequiredWorkflowFile(setupInput);
+    const index = expected.findIndex((file) => file.path === required.path);
+    if (index >= 0) expected[index] = required;
+  }
   const expectedPaths = expected.map((file) => file.path);
   const missing = expected.filter((file) => input.files[file.path] === null).map((file) => file.path);
   const drifted = expected
