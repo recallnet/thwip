@@ -62,6 +62,8 @@ export interface ActivePolicy {
   pipelineDigest: string | null;
   requiredSuites: readonly string[];
   securityProfile: string;
+  /** Combined candidates touching one of these globs must be run again. */
+  exclusivePaths?: readonly string[];
   /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
   organizationId: string;
   /** Null when no verifier is pinned, which only matters to a stronger profile. */

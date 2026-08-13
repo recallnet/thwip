@@ -189,6 +189,8 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
     "This project runs integrations on your own machine. Keep `thwip ship --wait` running and the queue will hand it the turn.",
   CANDIDATE_NOT_VERIFIED: "The verifier has not answered for this candidate yet. The queue is waiting for it.",
   CANDIDATE_BASE_MOVED: "The base moved, so the queue is rebuilding the candidate and running it again.",
+  CANDIDATE_PATHS_UNREADABLE:
+    "The queue could not establish the combined candidate's changed paths. Retry after GitHub can return both complete trees.",
   BASE_UNREADABLE:
     "GitHub would not say what the base branch is right now. The queue pins no base it cannot read, and it will ask again.",
   MERGEABILITY_UNKNOWN: "GitHub is still working out whether this merges. The queue will ask again shortly.",

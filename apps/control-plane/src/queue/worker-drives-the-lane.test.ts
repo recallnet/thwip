@@ -8,6 +8,8 @@ import { runOnQueue } from "./routes.js";
 import { loadQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
 import { driveQueue } from "./drive-queue.js";
+import { candidateResultDigest } from "./candidate-verdict.js";
+import { recordCandidateVerdict } from "./candidate-store.js";
 
 // `../index.js` statically re-exports the Durable Object class, which needs
 // `cloudflare:workers` and only resolves under the Workers pool.
@@ -69,15 +71,15 @@ afterEach(() => {
 const onQueue = ((e, repositoryId, baseRef, decide) =>
   runOnQueue(e, repositoryId, baseRef, decide)) as Parameters<typeof driveQueue>[2];
 
-function opened() {
+function opened(pullRequestNumber = 120, headSha = HEAD) {
   return {
     action: "opened",
     pull_request: {
-      number: 120,
+      number: pullRequestNumber,
       draft: false,
       state: "open",
       base: { ref: "main", repo: { id: Number(REPO) } },
-      head: { sha: HEAD },
+      head: { sha: headSha },
       user: { id: 1, login: "alice", type: "User" },
     },
   };
@@ -228,6 +230,220 @@ describe("who drives the lane", () => {
       onQueue,
       { repositoryId: REPO, baseRef: REF },
     );
+    expect(mergeWrites).toBe(0);
+  });
+
+  it("runs a fast combined candidate again when it changes an exclusive path", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+    let dispatches = 0;
+    let mergeWrites = 0;
+
+    await driveQueue(
+      e,
+      reads({
+        activePolicy: async () =>
+          fixturePolicy({
+            exclusivePaths: ["migrations/**"],
+            verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+          }),
+        candidateChangedPaths: async (_env: QueueRouteEnv, repositoryId: string, input: Record<string, string>) => {
+          expect(repositoryId).toBe(REPO);
+          expect(input.candidateTreeOid).toBe(TREE);
+          return { status: "exact" as const, paths: ["migrations/0033_new.sql"] };
+        },
+        dispatchCandidateVerification: async (_env: QueueRouteEnv, repositoryId: string, payload: { baseSha: string; candidateTreeOid: string }) => {
+          expect(repositoryId).toBe(REPO);
+          expect(payload).toMatchObject({ baseSha: BASE, candidateTreeOid: TREE });
+          dispatches += 1;
+          return { ok: true as const };
+        },
+        mergeWrite: async () => {
+          mergeWrites += 1;
+          return { kind: "unknown" as const, detail: "must wait for the combined run" };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(dispatches).toBe(1);
+    expect(mergeWrites).toBe(0);
+  });
+
+  it("does not inspect a second guarded entry while the first holds the lane", async () => {
+    const e = env();
+    watchGithub();
+    const secondHead = "6".repeat(40);
+    acceptProof(raw, REPO, secondHead);
+    await queueFromPullRequest(e as never, opened(120, HEAD));
+    await queueFromPullRequest(e as never, opened(121, secondHead));
+    const candidates: number[] = [];
+    let pathReads = 0;
+
+    await driveQueue(
+      e,
+      reads({
+        activePolicy: async () =>
+          fixturePolicy({
+            exclusivePaths: ["migrations/**"],
+            verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+          }),
+        integratedCandidate: async (_env: QueueRouteEnv, _repositoryId: string, _baseRef: string, pr: number) => {
+          candidates.push(pr);
+          return {
+            status: "pinned" as const,
+            baseSha: BASE,
+            headSha: pr === 120 ? HEAD : secondHead,
+            candidateSha: CANDIDATE,
+            candidateTreeOid: TREE,
+          };
+        },
+        candidateChangedPaths: async () => {
+          pathReads += 1;
+          return { status: "exact" as const, paths: ["migrations/0033.sql"] };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(candidates).toEqual([120]);
+    expect(pathReads).toBe(1);
+  });
+
+  it("merges a guarded fast candidate only after the exact combined run passes", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+    const policy = fixturePolicy({
+      exclusivePaths: ["migrations/**"],
+      verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+    });
+    const queueReads = reads({
+      activePolicy: async () => policy,
+      candidateChangedPaths: async () => ({ status: "exact" as const, paths: ["migrations/0033_new.sql"] }),
+    });
+    let mergeWrites = 0;
+    queueReads.mergeWrite = async () => {
+      mergeWrites += 1;
+      return { kind: "unknown" as const, detail: "test keeps GitHub unchanged" };
+    };
+
+    await driveQueue(e, queueReads as never, onQueue, { repositoryId: REPO, baseRef: REF });
+    expect(mergeWrites).toBe(0);
+
+    const verdict = {
+      candidateTreeOid: TREE,
+      candidateSha: CANDIDATE,
+      baseSha: BASE,
+      pullRequestNumber: 120,
+      accepted: true,
+      policyDigest: policy.policyDigest as string,
+      suites: [{ name: "unit", outcome: "passed" as const, durationMs: 17 }],
+      reasonCodes: [],
+      workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main",
+      workflowSha: "9".repeat(40),
+      runId: "550011",
+      observedAt: "2026-08-13T03:00:00.000Z",
+    };
+    const resultDigest = await candidateResultDigest(verdict);
+    await expect(
+      recordCandidateVerdict(e.DB as unknown as D1Like, REPO, REF, "proj_1", { ...verdict, resultDigest }),
+    ).resolves.toEqual({ status: "applied" });
+
+    await driveQueue(e, queueReads as never, onQueue, { repositoryId: REPO, baseRef: REF });
+    expect(mergeWrites).toBe(1);
+  });
+
+  it("keeps fast proof reuse when the combined change misses every exclusive path", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+    let dispatches = 0;
+    let mergeWrites = 0;
+
+    await driveQueue(
+      e,
+      reads({
+        activePolicy: async () =>
+          fixturePolicy({
+            exclusivePaths: ["migrations/**"],
+            verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+          }),
+        candidateChangedPaths: async () => ({ status: "exact" as const, paths: ["src/index.ts"] }),
+        dispatchCandidateVerification: async () => {
+          dispatches += 1;
+          return { ok: true as const };
+        },
+        mergeWrite: async () => {
+          mergeWrites += 1;
+          return { kind: "unknown" as const, detail: "test keeps GitHub unchanged" };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(dispatches).toBe(0);
+    expect(mergeWrites).toBe(1);
+  });
+
+  it("does not spend a tree read for a repository that did not opt in", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+    let pathReads = 0;
+
+    await driveQueue(
+      e,
+      reads({
+        candidateChangedPaths: async () => {
+          pathReads += 1;
+          return { status: "exact" as const, paths: [] };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(pathReads).toBe(0);
+  });
+
+  it("fails closed when GitHub cannot return a complete combined candidate diff", async () => {
+    const e = env();
+    watchGithub();
+    await queueFromPullRequest(e as never, opened());
+    let dispatches = 0;
+    let mergeWrites = 0;
+
+    await driveQueue(
+      e,
+      reads({
+        activePolicy: async () =>
+          fixturePolicy({
+            exclusivePaths: ["migrations/**"],
+            verifier: { workflowRef: "acme/repo/.github/workflows/thwip-candidate.yml@refs/heads/main", workflowSha: null },
+          }),
+        candidateChangedPaths: async () => ({
+          status: "unreadable" as const,
+          detail: "GitHub truncated a recursive repository tree",
+        }),
+        dispatchCandidateVerification: async () => {
+          dispatches += 1;
+          return { ok: true as const };
+        },
+        mergeWrite: async () => {
+          mergeWrites += 1;
+          return { kind: "unknown" as const, detail: "must not merge" };
+        },
+      }) as never,
+      onQueue,
+      { repositoryId: REPO, baseRef: REF },
+    );
+
+    expect(dispatches).toBe(0);
     expect(mergeWrites).toBe(0);
   });
 
