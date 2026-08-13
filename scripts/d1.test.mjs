@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { commandFor, refuse } from "./d1.mjs";
+import { commandFor, executeRead, readDiagnostic, refuse } from "./d1.mjs";
+import { liveD1Target } from "./deploy-identity.mjs";
 
 /**
  * The documented way to look at production used to be `wrangler d1 execute`,
@@ -82,5 +83,32 @@ describe("what it runs", () => {
       "--command",
       "SELECT 1",
     ]);
+  });
+
+  it("diagnoses the read without printing SQL literals or selected rows", () => {
+    const statement = "SELECT * FROM principals WHERE github_login = 'private-person'";
+    const diagnostic = readDiagnostic(statement, liveD1Target("staging"));
+    expect(diagnostic).toContain("thwip-staging-wnam");
+    expect(diagnostic).toContain("live at thwip.ai");
+    expect(diagnostic).toMatch(/statement sha256:[0-9a-f]{64}/);
+    expect(diagnostic).not.toContain("private-person");
+    expect(diagnostic).not.toContain("principals");
+  });
+
+  it("does not repeat private SQL when Wrangler fails", () => {
+    const statement = "SELECT * FROM principals WHERE github_login = 'private-person'";
+    const argv = commandFor(statement, { database: "thwip-staging-wnam", env: "staging" });
+    const run = () => {
+      throw new Error(`Command failed: wrangler ${argv.join(" ")}`);
+    };
+    let message = "";
+    try {
+      executeRead(run, argv, {});
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/SQL was not repeated/);
+    expect(message).not.toContain("private-person");
+    expect(message).not.toContain("principals");
   });
 });
