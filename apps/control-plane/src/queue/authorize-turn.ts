@@ -36,7 +36,7 @@ import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
 import { decideCandidate, requiresRemoteVerification } from "./candidate-verdict.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
 import { headProofAccepted } from "./head-proof.js";
-import { candidateVerdict as readCandidateVerdict, claimCandidateDispatch } from "./candidate-store.js";
+import { candidateVerdict as readCandidateVerdict } from "./candidate-store.js";
 import {
   storeEvidence,
   type ActivePolicy,
@@ -54,12 +54,6 @@ import {
 } from "../project-lifecycle.js";
 
 /**
- * How long a dispatched verifier may stay silent before another is asked for. A
- * run that dies without reporting must not wedge its candidate forever.
- */
-const CANDIDATE_DISPATCH_STALE_MS = 15 * 60_000;
-
-/**
  * What the queue has to read, and who it may ask, to walk one pull request from
  * "asked" to "a merge has been written".
  *
@@ -75,7 +69,7 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string; projectId?: string; verifierWorkflowVersion?: 1 | 2 } | null>;
+  ): Promise<{ activationState: string; projectId?: string; verifierProtocol?: 1 | 2 | 3 } | null>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, repositoryId: string, githubUserId: string): Promise<string | null>;
   /**
@@ -130,6 +124,7 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
       baseSha: string;
       candidateSha: string;
       candidateTreeOid: string;
+      policyDigest: string;
       requiredSuites: readonly string[];
     },
   ): Promise<{ ok: true } | { ok: false; status: number; detail: string }>;
@@ -378,7 +373,7 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
   // Read once and used everywhere below. The profile decides whether a runner
   // has to be connected, whether the server may take the offer for itself, and
   // what evidence the merge rests on, and three reads of it could disagree.
-  const policy = await deps.activePolicy(env, repositoryId);
+  const policy = await deps.activePolicy(env, repositoryId, baseRef);
   const deviceOnly = requiresDeviceOnly(policy?.securityProfile ?? null);
 
   // Through `deriveReadiness`, from the facts this route has read.
@@ -781,6 +776,7 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         repositoryId,
         baseRef,
         cand.candidateTreeOid,
+        policy.projectId,
       );
       const decision = await decideCandidate(stored, {
         candidateTreeOid: cand.candidateTreeOid,
@@ -800,24 +796,12 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
           // Only the first asker dispatches. The caller polls this endpoint while
           // it waits, and dispatching on every poll once cost one candidate four
           // full CI runs.
-          const mine = await claimCandidateDispatch(
-            env.DB as unknown as D1Like,
-            repositoryId,
-            baseRef,
-            lifecycleLease.projectId,
-            attemptId,
-            project.verifierWorkflowVersion ?? 2,
-            cand.candidateTreeOid,
-            new Date().toISOString(),
-            CANDIDATE_DISPATCH_STALE_MS,
-          );
           let dispatched: { ok: true } | { ok: false; status: number; detail: string } = { ok: true };
-          if (mine) {
-            await lifecycleLease.renew();
-            if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lifecycleLease.projectId))) {
-              return { outcome: "not-configured" };
-            }
-            dispatched = await deps.dispatchCandidateVerification(env, repositoryId, {
+          await lifecycleLease.renew();
+          if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lifecycleLease.projectId))) {
+            return { outcome: "not-configured" };
+          }
+          dispatched = await deps.dispatchCandidateVerification(env, repositoryId, {
                 projectId: policy.projectId,
                 baseRef,
                 pullRequestNumber: input.pullRequestNumber,
@@ -825,13 +809,13 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
                 baseSha: cand.baseSha,
                 candidateSha: cand.candidateSha,
                 candidateTreeOid: cand.candidateTreeOid,
+                policyDigest: policy.policyDigest,
                 // Named here rather than typed into the verifier workflow. A
                 // verdict that covers a different set of suites than the
                 // policy requires is refused as CANDIDATE_SUITES_INCOMPLETE,
                 // and the workflow has no way to know what the policy says.
                 requiredSuites: policy.requiredSuites,
               });
-          }
           if (!dispatched.ok) {
             // Nothing will arrive, so waiting is the wrong answer. Say what
             // GitHub refused so it can be fixed rather than waited out.

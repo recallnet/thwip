@@ -77,6 +77,32 @@ describe("the active policy", () => {
     expect(policy?.pipelineDigest).toBe(`sha256:${"c".repeat(64)}`);
   });
 
+  it("reads the verifier pin for the exact queued branch", async () => {
+    const store = db();
+    project("fresh", bundle());
+    for (const branch of ["main", "release"]) {
+      raw
+        .prepare(
+          `INSERT INTO queue_projects
+             (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id, verifier_json)
+           VALUES (?, 'org_1', ?, ?, 1, 'enforced', 'prj_1', ?)`,
+        )
+        .run(
+          `queue_${branch}`,
+          REPO,
+          `refs/heads/${branch}`,
+          JSON.stringify({
+            workflowRef: `recallnet/thwip/.github/workflows/thwip-queue-verify.yml@refs/heads/${branch}`,
+            workflowSha: null,
+          }),
+        );
+    }
+
+    const policy = await readActivePolicy(store, REPO, "refs/heads/release");
+
+    expect(policy?.verifier?.workflowRef).toContain("@refs/heads/release");
+  });
+
   it("reports exclusive path globs from the activated bundle", async () => {
     const store = db();
     project("fast", bundle({ exclusivePaths: ["migrations/**"] }));

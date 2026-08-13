@@ -15,9 +15,11 @@ export const PRODUCTION_ENDPOINT = "https://thwip.ai";
  * proof workflow: this repository's copy runs the action from its own checkout,
  * which no other repository can do.
  */
-export const RENDERED_HERE = [
-  ".github/workflows/thwip-queue-verify.yml",
-];
+// Protocol v3 is generated for the owner-reviewed upgrade pull request, but it
+// must not replace this repository's live protocol-v2 workflow in a dark code
+// merge. The live Worker still speaks v2 until migration 0033, Actions: read
+// approval and project activation happen together during the explicit cutover.
+export const RENDERED_HERE = [];
 
 /** Every workflow the template emits, by path. */
 export function generatedWorkflows() {

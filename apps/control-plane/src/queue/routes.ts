@@ -1,7 +1,11 @@
 import { Hono } from "hono";
 import { queueKey, TERMINAL_ENTRY_STATES, type BlockingReason } from "@thwip/queue-domain";
 import type { BranchQueue } from "./BranchQueue.js";
-import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
+import {
+  verifyVerifierIdentity,
+  verifyVerifierV3Identity,
+  type PinnedVerifier,
+} from "./verifier-identity.js";
 import {
   projectQueueState,
   projectionMessageFrom,
@@ -114,8 +118,13 @@ import {
 } from "./integration-receipt.js";
 import { verifySshSigEd25519 } from "../sshsig-verify.js";
 import { DEFAULT_TIMINGS } from "./commands.js";
+import {
+  candidateDispatchBindingV2,
+  candidateDispatchV3ByNonce,
+  recordCandidateVerdictV2,
+  registerCandidateReport,
+} from "./candidate-store.js";
 import type { CandidateSuite } from "./store.js";
-import { candidateDispatchBinding, claimCandidateDispatch, recordCandidateVerdict } from "./candidate-store.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { authorizationResponse, authorizeTurn } from "./authorize-turn.js";
 import {
@@ -627,8 +636,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   >;
   /** Verify a GitHub Actions OIDC token and return its claims. */
   verifyOidc(c: { req: { raw: Request } }, env: TEnv): Promise<Record<string, unknown> | null>;
-  /** The pinned verifier identity for a repository, or null when not configured. */
-  pinnedVerifier(env: TEnv, repositoryId: string): Promise<PinnedVerifier | null>;
+  /** The pinned verifier identity for one exact queued branch, or null. */
+  pinnedVerifier(env: TEnv, repositoryId: string, baseRef: string): Promise<PinnedVerifier | null>;
   /**
    * What the active policy requires of a candidate, and which workflow may say it
    * was met. Null when the repository has no active policy, in which case there is
@@ -637,6 +646,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   activePolicy(
     env: TEnv,
     repositoryId: string,
+    baseRef?: string,
   ): Promise<{
     projectId: string;
     policyDigest: string;
@@ -697,6 +707,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       baseSha: string;
       candidateSha: string;
       candidateTreeOid: string;
+      policyDigest: string;
       /** The suites the activated policy requires, which the verifier runs. */
       requiredSuites: readonly string[];
     },
@@ -706,7 +717,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string; projectId?: string; verifierWorkflowVersion?: 1 | 2 } | null>;
+  ): Promise<{ activationState: string; projectId?: string; verifierProtocol?: 1 | 2 | 3 } | null>;
   /**
    * Perform the merge the queue just authorized, from the Worker.
    *
@@ -1373,7 +1384,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // give. Under `fast` the evidence is the proof already on the head and the
     // server claims its own offer, so a device asking for work here would be
     // told to run something nothing would ever read.
-    const policy = await deps.activePolicy(c.env, repositoryId);
+    const policy = await deps.activePolicy(c.env, repositoryId, baseRef);
     if (!requiresDeviceOnly(policy?.securityProfile ?? null)) {
       return c.json({ error: "PROFILE_DOES_NOT_DISPATCH", detail: "this repository's profile runs no work on a device" }, 409);
     }
@@ -1892,7 +1903,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "accepted and resultDigest required" }, 400);
     }
 
-    const pinned = await deps.pinnedVerifier(c.env, repositoryId);
+    const pinned = await deps.pinnedVerifier(c.env, repositoryId, baseRef);
     if (pinned === null) return c.json({ error: "no verifier is pinned for this repository" }, 409);
 
     const identity = verifyVerifierIdentity(claims, pinned);
@@ -1931,16 +1942,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
 
   /**
-   * A pinned verifier reports what the required suites did against one integrated
-   * candidate.
-   *
-   * This is the evidence the merge gate was missing. Before it existed the gate
-   * walked an attempt to merge-ready with a constant standing in for a verifier
-   * result, so the queue certified integrations nothing had ever run.
-   *
-   * The caller does not choose the digest. It is computed here from the reported
-   * content, so a verdict cannot claim to be about work other than the work it
-   * describes.
+   * Register a protocol-v3 report identity. The caller supplies no verdict.
+   * A trusted sweep waits for this exact report job to complete, then reads
+   * GitHub-owned job conclusions and materializes the immutable verdict.
    */
   app.post("/v1/queue/:repositoryId/candidate-result", async (c) => {
     const claims = await deps.verifyOidc(c, c.env);
@@ -1948,66 +1952,106 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const repositoryId = decimal(c.req.param("repositoryId"));
     if (repositoryId === null) return c.json({ error: "invalid repository id" }, 400);
+    const lease = c.get("projectLease");
+    if (lease === null) return c.json({ error: "repository project is unavailable" }, 409);
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+    // Protocol v3 is selected only by a dispatch nonce that the server issued
+    // for this exact repository/project/branch incarnation. The request body
+    // cannot opt a v2 project into v3 merely by naming a protocol version.
+    if (Object.hasOwn(rawBody, "dispatchNonce")) {
+      const dispatchNonce = rawBody["dispatchNonce"];
+      if (typeof dispatchNonce !== "string" || !/^verifier_[0-9a-f]{32}$/.test(dispatchNonce)) {
+        return c.json({ error: "dispatchNonce required" }, 400);
+      }
+      const dispatch = await candidateDispatchV3ByNonce(c.env.DB as unknown as D1Like, repositoryId, dispatchNonce);
+      if (dispatch === null) return c.json({ error: "no current verifier v3 dispatch" }, 409);
+      if (lease.projectId !== dispatch.projectId) {
+        return c.json({ error: "candidate report belongs to another project incarnation" }, 409);
+      }
+      const { snapshot } = await readQueue(c.env, repositoryId, dispatch.baseRef);
+      if (snapshot.activeAttemptId !== dispatch.attemptId) {
+        return c.json({ error: "candidate report belongs to another queue attempt" }, 409);
+      }
+      const pinned = await deps.pinnedVerifier(c.env, repositoryId, dispatch.baseRef);
+      if (pinned === null) return c.json({ error: "no verifier is pinned for this repository" }, 409);
+      const identity = verifyVerifierV3Identity(claims, {
+        repositoryId,
+        repositoryOwnerId: pinned.repositoryOwnerId,
+        workflowRef: pinned.workflowRef,
+        workflowSha: dispatch.workflowCommitSha,
+        defaultBranchRef: dispatch.baseRef,
+      });
+      if (!identity.ok) return c.json({ error: identity.reason, code: "VERIFIER_NOT_PINNED" }, 403);
+
+      await lease.renew();
+      const registered = await registerCandidateReport(
+        c.env.DB as unknown as D1Like,
+        repositoryId,
+        dispatchNonce,
+        identity,
+        new Date().toISOString(),
+      );
+      if (registered === "unavailable") {
+        return c.json({ error: "candidate report is stale or unavailable" }, 409);
+      }
+      return c.json({ pending: registered, runId: identity.runId }, 202);
+    }
+
+    // Compatibility for exact projects that have not completed the owner-
+    // approved v3 upgrade. The activation transaction supersedes these rows,
+    // and the v2 binding functions refuse immediately after that point.
     if (String(claims["repository_id"] ?? "") !== repositoryId) {
       return c.json({ error: "token is for another repository" }, 403);
     }
-
-    const pinned = await deps.pinnedVerifier(c.env, repositoryId);
+    const baseRef = branchRef(typeof rawBody["baseRef"] === "string" ? rawBody["baseRef"] : undefined);
+    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
+    const protocol = await c.env.DB.prepare(
+      `SELECT verifier_protocol AS protocol FROM queue_projects
+        WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?`,
+    )
+      .bind(repositoryId, baseRef, lease.projectId)
+      .first<{ protocol: number }>();
+    if (protocol === null) return c.json({ error: "repository queue is unavailable" }, 409);
+    if (protocol.protocol === 3) {
+      return c.json({ error: "dispatchNonce required" }, 400);
+    }
+    const pinned = await deps.pinnedVerifier(c.env, repositoryId, baseRef);
     if (pinned === null) return c.json({ error: "no verifier is pinned for this repository" }, 409);
     const identity = verifyVerifierIdentity(claims, pinned);
     if (!identity.ok) return c.json({ error: identity.reason, code: "VERIFIER_NOT_PINNED" }, 403);
-
-    const body = (await c.req.json().catch(() => ({}))) as {
-      projectId?: string;
-      attemptId?: string;
-      baseRef?: string;
-      pullRequestNumber?: number;
-      candidateSha?: string;
-      candidateTreeOid?: string;
-      baseSha?: string;
-      accepted?: boolean;
-      suites?: Array<{ name?: string; outcome?: string; durationMs?: number }>;
-      reasonCodes?: string[];
-    };
-    const baseRef = branchRef(body.baseRef);
-    if (baseRef === null) return c.json({ error: "baseRef must name a branch" }, 400);
-    const oid = (v: unknown) => (typeof v === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v) ? v : null);
-    const candidateSha = oid(body.candidateSha);
-    const candidateTreeOid = oid(body.candidateTreeOid);
-    const baseSha = oid(body.baseSha);
+    const oid = (value: unknown) =>
+      typeof value === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(value) ? value : null;
+    const candidateSha = oid(rawBody["candidateSha"]);
+    const candidateTreeOid = oid(rawBody["candidateTreeOid"]);
+    const baseSha = oid(rawBody["baseSha"]);
     if (candidateSha === null || candidateTreeOid === null || baseSha === null) {
       return c.json({ error: "candidateSha, candidateTreeOid and baseSha are required" }, 400);
     }
-    if (typeof body.accepted !== "boolean") return c.json({ error: "accepted required" }, 400);
-    if (typeof body.pullRequestNumber !== "number" || !Number.isSafeInteger(body.pullRequestNumber)) {
+    if (typeof rawBody["accepted"] !== "boolean") return c.json({ error: "accepted required" }, 400);
+    const pullRequestNumber = rawBody["pullRequestNumber"];
+    if (typeof pullRequestNumber !== "number" || !Number.isSafeInteger(pullRequestNumber)) {
       return c.json({ error: "pullRequestNumber required" }, 400);
     }
-
-    const lease = c.get("projectLease");
-    if (lease === null) return c.json({ error: "repository project is unavailable" }, 409);
-    const hasProjectId = typeof body.projectId === "string";
-    const hasAttemptId = typeof body.attemptId === "string";
+    const hasProjectId = typeof rawBody["projectId"] === "string";
+    const hasAttemptId = typeof rawBody["attemptId"] === "string";
     if (hasProjectId !== hasAttemptId) {
       return c.json({ error: "projectId and attemptId must be provided together" }, 400);
     }
-
     const { snapshot: candidateQueue } = await readQueue(c.env, repositoryId, baseRef);
-    const dispatch = await candidateDispatchBinding(
+    const dispatch = await candidateDispatchBindingV2(
       c.env.DB as unknown as D1Like,
       repositoryId,
       baseRef,
       candidateTreeOid,
       lease.projectId,
     );
-    if (dispatch === null) {
-      return c.json({ error: "candidate result has no current dispatch binding" }, 409);
-    }
-
+    if (dispatch === null) return c.json({ error: "candidate result has no current dispatch binding" }, 409);
     let projectId: string;
     let attemptId: string;
     if (hasProjectId && hasAttemptId) {
-      projectId = body.projectId!;
-      attemptId = body.attemptId!;
+      projectId = rawBody["projectId"] as string;
+      attemptId = rawBody["attemptId"] as string;
       if (projectId !== lease.projectId) {
         return c.json({ error: "candidate result belongs to another project incarnation" }, 409);
       }
@@ -2015,9 +2059,6 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         return c.json({ error: "candidate result belongs to another queue attempt" }, 409);
       }
     } else {
-      // Version 1 workflows were already installed before project incarnation
-      // fields were added. They remain valid only for a dispatch durably
-      // recorded as protocol 1 on this exact current project and candidate.
       if (dispatch.workflowProtocol !== 1 || candidateQueue.activeAttemptId === null) {
         return c.json({ error: "projectId and attemptId are required by this verifier workflow" }, 400);
       }
@@ -2029,68 +2070,57 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }
 
     const suites: CandidateSuite[] = [];
-    for (const raw of body.suites ?? []) {
-      if (typeof raw?.name !== "string" || !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(raw.name)) {
+    for (const suite of Array.isArray(rawBody["suites"]) ? rawBody["suites"] : []) {
+      const raw = suite as Record<string, unknown>;
+      if (typeof raw["name"] !== "string" || !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(raw["name"])) {
         return c.json({ error: "each suite needs a name" }, 400);
       }
-      if (raw.outcome !== "passed" && raw.outcome !== "failed" && raw.outcome !== "skipped") {
-        return c.json({ error: `suite ${raw.name} has an unknown outcome` }, 400);
+      if (raw["outcome"] !== "passed" && raw["outcome"] !== "failed" && raw["outcome"] !== "skipped") {
+        return c.json({ error: `suite ${raw["name"]} has an unknown outcome` }, 400);
       }
-      const durationMs = typeof raw.durationMs === "number" && raw.durationMs >= 0 ? raw.durationMs : 0;
-      suites.push({ name: raw.name, outcome: raw.outcome, durationMs });
+      suites.push({
+        name: raw["name"],
+        outcome: raw["outcome"],
+        durationMs: typeof raw["durationMs"] === "number" && raw["durationMs"] >= 0 ? raw["durationMs"] : 0,
+      });
     }
     if (suites.length > 32) return c.json({ error: "too many suites" }, 400);
-
-    const reasonCodes = (body.reasonCodes ?? []).filter(
-      (r): r is string => typeof r === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(r),
+    const reasonCodes = (Array.isArray(rawBody["reasonCodes"]) ? rawBody["reasonCodes"] : []).filter(
+      (reason): reason is string => typeof reason === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(reason),
     );
-    // A refusal that will not say why cannot be shown to anyone.
-    if (body.accepted === false && reasonCodes.length === 0) {
+    if (rawBody["accepted"] === false && reasonCodes.length === 0) {
       return c.json({ error: "a rejected candidate must carry at least one reason code" }, 400);
     }
-
-    const policy = await deps.activePolicy(c.env, repositoryId);
+    const policy = await deps.activePolicy(c.env, repositoryId, baseRef);
     if (policy === null) return c.json({ error: "no active policy for this repository" }, 409);
     if (policy.projectId !== projectId) {
       return c.json({ error: "candidate result belongs to another project incarnation" }, 409);
     }
-
-    // The identity fields come from the pinned record, which verifyVerifierIdentity
-    // has just proved the token matches. Taking them from the token instead would
-    // record whatever the caller presented.
     const content = {
       candidateTreeOid,
       candidateSha,
       baseSha,
-      pullRequestNumber: body.pullRequestNumber,
-      accepted: body.accepted,
+      pullRequestNumber,
+      accepted: rawBody["accepted"] as boolean,
       policyDigest: policy.policyDigest,
       suites,
       reasonCodes,
       workflowRef: pinned.workflowRef,
-      // The revision this run actually came from. The pin may name no revision, and
-      // recording the pin instead of the run would erase what was really executed.
       workflowSha: identity.workflowSha,
       runId: identity.runId,
     };
     const resultDigest = await candidateResultDigest(content);
-
-    // D1, not the object. A verdict is an immutable record about a tree; waking
-    // the coordination object to store or read one is what made the merge
-    // workflow's wait cost a Durable Object request every twenty seconds.
     await lease.renew();
-    const stored = await recordCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, lease.projectId, {
-      ...content,
-      resultDigest,
-      observedAt: new Date().toISOString(),
-    });
+    const stored = await recordCandidateVerdictV2(
+      c.env.DB as unknown as D1Like,
+      repositoryId,
+      baseRef,
+      lease.projectId,
+      { ...content, resultDigest, observedAt: new Date().toISOString() },
+    );
     if (stored.status === "unavailable") {
-      return c.json({ error: "candidate result belongs to a released project incarnation" }, 409);
+      return c.json({ error: "candidate report belongs to another project incarnation" }, 409);
     }
-
-    // Persist the bytes the digest was taken over, so the digest the transition
-    // chain records resolves to something a reader can fetch and check. Without
-    // this the chain holds a hash of evidence nobody outside the object can see.
     const evidence = await storeEvidence(c.env, {
       projectId: policy.projectId,
       organizationId: policy.organizationId,
@@ -2100,40 +2130,26 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       bytes: candidateResultBytes(content),
       writeLease: lease,
     });
-
-    // Say so on the pull request. The verifier workflow cannot: it asks GitHub
-    // for `checks: write` and is refused, so it finished red on every passing
-    // verification. Only on the first recording, and never at the cost of the
-    // verdict itself, which is already stored by this point.
     if (stored.status === "applied" && deps.publishCandidateCheck !== undefined) {
-      const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
-      const head = snapshot.entries.find((e) => e.pullRequestNumber === body.pullRequestNumber)?.headSha;
+      const head = candidateQueue.entries.find((entry) => entry.pullRequestNumber === pullRequestNumber)?.headSha;
       if (head != null) {
         const lines = suites
-          .map((s) => `- \`${s.name}\`: ${s.outcome} in ${Math.round(s.durationMs / 100) / 10}s`)
+          .map((suite) => `- \`${suite.name}\`: ${suite.outcome} in ${Math.round(suite.durationMs / 100) / 10}s`)
           .join("\n");
         await lease.renew();
         if (await repositoryAllowsExternalWrite(c.env.DB as unknown as D1Like, repositoryId, lease.projectId)) {
-          try {
-            await deps.publishCandidateCheck(c.env, repositoryId, {
-              projectId: lease.projectId,
-              headSha: head,
-              accepted: body.accepted === true,
-              summary: `Ran against merge tree \`${candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
-            });
-          } catch {
-            /* the verdict stands; the check is how it is shown, not what it is */
-          }
+          await deps.publishCandidateCheck(c.env, repositoryId, {
+            projectId: lease.projectId,
+            headSha: head,
+            accepted: rawBody["accepted"] === true,
+            summary: `Ran against merge tree \`${candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
+          }).catch(() => undefined);
         }
       }
     }
-
-    // The App owns the write, so an accepted first verdict wakes the holder
-    // directly. A retried report does not re-drive.
-    if (body.accepted === true && stored.status === "applied") {
+    if (rawBody["accepted"] === true && stored.status === "applied") {
       await driveQueue(c.env, deps, onQueue, { repositoryId, baseRef });
     }
-
     return c.json({ recorded: stored.status, resultDigest, candidateTreeOid, evidence }, 202);
   });
 
@@ -2845,7 +2861,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: `the queue refused to sign its own record: ${signed.error}` }, 409);
     }
 
-    const policy = await deps.activePolicy(c.env, repositoryId);
+    const policy = await deps.activePolicy(c.env, repositoryId, baseRef);
     const stored = await storeAttestation(db, {
       digest: signed.digest,
       kind: "base-correction",

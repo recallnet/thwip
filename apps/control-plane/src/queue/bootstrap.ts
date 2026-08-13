@@ -58,6 +58,7 @@ export interface QueueProject {
   readonly progress: BootstrapProgress;
   readonly projectId: string;
   readonly verifierWorkflowVersion: 1 | 2;
+  readonly verifierProtocol: 1 | 2 | 3;
 }
 
 export interface SetupPullRequestState {
@@ -91,6 +92,10 @@ export interface BootstrapGitHub {
     files: readonly SetupFile[];
     baseSha: string;
   }): Promise<SetupPullRequestState>;
+  /** Exact default-branch verifier after a person merges the upgrade. */
+  verifierWorkflowAtBase?(): Promise<{ commitSha: string; blobSha: string; content: string }>;
+  /** GitHub's observed permissions for this exact App installation. */
+  installationPermissions?(): Promise<Readonly<Record<string, string>> | null>;
   rulesetNamed(name: string): Promise<StoredRuleset | null>;
   /** Answers the Integration GitHub attributed the check to, not the one we hoped for. */
   publishBootstrapCheck(run: {
@@ -139,7 +144,7 @@ export interface ExpectedBypassActors {
  * back out of the prose with a regular expression, which breaks silently the day
  * the sentence is reworded.
  */
-export type BootstrapActivityStep = BootstrapStep | "merge-verifier-v2-pr";
+export type BootstrapActivityStep = BootstrapStep | "merge-verifier-v3-pr";
 
 export type StepOutcome =
   | {
@@ -175,6 +180,7 @@ interface ProjectRow {
   bootstrap_progress_json: string;
   project_id: string;
   verifier_workflow_version: number;
+  verifier_protocol: number;
 }
 
 function toProject(row: ProjectRow): QueueProject {
@@ -200,6 +206,7 @@ function toProject(row: ProjectRow): QueueProject {
     progress,
     projectId: row.project_id,
     verifierWorkflowVersion: row.verifier_workflow_version === 2 ? 2 : 1,
+    verifierProtocol: row.verifier_protocol === 3 ? 3 : row.verifier_protocol === 1 ? 1 : 2,
   };
 }
 
@@ -218,7 +225,7 @@ export async function readQueueProject(
     .prepare(
       `SELECT id, organization_id, github_repository_id, base_ref,
               enabled, activation_state, chain_public, bootstrap_progress_json, project_id,
-              verifier_workflow_version
+              verifier_workflow_version, verifier_protocol
          FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ?
           AND project_id IS NOT NULL
@@ -321,8 +328,8 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
       `INSERT INTO queue_projects
        (id, organization_id, github_repository_id, base_ref,
           enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json, project_id,
-          verifier_workflow_version)
-       SELECT ?, ?, ?, ?, 0, 'configured', ?, '{}', ?, ?, 2
+          verifier_workflow_version, verifier_protocol)
+       SELECT ?, ?, ?, ?, 0, 'configured', ?, '{}', ?, ?, 2, 2
         WHERE EXISTS (
           SELECT 1 FROM projects p
            WHERE p.id = ? AND p.organization_id = ? AND p.github_repository_id = ?
@@ -424,7 +431,11 @@ async function guardedProjectUpdate(
   project: QueueProject,
   set: string,
   bindings: readonly unknown[] = [],
+  requireDefaultBranch = false,
 ): Promise<boolean> {
+  const defaultBranchGuard = requireDefaultBranch
+    ? "AND queue_projects.base_ref = 'refs/heads/' || p.default_branch"
+    : "";
   const written = await db
     .prepare(
       `UPDATE queue_projects SET ${set}
@@ -435,6 +446,7 @@ async function guardedProjectUpdate(
              WHERE p.id = queue_projects.project_id
                AND p.organization_id = queue_projects.organization_id
                AND p.github_repository_id = queue_projects.github_repository_id
+               ${defaultBranchGuard}
           )
           AND NOT EXISTS (
             SELECT 1 FROM project_release_requests r
@@ -514,7 +526,7 @@ export interface BootstrapStatus {
 
 export function bootstrapStatus(project: QueueProject): BootstrapStatus {
   const ordinary = nextBootstrapStep(project.progress);
-  const next = ordinary ?? (project.verifierWorkflowVersion === 1 ? "merge-verifier-v2-pr" : null);
+  const next = ordinary ?? (project.verifierProtocol === 3 ? null : "merge-verifier-v3-pr");
   return {
     repositoryId: project.repositoryId,
     baseRef: project.baseRef,
@@ -979,7 +991,51 @@ export interface BootstrapRun {
 }
 
 async function upgradeVerifierWorkflow(deps: BootstrapDeps, project: QueueProject): Promise<StepOutcome> {
-  const step = "merge-verifier-v2-pr" as const;
+  const step = "merge-verifier-v3-pr" as const;
+  if (deps.github.verifierWorkflowAtBase === undefined) {
+    return { kind: "refused", step, detail: "the installed verifier cannot be read back" };
+  }
+  if (deps.github.installationPermissions === undefined) {
+    return { kind: "refused", step, detail: "the GitHub App installation permissions cannot be read" };
+  }
+  const permissions = await deps.github.installationPermissions();
+  if (permissions?.["actions"] !== "read") {
+    return {
+      kind: "waiting",
+      step,
+      detail:
+        "approve the Thwip GitHub App's Actions: read permission, then return here; protocol v2 remains active until GitHub confirms it",
+    };
+  }
+
+  const expected = verifierWorkflowFile({ endpoint: deps.endpoint, actionRef: deps.actionRef });
+  const activateInstalledV3 = async (pullRequestNumber?: number): Promise<StepOutcome> => {
+    const installed = await deps.github.verifierWorkflowAtBase!();
+    if (installed.content !== expected.content) {
+      return { kind: "refused", step, detail: "the installed verifier is not the exact reviewed protocol v3 workflow" };
+    }
+    if (!(await guardedProjectUpdate(
+      deps.db,
+      project,
+      "verifier_workflow_version = 2, verifier_protocol = 3",
+      [],
+      true,
+    ))) {
+      return { kind: "refused", step, detail: "the repository project changed while setup was running" };
+    }
+    return {
+      kind: "advanced",
+      step,
+      detail: pullRequestNumber === undefined
+        ? "the exact protocol v3 verifier and Actions: read permission are active"
+        : `verifier protocol upgrade pull request #${pullRequestNumber} merged`,
+      ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }),
+    };
+  };
+
+  const installed = await deps.github.verifierWorkflowAtBase();
+  if (installed.content === expected.content) return activateInstalledV3();
+
   const open = await deps.github.verifierUpgradePullRequest();
   if (open === null) {
     const baseSha = await deps.github.baseSha();
@@ -1002,15 +1058,7 @@ async function upgradeVerifierWorkflow(deps: BootstrapDeps, project: QueueProjec
       pullRequestNumber: open.number,
     };
   }
-  if (!(await guardedProjectUpdate(deps.db, project, "verifier_workflow_version = 2"))) {
-    return { kind: "refused", step, detail: "the repository project changed while setup was running" };
-  }
-  return {
-    kind: "advanced",
-    step,
-    detail: `verifier protocol upgrade pull request #${open.number} merged`,
-    pullRequestNumber: open.number,
-  };
+  return activateInstalledV3(open.number);
 }
 
 /**
@@ -1031,7 +1079,7 @@ export async function runBootstrap(
   // list rather than a literal, so adding a step cannot silently stop the run
   // one short of the end.
   for (let i = 0; i <= BOOTSTRAP_STEPS.length + 1; i += 1) {
-    const outcome = nextBootstrapStep(current.progress) === null && current.verifierWorkflowVersion === 1
+    const outcome = nextBootstrapStep(current.progress) === null && current.verifierProtocol !== 3
       ? await upgradeVerifierWorkflow(deps, current)
       : await advanceBootstrap(deps, current);
     outcomes.push(outcome);
@@ -1208,6 +1256,20 @@ export function bootstrapGitHub(
     async openVerifierUpgradePullRequest(input) {
       if (setup.verifierUpgrade === undefined) throw new Error("verifier upgrade pull request is not configured");
       return openPullRequest(setup.verifierUpgrade, input);
+    },
+
+    async verifierWorkflowAtBase() {
+      const ref = await http.json<{ object: { sha: string } }>(`${base}/git/ref/heads/${branch}`);
+      const commitSha = ref.object.sha;
+      const file = await http.json<{ sha: string; content: string; encoding: string }>(
+        `${base}/contents/.github/workflows/thwip-queue-verify.yml?ref=${encodeURIComponent(commitSha)}`,
+      );
+      if (file.encoding !== "base64") throw new Error("GitHub returned an unsupported verifier encoding");
+      return {
+        commitSha,
+        blobSha: file.sha,
+        content: atob(file.content.replaceAll("\\n", "")),
+      };
     },
 
     async rulesetNamed(name) {

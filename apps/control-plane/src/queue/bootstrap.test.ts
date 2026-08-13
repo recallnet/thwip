@@ -108,10 +108,12 @@ class FakeGitHub implements BootstrapGitHub {
   pull: SetupPullRequestState | null = null;
   upgradePull: SetupPullRequestState | null = null;
   openedFiles: string[] = [];
+  verifierContent = "";
   publishedChecks: Array<{ name: string; headSha: string; conclusion: string }> = [];
   appId = APP_INTEGRATION_ID;
   hideBypassActors = false;
   omitFalseUpdateParameters = false;
+  actionsRead = true;
   private nextId = 100;
 
   constructor(private readonly options: { mergesSetupPr?: boolean } = {}) {}
@@ -129,6 +131,8 @@ class FakeGitHub implements BootstrapGitHub {
     baseSha: string;
   }): Promise<SetupPullRequestState> {
     this.openedFiles = input.files.map((f) => f.path);
+    this.verifierContent =
+      input.files.find((file) => file.path === ".github/workflows/thwip-queue-verify.yml")?.content ?? "";
     this.pull = {
       number: 7,
       merged: this.options.mergesSetupPr === true,
@@ -141,11 +145,20 @@ class FakeGitHub implements BootstrapGitHub {
     return this.upgradePull;
   }
 
+  async verifierWorkflowAtBase() {
+    return { commitSha: BASE_SHA, blobSha: "f".repeat(40), content: this.verifierContent };
+  }
+
+  async installationPermissions() {
+    return this.actionsRead ? { actions: "read" } : {};
+  }
+
   async openVerifierUpgradePullRequest(input: {
     files: ReadonlyArray<{ path: string; content: string }>;
     baseSha: string;
   }): Promise<SetupPullRequestState> {
     this.openedFiles = input.files.map((f) => f.path);
+    this.verifierContent = input.files[0]?.content ?? "";
     this.upgradePull = { number: 8, merged: false, headSha: "d".repeat(40) };
     return this.upgradePull;
   }
@@ -297,6 +310,7 @@ describe("enrollQueueProject", () => {
     expect(row.activation_state).toBe("configured");
     expect(row.chain_public).toBe(0);
     expect(row.bootstrap_progress_json).toBe("{}");
+    expect(row.verifier_protocol).toBe(2);
     const columns = d1.raw.prepare("PRAGMA table_info(queue_projects)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).not.toContain("backend");
     expect(columns.map((column) => column.name)).not.toContain("merge_method");
@@ -468,9 +482,50 @@ describe("runBootstrap", () => {
     const github = new FakeGitHub();
     await enrolled();
     const progress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    d1.raw.prepare("DELETE FROM queue_projects WHERE project_id = 'proj_1'").run();
     d1.raw
       .prepare(
-        "UPDATE queue_projects SET bootstrap_progress_json = ?, verifier_workflow_version = 1, enabled = 1 WHERE project_id = 'proj_1'",
+        `INSERT INTO queue_projects
+           (id, organization_id, github_repository_id, base_ref, enabled,
+            activation_state, bootstrap_progress_json, project_id,
+            verifier_workflow_version, verifier_protocol)
+         VALUES ('legacy_queue', 'org_1', ?, ?, 1, 'enforced', ?, 'proj_1', 1, 2)`,
+      )
+      .run(REPOSITORY_ID, BASE_REF, JSON.stringify(progress));
+    const legacy = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    if (legacy === null) throw new Error("legacy queue project missing");
+
+    const waiting = await runBootstrap(deps(github), legacy);
+
+    expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v3-pr" });
+    expect(github.openedFiles).toEqual([".github/workflows/thwip-queue-verify.yml"]);
+    expect(waiting.status).toMatchObject({ complete: false, enabled: true, nextStep: "merge-verifier-v3-pr" });
+
+    github.upgradePull = { ...github.upgradePull!, merged: true };
+    const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    const completed = await runBootstrap(deps(github), current!);
+
+    expect(completed.outcomes).toContainEqual(expect.objectContaining({ kind: "advanced", step: "merge-verifier-v3-pr" }));
+    expect(completed.status).toMatchObject({ complete: true, nextStep: null });
+    expect(
+      d1.raw.prepare("SELECT verifier_workflow_version AS version FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ version: 2 });
+    expect(
+      d1.raw.prepare("SELECT verifier_protocol AS protocol FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ protocol: 3 });
+  });
+
+  it("keeps protocol v2 active until the owner approves Actions: read", async () => {
+    const github = new FakeGitHub();
+    github.actionsRead = false;
+    await enrolled();
+    const progress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    d1.raw
+      .prepare(
+        `UPDATE queue_projects
+            SET enabled = 1, activation_state = 'enforced', bootstrap_progress_json = ?,
+                verifier_workflow_version = 1, verifier_protocol = 2
+          WHERE project_id = 'proj_1'`,
       )
       .run(JSON.stringify(progress));
     const legacy = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
@@ -478,19 +533,41 @@ describe("runBootstrap", () => {
 
     const waiting = await runBootstrap(deps(github), legacy);
 
-    expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v2-pr" });
-    expect(github.openedFiles).toEqual([".github/workflows/thwip-queue-verify.yml"]);
-    expect(waiting.status).toMatchObject({ complete: false, enabled: true, nextStep: "merge-verifier-v2-pr" });
-
-    github.upgradePull = { ...github.upgradePull!, merged: true };
-    const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
-    const completed = await runBootstrap(deps(github), current!);
-
-    expect(completed.outcomes).toContainEqual(expect.objectContaining({ kind: "advanced", step: "merge-verifier-v2-pr" }));
-    expect(completed.status).toMatchObject({ complete: true, nextStep: null });
+    expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v3-pr" });
+    expect(waiting.outcomes.at(-1)).toMatchObject({ detail: expect.stringMatching(/Actions: read/) });
+    expect(github.upgradePull).toBeNull();
     expect(
-      d1.raw.prepare("SELECT verifier_workflow_version AS version FROM queue_projects WHERE project_id = 'proj_1'").get(),
-    ).toEqual({ version: 2 });
+      d1.raw.prepare("SELECT verifier_protocol AS protocol FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ protocol: 2 });
+  });
+
+  it("refuses v3 activation when a default-branch rename makes the queue base stale", async () => {
+    const github = new FakeGitHub();
+    await enrolled();
+    const progress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    d1.raw
+      .prepare(
+        `UPDATE queue_projects
+            SET enabled = 1, activation_state = 'enforced', bootstrap_progress_json = ?,
+                verifier_workflow_version = 2, verifier_protocol = 2
+          WHERE project_id = 'proj_1'`,
+      )
+      .run(JSON.stringify(progress));
+    const legacy = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    if (legacy === null) throw new Error("legacy queue project missing");
+
+    const waiting = await runBootstrap(deps(github), legacy);
+    expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v3-pr" });
+    github.upgradePull = { ...github.upgradePull!, merged: true };
+    d1.raw.prepare("UPDATE projects SET default_branch = 'trunk' WHERE id = 'proj_1'").run();
+
+    const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    const refused = await runBootstrap(deps(github), current!);
+
+    expect(refused.outcomes.at(-1)).toMatchObject({ kind: "refused", step: "merge-verifier-v3-pr" });
+    expect(
+      d1.raw.prepare("SELECT verifier_protocol AS protocol FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ protocol: 2 });
   });
 
   it("enrols a repository end to end once the setup pull request has merged", async () => {

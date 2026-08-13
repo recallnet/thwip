@@ -399,6 +399,10 @@ describe("the base a merge intent pins", () => {
     expect(pathReads).toBe(0);
     expect(dispatches).toBe(0);
 
+    // Remote verification is available only after the repository has merged
+    // and activated the reviewed protocol-v3 workflow.
+    raw.prepare("UPDATE queue_projects SET verifier_protocol = 3 WHERE github_repository_id = ?").run(REPO);
+
     vi.advanceTimersByTime(5 * 60_000 + 1);
     await app.request(`/v1/queue/${REPO}/tick?ref=${encodeURIComponent(REF)}`, { method: "POST" }, e);
 

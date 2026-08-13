@@ -64,6 +64,48 @@ describe("setupPullRequestFiles", () => {
     expect(verify).not.toMatch(/for suite in lint typecheck test/);
   });
 
+  it("keeps candidate code outside every OIDC and write-capable job", () => {
+    const verify = parse(file(".github/workflows/thwip-queue-verify.yml")) as {
+      jobs: Record<string, {
+        permissions?: Record<string, string>;
+        steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown> }>;
+      }>;
+    };
+    expect(verify.jobs["prepare"]?.permissions).toEqual({});
+    expect(verify.jobs["verify"]?.permissions).toEqual({ contents: "read" });
+    expect(verify.jobs["report"]?.permissions).toEqual({ "id-token": "write" });
+    const candidate = JSON.stringify(verify.jobs["verify"]);
+    expect(candidate).not.toContain("id-token");
+    expect(candidate).not.toContain("ACTIONS_ID_TOKEN");
+    expect(candidate).not.toContain("artifact");
+    expect(candidate).not.toContain("cache");
+    expect(candidate).not.toMatch(/\\bwrite\\b/);
+    expect(verify.jobs["verify"]?.steps?.[0]).toMatchObject({
+      uses: expect.stringMatching(/^actions\/checkout@[0-9a-f]{40}$/),
+      with: { "persist-credentials": false },
+    });
+  });
+
+  it("gives the clean reporter only a pending-report identity", () => {
+    const verify = parse(file(".github/workflows/thwip-queue-verify.yml")) as {
+      jobs: Record<string, { permissions?: Record<string, string>; steps?: Array<{ uses?: string; run?: string }> }>;
+    };
+    const report = verify.jobs["report"];
+    expect(report?.permissions).toEqual({ "id-token": "write" });
+    expect(report?.steps).toHaveLength(1);
+    expect(report?.steps?.[0]?.uses).toBeUndefined();
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain("actions:read");
+    expect(serialized).not.toContain("checkout");
+    expect(serialized).not.toContain("artifact");
+    expect(serialized).not.toContain("outputs.");
+    expect(serialized).not.toContain("requiredSuites");
+    expect(serialized).not.toContain("accepted");
+    expect(serialized).not.toContain("reasonCodes");
+    expect(serialized).not.toContain("candidateSha");
+    expect(serialized).toContain("dispatchNonce");
+  });
+
   it("publishes the proof check GitHub Actions is the source of", () => {
     const workflow = parse(file(".github/workflows/thwip-required.yml")) as {
       name: string;
@@ -163,18 +205,14 @@ describe("drift against this repository's own workflows", () => {
     expect(generated.jobs["thwip"]?.name).toBe(live.jobs["thwip"]?.name);
   });
 
-  it.each([".github/workflows/thwip-queue-verify.yml"])(
-    "is what %s is written from",
-    (path) => {
-      const live = readFileSync(join(repoRoot, path), "utf8");
-      expect(live).toBe(
-        setupPullRequestFiles({
-          endpoint: PRODUCTION_ENDPOINT,
-          actionRef: "recallnet/thwip@v1",
-        }).find(
-          (f) => f.path === path,
-        )?.content,
-      );
-    },
-  );
+  it("keeps this repository on v2 until the explicit production cutover", () => {
+    const live = readFileSync(join(repoRoot, ".github/workflows/thwip-queue-verify.yml"), "utf8");
+    const upgrade = setupPullRequestFiles({
+      endpoint: PRODUCTION_ENDPOINT,
+      actionRef: "recallnet/thwip@v1",
+    }).find((f) => f.path === ".github/workflows/thwip-queue-verify.yml")?.content;
+    expect(live).toContain("Thwip verifier callback protocol: 2");
+    expect(live).not.toBe(upgrade);
+    expect(upgrade).toContain("Thwip verifier callback protocol: 3");
+  });
 });
