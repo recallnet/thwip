@@ -7,6 +7,7 @@ import type { D1Like } from "./projection.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
+import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
 
 /**
  * Three GitHub reads per selected queue keeps this pass below the same bounded
@@ -226,7 +227,7 @@ export async function reconcileTerminalEntries<TEnv extends QueueRouteEnv>(
             idempotencyKey: `reconcile:closed:${current.entryId}:${observation.pull.headSha}`,
             entryId: current.entryId,
             actorPrincipalId: "github",
-            reason: "GitHub reports the pull request closed without merge",
+            reason: TERMINAL_RECONCILIATION_CANCEL_REASON,
           });
           if (result.status === "applied") reconciled += 1;
         }

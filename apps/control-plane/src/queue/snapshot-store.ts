@@ -24,6 +24,7 @@ import type {
   TransitionRow,
   UnresolvedMergeOperation,
 } from "./store.js";
+import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
 
 /**
  * The same durable state, in one document instead of eleven SQL tables.
@@ -206,6 +207,8 @@ export interface TerminalEntryProjection {
   readonly cooldownUntil: string | null;
   readonly lastAttemptId: string | null;
   readonly headSha: string;
+  /** Authority says terminal reconciliation, rather than ordinary flow, ended it. */
+  readonly terminalCommentPriority?: boolean;
 }
 
 export interface EventRow {
@@ -241,6 +244,8 @@ interface Document {
   transitionSigningLease?: { owner: string; until: string } | null;
   /** Terminal rows waiting for their final D1 history projection. */
   terminalEntryProjectionBacklog?: TerminalEntryProjection[];
+  /** Exact repaired admissions waiting to compact into their terminal handoff. */
+  terminalCommentPriorityProjectionIds?: string[];
 }
 
 /** Whether the sweep may read GitHub about this write on a tick at `now`. */
@@ -472,6 +477,10 @@ export class SnapshotQueueStore {
     const after = before.filter((row) => !acknowledged.has(row.projectionId));
     if (after.length === before.length) return;
     this.doc.terminalEntryProjectionBacklog = after;
+    const priorities = this.doc.terminalCommentPriorityProjectionIds ?? [];
+    this.doc.terminalCommentPriorityProjectionIds = priorities.filter(
+      (projectionId) => !acknowledged.has(projectionId),
+    );
     this.flush();
   }
 
@@ -624,6 +633,25 @@ export class SnapshotQueueStore {
     this.doc.events.push({ sequence, at: event.at, type: event.type, body: full });
     this.remember({ key: event.idempotencyKey, sequence, result: "applied", at: event.at });
 
+    // Only the scheduled GitHub reconciliation path earns status priority.
+    // Ordinary webhook closes and merges still publish, but cannot displace a
+    // repair whose stale comment is actively lying about queue authority.
+    if (
+      full.type === "EntryMergeReconciled" ||
+      (full.type === "EntryCancelled" &&
+        full.actorPrincipalId === "github" &&
+        full.reason === TERMINAL_RECONCILIATION_CANCEL_REASON)
+    ) {
+      const entry = next.entries.get(full.entryId);
+      if (entry !== undefined) {
+        const state = entry.state === "Merged" ? "Merged" : "Cancelled";
+        const projectionId = `${entry.entryId}:${entry.fairnessOrdinal}:${state}`;
+        const priorities = new Set(this.doc.terminalCommentPriorityProjectionIds ?? []);
+        priorities.add(projectionId);
+        this.doc.terminalCommentPriorityProjectionIds = [...priorities];
+      }
+    }
+
     // Drop what no live decision can reach, before it is written.
     //
     // Entries, attempts and the chain were all append-only, so this document grew
@@ -679,10 +707,12 @@ export class SnapshotQueueStore {
   private stageCompactedTerminalEntries(before: readonly Entry[], after: BranchQueueState): void {
     const backlog = this.doc.terminalEntryProjectionBacklog ?? [];
     const byId = new Map(backlog.map((row) => [row.projectionId, row]));
+    const priorities = new Set(this.doc.terminalCommentPriorityProjectionIds ?? []);
     for (const entry of before) {
       if (after.entries.has(entry.entryId)) continue;
       if (entry.state !== "Merged" && entry.state !== "Cancelled") continue;
       const projectionId = `${entry.entryId}:${entry.fairnessOrdinal}:${entry.state}`;
+      if (byId.has(projectionId)) continue;
       byId.set(projectionId, {
         projectionId,
         // This row is history, not a member of the compacted current snapshot.
@@ -699,6 +729,31 @@ export class SnapshotQueueStore {
         cooldownUntil: entry.cooldownUntil,
         lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
         headSha: entry.headSha,
+        terminalCommentPriority: priorities.has(projectionId),
+      });
+    }
+    // A repaired terminal entry may remain inside the 20-row snapshot tail for
+    // a long time. Hand its marker to D1 now rather than waiting for a future
+    // compaction; otherwise an old comment backlog can consume the whole write
+    // budget before this repair is even eligible for priority.
+    for (const entry of after.entries.values()) {
+      if (entry.state !== "Merged" && entry.state !== "Cancelled") continue;
+      const projectionId = `${entry.entryId}:${entry.fairnessOrdinal}:${entry.state}`;
+      if (!priorities.has(projectionId) || byId.has(projectionId)) continue;
+      byId.set(projectionId, {
+        projectionId,
+        generation: this.doc.generation,
+        entryId: entry.entryId,
+        pullRequestNumber: entry.pullRequestNumber,
+        sponsorPrincipalId: entry.sponsorPrincipalId,
+        state: entry.state,
+        primaryReason: entry.primaryReason,
+        fairnessOrdinal: entry.fairnessOrdinal.toString(),
+        schedulerEligible: entry.schedulerEligible,
+        cooldownUntil: entry.cooldownUntil,
+        lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
+        headSha: entry.headSha,
+        terminalCommentPriority: true,
       });
     }
     this.doc.terminalEntryProjectionBacklog = [...byId.values()];

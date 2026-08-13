@@ -1,8 +1,9 @@
 import {
   acknowledgeTerminalEntryStatus,
+  acknowledgeTerminalEntryStatusForbidden,
+  terminalCommentRepairState,
   trackedTerminalEntries,
   type D1Like,
-  type TrackedTerminalEntry,
 } from "./projection.js";
 import type { QueueSnapshot } from "./queue-operations.js";
 import {
@@ -63,57 +64,55 @@ export interface CommentBudget {
 }
 
 /**
- * Put a recent terminal repair in front of compatibility drift without making
- * the oldest history wait forever.
+ * Put authoritative terminal repairs in front of compatibility drift without
+ * making the oldest history wait forever.
  *
- * Three recent rows followed by one oldest row matches the heartbeat's
- * four-write allowance. A freshly reconciled group therefore closes in one
- * pass, while every successful pass also drains at least one old row. Rows that
- * are already current cost no budget, so walking the whole returned order also
- * acknowledges them for free.
+ * Three priority rows followed by one ordinary row matches the heartbeat's
+ * four-write allowance. Repair priority comes from the queue's terminal event,
+ * never from age, so an ordinary merge compacted in this same tick cannot take
+ * a repair slot. Oldest-first within each class gives bounded progress even
+ * while new repairs arrive.
  */
-function terminalPublicationOrder(
-  entries: readonly TrackedTerminalEntry[],
-): TrackedTerminalEntry[] {
-  const byOrdinal = (left: TrackedTerminalEntry, right: TrackedTerminalEntry): number => {
+interface TerminalPublicationCandidate {
+  readonly entryId: string;
+  readonly fairnessOrdinal: string;
+  readonly generation: number;
+  readonly terminalCommentPriority: boolean;
+}
+
+function terminalPublicationOrder<T extends TerminalPublicationCandidate>(entries: readonly T[]): T[] {
+  const byOrdinal = (left: T, right: T): number => {
     const length = left.fairnessOrdinal.length - right.fairnessOrdinal.length;
     return length !== 0
       ? length
       : left.fairnessOrdinal.localeCompare(right.fairnessOrdinal) ||
           left.entryId.localeCompare(right.entryId);
   };
-  const newest = [...entries].sort(
-    (left, right) => right.generation - left.generation || byOrdinal(left, right),
-  );
-  const oldest = [...entries].sort(
+  const priority = entries.filter((entry) => entry.terminalCommentPriority).sort(
     (left, right) => left.generation - right.generation || byOrdinal(left, right),
   );
-  const emitted = new Set<string>();
-  const ordered: TrackedTerminalEntry[] = [];
-  let newestIndex = 0;
-  let oldestIndex = 0;
-  const take = (source: TrackedTerminalEntry[], count: number, from: "newest" | "oldest") => {
-    let taken = 0;
-    while (taken < count) {
-      const index = from === "newest" ? newestIndex++ : oldestIndex++;
-      const entry = source[index];
-      if (entry === undefined) return;
-      if (emitted.has(entry.entryId)) continue;
-      emitted.add(entry.entryId);
-      ordered.push(entry);
-      taken += 1;
+  const ordinary = entries.filter((entry) => !entry.terminalCommentPriority).sort(
+    (left, right) => left.generation - right.generation || byOrdinal(left, right),
+  );
+  const ordered: T[] = [];
+  let priorityIndex = 0;
+  let ordinaryIndex = 0;
+  while (priorityIndex < priority.length) {
+    const end = Math.min(priorityIndex + 3, priority.length);
+    ordered.push(...priority.slice(priorityIndex, end));
+    priorityIndex = end;
+    const old = ordinary[ordinaryIndex];
+    if (old !== undefined) {
+      ordered.push(old);
+      ordinaryIndex += 1;
     }
-  };
-  while (ordered.length < entries.length) {
-    take(newest, 3, "newest");
-    take(oldest, 1, "oldest");
   }
+  ordered.push(...ordinary.slice(ordinaryIndex));
   return ordered;
 }
 
 /**
- * Publish live entries together with terminal rows already compacted from the
- * authoritative snapshot.
+ * Publish live entries together with retained and compacted terminal rows.
  *
  * The terminal rows live in D1 after their queue-document handoff is
  * acknowledged. Keeping this composition beside the writer gives a failed
@@ -129,11 +128,12 @@ export async function writeStatusCommentsForSnapshot(
   budget?: CommentBudget,
 ): Promise<CommentWriteOutcome[]> {
   const currentPullRequests = new Set(snapshot.entries.map((entry) => entry.pullRequestNumber));
-  const compactedTerminals = terminalPublicationOrder(
-    (await trackedTerminalEntries(db, where.repositoryId, where.baseRef)).filter(
-      (entry) => !currentPullRequests.has(entry.pullRequestNumber),
-    ),
+  const compactedTerminals = (
+    await trackedTerminalEntries(db, where.repositoryId, where.baseRef)
+  ).filter(
+    (entry) => !currentPullRequests.has(entry.pullRequestNumber),
   );
+  const repairState = await terminalCommentRepairState(db, where.repositoryId, where.baseRef);
   const completeSnapshot: QueueSnapshot = {
     ...snapshot,
     entries: [...snapshot.entries, ...compactedTerminals],
@@ -158,34 +158,53 @@ export async function writeStatusCommentsForSnapshot(
     ],
   };
   const currentEntryIds = new Set(snapshot.entries.map((entry) => entry.entryId));
-  const compactedEntryIds = new Set(compactedTerminals.map((entry) => entry.entryId));
   const allViews = commentViews(completeSnapshot, options);
   const viewByEntryId = new Map(allViews.map((view) => [view.entryId, view]));
   const terminalStates = new Set<CommentView["state"]>(["merged", "cancelled", "withdrawn-draft"]);
   const liveViews = allViews.filter(
     (view) => currentEntryIds.has(view.entryId) && !terminalStates.has(view.state),
   );
-  const compactedViews = compactedTerminals.flatMap((entry) => {
+  const retainedTerminalEntries = snapshot.entries.filter(
+    (entry) => {
+      const view = viewByEntryId.get(entry.entryId);
+      return (
+        currentEntryIds.has(entry.entryId) &&
+        view !== undefined &&
+        terminalStates.has(view.state) &&
+        !repairState.acknowledged.has(entry.entryId)
+      );
+    },
+  );
+  const terminalCandidates = terminalPublicationOrder([
+    ...compactedTerminals,
+    ...retainedTerminalEntries.map((entry) => ({
+      ...entry,
+      generation: snapshot.generation,
+      terminalCommentPriority: repairState.priority.has(entry.entryId),
+    })),
+  ]);
+  const terminalCandidateByEntryId = new Map(terminalCandidates.map((entry) => [entry.entryId, entry]));
+  const terminalViews = terminalCandidates.flatMap((entry) => {
     const view = viewByEntryId.get(entry.entryId);
     return view === undefined ? [] : [view];
   });
-  const retainedTerminalViews = allViews.filter(
-    (view) => currentEntryIds.has(view.entryId) && terminalStates.has(view.state),
-  );
 
   const outcomes: CommentWriteOutcome[] = [];
-  for (const view of [...liveViews, ...compactedViews, ...retainedTerminalViews]) {
+  for (const view of [...liveViews, ...terminalViews]) {
     const outcome = await writeStatusComment(db, api, where, view, options.now, budget);
     outcomes.push(outcome);
-    if (
-      (view.state === "merged" || view.state === "cancelled" || view.state === "withdrawn-draft") &&
-      (outcome === "updated" || outcome === "unchanged")
-    ) {
-      const entry = compactedEntryIds.has(view.entryId)
-        ? compactedTerminals.find((candidate) => candidate.entryId === view.entryId)
-        : undefined;
-      if (entry !== undefined) {
+    if (view.state === "merged" || view.state === "cancelled" || view.state === "withdrawn-draft") {
+      const entry = terminalCandidateByEntryId.get(view.entryId);
+      if (entry !== undefined && (outcome === "updated" || outcome === "unchanged")) {
         await acknowledgeTerminalEntryStatus(
+          db,
+          where.repositoryId,
+          where.baseRef,
+          entry.entryId,
+          entry.fairnessOrdinal,
+        );
+      } else if (entry !== undefined && outcome === "forbidden") {
+        await acknowledgeTerminalEntryStatusForbidden(
           db,
           where.repositoryId,
           where.baseRef,
