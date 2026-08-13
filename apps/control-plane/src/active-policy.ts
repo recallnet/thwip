@@ -39,7 +39,11 @@ export interface ActivePolicy {
   readonly daggerEngineDigest: string | null;
 }
 
-export async function readActivePolicy(db: D1Like, repositoryId: string): Promise<ActivePolicy | null> {
+export async function readActivePolicy(
+  db: D1Like,
+  repositoryId: string,
+  baseRef?: string,
+): Promise<ActivePolicy | null> {
   const row = await db
     .prepare(
       `SELECT p.id AS projectId, p.active_policy_digest AS digest, p.organization_id AS org,
@@ -47,6 +51,7 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
          FROM projects p
          JOIN policy_bundles b ON b.digest = p.active_policy_digest
          LEFT JOIN queue_projects q ON q.github_repository_id = p.github_repository_id
+          AND (? IS NULL OR q.base_ref = ?)
         WHERE p.github_repository_id = ?
           AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
@@ -55,7 +60,7 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
                AND r.github_repository_id = p.github_repository_id
           )`,
     )
-    .bind(repositoryId)
+    .bind(baseRef ?? null, baseRef ?? null, repositoryId)
     .first<{ projectId: string; digest: string; org: string; bundle: string; verifier: string | null }>();
   if (row === null) return null;
 

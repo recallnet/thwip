@@ -1,4 +1,4 @@
-import { installationToken } from "../github-app.js";
+import { installationToken, listInstallations } from "../github-app.js";
 import { githubStatusOf } from "../github-error.js";
 import {
   bootstrapGitHub,
@@ -67,8 +67,8 @@ interface RepositoryRow {
   installation_id: string | null;
 }
 
-const VERIFIER_UPGRADE_BRANCH = "thwip/upgrade-verifier-v2";
-const VERIFIER_UPGRADE_PULL_REQUEST_TITLE = "Upgrade Thwip verifier protocol";
+const VERIFIER_UPGRADE_BRANCH = "thwip/upgrade-verifier-v3";
+const VERIFIER_UPGRADE_PULL_REQUEST_TITLE = "Upgrade Thwip verifier trust protocol";
 
 /** The repository a request names, or nothing to act on. */
 async function repositoryFor(
@@ -118,7 +118,7 @@ const githubPort: BootstrapPort = async (env, repo, setup = {}, beforeWrite) => 
   // `installationToken` asks for the whole binding and reads two fields of it,
   // both of which are here.
   const token = await installationToken(env as Env, repo.installationId, undefined, repo.repositoryId);
-  return bootstrapGitHub(
+  const github = bootstrapGitHub(
     githubHttp(token),
     { owner: repo.owner, repo: repo.repo, baseRef: repo.baseRef },
     {
@@ -140,6 +140,14 @@ const githubPort: BootstrapPort = async (env, repo, setup = {}, beforeWrite) => 
     },
     beforeWrite,
   );
+  return {
+    ...github,
+    async installationPermissions() {
+      const installations = await listInstallations(env as Env).catch(() => null);
+      if (installations === null) return null;
+      return installations.find((installation) => String(installation.id) === repo.installationId)?.permissions ?? null;
+    },
+  };
 };
 
 const UNAUTHORIZED: BootstrapResponse = { status: 401, body: { error: "unauthorized" } };
@@ -164,6 +172,12 @@ function lifecycleBoundGitHub(
     baseSha: () => github.baseSha(),
     setupPullRequest: () => github.setupPullRequest(),
     verifierUpgradePullRequest: () => github.verifierUpgradePullRequest(),
+    ...(github.verifierWorkflowAtBase === undefined
+      ? {}
+      : { verifierWorkflowAtBase: () => github.verifierWorkflowAtBase!() }),
+    ...(github.installationPermissions === undefined
+      ? {}
+      : { installationPermissions: () => github.installationPermissions!() }),
     rulesetNamed: (name) => github.rulesetNamed(name),
     async openSetupPullRequest(input) {
       await beforeWrite();

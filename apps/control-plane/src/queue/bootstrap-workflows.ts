@@ -202,7 +202,7 @@ jobs:
 
 const VERIFY_WORKFLOW = `name: thwip-queue-verify
 
-# Thwip verifier callback protocol: 2
+# Thwip verifier callback protocol: 3
 
 run-name: >-
   thwip: verify candidate \${{ github.event.client_payload.candidateSha }}
@@ -220,15 +220,51 @@ on:
   repository_dispatch:
     types: [thwip-queue-verify]
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
+  # Validate the control-plane-owned suite list before GitHub expands it into a
+  # matrix. This job checks out nothing and receives no token permission.
+  prepare:
+    name: prepare trusted suite matrix
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      suites: \${{ steps.suites.outputs.suites }}
+    steps:
+      - name: Validate the required suite list
+        id: suites
+        env:
+          REQUIRED_SUITES: \${{ toJSON(github.event.client_payload.requiredSuites) }}
+        run: |
+          node <<'NODE'
+          const suites = JSON.parse(process.env.REQUIRED_SUITES ?? "null");
+          if (!Array.isArray(suites) || suites.length === 0 || suites.length > 32) {
+            throw new Error("the dispatch must name between 1 and 32 required suites");
+          }
+          const valid = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+          if (suites.some((suite) => typeof suite !== "string" || !valid.test(suite))) {
+            throw new Error("the dispatch contains an invalid required suite id");
+          }
+          if (new Set(suites).size !== suites.length) {
+            throw new Error("the dispatch contains a duplicate required suite id");
+          }
+          require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "suites=" + JSON.stringify(suites) + "\\n");
+          NODE
+
   verify:
-    name: verify candidate
+    name: verify candidate / \${{ matrix.suite }}
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      # Candidate-controlled install, build and suite code runs in this job.
+      # It must never receive OIDC or a repository write capability. Each suite
+      # runs on its own hosted runner, and no output, cache or artifact crosses
+      # the trust boundary into the reporter.
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: \${{ fromJSON(needs.prepare.outputs.suites) }}
     steps:
       # The candidate commit itself: the merge GitHub simulated for this pull
       # request. This is the integration that will land, which is the thing no
@@ -268,68 +304,55 @@ jobs:
       - name: Build workspace packages
         run: pnpm build
 
-      # Each required suite runs separately so the verdict can say which one
-      # failed, rather than reporting a single opaque failure.
-      #
-      # The list comes from the dispatch, which the control plane composes from
-      # the activated policy. It used to be typed into this file, and a verdict
-      # covering a different set of suites than the policy requires is refused as
-      # CANDIDATE_SUITES_INCOMPLETE — a refusal nobody could fix from here. It is
-      # also not read from the candidate checkout, because a pull request that
-      # could edit its own suite list would be verifying itself.
-      - name: Run required suites
-        id: suites
+      # The suite id came through the validated matrix and enters the shell only
+      # as a quoted environment value. The command remains the repository's
+      # reviewed package-script mapping; the reporter never consumes its output.
+      - name: Run required suite
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-          REQUIRED_SUITES: \${{ toJSON(github.event.client_payload.requiredSuites) }}
+          SUITE: \${{ matrix.suite }}
         run: |
-          set -uo pipefail
-          names=$(printf '%s' "$REQUIRED_SUITES" | jq -r '.[]? // empty')
-          if [ -z "$names" ]; then
-            echo "::error::the dispatch named no required suites; nothing was run"
+          set -euo pipefail
+          case "$SUITE" in
+            ""|[!a-z0-9]*|*[!a-z0-9_.-]*)
+              echo "::error::the matrix supplied an invalid suite id"
+              exit 1
+              ;;
+          esac
+          if [ "\${#SUITE}" -gt 64 ]; then
+            echo "::error::the matrix supplied an invalid suite id"
             exit 1
           fi
-          results=""
-          overall=0
-          for suite in $names; do
-            start=$(date +%s%3N)
-            if pnpm run "$suite"; then
-              outcome=passed
-            else
-              outcome=failed
-              overall=1
-            fi
-            end=$(date +%s%3N)
-            echo "suite $suite: $outcome ($((end - start))ms)"
-            results=$(jq -c \\
-              --arg n "$suite" --arg o "$outcome" --argjson d "$((end - start))" \\
-              '. + [{name:$n, outcome:$o, durationMs:$d}]' <<< "\${results:-[]}")
-          done
-          {
-            echo "suites=$results"
-            echo "accepted=$([ "$overall" -eq 0 ] && echo true || echo false)"
-          } >> "$GITHUB_OUTPUT"
+          pnpm run "$SUITE"
 
-      # Reported even when the suites failed: a refusal the queue never hears is
-      # a pull request that waits forever.
-      - name: Report the verdict to Thwip Queue
-        if: always() && steps.suites.outcome != 'skipped'
+  report:
+    name: register trusted candidate report
+    needs: [prepare, verify]
+    if: \${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # This clean job is the only place that can mint the report identity. It
+      # has no repository or Actions read capability and consumes no candidate
+      # output, artifact, cache, environment or workspace.
+      id-token: write
+    steps:
+      # Register only a dispatch nonce. The App waits for this job to finish,
+      # reads GitHub's exact run-attempt jobs, and derives the verdict itself.
+      - name: Register the candidate report with Thwip Queue
         env:
           THWIP_ENDPOINT: __ENDPOINT__
           REPO_ID: \${{ github.event.repository.id }}
-          SUITES: \${{ steps.suites.outputs.suites }}
-          ACCEPTED: \${{ steps.suites.outputs.accepted }}
-          PR: \${{ github.event.client_payload.pullRequestNumber }}
-          PROJECT_ID: \${{ github.event.client_payload.projectId }}
-          ATTEMPT_ID: \${{ github.event.client_payload.attemptId }}
-          BASE_REF: \${{ github.event.client_payload.baseRef }}
-          BASE_SHA: \${{ github.event.client_payload.baseSha }}
-          CANDIDATE_SHA: \${{ github.event.client_payload.candidateSha }}
-          CANDIDATE_TREE: \${{ github.event.client_payload.candidateTreeOid }}
+          DISPATCH_NONCE: \${{ github.event.client_payload.dispatchNonce }}
+          EXPECTED_WORKFLOW_SHA: \${{ github.event.client_payload.workflowCommitSha }}
+          ACTUAL_WORKFLOW_SHA: \${{ github.workflow_sha }}
         run: |
-          set -uo pipefail
-          raw=$(curl -sS -w '\\n%{http_code}' \\
-            -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \\
+          set -euo pipefail
+          if [ "$ACTUAL_WORKFLOW_SHA" != "$EXPECTED_WORKFLOW_SHA" ]; then
+            echo "::error::the verifier did not start from the dispatched workflow commit"
+            exit 1
+          fi
+          raw=$(curl -sS -w '\\n%{http_code}' \
+            -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=\${THWIP_ENDPOINT}/api/github-actions" || true)
           code=$(printf '%s' "$raw" | tail -n1)
           payload=$(printf '%s' "$raw" | sed '$d')
@@ -342,48 +365,17 @@ jobs:
             echo "::error::OIDC response carried no token"
             exit 1
           fi
-
-          suites="\${SUITES:-[]}"
-          accepted="\${ACCEPTED:-false}"
-          reasons='[]'
-          if [ "$accepted" != "true" ]; then
-            reasons='["SUITE_NOT_PASSED"]'
-          fi
-
-          body=$(jq -nc \\
-            --arg project "$PROJECT_ID" --arg attempt "$ATTEMPT_ID" \\
-            --arg base "$BASE_REF" --argjson pr "$PR" \\
-            --arg bsha "$BASE_SHA" --arg csha "$CANDIDATE_SHA" --arg tree "$CANDIDATE_TREE" \\
-            --argjson accepted "$accepted" --argjson suites "$suites" --argjson reasons "$reasons" \\
-            '{projectId:$project, attemptId:$attempt, baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
-              candidateTreeOid:$tree, accepted:$accepted, suites:$suites, reasonCodes:$reasons}')
-
-          out=$(curl -sS -w '\\n%{http_code}' -X POST \\
-            -H "authorization: Bearer $oidc" -H "content-type: application/json" \\
+          body=$(jq -nc --arg nonce "$DISPATCH_NONCE" '{dispatchNonce:$nonce}')
+          out=$(curl -sS -w '\\n%{http_code}' -X POST \
+            -H "authorization: Bearer $oidc" -H "content-type: application/json" \
             -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/candidate-result" || true)
           rcode=$(printf '%s' "$out" | tail -n1)
-          echo "candidate-result: http $rcode"
+          echo "candidate-report: http $rcode"
           printf '%s\\n' "$out" | sed '$d'
           if [ "$rcode" != "202" ]; then
-            echo "::error::Thwip Queue did not accept the candidate verdict (http $rcode)"
+            echo "::error::Thwip Queue did not register the candidate report (http $rcode)"
             exit 1
           fi
-
-      # The verdict is published on the pull request head by the App, from the
-      # report above, not from here.
-      #
-      # This step used to do it and could not: it asks GitHub for \`checks: write\`,
-      # which the repository's default workflow permission does not grant, so every
-      # passing verification ended as a failed run. The App already holds the
-      # permission and already publishes the other two checks, and it has the
-      # verdict before this job ends.
-      # The job's own conclusion still reflects whether the candidate passed, so a
-      # failure is visible in the Actions list and not only inside the queue.
-      - name: Fail when a required suite failed
-        if: steps.suites.outputs.accepted != 'true'
-        run: |
-          echo "::error::a required suite failed against the integrated candidate"
-          exit 1
 `;
 
 export interface SetupPullRequestInput {
@@ -416,7 +408,7 @@ export function verifierUpgradePullRequestBody(input: SetupPullRequestInput): st
     "This reviewed change upgrades only Thwip's candidate verifier callback protocol.",
     "",
     "Protocol 2 binds every result to the exact Thwip project incarnation and queue attempt that dispatched it.",
-    "The required suites, permissions, and candidate checkout behavior are unchanged.",
+    "Each required suite now runs without report authority; a separate trusted job reports only GitHub-owned job conclusions.",
     "",
     `The workflow reports to ${input.endpoint}.`,
   ].join("\n");

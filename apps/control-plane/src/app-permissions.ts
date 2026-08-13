@@ -32,6 +32,10 @@
  * authority that the runtime queue does not need.
  */
 export const REQUIRED_APP_PERMISSIONS: Readonly<Record<string, string>> = {
+  // The trusted v3 finalizer reads the exact workflow run attempt and its jobs
+  // after the unprivileged candidate jobs finish. The workflow reporter itself
+  // receives no Actions permission.
+  actions: "read",
   checks: "write",
   contents: "write",
   pull_requests: "write",

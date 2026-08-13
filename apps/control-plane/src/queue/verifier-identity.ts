@@ -23,9 +23,75 @@ export interface OidcVerifierClaims {
   readonly job_workflow_sha?: unknown;
   readonly run_id?: unknown;
   readonly run_attempt?: unknown;
+  readonly check_run_id?: unknown;
   readonly event_name?: unknown;
   readonly ref?: unknown;
   readonly jti?: unknown;
+}
+
+/**
+ * repository_dispatch always executes the repository's current default branch.
+ * A stale or deliberately different queue branch cannot be made authoritative
+ * by merely naming it in the dispatch payload.
+ */
+export function exactDefaultBranchRef(baseRef: string, defaultBranch: string): string | null {
+  const expected = `refs/heads/${defaultBranch}`;
+  return baseRef === expected ? expected : null;
+}
+
+export type VerifierV3Identity =
+  | {
+      readonly ok: true;
+      readonly runId: string;
+      readonly runAttempt: number;
+      readonly checkRunId: string;
+      readonly jti: string;
+      readonly workflowSha: string;
+    }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Protocol 3 is a non-reusable workflow. GitHub therefore signs workflow_ref
+ * and workflow_sha, but does not promise job_workflow_ref. check_run_id binds
+ * the token to the clean reporter job; the finalizer proves that job through
+ * GitHub's App-authenticated APIs after it has completed.
+ */
+export function verifyVerifierV3Identity(
+  claims: OidcVerifierClaims,
+  expected: {
+    repositoryId: string;
+    repositoryOwnerId: string;
+    workflowRef: string;
+    workflowSha: string;
+    defaultBranchRef: string;
+  },
+): VerifierV3Identity {
+  const repositoryId = decimal(claims.repository_id);
+  if (repositoryId !== expected.repositoryId) return { ok: false, reason: "token is for another repository" };
+  const ownerId = decimal(claims.repository_owner_id);
+  if (ownerId !== expected.repositoryOwnerId) return { ok: false, reason: "token is for another owner" };
+  const workflowRef = str(claims.workflow_ref);
+  if (workflowRef !== expected.workflowRef) return { ok: false, reason: "token is not from the v3 verifier path" };
+  const workflowSha = str(claims.workflow_sha);
+  if (workflowSha !== expected.workflowSha) return { ok: false, reason: "token is not from the dispatched verifier commit" };
+  if (str(claims.event_name) !== "repository_dispatch") {
+    return { ok: false, reason: "token did not come from a queue dispatch" };
+  }
+  if (str(claims.ref) !== expected.defaultBranchRef) {
+    return { ok: false, reason: "token is not from the default branch" };
+  }
+  const runId = decimal(claims.run_id);
+  const runAttempt = decimal(claims.run_attempt);
+  const checkRunId = decimal(claims.check_run_id);
+  const jti = str(claims.jti);
+  if (runId === null || runAttempt === null || checkRunId === null || jti === null) {
+    return { ok: false, reason: "token is missing its exact run or job identity" };
+  }
+  const attempt = Number(runAttempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    return { ok: false, reason: "token has an invalid run attempt" };
+  }
+  return { ok: true, runId, runAttempt: attempt, checkRunId, jti, workflowSha };
 }
 
 export interface PinnedVerifier {
