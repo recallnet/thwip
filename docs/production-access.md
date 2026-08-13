@@ -258,6 +258,43 @@ the next contiguous phase through a temporary Wrangler configuration, and then:
 - leaves every later phase hidden until the next invocation reads the new live
   schema again.
 
+The ordered release and barrier model lives in `@thwip/migration-plan`. The
+migration command, deploy gate, `/health`, and `/v1/schema` all evaluate that
+same model. A pending `before-worker` migration after an unapplied
+`after-worker` barrier is reported as `blockedBehindBarrier`; it is not a blocker
+for the preparatory Worker and it cannot be selected early. Do not infer a safe
+order from the SQL comments or run Wrangler directly around the model.
+The same model reports and hard-refuses any known migration recorded after an
+earlier known migration is missing; a damaged ledger is never normalized into a
+plausible phase.
+Every non-empty migration phase also requires a clean checkout whose full HEAD
+SHA equals freshly fetched `origin/main`; an operator cannot apply even an
+additive batch from a stale or unmerged tree.
+
+For the #398 capability cutover, the supported order is exact:
+
+1. Apply `0029` and `0030`.
+2. Deploy the current canonical `main` Worker. Its v2 paths are compatible with
+   schema through `0030`; do not deploy an older SHA.
+3. Complete the reviewed human cutover, backfill, maintenance fence, and remote
+   capability evidence.
+4. Run the migration command to apply only `0031`. It leaves maintenance on.
+5. Run it again to apply `0032` and `0033` while all traffic stays fenced.
+6. Deploy the exact current canonical `main` Worker again. Confirm `/health`
+   reports that build, maintenance mode, the `0032`/`0033` capabilities, and a
+   new `workerDeploymentId`. Migration `0033` snapshots the deployment ID that
+   served before its barrier; `0034` refuses until a different deployment ID is
+   serving, even when canonical `main` still has the same commit SHA. Migration
+   `0033` rejects the `unstamped` configuration before changing the v3 schema,
+   so a correctly stamped deployment can repair and retry safely.
+7. Run it once more to apply `0034`. Only `0034` reopens traffic.
+
+Each invocation re-reads public schema and health first. `0031` still refuses
+without the cutover evidence. `0034` independently refuses unless the exact
+Worker build, all three preceding migrations, complete evidence/backfill, and
+maintenance fence are present. A break-glass deploy or direct migration is not
+part of this sequence.
+
 Never work around a refusal with raw `wrangler d1 migrations apply`. For a mixed
 tree, run the guarded command, deploy when the next phase is `after-worker`, then
 run the guarded command again. Repeat until the current tree is level.

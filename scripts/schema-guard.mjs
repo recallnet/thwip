@@ -18,41 +18,42 @@
  * have been wrong for it, and a blanket "never" is what happened here. So each
  * migration declares its own order in its header and this reads the answer.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 
-/** The two orders a migration may declare. */
-export const DEPLOY_ORDERS = ["before-worker", "after-worker"];
-
-/**
- * Only the machine-readable token counts. Prose about ordering is welcome under
- * it, and 0021's header already talks about 0018's opposite order, so anything
- * that scanned the paragraph for "before" or "after" would read the wrong one.
- */
-const HEADER = /^--[ \t]*DEPLOY ORDER:[ \t]*(before-worker|after-worker)\b/m;
-
-export function parseDeployOrder(sql) {
-  const match = HEADER.exec(sql);
-  return match === null ? null : match[1];
-}
+import {
+  MIGRATION_RELEASES,
+  evaluateMigrationReleases,
+} from "../packages/migration-plan/src/index.mjs";
 
 export function readMigrations(dir) {
+  const modeled = new Map(MIGRATION_RELEASES.map((migration) => [migration.name, migration]));
   return readdirSync(dir)
     .filter((name) => name.endsWith(".sql"))
     .sort()
-    .map((name) => ({ name, order: parseDeployOrder(readFileSync(`${dir}/${name}`, "utf8")) }));
+    .map((name) => modeled.get(name) ?? { name, phase: null });
 }
 
-/** Migrations that never said which side of the deploy they belong on. */
+/** SQL files absent from the shared release model. */
 export function undeclaredMigrations(migrations) {
-  return migrations.filter((migration) => migration.order === null).map((migration) => migration.name);
+  return migrations.filter((migration) => migration.phase === null).map((migration) => migration.name);
+}
+
+/** Modeled releases whose SQL file is absent from the checkout. */
+export function missingMigrationFiles(migrations) {
+  const files = new Set(migrations.map((migration) => migration.name));
+  return MIGRATION_RELEASES.filter((migration) => !files.has(migration.name)).map((migration) => migration.name);
 }
 
 /** Unapplied migrations the code being deployed needs already in place. */
 export function blockingMigrations(migrations, unapplied) {
   const pending = new Set(unapplied);
-  return migrations
-    .filter((migration) => migration.order === "before-worker" && pending.has(migration.name))
-    .map((migration) => migration.name);
+  const applied = migrations.filter((migration) => !pending.has(migration.name)).map((migration) => migration.name);
+  return evaluateMigrationReleases(migrations, applied).deployBlockers;
+}
+
+/** One evaluator for the migration command, deploy gate, and public Worker state. */
+export function migrationReleaseState(migrations, applied) {
+  return evaluateMigrationReleases(migrations, applied);
 }
 
 /**

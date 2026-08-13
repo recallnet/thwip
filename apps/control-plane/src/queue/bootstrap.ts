@@ -22,6 +22,7 @@ import {
   type Ruleset,
 } from "./rulesets.js";
 import { PROOF_CHECK, TURN_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
+import { databaseSchemaCapabilities } from "../schema-state.js";
 
 /**
  * Enrolling a repository, through the product.
@@ -221,11 +222,13 @@ export async function readQueueProject(
   baseRef: string,
   expected?: BootstrapProjectBinding,
 ): Promise<QueueProject | null> {
+  const v3Ready = (await databaseSchemaCapabilities(db)).verifierProtocolV3;
   const row = await db
     .prepare(
       `SELECT id, organization_id, github_repository_id, base_ref,
               enabled, activation_state, chain_public, bootstrap_progress_json, project_id,
-              verifier_workflow_version, verifier_protocol
+              verifier_workflow_version,
+              ${v3Ready ? "verifier_protocol" : "CASE verifier_workflow_version WHEN 1 THEN 1 ELSE 2 END"} AS verifier_protocol
          FROM queue_projects
         WHERE github_repository_id = ? AND base_ref = ?
           AND project_id IS NOT NULL
@@ -305,6 +308,7 @@ export function pinnedVerifierFor(input: {
  * installed, and there is nothing to enrol.
  */
 export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest): Promise<Enrollment> {
+  const v3Ready = (await databaseSchemaCapabilities(db)).verifierProtocolV3;
   const installed = await db
     .prepare(
       `SELECT p.id AS projectId, p.organization_id AS organizationId, p.github_name AS repository, o.github_org_id AS ownerId
@@ -325,11 +329,30 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
 
   await db
     .prepare(
-      `INSERT INTO queue_projects
+      v3Ready ? `INSERT INTO queue_projects
        (id, organization_id, github_repository_id, base_ref,
           enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json, project_id,
           verifier_workflow_version, verifier_protocol)
        SELECT ?, ?, ?, ?, 0, 'configured', ?, '{}', ?, ?, 2, 2
+        WHERE EXISTS (
+          SELECT 1 FROM projects p
+           WHERE p.id = ? AND p.organization_id = ? AND p.github_repository_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM project_release_requests r
+                WHERE r.github_repository_id = p.github_repository_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM project_release_jobs r
+                WHERE r.organization_id = p.organization_id
+                  AND r.github_repository_id = p.github_repository_id
+             )
+        )
+       ON CONFLICT (github_repository_id, base_ref) DO NOTHING`
+      : `INSERT INTO queue_projects
+       (id, organization_id, github_repository_id, base_ref,
+          enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json, project_id,
+          verifier_workflow_version)
+       SELECT ?, ?, ?, ?, 0, 'configured', ?, '{}', ?, ?, 2
         WHERE EXISTS (
           SELECT 1 FROM projects p
            WHERE p.id = ? AND p.organization_id = ? AND p.github_repository_id = ?
@@ -992,6 +1015,13 @@ export interface BootstrapRun {
 
 async function upgradeVerifierWorkflow(deps: BootstrapDeps, project: QueueProject): Promise<StepOutcome> {
   const step = "merge-verifier-v3-pr" as const;
+  if (!(await databaseSchemaCapabilities(deps.db)).verifierProtocolV3) {
+    return {
+      kind: "waiting",
+      step,
+      detail: "verifier protocol v3 is waiting for its guarded schema phase; protocol v2 remains active",
+    };
+  }
   if (deps.github.verifierWorkflowAtBase === undefined) {
     return { kind: "refused", step, detail: "the installed verifier cannot be read back" };
   }

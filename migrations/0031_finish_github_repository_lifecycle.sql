@@ -819,10 +819,11 @@ SELECT 'bucket:' || json_extract(remote_capability_evidence, '$.r2.newBucket'),
   FROM project_lifecycle_rollout
  WHERE id = 1;
 
--- This is the final half of the cleanup gate. The Worker requires both the
--- externally recorded capability retirement and this schema marker before it
--- purges any project data.
+-- This is the final half of the cleanup gate. Keep service maintenance active:
+-- 0032 and 0033 are the next guarded before-worker phase, and 0034 is the only
+-- migration allowed to reopen traffic after the exact compatible Worker proves
+-- that complete schema live. The Worker-level maintenance gate replaces the
+-- table triggers removed above and keeps every route, queue, and cron fenced.
 UPDATE project_lifecycle_rollout
-   SET destructive_schema_ready_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-       maintenance_mode = 0
+   SET destructive_schema_ready_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
  WHERE id = 1 AND maintenance_mode = 1 AND remote_capabilities_retired_at IS NOT NULL;
