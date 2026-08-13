@@ -34,6 +34,8 @@ export interface TerminalProjectionEntry extends ProjectionEntry {
 
 /** A terminal history row whose existing status comment still needs closing. */
 export type TrackedTerminalEntry = QueueSnapshot["entries"][number] & {
+  /** Generation at which authority last carried this admission. */
+  readonly generation: number;
   readonly transition: ProjectionTransition | null;
 };
 
@@ -400,7 +402,7 @@ export async function trackedTerminalEntries(
     .prepare(
       `SELECT e.entry_id, e.pull_request_number, e.sponsor_principal_id, e.state,
               e.primary_reason, e.fairness_ordinal, e.scheduler_eligible,
-              e.cooldown_until, e.last_attempt_id, e.head_sha,
+              e.cooldown_until, e.last_attempt_id, e.head_sha, e.generation,
               t.transition_sequence, t.kind AS transition_kind, t.digest,
               t.prior_digest, t.base_sha AS transition_base_sha,
               t.witness_count, t.observed_at
@@ -442,6 +444,7 @@ export async function trackedTerminalEntries(
       cooldown_until: string | null;
       last_attempt_id: string | null;
       head_sha: string | null;
+      generation: number;
       transition_sequence: number | null;
       transition_kind: string | null;
       digest: string | null;
@@ -461,6 +464,7 @@ export async function trackedTerminalEntries(
     cooldownUntil: row.cooldown_until,
     lastAttemptId: row.last_attempt_id,
     headSha: row.head_sha,
+    generation: row.generation,
     transition:
       row.transition_sequence === null ||
       row.transition_kind === null ||
