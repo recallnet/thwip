@@ -24,6 +24,10 @@ function verified(expiresOn = "2026-08-13T00:00:00Z") {
   return response({ success: true, result: { status: "active", expires_on: expiresOn } });
 }
 
+function verificationResponse(url, expiresOn) {
+  return url.includes("/tokens/verify") ? verified(expiresOn) : null;
+}
+
 function successfulProbe() {
   return response({
     success: true,
@@ -97,9 +101,10 @@ describe("choosing a D1 identity", () => {
 
 describe("preflighting a deploy token", () => {
   it("accepts an active scoped deploy token only when live D1 refuses it", async () => {
-    const fetchImpl = vi.fn(async (url) =>
-      url.endsWith("/verify") ? verified() : response({ success: false, errors: [{ code: 10000 }] }, 403),
-    );
+    const fetchImpl = vi.fn(async (url) => {
+      const token = verificationResponse(url);
+      return token ?? response({ success: false, errors: [{ code: 10000 }] }, 403);
+    });
     await expect(
       preflightDeployCredential({
         fetchImpl,
@@ -111,11 +116,10 @@ describe("preflighting a deploy token", () => {
   });
 
   it("refuses a deploy token that can query live D1", async () => {
-    const fetchImpl = vi.fn(async (url) =>
-      url.endsWith("/verify")
-        ? verified()
-        : response({ success: true, result: [{ success: true, results: [{ thwip_deploy_d1_probe: 1 }] }] }),
-    );
+    const fetchImpl = vi.fn(async (url) => {
+      const token = verificationResponse(url);
+      return token ?? response({ success: true, result: [{ success: true, results: [{ thwip_deploy_d1_probe: 1 }] }] });
+    });
     await expect(
       preflightDeployCredential({
         fetchImpl,
@@ -125,11 +129,29 @@ describe("preflighting a deploy token", () => {
       }),
     ).rejects.toThrow(/can query the live D1/);
   });
+
+  it("falls back to user-token verification when the token is not account-owned", async () => {
+    const fetchImpl = vi.fn(async (url) => {
+      if (url.includes(`/accounts/${"a".repeat(32)}/tokens/verify`)) {
+        return response({ success: false, errors: [{ code: 10000 }] }, 403);
+      }
+      if (url.endsWith("/user/tokens/verify")) return verified();
+      return response({ success: false }, 403);
+    });
+    await expect(
+      preflightDeployCredential({
+        fetchImpl,
+        token: "user-deploy-token",
+        accountId: "a".repeat(32),
+        target: TARGET,
+      }),
+    ).resolves.toEqual({ status: "active", liveD1Access: false });
+  });
 });
 
 describe("preflighting a D1 token", () => {
   it("accepts a short-lived token that can perform the non-mutating target probe", async () => {
-    const fetchImpl = vi.fn(async (url) => (url.endsWith("/verify") ? verified() : successfulProbe()));
+    const fetchImpl = vi.fn(async (url) => verificationResponse(url) ?? successfulProbe());
     await expect(
       preflightD1Credential({
         fetchImpl,
@@ -145,7 +167,9 @@ describe("preflighting a D1 token", () => {
   });
 
   it("refuses a long-lived D1 token before querying the database", async () => {
-    const fetchImpl = vi.fn(async () => verified("2026-08-20T00:00:00Z"));
+    const fetchImpl = vi.fn(async (url) =>
+      verificationResponse(url, "2026-08-20T00:00:00Z") ?? successfulProbe(),
+    );
     await expect(
       preflightD1Credential({
         fetchImpl,
@@ -160,7 +184,7 @@ describe("preflighting a D1 token", () => {
   it("reports no token or private result when the probe fails", async () => {
     const secret = "private-migration-token";
     const fetchImpl = vi.fn(async (url) =>
-      url.endsWith("/verify") ? verified() : response({ success: false, errors: [{ message: "denied" }] }, 403),
+      verificationResponse(url) ?? response({ success: false, errors: [{ message: "denied" }] }, 403),
     );
     let message = "";
     try {
@@ -206,7 +230,7 @@ describe("the Wrangler child identity", () => {
 describe("post-use revocation", () => {
   it("treats Cloudflare's authentication rejection as revoked", async () => {
     const fetchImpl = vi.fn(async () => response({ success: false, errors: [{ code: 9109 }] }, 401));
-    await expect(tokenAcceptance({ fetchImpl, token: "deleted-token" })).resolves.toEqual({
+    await expect(tokenAcceptance({ fetchImpl, token: "deleted-token", accountId: "a".repeat(32) })).resolves.toEqual({
       accepted: false,
       status: "rejected",
     });
@@ -214,7 +238,7 @@ describe("post-use revocation", () => {
 
   it("refuses to call an active token revoked", async () => {
     const fetchImpl = vi.fn(async () => verified());
-    await expect(tokenAcceptance({ fetchImpl, token: "active-token" })).resolves.toEqual({
+    await expect(tokenAcceptance({ fetchImpl, token: "active-token", accountId: "a".repeat(32) })).resolves.toEqual({
       accepted: true,
       status: "active",
     });
@@ -222,7 +246,9 @@ describe("post-use revocation", () => {
 
   it("does not treat an ambiguous permission refusal as proof of revocation", async () => {
     const fetchImpl = vi.fn(async () => response({ success: false, errors: [{ code: 10000 }] }, 403));
-    await expect(tokenAcceptance({ fetchImpl, token: "uncertain-token" })).rejects.toThrow(
+    await expect(
+      tokenAcceptance({ fetchImpl, token: "uncertain-token", accountId: "a".repeat(32) }),
+    ).rejects.toThrow(
       /Could not prove.*revoked/,
     );
   });
