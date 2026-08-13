@@ -20,16 +20,11 @@ describe("Home", () => {
 
     expect(html).toContain("A merge queue for agent-built software.");
     expect(html).toContain(
-      '<span class="mq-hero__line mq-hero__line--lead">Your agents already ran CI locally.</span>',
+      '<span class="mq-hero__line mq-hero__line--lead">A merge queue built for agent workflows.</span>',
     );
-    expect(html).toContain(
-      '<span class="mq-hero__line">Merge faster, and avoid repeat CI costs by letting them prove it.</span>',
-    );
-    expect(html).toContain(
-      "Thwip verifies signed evidence from those agent runs and lets you configure what counts as proof.",
-    );
-    expect(html).toContain("the protected merge queue moves without repeating the same checks in cloud CI");
-    expect(html).toContain("cloud CI. Simple.");
+    expect(html).toContain("Thwip makes agents prove their work before it enters the queue");
+    expect(html).toContain("reuses that proof to avoid expensive cloud CI whenever it can");
+    expect(html).toContain("Agents save time. You save money. Simple.");
     expect(html).toContain("Cloud queues repeat work that your agents already finished in parallel.");
     expect(html).toContain("Loading measured results");
     expect(html).not.toContain("14.0s");
@@ -49,18 +44,18 @@ describe("Home", () => {
     const html = render();
     const hero = html.slice(html.indexOf('<section class="mq-row mq-row--open">'), html.indexOf("</section>"));
 
-    expect(hero).toMatch(/merge faster/i);
-    expect(hero).toMatch(/avoid repeat CI costs/i);
-    expect(hero).toMatch(/when that evidence is enough/i);
+    expect(hero).toMatch(/agents prove their work/i);
+    expect(hero).toMatch(/avoid expensive cloud CI whenever it can/i);
+    expect(hero).toMatch(/agents save time\. you save money\. simple\./i);
     expect(hero).not.toMatch(/guaranteed|always|save[s]? \$|developer[- ]time savings/i);
   });
 
-  it("keeps the speed and repeat-CI cost benefit in page metadata", () => {
+  it("keeps the agent-workflow benefit in page metadata", () => {
     const index = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
-    expect(index).toContain("Merge faster and avoid repeat CI costs");
-    expect(index).toContain("Thwip verifies signed evidence from agent-run checks");
-    expect(index).toContain("When your policy accepts it");
+    expect(index).toContain("A merge queue built for agent workflows");
+    expect(index).toContain("makes agents prove their work before it enters the queue");
+    expect(index).toContain("avoid expensive cloud CI whenever it can");
     expect(index).not.toMatch(/guaranteed|developer[- ]time savings|save[s]? \$/i);
   });
 
