@@ -410,8 +410,6 @@ export interface ProjectLifecycleRollout {
   readonly workerBuildSha: string | null;
   readonly workerDeploymentId: string | null;
   readonly verifierV3PredeployId: string | null;
-  readonly remoteCapabilitiesRetiredAt: string | null;
-  readonly remoteCapabilityEvidenceComplete: boolean;
   readonly destructiveSchemaReadyAt: string | null;
   readonly backfillReady: boolean;
   readonly cleanupReady: boolean;
@@ -471,79 +469,13 @@ export async function drainProjectLifecycleBackfill(
   return { table, updated: (updated as { meta?: { changes?: number } }).meta?.changes ?? 0, ready: stillPending === null };
 }
 
-function cutoverEvidenceComplete(raw: string | null, capabilitiesRetiredAt: string | null): boolean {
-  if (raw === null || capabilitiesRetiredAt === null) return false;
-  try {
-    const value = JSON.parse(raw) as Record<string, unknown>;
-    const r2 = value["r2"] as Record<string, unknown> | undefined;
-    const d1 = value["d1"] as Record<string, unknown> | undefined;
-    const github = value["github"] as Record<string, unknown> | undefined;
-    const text = (input: unknown) => typeof input === "string" && input.trim().length > 0;
-    const instant = (input: unknown) => text(input) && Number.isFinite(Date.parse(input as string));
-    const oldBucketDeletedAt = Date.parse(String(r2?.["oldBucketDeletedAt"]));
-    const copyCompletedAt = Date.parse(String(r2?.["copyCompletedAt"]));
-    const newBucketRoundTripAt = Date.parse(String(r2?.["newBucketRoundTripAt"]));
-    const maintenanceEnabledAt = Date.parse(String(d1?.["maintenanceEnabledAt"]));
-    const exportCompletedAt = Date.parse(String(d1?.["exportCompletedAt"]));
-    const importCompletedAt = Date.parse(String(d1?.["importCompletedAt"]));
-    const newDatabaseRoundTripAt = Date.parse(String(d1?.["newDatabaseRoundTripAt"]));
-    const newBindingActivatedAt = Date.parse(String(d1?.["newBindingActivatedAt"]));
-    const oldDatabaseDeletedAt = Date.parse(String(d1?.["oldDatabaseDeletedAt"]));
-    const oldPrivateKeyDeletedAt = Date.parse(String(github?.["oldPrivateKeyDeletedAt"]));
-    const newKeyAcceptedAt = Date.parse(String(github?.["newKeyAcceptedAt"]));
-    const oldKeyRejectedAt = Date.parse(String(github?.["oldKeyRejectedAt"]));
-    const oldInstallationTokensExpiredAt = Date.parse(String(github?.["oldInstallationTokensExpiredAt"]));
-    const oldInstallationTokenRejectedAt = Date.parse(String(github?.["oldInstallationTokenRejectedAt"]));
-    const retiredAt = Date.parse(capabilitiesRetiredAt);
-    const observedNow = Date.now();
-    const prerequisites = [copyCompletedAt, newBucketRoundTripAt, oldBucketDeletedAt,
-      maintenanceEnabledAt, exportCompletedAt, importCompletedAt, newDatabaseRoundTripAt,
-      newBindingActivatedAt, oldDatabaseDeletedAt, newKeyAcceptedAt, oldPrivateKeyDeletedAt,
-      oldKeyRejectedAt, oldInstallationTokensExpiredAt, oldInstallationTokenRejectedAt];
-    return r2 !== undefined && d1 !== undefined && github !== undefined &&
-      text(r2["oldBucket"]) && text(r2["newBucket"]) && r2["oldBucket"] !== r2["newBucket"] &&
-      instant(r2["copyCompletedAt"]) && instant(r2["newBucketRoundTripAt"]) && instant(r2["oldBucketDeletedAt"]) &&
-      text(d1["oldDatabase"]) && text(d1["newDatabase"]) && d1["oldDatabase"] !== d1["newDatabase"] &&
-      text(d1["oldDatabaseId"]) && text(d1["newDatabaseId"]) && d1["oldDatabaseId"] !== d1["newDatabaseId"] &&
-      instant(d1["maintenanceEnabledAt"]) && instant(d1["exportCompletedAt"]) &&
-      instant(d1["importCompletedAt"]) && instant(d1["newDatabaseRoundTripAt"]) &&
-      instant(d1["newBindingActivatedAt"]) && instant(d1["oldDatabaseDeletedAt"]) &&
-      text(d1["exportSha256"]) && /^[0-9a-f]{64}$/.test(String(d1["exportSha256"])) &&
-      text(d1["schemaSha256"]) && /^[0-9a-f]{64}$/.test(String(d1["schemaSha256"])) &&
-      text(d1["rowCountSha256"]) && /^[0-9a-f]{64}$/.test(String(d1["rowCountSha256"])) &&
-      d1["quickCheck"] === "ok" && d1["foreignKeyViolations"] === 0 &&
-      copyCompletedAt <= newBucketRoundTripAt && newBucketRoundTripAt <= oldBucketDeletedAt &&
-      maintenanceEnabledAt <= exportCompletedAt && exportCompletedAt <= importCompletedAt &&
-      importCompletedAt <= newDatabaseRoundTripAt &&
-      importCompletedAt <= newBindingActivatedAt && newBindingActivatedAt <= oldDatabaseDeletedAt &&
-      text(github["oldKeyFingerprint"]) && text(github["newKeyFingerprint"]) &&
-      github["oldKeyFingerprint"] !== github["newKeyFingerprint"] &&
-      instant(github["newKeyAcceptedAt"]) && instant(github["oldKeyRejectedAt"]) &&
-      instant(github["oldPrivateKeyDeletedAt"]) && instant(github["oldInstallationTokensExpiredAt"]) &&
-      instant(github["oldInstallationTokenRejectedAt"]) &&
-      newKeyAcceptedAt <= oldPrivateKeyDeletedAt && oldPrivateKeyDeletedAt <= oldKeyRejectedAt &&
-      oldInstallationTokensExpiredAt >= oldPrivateKeyDeletedAt + 60 * 60_000 &&
-      oldInstallationTokenRejectedAt >= oldInstallationTokensExpiredAt &&
-      oldKeyRejectedAt >= oldPrivateKeyDeletedAt &&
-      Number.isFinite(retiredAt) && retiredAt <= observedNow &&
-      prerequisites.every((timestamp) => Number.isFinite(timestamp) && timestamp <= retiredAt && timestamp <= observedNow) &&
-      retiredAt >= oldInstallationTokenRejectedAt && retiredAt >= oldBucketDeletedAt &&
-      retiredAt >= oldDatabaseDeletedAt &&
-      text(value["approvedBy"]) && typeof value["changeUrl"] === "string" &&
-      /^https:\/\//.test(value["changeUrl"]);
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Record when the lifecycle-aware Worker first served traffic.
  *
- * Migration 0030 deliberately leaves the previous Worker runnable. Its
- * already-started requests do not know about project leases and can remain
- * alive while their client is connected. The timestamp is deployment evidence
- * only. It never authorizes cleanup; retiring the old D1, R2, and GitHub
- * capabilities plus the final schema marker below does that.
+ * Migration 0030 deliberately leaves the previous Worker runnable. The
+ * finishing migration uses this timestamp for one bounded compatibility
+ * window before it rebuilds repository-keyed tables in place. This is ordinary
+ * release drainage, not a demand to replace the database, bucket, or App key.
  */
 export async function activateProjectLifecycleWorker(
   db: D1Like,
@@ -575,8 +507,6 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
               worker_build_sha AS buildSha,
               worker_deployment_id AS deploymentId,
               verifier_v3_predeploy_id AS verifierV3PredeployId,
-              remote_capabilities_retired_at AS capabilitiesRetiredAt,
-              remote_capability_evidence AS capabilityEvidence,
               destructive_schema_ready_at AS schemaReadyAt
          FROM project_lifecycle_rollout WHERE id = 1`,
     )
@@ -587,8 +517,6 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
       buildSha: string | null;
       deploymentId: string | null;
       verifierV3PredeployId: string | null;
-      capabilitiesRetiredAt: string | null;
-      capabilityEvidence: string | null;
       schemaReadyAt: string | null;
     }>();
   const workerActivatedAt = row?.activatedAt ?? null;
@@ -596,31 +524,20 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
   const workerDeploymentId = row?.deploymentId ?? null;
   const verifierV3PredeployId = row?.verifierV3PredeployId ?? null;
   const maintenanceMode = row?.maintenanceMode === 1;
-  const remoteCapabilitiesRetiredAt = row?.capabilitiesRetiredAt ?? null;
-  const remoteCapabilityEvidence = row?.capabilityEvidence ?? null;
   const destructiveSchemaReadyAt = row?.schemaReadyAt ?? null;
   const pendingBackfill = await db.prepare(
     "SELECT 1 AS pending FROM project_lifecycle_backfills WHERE completed_at IS NULL LIMIT 1",
   ).bind().first<{ pending: number }>();
   const backfillReady = pendingBackfill === null;
-  const remoteCapabilityEvidenceComplete = cutoverEvidenceComplete(
-    remoteCapabilityEvidence,
-    remoteCapabilitiesRetiredAt,
-  );
   return {
     maintenanceMode,
     workerActivatedAt,
     workerBuildSha,
     workerDeploymentId,
     verifierV3PredeployId,
-    remoteCapabilitiesRetiredAt,
-    remoteCapabilityEvidenceComplete,
     destructiveSchemaReadyAt,
     backfillReady,
-    cleanupReady:
-      remoteCapabilitiesRetiredAt !== null &&
-      remoteCapabilityEvidenceComplete &&
-      destructiveSchemaReadyAt !== null && backfillReady,
+    cleanupReady: destructiveSchemaReadyAt !== null && backfillReady,
   };
 }
 
@@ -953,8 +870,13 @@ interface R2CleanupIntentRow {
   readonly projectId: string;
   readonly repositoryId: string;
   readonly state: "writing" | "cleanup";
-  readonly capabilityState: "active" | "retired";
 }
+
+// Current writers renew every minute and receive a fifteen-minute lease. An
+// intent that remains abandoned for a further hour is treated as a terminated
+// invocation and reclaimed in place. This is deliberately a normal bounded
+// failure model: storage cleanup must not require replacing the R2 bucket.
+const R2_ABANDONED_WRITE_GRACE_MS = 60 * 60_000;
 
 export interface R2CleanupDrainResult {
   readonly attempted: number;
@@ -966,11 +888,11 @@ export interface R2CleanupDrainResult {
 /**
  * Resolve expired R2 writes without relying on a project or installation row.
  *
- * An expired clock lease never proves that an R2 put has stopped. A writing
- * intent remains a hard release fence until the bucket generation that issued
- * the put has been retired. Cleanup intents are safe because their writer has
- * already returned from put. Retired-generation intents are safe because the
- * old bucket no longer exists. Only those two classes may be acquired here.
+ * Cleanup intents are immediately retryable after their lease expires. A
+ * writing intent gets one additional hour beyond its renewable lease before it
+ * is treated as abandoned. The exact object key remains durable throughout,
+ * so a failed delete retries without rotating the bucket or retaining a
+ * repository tombstone.
  */
 export async function drainR2CleanupIntents(
   env: Pick<Env, "DB" | "EVIDENCE">,
@@ -978,19 +900,23 @@ export async function drainR2CleanupIntents(
 ): Promise<R2CleanupDrainResult> {
   const db = env.DB as unknown as D1Like;
   const now = options.now ?? new Date();
+  const abandonedBefore = new Date(now.getTime() - R2_ABANDONED_WRITE_GRACE_MS).toISOString();
   const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 10)));
   const rows = await db.prepare(
     `SELECT i.object_key AS key, i.project_id AS projectId,
-            i.github_repository_id AS repositoryId, i.state,
-            generation.state AS capabilityState
+            i.github_repository_id AS repositoryId, i.state
        FROM project_r2_cleanup_intents i
-       JOIN project_r2_capability_generations generation
-         ON generation.generation = i.capability_generation
       WHERE i.lease_expires_at <= ? AND (? IS NULL OR i.project_id = ?)
-        AND (i.state = 'cleanup' OR generation.state = 'retired')
+        AND (i.state = 'cleanup' OR i.lease_expires_at <= ?)
       ORDER BY COALESCE(i.last_attempted_at, i.created_at), i.object_key
       LIMIT ?`,
-  ).bind(now.toISOString(), options.projectId ?? null, options.projectId ?? null, limit).all<R2CleanupIntentRow>();
+  ).bind(
+    now.toISOString(),
+    options.projectId ?? null,
+    options.projectId ?? null,
+    abandonedBefore,
+    limit,
+  ).all<R2CleanupIntentRow>();
   let cleaned = 0;
   let preserved = 0;
   let failed = 0;
@@ -1273,7 +1199,7 @@ export async function releaseProject(
   await dependencies.afterMarked?.(project.repositoryId);
 
   if (!(await lifecycleCleanupReady(db))) {
-    throw new Error(`project ${project.repositoryId} is waiting for the remote capability cutover and finishing schema`);
+    throw new Error(`project ${project.repositoryId} is waiting for the finishing lifecycle schema`);
   }
 
   project = await currentReleaseTarget(db, project);
@@ -1842,7 +1768,7 @@ export async function drainProjectReleases(
     // A repository that was never selected again has no import to consume its
     // capability quarantine. A current selection must retain the row until an
     // authoritative installation sync creates the fresh project. Remove only
-    // expired, project-free, unselected rows after the capability cutover.
+    // expired, project-free, unselected rows after the finishing schema.
     const expiredUnselectedQuarantine = `
       quarantine.reimport_not_before <= ?
       AND NOT EXISTS (
@@ -1931,7 +1857,7 @@ export async function drainProjectReleases(
     ).bind(attemptedAt, scope.repositoryId, scope.organizationId).run();
     try {
       if (!(await lifecycleCleanupReady(db))) {
-        throw new Error(`legacy cleanup ${scope.organizationId}/${scope.repositoryId} is waiting for the remote capability cutover and finishing schema`);
+        throw new Error(`legacy cleanup ${scope.organizationId}/${scope.repositoryId} is waiting for the finishing lifecycle schema`);
       }
       if (await cleanupLegacyScope(env, scope)) released += 1;
       else failed += 1;

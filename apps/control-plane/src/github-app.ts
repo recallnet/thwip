@@ -341,7 +341,7 @@ export async function deleteInstallation(
     await releaseSyncLease(env, installationId, owner);
   }
   // Successful uninstall removed its projects, authority, and staged snapshot.
-  // Once the remote capability cutover is complete, discard the now-expired
+  // Once the finishing schema is installed, discard the now-expired
   // repository authority identities as well. The bounded drainer repeats all
   // ownership predicates, so unrelated or newly active repositories survive.
   await drainRepositoryAuthorityLeases(env.DB as unknown as D1Like);

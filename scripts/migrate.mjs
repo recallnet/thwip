@@ -32,6 +32,7 @@ import {
 
 const PROJECT_LIFECYCLE_FINISH_MIGRATION = "0031_finish_github_repository_lifecycle.sql";
 const PROJECT_LIFECYCLE_REOPEN_MIGRATION = "0034_reopen_after_project_lifecycle.sql";
+const PROJECT_LIFECYCLE_COMPATIBILITY_WINDOW_MS = 60 * 60_000;
 
 export function migrationPlan(migrations, applied) {
   return migrationReleaseState(migrations, applied);
@@ -136,19 +137,20 @@ export async function applyMigrations({
     if (
       plan.after.includes(PROJECT_LIFECYCLE_FINISH_MIGRATION)
       && (
-        typeof health.projectLifecycle?.remoteCapabilitiesRetiredAt !== "string"
-        || health.projectLifecycle?.remoteCapabilityEvidenceComplete !== true
-        || health.projectLifecycle?.maintenanceMode !== true
+        typeof health.projectLifecycle?.workerActivatedAt !== "string"
+        || !Number.isFinite(Date.parse(health.projectLifecycle.workerActivatedAt))
+        || Date.parse(health.projectLifecycle.workerActivatedAt)
+          > Date.now() - PROJECT_LIFECYCLE_COMPATIBILITY_WINDOW_MS
+        || health.projectLifecycle?.maintenanceMode !== false
         || health.projectLifecycle?.backfillReady !== true
       )
     ) {
       throw new Error(
         [
-          "Refusing: the remote capability cutover has not been recorded.",
-          "Migration 0031 removes compatibility objects that an already-started previous Worker may still use.",
-          "Retire the old D1 database, R2 bucket binding, and GitHub App private key; record the reviewed evidence,",
-          "then confirm /health reports maintenanceMode=true, remoteCapabilitiesRetiredAt,",
-          "and remoteCapabilityEvidenceComplete=true plus backfillReady=true from the new D1 generation.",
+          "Refusing: the in-place lifecycle migration is not ready.",
+          "Migration 0031 requires the exact lifecycle-aware Worker to have served for at least one hour,",
+          "maintenanceMode=false, and the bounded project-id backfill to report backfillReady=true.",
+          "No database, bucket, or GitHub App key rotation is required.",
         ].join("\n"),
       );
     }
@@ -164,8 +166,6 @@ export async function applyMigrations({
         || !validDeploymentId(health.projectLifecycle?.workerDeploymentId)
         || !validDeploymentId(health.projectLifecycle?.verifierV3PredeployId)
         || health.projectLifecycle.workerDeploymentId === health.projectLifecycle.verifierV3PredeployId
-        || typeof health.projectLifecycle?.remoteCapabilitiesRetiredAt !== "string"
-        || health.projectLifecycle?.remoteCapabilityEvidenceComplete !== true
         || health.projectLifecycle?.maintenanceMode !== true
         || health.projectLifecycle?.backfillReady !== true
         || typeof health.projectLifecycle?.destructiveSchemaReadyAt !== "string"
@@ -177,7 +177,7 @@ export async function applyMigrations({
           "Refusing: the lifecycle schema is not ready to reopen traffic.",
           "Migration 0034 requires canonical main to report maintenanceMode=true, its own build SHA,",
           "and a deployment generation different from the one migration 0033 snapshotted,",
-          "complete capability evidence and backfill, the 0031 cleanup marker, and the 0032/0033 capabilities.",
+          "complete backfill, the 0031 cleanup marker, and the 0032/0033 capabilities.",
           "Keep maintenance active, finish the guarded migration phases, deploy this exact build, then retry.",
         ].join("\n"),
       );

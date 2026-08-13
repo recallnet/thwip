@@ -30,8 +30,11 @@ function markPostV3Deploy(test: TestD1): void {
 }
 
 describe("migration 0034: guarded project lifecycle reopen", () => {
-  it("is the only phase that clears maintenance after 0031, 0032, and 0033", () => {
+  it("clears maintenance in place without infrastructure-rotation evidence", () => {
     const test = fenced();
+    expect(test.raw.prepare(
+      "SELECT remote_capabilities_retired_at AS retired, remote_capability_evidence AS evidence FROM project_lifecycle_rollout",
+    ).get()).toEqual({ retired: null, evidence: null });
     markPostV3Deploy(test);
     applyAtomically(test);
     expect(test.raw.prepare("SELECT maintenance_mode AS maintenance FROM project_lifecycle_rollout").get())
@@ -56,41 +59,6 @@ describe("migration 0034: guarded project lifecycle reopen", () => {
     const test = fenced();
     markPostV3Deploy(test);
     test.raw.prepare("UPDATE project_lifecycle_rollout SET worker_build_sha = NULL").run();
-    expect(() => applyAtomically(test)).toThrow(/CHECK constraint failed/);
-    expect(test.raw.prepare("SELECT maintenance_mode AS maintenance FROM project_lifecycle_rollout").get())
-      .toEqual({ maintenance: 1 });
-  });
-
-  it("rolls back when the reviewed capability evidence is incomplete", () => {
-    const test = fenced();
-    markPostV3Deploy(test);
-    const evidence = JSON.parse(String(test.raw.prepare(
-      "SELECT remote_capability_evidence AS evidence FROM project_lifecycle_rollout",
-    ).get().evidence)) as Record<string, unknown>;
-    evidence["approvedBy"] = "   ";
-    test.raw.prepare("UPDATE project_lifecycle_rollout SET remote_capability_evidence = ?")
-      .run(JSON.stringify(evidence));
-    expect(() => applyAtomically(test)).toThrow(/CHECK constraint failed/);
-    expect(test.raw.prepare("SELECT maintenance_mode AS maintenance FROM project_lifecycle_rollout").get())
-      .toEqual({ maintenance: 1 });
-  });
-
-  it.each([
-    ["a non-text timestamp", (evidence: Record<string, unknown>) => {
-      (evidence["d1"] as Record<string, unknown>)["exportCompletedAt"] = 2451544.5;
-    }],
-    ["a boolean foreign-key count", (evidence: Record<string, unknown>) => {
-      (evidence["d1"] as Record<string, unknown>)["foreignKeyViolations"] = false;
-    }],
-  ])("rolls back for %s even when SQLite could coerce it", (_reason, mutate) => {
-    const test = fenced();
-    markPostV3Deploy(test);
-    const evidence = JSON.parse(String(test.raw.prepare(
-      "SELECT remote_capability_evidence AS evidence FROM project_lifecycle_rollout",
-    ).get().evidence)) as Record<string, unknown>;
-    mutate(evidence);
-    test.raw.prepare("UPDATE project_lifecycle_rollout SET remote_capability_evidence = ?")
-      .run(JSON.stringify(evidence));
     expect(() => applyAtomically(test)).toThrow(/CHECK constraint failed/);
     expect(test.raw.prepare("SELECT maintenance_mode AS maintenance FROM project_lifecycle_rollout").get())
       .toEqual({ maintenance: 1 });

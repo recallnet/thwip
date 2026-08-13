@@ -50,11 +50,10 @@ CREATE TABLE IF NOT EXISTS project_release_evidence_scopes (
   FOREIGN KEY (github_repository_id) REFERENCES project_release_jobs(github_repository_id) ON DELETE CASCADE
 );
 
--- R2 is an external capability, so a clock expiry cannot prove that a paused
--- put has stopped. Every intent names the bucket generation whose binding
--- started the write. A `writing` intent is drainable only after an operator has
--- deleted that generation's bucket and recorded the hard capability boundary.
--- A later deployment writes through one different active generation.
+-- Every R2 write records the storage generation that started it. The first
+-- generation names the existing bucket; the in-place finishing migration keeps
+-- it active. Abandoned intents are recovered after a bounded grace period, so
+-- project removal never requires replacing the bucket.
 CREATE TABLE IF NOT EXISTS project_r2_capability_generations (
   generation TEXT PRIMARY KEY,
   state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
@@ -76,7 +75,7 @@ VALUES ('phase-1-existing-bucket', 'active');
 -- project foreign key on purpose: cleanup must survive deletion of the project
 -- and release job. A live writer renews its lease. A writer that returned from
 -- put marks cleanup; an uncertain writing intent remains a hard fence until its
--- bucket generation is retired.
+-- renewable lease plus the bounded compatibility grace has elapsed.
 CREATE TABLE IF NOT EXISTS project_r2_cleanup_intents (
   object_key TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -444,11 +443,11 @@ CREATE TABLE IF NOT EXISTS project_write_leases (
 CREATE INDEX IF NOT EXISTS project_write_leases_expiry
   ON project_write_leases (github_repository_id, expires_at);
 
--- Rollout state is operational evidence, not repository history. Cleanup is
--- disabled until an operator has retired the old Worker's D1 database, R2
--- bucket, and GitHub App private key, then the finishing migration has installed the
--- incarnation-bound schema. Time elapsed after a deploy is not a capability
--- boundary: an HTTP invocation may remain alive while its client is connected.
+-- Rollout state is operational evidence, not repository history. The remote
+-- capability columns shipped in the additive migration but are no longer a
+-- cleanup prerequisite. They remain nullable for schema compatibility. The
+-- finishing migration runs in place after a one-hour deployment drain and the
+-- bounded project-id backfill.
 CREATE TABLE IF NOT EXISTS project_lifecycle_rollout (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   maintenance_mode INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_mode IN (0, 1)),
@@ -613,12 +612,10 @@ BEFORE INSERT ON queue_projects WHEN
 BEGIN SELECT RAISE(IGNORE); END;
 
 
--- A D1 export is coherent only after every old Worker invocation has lost the
--- ability to mutate the source database. These database-level triggers also
--- stop invocations that started before the lifecycle-aware Worker deployed.
--- The rollout row itself remains writable so an operator can enter maintenance
--- and record cutover evidence. Migration 0031 runs only against the new,
--- unexposed D1 generation and removes these temporary source-database guards.
+-- These database-level triggers provide the short maintenance fence while the
+-- repository-keyed tables are rebuilt in place. The rollout row itself remains
+-- writable so migration 0031 can enter maintenance atomically. No database
+-- export/import or replacement generation is required.
 CREATE TRIGGER project_lifecycle_maintenance_account_insert
 BEFORE INSERT ON "account" WHEN
   (SELECT maintenance_mode FROM project_lifecycle_rollout WHERE id = 1) = 1

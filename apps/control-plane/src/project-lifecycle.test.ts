@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import {
   applyMigration,
   testD1,
-  TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE,
   type TestD1,
 } from "../test/d1.js";
 import type { Env } from "./env.js";
@@ -36,24 +35,20 @@ function finishRollout(t: TestD1): void {
     .prepare(
       `UPDATE project_lifecycle_rollout
           SET worker_activated_at = '2000-01-01T00:00:00.000Z',
-              remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-              remote_capability_evidence = ?,
               destructive_schema_ready_at = '2000-01-01T00:00:00.000Z'
         WHERE id = 1`,
     )
-    .run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+    .run();
 }
 
 function authorizeFinishingMigration(t: TestD1): void {
   t.raw.prepare(
     `UPDATE project_lifecycle_rollout
-        SET maintenance_mode = 1,
+        SET maintenance_mode = 0,
             worker_activated_at = '2000-01-01T00:00:00.000Z',
-            remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-            remote_capability_evidence = ?,
             destructive_schema_ready_at = NULL
       WHERE id = 1`,
-  ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+  ).run();
 }
 
 function fixture() {
@@ -370,7 +365,7 @@ describe("GitHub App repository lifecycle", () => {
     expect(t.raw.prepare("SELECT COUNT(*) AS n FROM project_r2_cleanup_intents").get()).toEqual({ n: 0 });
   });
 
-  it("keeps an expired pre-put intent fenced until its R2 capability generation is retired", async () => {
+  it("keeps an expired pre-put intent fenced through the bounded abandoned-writer grace", async () => {
     const { t, env } = fixture();
     const oldKey = `project/${PROJECT}/org/${ORG}/repo/${REPO}/queue-decision/aa/paused`;
     const objects = new Set<string>();
@@ -388,47 +383,37 @@ describe("GitHub App repository lifecycle", () => {
         },
       },
     };
-    t.raw.prepare("DELETE FROM project_r2_capability_generations WHERE state = 'active'").run();
-    t.raw.prepare(
-      `UPDATE project_r2_capability_generations
-          SET state = 'active', retired_at = NULL, retirement_evidence = NULL
-        WHERE generation = 'phase-1-existing-bucket'`,
-    ).run();
     t.raw.prepare(
       `INSERT INTO project_r2_cleanup_intents
          (object_key, project_id, organization_id, github_repository_id,
           capability_generation, state, owner_token, lease_expires_at)
-       VALUES (?, ?, ?, ?, 'phase-1-existing-bucket', 'writing', 'paused-put', '2000-01-01T00:00:00.000Z')`,
+       VALUES (?, ?, ?, ?, 'phase-1-existing-bucket', 'writing', 'paused-put', '2030-01-01T00:00:00.000Z')`,
     ).run(oldKey, PROJECT, ORG, REPO);
 
-    // Time and a global drain cannot claim that a paused external put ended.
-    // Release remains fenced even though no object is visible yet.
-    await expect(drainR2CleanupIntents(lifecycleEnv as never)).resolves.toMatchObject({ attempted: 0 });
+    // Lease expiry alone cannot claim that a paused external put ended. Release
+    // remains fenced even though no object is visible yet.
+    await expect(drainR2CleanupIntents(lifecycleEnv as never, {
+      now: new Date("2030-01-01T00:30:00.000Z"),
+    })).resolves.toMatchObject({ attempted: 0 });
     await expect(reconcileInstalledProjects(lifecycleEnv as never, ORG, [])).rejects.toThrow(/R2 writes/);
     expect(t.raw.prepare("SELECT state FROM project_r2_cleanup_intents WHERE object_key = ?").get(oldKey)).toEqual({
       state: "writing",
     });
 
     // The original put now commits and its invocation terminates before the
-    // postcheck. The durable intent is still present, so the human cutover must
-    // copy this residue before it can delete the old bucket.
+    // postcheck. The durable exact-key intent still holds the release fence.
     objects.add(oldKey);
-    await expect(drainR2CleanupIntents(lifecycleEnv as never)).resolves.toMatchObject({ attempted: 0 });
+    await expect(drainR2CleanupIntents(lifecycleEnv as never, {
+      now: new Date("2030-01-01T00:59:59.999Z"),
+    })).resolves.toMatchObject({ attempted: 0 });
     await expect(reconcileInstalledProjects(lifecycleEnv as never, ORG, [])).rejects.toThrow(/R2 writes/);
 
-    // Deleting the old bucket is the only event that retires the put
-    // capability. Model its copied residue in the new binding, then prove
-    // bounded cleanup and release.
-    t.raw.prepare(
-      `UPDATE project_r2_capability_generations
-          SET state = 'retired', retired_at = '2000-01-01T01:00:00.000Z',
-              retirement_evidence = '{"bucket":"deleted"}'
-        WHERE generation = 'phase-1-existing-bucket'`,
-    ).run();
-    t.raw.prepare(
-      "INSERT INTO project_r2_capability_generations (generation, state) VALUES ('bucket:evidence-new', 'active')",
-    ).run();
-    await expect(drainR2CleanupIntents(lifecycleEnv as never)).resolves.toMatchObject({ cleaned: 1, failed: 0 });
+    // One hour after the renewable lease expired, the drainer may treat the
+    // writer as terminated. It deletes the exact old-incarnation key in the
+    // existing bucket and release can finish without replacing storage.
+    await expect(drainR2CleanupIntents(lifecycleEnv as never, {
+      now: new Date("2030-01-01T01:00:00.000Z"),
+    })).resolves.toMatchObject({ cleaned: 1, failed: 0 });
     await expect(reconcileInstalledProjects(lifecycleEnv as never, ORG, [])).resolves.toMatchObject({ released: 1 });
     expect(objects.has(oldKey)).toBe(false);
     expect(t.raw.prepare("SELECT COUNT(*) AS n FROM project_r2_cleanup_intents").get()).toEqual({ n: 0 });
@@ -738,7 +723,7 @@ describe("GitHub App repository lifecycle", () => {
     expect(fresh.id).not.toBe(PROJECT);
   });
 
-  it("independently collects only expired never-reselected quarantines after capability cutover", async () => {
+  it("independently collects only expired never-reselected quarantines after the finishing schema", async () => {
     const { t, env } = fixture();
     const now = new Date("2030-01-01T02:00:00.000Z");
     t.raw.prepare(
@@ -773,7 +758,7 @@ describe("GitHub App repository lifecycle", () => {
     ]);
   });
 
-  it("keeps the release fence until remote capabilities and the finishing schema are proven", async () => {
+  it("keeps the release fence until the in-place finishing schema is installed", async () => {
     const { t, env, deleted } = fixture();
     t.raw.prepare(
       `UPDATE project_lifecycle_rollout
@@ -796,84 +781,21 @@ describe("GitHub App repository lifecycle", () => {
     expect(t.raw.prepare("SELECT COUNT(*) AS count FROM projects WHERE id = ?").get(PROJECT)).toEqual({ count: 1 });
     expect(deleted).toEqual([]);
 
-    // A clock advance cannot unlock cleanup. Only the explicit cutover record
-    // plus the finishing migration can do that.
+    // A clock advance cannot unlock cleanup by itself. Migration 0031 must
+    // install the mandatory incarnation schema and record its marker.
     await expect(
       reconcileInstalledProjects(env, ORG, [], {
         now: () => new Date(deployedAt.getTime() + 365 * 24 * 60 * 60_000),
       }),
     ).resolves.toEqual({ released: 0, imported: 0 });
-    t.raw.prepare(
-      `UPDATE project_lifecycle_rollout
-          SET remote_capabilities_retired_at = ?,
-              remote_capability_evidence = '{"r2":"old-bucket-deleted","github":"old-key-rejected"}',
-              destructive_schema_ready_at = ?
-        WHERE id = 1`,
-    ).run(deployedAt.toISOString(), deployedAt.toISOString());
-    await expect(reconcileInstalledProjects(env, ORG, [])).resolves.toEqual({ released: 0, imported: 0 });
-    const sameD1Evidence = JSON.parse(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE) as {
-      d1: { oldDatabase: string; newDatabase: string };
-    };
-    sameD1Evidence.d1.newDatabase = sameD1Evidence.d1.oldDatabase;
-    t.raw.prepare(
-      `UPDATE project_lifecycle_rollout
-          SET remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-              remote_capability_evidence = ?,
-              destructive_schema_ready_at = '2000-01-01T01:00:00.000Z'
-        WHERE id = 1`,
-    ).run(JSON.stringify(sameD1Evidence));
-    await expect(projectLifecycleRollout(t.db)).resolves.toMatchObject({
-      remoteCapabilityEvidenceComplete: false,
-      cleanupReady: false,
-    });
-    for (const mutate of [
-      (evidence: any) => { evidence.r2.copyCompletedAt = "2000-01-01T00:01:00.000Z"; },
-      (evidence: any) => { evidence.d1.importCompletedAt = "2000-01-01T00:09:00.000Z"; },
-      (evidence: any) => { evidence.github.newKeyAcceptedAt = "2000-01-01T01:00:01.000Z"; },
-    ]) {
-      const invalid = JSON.parse(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
-      mutate(invalid);
-      t.raw.prepare(
-        `UPDATE project_lifecycle_rollout
-            SET remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-                remote_capability_evidence = ?
-          WHERE id = 1`,
-      ).run(JSON.stringify(invalid));
-      await expect(projectLifecycleRollout(t.db)).resolves.toMatchObject({
-        remoteCapabilityEvidenceComplete: false,
-        cleanupReady: false,
-      });
-    }
-    t.raw.prepare(
-      `UPDATE project_lifecycle_rollout
-          SET remote_capabilities_retired_at = '2099-01-01T00:00:00.000Z',
-              remote_capability_evidence = ?
-        WHERE id = 1`,
-    ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
-    await expect(projectLifecycleRollout(t.db)).resolves.toMatchObject({
-      remoteCapabilityEvidenceComplete: false,
-      cleanupReady: false,
-    });
-    const prematureTokenEvidence = JSON.parse(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE) as {
-      github: { oldInstallationTokensExpiredAt: string; oldInstallationTokenRejectedAt: string };
-    };
-    prematureTokenEvidence.github.oldInstallationTokensExpiredAt = "2000-01-01T00:59:59.000Z";
-    prematureTokenEvidence.github.oldInstallationTokenRejectedAt = "2000-01-01T00:59:59.000Z";
-    t.raw.prepare(
-      `UPDATE project_lifecycle_rollout
-          SET remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-              remote_capability_evidence = ?,
-              destructive_schema_ready_at = '2000-01-01T01:00:00.000Z'
-        WHERE id = 1`,
-    ).run(JSON.stringify(prematureTokenEvidence));
-    await expect(projectLifecycleRollout(t.db)).resolves.toMatchObject({
-      remoteCapabilityEvidenceComplete: false,
-      cleanupReady: false,
-    });
     await expect(reconcileInstalledProjects(env, ORG, [])).resolves.toEqual({ released: 0, imported: 0 });
     finishRollout(t);
+    await expect(projectLifecycleRollout(t.db)).resolves.toMatchObject({
+      cleanupReady: true,
+    });
 
-    // Model old-bucket residue present when the proven cutover allows cleanup.
+    // Model old residue in the existing bucket when the finishing schema
+    // allows cleanup.
     (env.EVIDENCE as unknown as { list(options: { prefix: string }): Promise<unknown> }).list = vi.fn()
       .mockImplementation(async ({ prefix }) => ({
         objects: prefix === `org/${ORG}/repo/${REPO}/`
@@ -929,8 +851,7 @@ describe("GitHub App repository lifecycle", () => {
     expect(t.raw.prepare(
       "SELECT generation, state FROM project_r2_capability_generations ORDER BY generation",
     ).all()).toEqual([
-      { generation: "bucket:evidence-new", state: "active" },
-      { generation: "phase-1-existing-bucket", state: "retired" },
+      { generation: "phase-1-existing-bucket", state: "active" },
     ]);
   });
 
@@ -992,7 +913,7 @@ describe("GitHub App repository lifecycle", () => {
     )).toMatchObject({ notnull: 0 });
   }, 30_000);
 
-  it("refuses the finishing migration without the recorded capability cutover", () => {
+  it("refuses the finishing migration before the Worker compatibility window", () => {
     const t = testD1({ upTo: "0030_github_repository_lifecycle.sql" });
     open.push(t);
     applyMigration(t.raw, "0030_github_repository_lifecycle.sql");
@@ -1142,7 +1063,7 @@ describe("GitHub App repository lifecycle", () => {
     expect(t.raw.pragma("foreign_key_check")).toEqual([]);
   });
 
-  it("fences every old D1 table mutation before export and removes the fence only in the new generation", () => {
+  it("fences every old D1 table mutation and keeps traffic closed through the in-place rebuild", () => {
     const t = testD1({ upTo: "0030_github_repository_lifecycle.sql" });
     open.push(t);
     t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, '123', 'legacy')").run(ORG);
@@ -1171,12 +1092,8 @@ describe("GitHub App repository lifecycle", () => {
     }
 
     t.raw.prepare(
-      `UPDATE project_lifecycle_rollout
-          SET maintenance_mode = 1,
-              remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-              remote_capability_evidence = ?
-        WHERE id = 1`,
-    ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+      "UPDATE project_lifecycle_rollout SET maintenance_mode = 1 WHERE id = 1",
+    ).run();
     expect(() => t.raw.prepare("UPDATE queue_state SET document = '{\"old\":true}' WHERE github_repository_id = ?").run(REPO))
       .toThrow("project lifecycle maintenance is active");
     expect(() => t.raw.prepare("DELETE FROM queue_state WHERE github_repository_id = ?").run(REPO))
@@ -1186,9 +1103,9 @@ describe("GitHub App repository lifecycle", () => {
     ).run(REPO)).toThrow("project lifecycle maintenance is active");
     expect(t.raw.prepare("SELECT document FROM queue_state WHERE github_repository_id = ?").get(REPO)).toEqual({ document: "{}" });
 
-    // This models the imported, still-fenced copy. Migration 0031 removes the
-    // copied source guards before its table rebuilds. The Worker-level gate
-    // remains active until 0034 reopens traffic.
+    // Migration 0031 removes the source guards before its in-place table
+    // rebuilds. The Worker-level gate remains active until 0034 reopens
+    // traffic.
     authorizeFinishingMigration(t);
     applyMigration(t.raw, "0031_finish_github_repository_lifecycle.sql");
     expect(t.raw.prepare("SELECT maintenance_mode, destructive_schema_ready_at FROM project_lifecycle_rollout").get())

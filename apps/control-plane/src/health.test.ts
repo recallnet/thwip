@@ -68,8 +68,6 @@ describe("the public health signal", () => {
       projectLifecycle: {
         maintenanceMode: false,
         workerActivatedAt: expect.any(String),
-        remoteCapabilitiesRetiredAt: null,
-        remoteCapabilityEvidenceComplete: false,
         destructiveSchemaReadyAt: null,
         cleanupReady: false,
       },
@@ -127,7 +125,7 @@ describe("the public health signal", () => {
     expect(retry).not.toHaveBeenCalled();
   });
 
-  it("serves only health and schema while the D1 generation is fenced", async () => {
+  it("serves only health and schema during the in-place lifecycle rebuild", async () => {
     opened = testD1({ upTo: "0031_finish_github_repository_lifecycle.sql" });
     const pair = await generateKeyPair("ES256", { extractable: true });
     const privateJwk = {

@@ -62,8 +62,6 @@ function reopenHealth(overrides = {}) {
       workerBuildSha: SHA,
       workerDeploymentId: "00000000-0000-4000-8000-000000000002",
       verifierV3PredeployId: "00000000-0000-4000-8000-000000000001",
-      remoteCapabilitiesRetiredAt: "2026-08-12T11:00:00.000Z",
-      remoteCapabilityEvidenceComplete: true,
       maintenanceMode: true,
       backfillReady: true,
       destructiveSchemaReadyAt: "2026-08-12T12:00:00.000Z",
@@ -173,31 +171,28 @@ describe("applying a migration plan", () => {
     expect(deps.run).not.toHaveBeenCalled();
   });
 
-  it("refuses the lifecycle finishing migration until remote capabilities are explicitly retired", async () => {
+  it("refuses the lifecycle finishing migration before the one-hour compatibility window", async () => {
     const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
       buildSha: SHA,
         projectLifecycle: {
         maintenanceMode: false,
-        workerActivatedAt: "2026-08-12T10:00:00.000Z",
-        remoteCapabilitiesRetiredAt: null,
-        remoteCapabilityEvidenceComplete: false,
+        workerActivatedAt: new Date().toISOString(),
+        backfillReady: true,
         destructiveSchemaReadyAt: null,
         cleanupReady: false,
       },
     });
     deps.migrations = lifecycleMigrations;
-    await expect(applyMigrations(deps)).rejects.toThrow(/remote capability cutover has not been recorded/);
+    await expect(applyMigrations(deps)).rejects.toThrow(/served for at least one hour/);
     expect(deps.run).not.toHaveBeenCalled();
   });
 
-  it("applies the lifecycle finishing migration after the exact Worker and capability cutover are confirmed", async () => {
+  it("applies the lifecycle finishing migration in place after the Worker window and backfill", async () => {
     const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
       buildSha: SHA,
       projectLifecycle: {
-        maintenanceMode: true,
+        maintenanceMode: false,
         workerActivatedAt: "2026-08-12T10:00:00.000Z",
-        remoteCapabilitiesRetiredAt: "2026-08-12T11:00:00.000Z",
-        remoteCapabilityEvidenceComplete: true,
         backfillReady: true,
         destructiveSchemaReadyAt: null,
         cleanupReady: false,
@@ -211,21 +206,19 @@ describe("applying a migration plan", () => {
     expect(deps.run).toHaveBeenCalledWith(["0031_finish_github_repository_lifecycle.sql"]);
   });
 
-  it("refuses the finishing migration while the new D1 generation is not fenced", async () => {
+  it("refuses the finishing migration if maintenance is already active", async () => {
     const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
       buildSha: SHA,
       projectLifecycle: {
-        maintenanceMode: false,
+        maintenanceMode: true,
         workerActivatedAt: "2026-08-12T10:00:00.000Z",
-        remoteCapabilitiesRetiredAt: "2026-08-12T11:00:00.000Z",
-        remoteCapabilityEvidenceComplete: true,
         backfillReady: true,
         destructiveSchemaReadyAt: null,
         cleanupReady: false,
       },
     });
     deps.migrations = lifecycleMigrations;
-    await expect(applyMigrations(deps)).rejects.toThrow(/maintenanceMode=true/);
+    await expect(applyMigrations(deps)).rejects.toThrow(/maintenanceMode=false/);
     expect(deps.run).not.toHaveBeenCalled();
   });
 
@@ -259,7 +252,7 @@ describe("applying a migration plan", () => {
     }],
     ["the wrong selected phase", { schema: { ...reopenHealth().schema, selected: [] } }],
     ["an open traffic fence", { projectLifecycle: { ...reopenHealth().projectLifecycle, maintenanceMode: false } }],
-    ["incomplete cleanup evidence", { projectLifecycle: { ...reopenHealth().projectLifecycle, cleanupReady: false } }],
+    ["incomplete cleanup readiness", { projectLifecycle: { ...reopenHealth().projectLifecycle, cleanupReady: false } }],
   ])("refuses 0034 for %s", async (_reason, overrides) => {
     const deps = dependencies(
       reopenMigrations.slice(0, 3).map((migration) => migration.name),
