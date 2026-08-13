@@ -1,6 +1,13 @@
-import { envelopeDigest, parseMergeIntent, parseTransitionRecord, recordDigest } from "@thwip/queue-protocol";
+import {
+  envelopeDigest,
+  parseMergeIntent,
+  parseTransitionRecord,
+  QUEUE_PREDICATE_TYPES,
+  recordDigest,
+} from "@thwip/queue-protocol";
 import { transitionKindOf } from "@thwip/queue-domain";
 import type { GitSubject, MergeIntentV1, MergeMethod, Sha256, VerifiedExecutionV1 } from "@thwip/queue-protocol";
+import type { TransitionRecordKind } from "@thwip/queue-protocol";
 import {
   buildMergeIntent,
   buildReusedProofRecord,
@@ -13,6 +20,7 @@ import { proofShortfall, type ProofBinding } from "./work-receipt.js";
 import type { Signer, SignedRecord } from "./evidence.js";
 import { mergeCommitMessage, mergeCommitTitle } from "./merge-commit.js";
 import type { D1Like } from "./projection.js";
+import { verifyServiceSignature } from "../service-keys.js";
 
 /**
  * The queue's own signed records, for a merge that rested on the head's proof.
@@ -712,6 +720,362 @@ export async function durableTransitionForAttempt(
     queueAttemptId: row.queueAttemptId,
     recordKind: row.recordKind,
   };
+}
+
+/**
+ * Find the one durable chain link made by an attempt when its resulting commit
+ * is not carried by the merge-operation row.
+ *
+ * A signed intent names the integrated candidate, not necessarily the merge
+ * commit GitHub created from it. Using that candidate as `link.base_sha` made a
+ * resolved operation look unrecorded on every heartbeat. Candidate rows come
+ * only from the joined durable index, then pass the same strict byte validation
+ * as an exact lookup before they count.
+ */
+export async function durableTransitionForAttemptId(
+  db: D1Like,
+  input: { repositoryId: string; baseRef: string; attemptId: string },
+): ReturnType<typeof durableTransitionForAttempt> {
+  const candidates = await db
+    .prepare(
+      `SELECT DISTINCT link.base_sha AS mergeSha
+         FROM queue_transitions_index AS link
+         JOIN queue_attestations AS record ON record.digest = link.digest
+        WHERE link.github_repository_id = ? AND link.base_ref = ?
+          AND record.github_repository_id = ? AND record.base_ref = ?
+          AND record.attempt_id = ?
+          AND record.transition_sequence = link.transition_sequence`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.repositoryId, input.baseRef, input.attemptId)
+    .all<{ mergeSha: string }>();
+  for (const candidate of candidates.results) {
+    const durable = await durableTransitionForAttempt(db, { ...input, mergeSha: candidate.mergeSha });
+    if (durable !== null) return durable;
+  }
+  return null;
+}
+
+/**
+ * The durable signed merge record for one pull request and exact merge commit.
+ *
+ * Reconciliation asks this before it signs anything. The join requires the
+ * queue's durable link as well as an attestation row, and the parsed bytes must
+ * agree with both rows. An unpositioned duplicate, malformed row, movement
+ * record, or record for another pull request is not evidence for this entry.
+ */
+export interface DurableMergeRecord {
+  readonly attemptId: string;
+  readonly pullRequestNumber: number;
+  readonly digest: string;
+  readonly transitionSequence: number;
+  readonly queueAttemptId: string | null;
+}
+
+/**
+ * The authentic durable merge record for one exact commit.
+ *
+ * Every row discovered from storage passes the service signature check. The
+ * writer cannot use its in-memory copy as a trust shortcut: storage is the
+ * durable boundary this answer claims to validate.
+ */
+export async function durableMergeRecordForCommit(
+  db: D1Like,
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    mergeSha: string;
+    pullRequestNumber?: number;
+  },
+): Promise<DurableMergeRecord | null> {
+  const rows = await db
+    .prepare(
+      `SELECT link.digest, link.kind AS linkKind, link.queue_epoch AS queueEpoch,
+              link.transition_sequence AS transitionSequence,
+              link.prior_digest AS priorDigest, link.base_sha AS baseSha,
+              link.attempt_id AS queueAttemptId, record.kind AS recordKind,
+              record.attempt_id AS recordAttemptId,
+              record.transition_sequence AS recordTransitionSequence,
+              record.bytes, record.jws
+         FROM queue_transitions_index AS link
+         JOIN queue_attestations AS record ON record.digest = link.digest
+        WHERE link.github_repository_id = ? AND link.base_ref = ?
+          AND record.github_repository_id = ? AND record.base_ref = ?
+          AND link.base_sha = ?
+        ORDER BY link.queue_epoch DESC, link.transition_sequence DESC`,
+    )
+    .bind(
+      input.repositoryId,
+      input.baseRef,
+      input.repositoryId,
+      input.baseRef,
+      input.mergeSha,
+    )
+    .all<{
+      digest: string;
+      linkKind: string;
+      queueEpoch: number;
+      transitionSequence: number;
+      priorDigest: string | null;
+      baseSha: string;
+      queueAttemptId: string | null;
+      recordKind: string;
+      recordAttemptId: string | null;
+      recordTransitionSequence: number | null;
+      bytes: string;
+      jws: string;
+    }>();
+
+  for (const row of rows.results) {
+    let stored: unknown;
+    try {
+      stored = JSON.parse(row.bytes) as unknown;
+    } catch {
+      continue;
+    }
+    const parsed = parseTransitionRecord(stored);
+    if (!parsed.ok) continue;
+    const record = parsed.value;
+    const facts =
+      record.kind === "verified-merge"
+        ? record.verifiedMerge
+        : record.kind === "reused-proof-merge"
+          ? record.reusedProof
+          : record.kind === "candidate-verified-merge"
+            ? record.candidateVerified
+            : record.kind === "override-merge"
+              ? record.override
+              : null;
+    if (facts === null) continue;
+    const digest = await envelopeDigest(new TextEncoder().encode(row.bytes));
+    if (
+      digest !== row.digest ||
+      !(await verifyServiceSignature(
+        db,
+        new TextEncoder().encode(row.bytes),
+        row.jws,
+        QUEUE_PREDICATE_TYPES.transitionRecord,
+      )) ||
+      record.repositoryId !== input.repositoryId ||
+      record.baseRef !== input.baseRef ||
+      record.after.baseSha !== input.mergeSha ||
+      (input.pullRequestNumber !== undefined && facts.pullRequestNumber !== input.pullRequestNumber) ||
+      facts.attemptId !== row.recordAttemptId ||
+      transitionKindOf(record.kind) !== row.linkKind ||
+      record.kind !== row.recordKind ||
+      record.queueEpoch !== row.queueEpoch ||
+      record.transitionSequence !== row.transitionSequence ||
+      record.previousTransitionDigest !== row.priorDigest ||
+      row.baseSha !== input.mergeSha ||
+      (row.recordTransitionSequence !== null && row.recordTransitionSequence !== row.transitionSequence) ||
+      (row.queueAttemptId !== null && row.queueAttemptId !== facts.attemptId)
+    ) {
+      continue;
+    }
+    const placed = await placeAttestationInChain(db, {
+      digest: row.digest,
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      attemptId: facts.attemptId,
+      transitionSequence: row.transitionSequence,
+    });
+    if (placed) {
+      return {
+        attemptId: facts.attemptId,
+        pullRequestNumber: facts.pullRequestNumber,
+        digest: row.digest,
+        transitionSequence: row.transitionSequence,
+        queueAttemptId: row.queueAttemptId,
+      };
+    }
+  }
+  return null;
+}
+
+/** The authentic durable merge record for one pull request and exact commit. */
+export async function durableMergeRecordForPullRequest(
+  db: D1Like,
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    pullRequestNumber: number;
+    mergeSha: string;
+  },
+): Promise<DurableMergeRecord | null> {
+  return durableMergeRecordForCommit(db, input);
+}
+
+/**
+ * Find an authentic durable merge record when a settled operation retained the
+ * pull request number but not GitHub's resulting commit SHA.
+ *
+ * A pull request has one terminal merge. Candidate commits come only from the
+ * durable queue index and the full record/link/signature validator above still
+ * decides whether any candidate counts.
+ */
+export async function durableMergeRecordForPullRequestNumber(
+  db: D1Like,
+  input: { repositoryId: string; baseRef: string; pullRequestNumber: number },
+): Promise<DurableMergeRecord | null> {
+  const candidates = await db
+    .prepare(
+      `SELECT DISTINCT link.base_sha AS mergeSha
+         FROM queue_transitions_index AS link
+         JOIN queue_attestations AS record ON record.digest = link.digest
+        WHERE link.github_repository_id = ? AND link.base_ref = ?
+          AND record.github_repository_id = ? AND record.base_ref = ?
+          AND record.transition_sequence = link.transition_sequence
+          AND COALESCE(
+            json_extract(record.bytes, '$.verifiedMerge.pullRequestNumber'),
+            json_extract(record.bytes, '$.reusedProof.pullRequestNumber'),
+            json_extract(record.bytes, '$.candidateVerified.pullRequestNumber'),
+            json_extract(record.bytes, '$.override.pullRequestNumber')
+          ) = ?`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.repositoryId, input.baseRef, input.pullRequestNumber)
+    .all<{ mergeSha: string }>();
+  for (const candidate of candidates.results) {
+    const durable = await durableMergeRecordForPullRequest(db, { ...input, mergeSha: candidate.mergeSha });
+    if (durable !== null) return durable;
+  }
+  return null;
+}
+
+/** Whether queue authority has projected a link for this exact digest. */
+export async function queueTransitionLinkForDigest(
+  db: D1Like,
+  input: { repositoryId: string; baseRef: string; digest: string },
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS found FROM queue_transitions_index
+        WHERE github_repository_id = ? AND base_ref = ? AND digest = ?
+        LIMIT 1`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.digest)
+    .first<{ found: number }>();
+  return row !== null;
+}
+
+/**
+ * Reuse an exact merge record that was signed and stored before its queue link
+ * could commit.
+ *
+ * A crash between those writes must not make the retry sign new bytes. Only an
+ * authentic service signature whose complete subject matches the record this
+ * retry would build can be staged; a stale chain position or different commit
+ * remains inert evidence.
+ */
+export async function stagedMergeRecordForAttempt(
+  db: D1Like,
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    pullRequestNumber: number;
+    mergeSha: string;
+    mergeTree: string;
+    parentShas: readonly string[];
+    beforeBaseSha: string;
+    beforeTree: string | null;
+    queueEpoch: number;
+    transitionSequence: number;
+    priorDigest: string | null;
+  },
+): Promise<{ attemptId: string; digest: string; recordKind: TransitionRecordKind } | null> {
+  const rows = await db
+    .prepare(
+      `SELECT digest, kind, attempt_id AS attemptId, bytes, jws
+         FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ?
+          AND transition_sequence IS NULL
+          AND kind IN ('verified-merge', 'reused-proof-merge', 'candidate-verified-merge', 'override-merge')
+          AND json_extract(bytes, '$.after.baseSha') = ?
+        ORDER BY created_at, digest`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.mergeSha)
+    .all<{ digest: string; kind: string; attemptId: string; bytes: string; jws: string }>();
+
+  for (const row of rows.results) {
+    let stored: unknown;
+    try {
+      stored = JSON.parse(row.bytes) as unknown;
+    } catch {
+      continue;
+    }
+    const parsed = parseTransitionRecord(stored);
+    if (!parsed.ok) continue;
+    const record = parsed.value;
+    const facts =
+      record.kind === "verified-merge"
+        ? record.verifiedMerge
+        : record.kind === "reused-proof-merge"
+          ? record.reusedProof
+          : record.kind === "candidate-verified-merge"
+            ? record.candidateVerified
+            : record.kind === "override-merge"
+              ? record.override
+              : null;
+    if (facts === null) continue;
+    const bytes = new TextEncoder().encode(row.bytes);
+    if (
+      (await envelopeDigest(bytes)) !== row.digest ||
+      !(await verifyServiceSignature(db, bytes, row.jws, QUEUE_PREDICATE_TYPES.transitionRecord)) ||
+      record.repositoryId !== input.repositoryId ||
+      record.baseRef !== input.baseRef ||
+      record.kind !== row.kind ||
+      record.queueEpoch !== input.queueEpoch ||
+      record.transitionSequence !== input.transitionSequence ||
+      record.previousTransitionDigest !== input.priorDigest ||
+      record.before.baseSha !== input.beforeBaseSha ||
+      record.before.treeOid !== input.beforeTree ||
+      record.after.baseSha !== input.mergeSha ||
+      record.after.treeOid !== input.mergeTree ||
+      !record.after.parentsComplete ||
+      JSON.stringify(record.after.parentOids) !== JSON.stringify(input.parentShas) ||
+      facts.attemptId !== row.attemptId ||
+      facts.pullRequestNumber !== input.pullRequestNumber ||
+      facts.candidateSha !== input.mergeSha ||
+      facts.candidateTreeOid !== input.mergeTree ||
+      facts.headSha !== input.parentShas[1]
+    ) {
+      continue;
+    }
+    return { attemptId: facts.attemptId, digest: row.digest, recordKind: record.kind };
+  }
+  return null;
+}
+
+/**
+ * Resolve the only two reusable states for one exact pull-request merge.
+ *
+ * A linked record wins, regardless of which attempt wrote it. If no authority
+ * link exists, an optional complete subject may recover authentic bytes staged
+ * by any attempt at the current chain position. Callers sign only when this
+ * returns null.
+ */
+export async function recoverExactMergeRecord(
+  db: D1Like,
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    pullRequestNumber: number;
+    mergeSha: string;
+    staged?: Omit<Parameters<typeof stagedMergeRecordForAttempt>[1], "repositoryId" | "baseRef" | "mergeSha">;
+  },
+): Promise<
+  | { status: "linked"; attemptId: string; digest: string; transitionSequence: number; queueAttemptId: string | null }
+  | { status: "staged"; attemptId: string; digest: string; recordKind: TransitionRecordKind }
+  | null
+> {
+  const linked = await durableMergeRecordForPullRequest(db, input);
+  if (linked !== null) return { status: "linked", ...linked };
+  if (input.staged === undefined) return null;
+  const staged = await stagedMergeRecordForAttempt(db, {
+    repositoryId: input.repositoryId,
+    baseRef: input.baseRef,
+    mergeSha: input.mergeSha,
+    ...input.staged,
+  });
+  return staged === null ? null : { status: "staged", ...staged };
 }
 
 /**

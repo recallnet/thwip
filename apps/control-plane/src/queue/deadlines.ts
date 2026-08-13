@@ -99,6 +99,20 @@ export interface ReconciliationReads {
   sleep?(ms: number): Promise<void>;
 }
 
+/** The full pull-request state needed by the bounded terminal-entry sweep. */
+export interface TerminalPullRequestReads {
+  pullRequestState(
+    env: QueueRouteEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{
+    state: "open" | "closed";
+    merged: boolean;
+    mergeCommitSha: string | null;
+    headSha: string;
+  } | null>;
+}
+
 export type ReconciliationOutcome =
   | { readonly settled: "merged"; readonly attemptId: string; readonly mergeSha: string }
   | { readonly settled: "not-merged"; readonly attemptId: string; readonly reason: string }
@@ -145,7 +159,24 @@ async function githubJson<T>(env: QueueRouteEnv, repositoryId: string, path: str
  * entry point. A fix that only works once somebody remembers to pass a port is
  * not deployed.
  */
-export const GITHUB_READS: ReconciliationReads = {
+export const GITHUB_READS: ReconciliationReads & TerminalPullRequestReads = {
+  async pullRequestState(env, repositoryId, pullRequestNumber) {
+    const pull = await githubJson<{
+      state?: string;
+      merged?: boolean;
+      merge_commit_sha?: string | null;
+      head?: { sha?: string };
+    }>(env, repositoryId, `/pulls/${pullRequestNumber}`);
+    const state = pull?.state;
+    const headSha = pull?.head?.sha;
+    if ((state !== "open" && state !== "closed") || typeof headSha !== "string") return null;
+    return {
+      state,
+      merged: pull?.merged === true,
+      mergeCommitSha: typeof pull?.merge_commit_sha === "string" ? pull.merge_commit_sha : null,
+      headSha,
+    };
+  },
   async pullRequestMergeState(env, repositoryId, pullRequestNumber) {
     const pull = await githubJson<{ merged?: boolean; merge_commit_sha?: string | null }>(
       env,

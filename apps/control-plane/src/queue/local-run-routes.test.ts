@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import { queueRouteDeps } from "../../test/queue-deps.js";
 import { signSsh } from "@thwip/sshsig";
 import { testD1 } from "../../test/d1.js";
@@ -50,6 +51,8 @@ let keyDir: string;
 let keyPath: string;
 let publicKey: string;
 let deviceKeyId: string;
+let serviceSigningKey: CryptoKey;
+let servicePublicJwk: Awaited<ReturnType<typeof exportJWK>>;
 
 beforeAll(async () => {
   keyDir = await mkdtemp(join(tmpdir(), "thwip-local-run-"));
@@ -57,6 +60,9 @@ beforeAll(async () => {
   await execFileP("ssh-keygen", ["-t", "ed25519", "-f", keyPath, "-N", "", "-C", "thwip-test"]);
   publicKey = (await readFile(`${keyPath}.pub`, "utf8")).trim();
   deviceKeyId = await sha256Fingerprint(publicKey);
+  const servicePair = await generateKeyPair("ES256", { extractable: true });
+  serviceSigningKey = servicePair.privateKey;
+  servicePublicJwk = { ...(await exportJWK(servicePair.publicKey)), kid: "local-run-routes-test", alg: "ES256" };
 });
 
 afterAll(async () => {
@@ -88,6 +94,9 @@ function env(): QueueRouteEnv {
   open.push(t);
   raw = t.raw;
   seed();
+  raw
+    .prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?)")
+    .run(servicePublicJwk.kid, JSON.stringify(servicePublicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -161,7 +170,10 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}, principalId 
               message: `feat: work\n\nthwip-proof: ${CARRIER}\n`,
             },
       proofCheckRunId: async () => "998877",
-      signRecordBytes: async () => "eyJhbGciOiJFUzI1NiJ9.payload.signature",
+      signRecordBytes: async (_environment: unknown, bytes: Uint8Array, typ: string) =>
+        new CompactSign(bytes)
+          .setProtectedHeader({ alg: "ES256", kid: servicePublicJwk.kid, typ })
+          .sign(serviceSigningKey),
       baseContainsSha: async () => true,
       ...over,
     }) as Parameters<typeof queueRoutes>[0],
@@ -258,7 +270,7 @@ describe("claiming the turn as the machine that will run it", () => {
       requiredSuites: ["lint"],
     });
     expect(claimed.assignmentDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(claimed.assignment).toBe("eyJhbGciOiJFUzI1NiJ9.payload.signature");
+    expect(claimed.assignment.split(".")).toHaveLength(3);
     expect(claimed.executionSeconds).toBeGreaterThan(0);
   });
 
