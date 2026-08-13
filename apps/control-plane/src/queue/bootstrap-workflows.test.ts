@@ -3,7 +3,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
-import { QUEUE_ACTION_REF, setupPullRequestBody, setupPullRequestFiles, SETUP_BRANCH } from "./bootstrap-workflows.js";
+import {
+  QUEUE_ACTION_REF,
+  setupPullRequestBody,
+  setupPullRequestFiles,
+  SETUP_BRANCH,
+  sourceRepositoryRequiredWorkflowFile,
+} from "./bootstrap-workflows.js";
 import { PROOF_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -27,7 +33,7 @@ function file(path: string): string {
 
 describe("setupPullRequestFiles", () => {
   it("pins new repositories to the current immutable Action release", () => {
-    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@2c47d61a145c2a7cc245326ccae090c279378962");
+    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@e8e060530f938e415e8f651a081ce1707adb2ff0");
   });
 
   it("offers only the workflows while inheriting organization defaults", () => {
@@ -184,25 +190,15 @@ describe("the generated workflows under the workflow lint", () => {
 });
 
 describe("drift against this repository's own workflows", () => {
-  /**
-   * The generated proof workflow is a copy of the one this repository runs, so a
-   * change to the original that never reaches the template would enrol new
-   * repositories on a workflow that no longer matches the check the ruleset
-   * requires. Names are what the ruleset pins, so names are what this compares.
-   */
-  it("agrees with .github/workflows/thwip-required.yml on the names the ruleset pins", () => {
-    const live = parse(readFileSync(join(repoRoot, ".github/workflows/thwip-required.yml"), "utf8")) as {
-      name: string;
-      jobs: Record<string, { name: string }>;
-    };
-    const generated = parse(file(".github/workflows/thwip-required.yml")) as {
-      name: string;
-      jobs: Record<string, { name: string }>;
-    };
-    expect(generated.name).toBe(live.name);
-    expect(Object.keys(generated.jobs)).toEqual(Object.keys(live.jobs));
-    expect(generated.jobs["thwip"]?.name).toBe(WORKFLOW_CHECK);
-    expect(generated.jobs["thwip"]?.name).toBe(live.jobs["thwip"]?.name);
+  /** Keep the source-repository variant exact without exposing it to adopters. */
+  it("keeps this repository on the exact managed proof workflow", () => {
+    const live = readFileSync(join(repoRoot, ".github/workflows/thwip-required.yml"), "utf8");
+    const generated = sourceRepositoryRequiredWorkflowFile({
+      endpoint: PRODUCTION_ENDPOINT,
+      actionRef: QUEUE_ACTION_REF,
+    }).content;
+    expect(generated).toContain("uses: ./");
+    expect(live).toBe(generated);
   });
 
   it("keeps this repository on the exact reviewed v3 workflow after cutover", () => {

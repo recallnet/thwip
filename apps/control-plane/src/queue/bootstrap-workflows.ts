@@ -45,7 +45,7 @@ export const SETUP_PULL_REQUEST_TITLE = "Set up Thwip Queue" as const;
  * drift here means an adopted repository running a different action from the one
  * this repository tests.
  */
-export const QUEUE_ACTION_REF = "recallnet/thwip@2c47d61a145c2a7cc245326ccae090c279378962";
+export const QUEUE_ACTION_REF = "recallnet/thwip@e8e060530f938e415e8f651a081ce1707adb2ff0";
 
 /**
  * An explicit repository override for teams that choose one during setup.
@@ -66,6 +66,17 @@ required:
   - test
 `;
 
+const PUBLISHED_ACTION_STEP = `      - name: Verify thwip proof for the exact PR head commit
+        uses: __ACTION_REF__`;
+
+const SOURCE_REPOSITORY_ACTION_STEPS = `      # Check out the workflow's own pinned revision — never the PR head.
+      # Proof verification must not execute PR-controlled code.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: \${{ github.workflow_sha }}
+      - name: Verify thwip proof for the exact PR head commit
+        uses: ./`;
+
 const REQUIRED_WORKFLOW = `name: thwip
 
 # Whether the proof is good for this exact tree, and nothing else.
@@ -77,7 +88,7 @@ const REQUIRED_WORKFLOW = `name: thwip
 # now, the moment it offers the lane.
 
 run-name: >-
-  thwip: verify proof for PR #\${{ github.event.pull_request.number }} :
+  thwip: verify proof for PR #\${{ github.event.pull_request.number }} —
   \${{ github.event.pull_request.title }}
 
 on:
@@ -97,8 +108,7 @@ jobs:
     name: thwip / workflow
     runs-on: ubuntu-latest
     steps:
-      - name: Verify thwip proof for the exact PR head commit
-        uses: __ACTION_REF__
+__ACTION_STEPS__
         env:
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           THWIP_ENDPOINT: __ENDPOINT__
@@ -387,16 +397,31 @@ export interface SetupPullRequestInput {
   readonly includeRepositoryConfig?: boolean;
 }
 
-function render(template: string, input: SetupPullRequestInput): string {
-  return template.replaceAll("__ENDPOINT__", input.endpoint).replaceAll("__ACTION_REF__", input.actionRef);
+function render(template: string, input: SetupPullRequestInput, actionSteps = PUBLISHED_ACTION_STEP): string {
+  return template
+    .replaceAll("__ACTION_STEPS__", actionSteps)
+    .replaceAll("__ENDPOINT__", input.endpoint)
+    .replaceAll("__ACTION_REF__", input.actionRef);
 }
 
 export function setupPullRequestFiles(input: SetupPullRequestInput): readonly SetupFile[] {
   return [
-    { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) },
+    requiredWorkflowFile(input),
     verifierWorkflowFile(input),
     ...(input.includeRepositoryConfig === true ? [{ path: "thwip.yaml", content: THWIP_YAML }] : []),
   ];
+}
+
+export function requiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
+  return { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) };
+}
+
+/** The Action source repository can safely execute its checked-out bundle. */
+export function sourceRepositoryRequiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
+  return {
+    path: ".github/workflows/thwip-required.yml",
+    content: render(REQUIRED_WORKFLOW, input, SOURCE_REPOSITORY_ACTION_STEPS),
+  };
 }
 
 export function verifierWorkflowFile(input: SetupPullRequestInput): SetupFile {
