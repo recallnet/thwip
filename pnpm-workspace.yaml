@@ -1,6 +1,8 @@
 packages:
   - apps/*
   - packages/*
+overrides:
+  'postcss>nanoid': 3.3.18
 allowBuilds:
   '@prisma/client': false
   better-sqlite3: true
