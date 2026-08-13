@@ -86,7 +86,7 @@ import type { BranchQueueState, Entry } from "@thwip/queue-domain";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
 import type { QueueSnapshot } from "./queue/queue-operations.js";
-import { githubHttp, resolveCandidate } from "./queue/github-port.js";
+import { CandidatePathCache, changedCandidatePaths, githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
 import {
@@ -2718,6 +2718,7 @@ async function publishTurnCheckFor(
  * repository holding no workflow files could enqueue a pull request and never
  * merge one.
  */
+const candidatePathCache = new CandidatePathCache();
 const queueDeps = {
   async authenticate(c: { req: { raw: Request } }, env: Env) {
     // The operator token authenticates too. Every administrative action needing a
@@ -2926,6 +2927,26 @@ const queueDeps = {
       pullRequestNumber,
     );
     return integratedCandidateFrom(pinned);
+  },
+  async candidateChangedPaths(
+    env: Env,
+    repositoryId: string,
+    input: { baseTreeOid: string; candidateTreeOid: string },
+  ) {
+    const project = await env.DB.prepare(
+      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    )
+      .bind(repositoryId)
+      .first<{ github_name: string; installation_id: string | null }>();
+    if (project === null || project.installation_id === null) {
+      return { status: "unreadable" as const, detail: "the repository installation is unavailable" };
+    }
+    const [owner, repo] = project.github_name.split("/");
+    if (owner === undefined || repo === undefined) {
+      return { status: "unreadable" as const, detail: "the repository name is invalid" };
+    }
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
+    return changedCandidatePaths(githubHttp(token), { owner, repo }, input, candidatePathCache);
   },
   async signRecordBytes(env: Env, bytes: Uint8Array, typ: string) {
     const { key, kid } = await serviceKey(env);

@@ -3,6 +3,9 @@ import { bytesDigest } from "@thwip/protocol";
 import {
   deriveEffectiveProjectConfig,
   deriveProjectConfig,
+  exclusivePathMatches,
+  MAX_EXCLUSIVE_PATH_LENGTH,
+  MAX_EXCLUSIVE_PATHS,
   MAX_PIPELINE_MODULE_PATH_LENGTH,
   parseThwipYaml,
   repositoryDirectoryPrefix,
@@ -86,6 +89,82 @@ policy:
 });
 
 describe("canonical project policy derivation", () => {
+  it("signs sorted exclusive path globs into the policy bundle", async () => {
+    const yaml = `
+version: 4
+profile: fast
+required: [lint, test]
+policy:
+  exclusive_paths:
+    - "schema/*/generated?.sql"
+    - "migrations/**"
+`;
+    const config = await deriveProjectConfig(
+      parseThwipYaml(yaml),
+      { ownerId: "10", repositoryId: "20" },
+      new MemorySnapshot({ "pnpm-lock.yaml": "" }),
+    );
+
+    expect(config.policy.exclusivePaths).toEqual(["migrations/**", "schema/*/generated?.sql"]);
+  });
+
+  it("leaves the legacy bundle shape unchanged when no exclusive paths are configured", async () => {
+    const config = await deriveProjectConfig(
+      { version: 4, profile: "fast", required: ["test"] },
+      { ownerId: "10", repositoryId: "20" },
+      new MemorySnapshot({ "pnpm-lock.yaml": "" }),
+    );
+    expect(config.policy).not.toHaveProperty("exclusivePaths");
+  });
+
+  it("rejects ambiguous, escaping, duplicated and unbounded exclusive globs", () => {
+    const document = (patterns: readonly string[]) => `
+version: 4
+profile: fast
+required: [test]
+policy:
+  exclusive_paths: ${JSON.stringify(patterns)}
+`;
+    for (const patterns of [
+      ["../migrations/**"],
+      ["/migrations/**"],
+      ["migrations\\**"],
+      ["migrations/**.sql"],
+      ["migrations//*.sql"],
+      ["migrations/**", "migrations/**"],
+      ["x".repeat(MAX_EXCLUSIVE_PATH_LENGTH + 1)],
+      Array.from({ length: MAX_EXCLUSIVE_PATHS + 1 }, (_, index) => `p${index}`),
+    ]) {
+      expect(() => parseThwipYaml(document(patterns)), JSON.stringify(patterns)).toThrow(/exclusive_paths/);
+    }
+  });
+
+  it("applies exclusive glob validation to direct policy derivation too", async () => {
+    await expect(
+      deriveProjectConfig(
+        {
+          version: 4,
+          profile: "fast",
+          required: ["test"],
+          policy: { exclusive_paths: ["../migrations/**"] },
+        },
+        { ownerId: "10", repositoryId: "20" },
+        new MemorySnapshot({ "pnpm-lock.yaml": "" }),
+      ),
+    ).rejects.toThrow(/exclusive_paths/);
+  });
+
+  it("matches only the documented repository-relative glob language", () => {
+    expect(exclusivePathMatches("migrations/**", "migrations/0033/add.sql")).toBe(true);
+    expect(exclusivePathMatches("migrations/**", "migrations/0033.sql")).toBe(true);
+    expect(exclusivePathMatches("schema/*/generated?.sql", "schema/users/generated1.sql")).toBe(true);
+    expect(exclusivePathMatches("schema/*/generated?.sql", "schema/users/nested/generated1.sql")).toBe(false);
+    expect(exclusivePathMatches("migrations/*.sql", "migrations/nested/0033.sql")).toBe(false);
+    expect(exclusivePathMatches("**/manifest.json", "manifest.json")).toBe(true);
+    expect(exclusivePathMatches("**/manifest.json", "packages/a/manifest.json")).toBe(true);
+    expect(exclusivePathMatches("../**", "migrations/0033.sql")).toBe(false);
+  });
+
   it("derives command policy from the frozen repository tree", async () => {
     const yaml = `
 version: 3

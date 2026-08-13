@@ -220,6 +220,7 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   // The queue could not read the repository, so it says nothing about this pull
   // request and the next ask very likely gets an answer.
   BASE_UNREADABLE: EXIT.unavailable,
+  CANDIDATE_PATHS_UNREADABLE: EXIT.unavailable,
   // GitHub recomputes mergeability and rebuilds the merge commit after every
   // merge on the branch, and answers about neither while it does. Waiting is the
   // whole answer, so these retry rather than sending anybody to edit code.

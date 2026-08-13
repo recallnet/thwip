@@ -77,6 +77,30 @@ describe("the active policy", () => {
     expect(policy?.pipelineDigest).toBe(`sha256:${"c".repeat(64)}`);
   });
 
+  it("reports exclusive path globs from the activated bundle", async () => {
+    const store = db();
+    project("fast", bundle({ exclusivePaths: ["migrations/**"] }));
+    expect((await readActivePolicy(store, REPO))?.exclusivePaths).toEqual(["migrations/**"]);
+  });
+
+  it("defaults old bundles to no exclusive path globs", async () => {
+    const store = db();
+    project("fast", bundle());
+    expect((await readActivePolicy(store, REPO))?.exclusivePaths).toEqual([]);
+  });
+
+  it("refuses a bundle whose exclusive path field is malformed", async () => {
+    const store = db();
+    project("fast", bundle({ exclusivePaths: "migrations/**" }));
+    expect(await readActivePolicy(store, REPO)).toBeNull();
+  });
+
+  it("refuses invalid globs in a stored bundle instead of matching them open", async () => {
+    const store = db();
+    project("fast", bundle({ exclusivePaths: ["../migrations/**"] }));
+    expect(await readActivePolicy(store, REPO)).toBeNull();
+  });
+
   /**
    * A bundle with no profile cannot say what a merge has to satisfy. Falling back
    * to the column here would restore the very drift this removes, so there is no

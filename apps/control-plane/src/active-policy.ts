@@ -1,4 +1,5 @@
 import type { D1Like } from "./queue/projection.js";
+import { MAX_EXCLUSIVE_PATHS, validateExclusivePathPattern } from "@thwip/policy";
 
 /**
  * What the active policy requires of a candidate.
@@ -24,6 +25,8 @@ export interface ActivePolicy {
   readonly pipelineDigest: string | null;
   readonly requiredSuites: readonly string[];
   readonly securityProfile: string;
+  /** Combined candidates touching one of these globs must be run again. */
+  readonly exclusivePaths: readonly string[];
   /** Evidence keys are tenant-scoped so an export or deletion can be bounded. */
   readonly organizationId: string;
   /** Null when no verifier is pinned, which only matters to a stronger profile. */
@@ -58,6 +61,7 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
 
   const bundle = JSON.parse(row.bundle) as {
     securityProfile?: unknown;
+    exclusivePaths?: unknown;
     version?: unknown;
     pipeline?: { requiredSuites?: string[]; digest?: string; moduleDigest?: unknown; engineDigest?: unknown };
   };
@@ -65,6 +69,24 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
   // A bundle that does not say what it requires cannot be certified against.
   // Falling back to the column would restore exactly the drift this removes.
   if (typeof bundle.securityProfile !== "string" || bundle.securityProfile.length === 0) return null;
+  if (
+    bundle.exclusivePaths !== undefined &&
+    (!Array.isArray(bundle.exclusivePaths) || bundle.exclusivePaths.length > MAX_EXCLUSIVE_PATHS)
+  ) {
+    return null;
+  }
+  if (Array.isArray(bundle.exclusivePaths)) {
+    const seen = new Set<string>();
+    try {
+      for (const path of bundle.exclusivePaths) {
+        validateExclusivePathPattern(path);
+        if (seen.has(path)) return null;
+        seen.add(path);
+      }
+    } catch {
+      return null;
+    }
+  }
 
   const verifierJson = row.verifier === null ? null : (JSON.parse(row.verifier) as Record<string, unknown>);
   // workflowSha may be null: that pins the workflow's path on the default branch
@@ -84,6 +106,7 @@ export async function readActivePolicy(db: D1Like, repositoryId: string): Promis
     pipelineDigest: bundle.pipeline?.digest ?? null,
     requiredSuites: bundle.pipeline?.requiredSuites ?? [],
     securityProfile: bundle.securityProfile,
+    exclusivePaths: (bundle.exclusivePaths as string[] | undefined) ?? [],
     organizationId: row.org,
     verifier,
     document: bundle,
