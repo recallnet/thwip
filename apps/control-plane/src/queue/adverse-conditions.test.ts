@@ -355,9 +355,9 @@ describe("the closed webhook itself, once the project or principal it looked up 
       .run(org, "1", "acme");
     raw
       .prepare(
-        "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
+        "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id) VALUES (?, ?, ?, ?, 1, 'enforced', ?)",
       )
-      .run("qp_1", org, REPO, REF);
+      .run("qp_1", org, REPO, REF, "proj_1");
     raw
       .prepare(
         "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -881,6 +881,7 @@ describe("the check that says whose turn it is", () => {
 /** A policy bundle naming the queue's execution profile. */
 function policyNamed(securityProfile: string) {
   return async () => ({
+    projectId: "proj_1",
     policyDigest: `sha256:${"b".repeat(64)}`,
     pipelineDigest: `sha256:${"c".repeat(64)}`,
     requiredSuites: ["unit"],
@@ -906,8 +907,8 @@ describe("nudging a held lane", () => {
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
     seedMembership("principal_59", "59");
-    await heartbeat(app, e);
-    await authorize(app, e, 59);
+    expect((await heartbeat(app, e)).status).toBe(200);
+    expect(await authorize(app, e, 59)).toMatchObject({ authorized: true, reason: "HOLDS_TURN" });
 
     const response = await app.request(
       `/v1/queue/${REPO}/nudge?ref=${encodeURIComponent(REF)}`,
@@ -969,13 +970,28 @@ describe("an accepted candidate verdict", () => {
     jti: "jti-1",
   };
 
-  function postVerdict(app: App, e: QueueRouteEnv, pr: number) {
+  async function postVerdict(
+    app: App,
+    e: QueueRouteEnv,
+    pr: number,
+    over: { projectId?: string; attemptId?: string; legacyProtocol?: boolean } = {},
+  ) {
+    const attemptId = (await liveState(app, e)).activeAttemptId;
+    if (attemptId === null) throw new Error("candidate verdict test has no active attempt");
+    raw.prepare(
+      `INSERT OR REPLACE INTO candidate_dispatches
+         (github_repository_id, base_ref, candidate_tree_oid, dispatched_at, project_id, attempt_id, workflow_protocol)
+       VALUES (?, ?, ?, datetime('now'), 'proj_1', ?, ?)`,
+    ).run(REPO, REF, TREE, attemptId, over.legacyProtocol === true ? 1 : 2);
     return app.request(
       `/v1/queue/${REPO}/candidate-result`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          ...(over.legacyProtocol === true
+            ? {}
+            : { projectId: over.projectId ?? "proj_1", attemptId: over.attemptId ?? attemptId }),
           baseRef: REF,
           pullRequestNumber: pr,
           candidateSha: "c".repeat(40),
@@ -1006,8 +1022,8 @@ describe("an accepted candidate verdict", () => {
       authenticate: async () => ({ ok: true, principalId: "principal_59", githubUserId: "59", isAdmin: true }),
     });
     seedMembership("principal_59", "59");
-    await heartbeat(app, e);
-    await authorize(app, e, 59);
+    expect((await heartbeat(app, e)).status).toBe(200);
+    expect(await authorize(app, e, 59)).toMatchObject({ authorized: true, reason: "HOLDS_TURN" });
 
     const response = await postVerdict(app, e, 59);
     expect(response.status).toBe(202);
@@ -1033,5 +1049,55 @@ describe("an accepted candidate verdict", () => {
     const response = await postVerdict(app, e, 59);
     expect(response.status).toBe(202);
     expect(writes).toBe(1);
+  });
+
+  it("accepts an in-flight protocol 1 callback only through its current durable dispatch", async () => {
+    const e = env();
+    let enabled = false;
+    const app = routes({
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: async () => (enabled ? policyNamed("fast")() : null),
+    });
+    await authorize(app, e, 59);
+    enabled = true;
+
+    const response = await postVerdict(app, e, 59, { legacyProtocol: true });
+
+    expect(response.status).toBe(202);
+  });
+
+  it("rejects a verifier result dispatched for an earlier project incarnation", async () => {
+    const e = env();
+    let enabled = false;
+    const app = routes({
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: async () => (enabled ? policyNamed("fast")() : null),
+    });
+    await authorize(app, e, 59);
+    enabled = true;
+
+    const response = await postVerdict(app, e, 59, { projectId: "proj_removed" });
+
+    expect(response.status).toBe(409);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM candidate_verdicts WHERE github_repository_id = ?").get(REPO)).toEqual({ n: 0 });
+  });
+
+  it("rejects a verifier result dispatched for an earlier queue attempt", async () => {
+    const e = env();
+    let enabled = false;
+    const app = routes({
+      verifyOidc: async () => claims,
+      pinnedVerifier: async () => pinned,
+      activePolicy: async () => (enabled ? policyNamed("fast")() : null),
+    });
+    await authorize(app, e, 59);
+    enabled = true;
+
+    const response = await postVerdict(app, e, 59, { attemptId: "attempt_from_before_reselection" });
+
+    expect(response.status).toBe(409);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM candidate_verdicts WHERE github_repository_id = ?").get(REPO)).toEqual({ n: 0 });
   });
 });

@@ -46,6 +46,8 @@ export interface QueueDepsPins {
   principalId?: string;
   githubUserId?: string;
   isAdmin?: boolean;
+  /** Current lifecycle incarnation of the repository fixture. */
+  projectId?: string;
 }
 
 /** A `fast` policy with one required suite, which is what most files run under. */
@@ -56,6 +58,7 @@ export function fixturePolicy(over: Record<string, unknown> = {}): Record<string
     requiredSuites: ["unit"],
     securityProfile: "fast",
     organizationId: "org_1",
+    projectId: "proj_1",
     verifier: null,
     ...over,
   };
@@ -88,8 +91,8 @@ export function queueRouteDeps(
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e: unknown, bytes: Uint8Array) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
-    principalFor: async (_e: unknown, userId: string) => `principal_${userId}`,
+    queueProject: async () => ({ activationState: "enforced", projectId: pins.projectId ?? "proj_1" }),
+    principalFor: async (_e: unknown, _repositoryId: string, userId: string) => `principal_${userId}`,
     pullRequestPlacement: async (_e: unknown, _r: string, pullRequestNumber: number) => ({
       authorGithubUserId: githubUserId,
       baseRef,

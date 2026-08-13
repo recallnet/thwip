@@ -42,7 +42,7 @@ function seedSessionMembership(principalId: string, githubUserId: string): void 
     .prepare(
       "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
-    .run("proj_session", "org_1", REPO, "acme/repo");
+    .run("proj_1", "org_1", REPO, "acme/repo");
   raw
     .prepare(
       "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -266,7 +266,7 @@ describe("the merge gate", () => {
 
   it("observes without enforcing", async () => {
     const e = env();
-    const routes = app({ queueProject: async () => ({ activationState: "observe" }) });
+    const routes = app({ queueProject: async () => ({ activationState: "observe", projectId: "proj_1" }) });
     await authorize(routes, e, 59);
     // The second pull request is told what would have happened and let through
     // anyway, which is what makes adoption reversible.

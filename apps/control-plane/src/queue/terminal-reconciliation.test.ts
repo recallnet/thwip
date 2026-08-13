@@ -37,6 +37,14 @@ function env(): QueueRouteEnv {
   open.push(t);
   raw = t.raw;
   raw
+    .prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_terminal', '1', 'acme')")
+    .run();
+  raw
+    .prepare(
+      "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('prj_terminal', 'org_terminal', ?, 'acme/repo', 1)",
+    )
+    .run(REPO);
+  raw
     .prepare("INSERT INTO service_keys (kid, public_jwk) VALUES (?, ?)")
     .run(publicJwk.kid, JSON.stringify(publicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
@@ -178,8 +186,8 @@ async function seedIntent(pr: number, attemptId = `att_${pr}`): Promise<void> {
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at, project_id)
+       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?, 'prj_terminal')`,
     )
     .run(
       signed.digest,
@@ -334,7 +342,7 @@ describe("bounded terminal queue reconciliation", () => {
     await fillWithNewerTerminals(e);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z', 'prj_terminal')",
       )
       .run(REPO, REF, pr);
 
@@ -381,7 +389,7 @@ describe("bounded terminal queue reconciliation", () => {
     await fillWithNewerTerminals(e);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z', 'prj_terminal')",
       )
       .run(REPO, REF, pr);
     await reconcileTerminalEntries(e, { repositoryId: REPO, baseRef: REF }, reads("closed"), deps(pr));
@@ -415,7 +423,7 @@ describe("bounded terminal queue reconciliation", () => {
     await fillWithNewerTerminals(e);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z')",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, 99, 'blocked', '2026-08-12T12:00:00Z', 'prj_terminal')",
       )
       .run(REPO, REF, pr);
     const failures = { remaining: 2 };

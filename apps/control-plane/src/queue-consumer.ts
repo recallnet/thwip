@@ -11,19 +11,32 @@ import type { PolicyPush } from "./policy-activation.js";
 export interface QueueConsumerMessage {
   readonly event?: string;
   readonly installationId?: string | null;
+  readonly installationAction?: string | null;
   readonly policyPush?: PolicyPush | null;
   readonly appProofTask?: AppProofTask | null;
   readonly reconcileProofRepositoryId?: string | null;
+  readonly reconcileProofProjectId?: string | null;
   readonly syncInstallation?: boolean;
+  /** Durable work restored by an installation-sync continuation. */
+  readonly postSyncPolicyReconcile?: boolean;
+  readonly postSyncProofReconcile?: boolean;
+}
+
+export interface QueueConsumerPostSyncWork {
+  readonly reconcilePolicies: boolean;
+  readonly reconcileProofChecks: boolean;
 }
 
 /** The consumer's side effects, each already bound to the `Env` it needs. */
 export interface QueueConsumerDeps {
-  syncInstallation?: (installationId: string) => Promise<unknown>;
+  syncInstallation?: (
+    installationId: string,
+    postSyncWork: QueueConsumerPostSyncWork,
+  ) => Promise<unknown | "synced" | "deleted" | { continued: 0 | 1 }>;
   reconcileInstallationProofChecks?: (installationId: string) => Promise<unknown>;
   activatePolicyFromDefaultBranchPush?: (policyPush: PolicyPush) => Promise<unknown>;
   reconcileInstallationPolicies?: (installationId: string) => Promise<unknown>;
-  reconcileProjectProofChecks?: (repositoryId: string) => Promise<unknown>;
+  reconcileProjectProofChecks?: (repositoryId: string, projectId: string) => Promise<unknown>;
   processAppProof?: (request: AppProofRequest) => Promise<unknown>;
   requestForRerequest?: (verificationId: string) => Promise<AppProofRequest | null>;
   /**
@@ -35,7 +48,7 @@ export interface QueueConsumerDeps {
    * entry stayed blocked on a proof that had passed until some unrelated event
    * woke the lane. The App must reconsider it as soon as the verdict lands.
    */
-  reconsiderHead?: (repositoryId: string, headSha: string) => Promise<unknown>;
+  reconsiderHead?: (repositoryId: string, headSha: string, projectId?: string) => Promise<unknown>;
 }
 
 const noop = async (): Promise<void> => {};
@@ -47,8 +60,9 @@ const noop = async (): Promise<void> => {};
  * and published.
  */
 async function considered(deps: Required<QueueConsumerDeps>, request: AppProofRequest): Promise<void> {
+  if (request.projectId === undefined) return;
   try {
-    await deps.reconsiderHead(request.repositoryId, request.subjectSha);
+    await deps.reconsiderHead(request.repositoryId, request.subjectSha, request.projectId);
   } catch {
     /* the verdict stands; the next delivery or the tick asks again */
   }
@@ -79,27 +93,42 @@ export async function processQueueMessage(
 ): Promise<void> {
   const resolved = resolveDeps(deps);
   const inst = body.installationId;
+  const membershipWork = MEMBERSHIP_EVENTS.includes(body.event as (typeof MEMBERSHIP_EVENTS)[number]);
+  const postSyncWork: QueueConsumerPostSyncWork = {
+    reconcilePolicies: body.event === "policy_reconcile" || body.postSyncPolicyReconcile === true,
+    reconcileProofChecks:
+      membershipWork || body.event === "policy_reconcile" || body.postSyncProofReconcile === true,
+  };
+  let completedPostSyncWork = false;
+
+  if (inst && body.event === "installation" && body.installationAction === "deleted") {
+    await resolved.syncInstallation(inst, postSyncWork);
+    synced.add(inst);
+    return;
+  }
 
   // Syncing on every message asked GitHub to confirm what it had just told
   // us, once per delivery. The producer now says when a delivery changed
   // what the installation covers, and the daily reconciliation still catches
   // anything that drifted in between.
   if (inst && body.syncInstallation === true && !synced.has(inst)) {
-    await resolved.syncInstallation(inst);
+    const outcome = await resolved.syncInstallation(inst, postSyncWork);
     synced.add(inst);
-    if (MEMBERSHIP_EVENTS.includes(body.event as (typeof MEMBERSHIP_EVENTS)[number])) {
-      await resolved.reconcileInstallationProofChecks(inst);
-    }
+    if (outcome === "deleted") return;
+    if (typeof outcome === "object" && outcome !== null && "continued" in outcome && outcome.continued === 1) return;
+    if (postSyncWork.reconcilePolicies) await resolved.reconcileInstallationPolicies(inst);
+    if (postSyncWork.reconcileProofChecks) await resolved.reconcileInstallationProofChecks(inst);
+    completedPostSyncWork = true;
   }
   if (body.policyPush != null) {
     await resolved.activatePolicyFromDefaultBranchPush(body.policyPush);
   }
-  if (body.event === "policy_reconcile" && inst) {
+  if (body.event === "policy_reconcile" && inst && !completedPostSyncWork) {
     await resolved.reconcileInstallationPolicies(inst);
     await resolved.reconcileInstallationProofChecks(inst);
   }
-  if (body.reconcileProofRepositoryId) {
-    await resolved.reconcileProjectProofChecks(body.reconcileProofRepositoryId);
+  if (body.reconcileProofRepositoryId && body.reconcileProofProjectId) {
+    await resolved.reconcileProjectProofChecks(body.reconcileProofRepositoryId, body.reconcileProofProjectId);
   }
   if (body.appProofTask?.kind === "verify") {
     await resolved.processAppProof(body.appProofTask.request);

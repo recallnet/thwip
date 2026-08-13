@@ -6,6 +6,7 @@ import { buildSnapshot, commandsFor } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
+import { reconcileInstalledProjects } from "../project-lifecycle.js";
 
 /**
  * The scheduling decision behind a turn, from the round that made it to the
@@ -20,6 +21,7 @@ import type { D1Like } from "./projection.js";
 const REPO = "1315419165";
 const REF = "refs/heads/main";
 const ORG = "org_1";
+const PROJECT = "proj_1";
 const HEAD = "e".repeat(40);
 const BASE = "b".repeat(40);
 const CANDIDATE = "c".repeat(40);
@@ -52,10 +54,13 @@ function bucket(): R2Like & { objects: Map<string, Uint8Array> } {
         ? null
         : { arrayBuffer: async () => found.buffer.slice(found.byteOffset, found.byteOffset + found.byteLength) as ArrayBuffer };
     },
+    async delete(key) {
+      objects.delete(key);
+    },
   };
 }
 
-function env(): { e: QueueRouteEnv; db: D1Like; store: ReturnType<typeof bucket> } {
+function env(): { e: QueueRouteEnv; db: D1Like; store: ReturnType<typeof bucket>; raw: ReturnType<typeof testD1>["raw"] } {
   const t = testD1();
   open.push(t);
   const raw = t.raw;
@@ -67,10 +72,10 @@ function env(): { e: QueueRouteEnv; db: D1Like; store: ReturnType<typeof bucket>
     .run("proj_1", ORG, REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', ?, ?, ?, 1, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', ?, ?, ?, 1, 'enforced', ?)`,
     )
-    .run(ORG, REPO, REF);
+    .run(ORG, REPO, REF, "proj_1");
   for (const [id, githubUserId] of [
     ["alice", "1"],
     ["bob", "2"],
@@ -86,12 +91,13 @@ function env(): { e: QueueRouteEnv; db: D1Like; store: ReturnType<typeof bucket>
     e: { DB: t.db, EVIDENCE: store, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv,
     db: t.db as unknown as D1Like,
     store,
+    raw,
   };
 }
 
 /** Read a stored decision back the way an auditor would: by its digest alone. */
 async function decisionAt(store: ReturnType<typeof bucket>, digest: string): Promise<QueueDecisionV1> {
-  const key = evidenceKey({ organizationId: ORG, repositoryId: REPO, kind: "queue-decision", digest: digest as Sha256 });
+  const key = evidenceKey({ projectId: PROJECT, organizationId: ORG, repositoryId: REPO, kind: "queue-decision", digest: digest as Sha256 });
   const object = await store.get(key);
   expect(object, `nothing is stored under ${digest}`).not.toBeNull();
   const bytes = new Uint8Array(await object!.arrayBuffer());
@@ -133,7 +139,7 @@ function enqueue(
 describe("the decision behind a turn", () => {
   it("stores a record the validator accepts, and binds its digest to the offer", async () => {
     const { e, db, store } = env();
-    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO });
+    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO, projectId: PROJECT });
 
     const snapshot = await withQueueState(db, REPO, REF, async (s) => {
       const commands = commandsFor(s, undefined, recordDecision);
@@ -158,7 +164,7 @@ describe("the decision behind a turn", () => {
 
   it("names the entry the scheduler actually selected, not the first one queued", async () => {
     const { db, store } = env();
-    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO });
+    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO, projectId: PROJECT });
 
     // Alice takes and finishes the first turn, so bob is the principal served
     // least recently when the lane frees. A record built from anything other
@@ -203,6 +209,71 @@ describe("the decision behind a turn", () => {
     expect(decision.priorDecisionDigest).toBe(first.activeDecisionDigest);
   });
 
+  it("waits for a paused R2 put, then removes its old-incarnation object before re-selection", async () => {
+    const { db, store, raw } = env();
+    const originalPut = store.put.bind(store);
+    let putStarted!: () => void;
+    const started = new Promise<void>((resolve) => { putStarted = resolve; });
+    let finishPut!: () => void;
+    const mayFinish = new Promise<void>((resolve) => { finishPut = resolve; });
+    store.put = async (key, value, options) => {
+      putStarted();
+      await mayFinish;
+      return originalPut(key, value, options);
+    };
+    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO, projectId: PROJECT });
+    const oldWork = withQueueState(db, REPO, REF, async (state) => {
+      const commands = commandsFor(state, undefined, recordDecision);
+      enqueue(commands, "entry_old", "alice", "1", 82);
+      await commands.tick({ idempotencyKey: "tick-old" });
+    });
+    await started;
+
+    // The old request has exceeded its project lease, but its durable R2 intent
+    // is still live. Deselecting the repository must keep the release fence and
+    // refuse to import a new project until that external call resolves.
+    raw.prepare("UPDATE project_write_leases SET expires_at = '2000-01-01T00:00:00.000Z' WHERE github_repository_id = ?").run(REPO);
+    const lifecycleEnv = {
+      DB: db,
+      EVIDENCE: {
+        list: async ({ prefix }: { prefix: string }) => ({
+          objects: [...store.objects.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key })),
+          truncated: false,
+        }),
+        delete: async (keys: string | string[]) => {
+          for (const key of Array.isArray(keys) ? keys : [keys]) await store.delete(key);
+        },
+        head: async (key: string) => store.head(key),
+      },
+      BRANCH_QUEUE: {
+        idFromName: (name: string) => name,
+        get: () => ({ purge: async () => undefined }),
+      },
+    } as never;
+    await expect(reconcileInstalledProjects(lifecycleEnv, ORG, [])).rejects.toThrow(/R2 writes/);
+    expect(raw.prepare("SELECT project_id FROM project_r2_cleanup_intents").get()).toEqual({ project_id: PROJECT });
+
+    finishPut();
+    await expect(oldWork).rejects.toThrow(/released|write lease was lost/);
+    expect([...store.objects.keys()]).toEqual([]);
+
+    await reconcileInstalledProjects(lifecycleEnv, ORG, []);
+    await reconcileInstalledProjects(
+      lifecycleEnv,
+      ORG,
+      [{ id: REPO, fullName: "acme/repo", defaultBranch: "main" }],
+      { now: () => new Date(Date.now() + 2 * 60 * 60_000) },
+    );
+    const fresh = raw.prepare("SELECT id, enabled FROM projects WHERE github_repository_id = ?").get(REPO) as {
+      id: string;
+      enabled: number;
+    };
+    expect(fresh).toMatchObject({ enabled: 0 });
+    expect(fresh.id).not.toBe(PROJECT);
+
+    expect([...store.objects.keys()]).toEqual([]);
+  });
+
   it("gives a device an assignment bound to a decision it can fetch", async () => {
     const { e, db, store } = env();
     const signed: Uint8Array[] = [];
@@ -211,6 +282,7 @@ describe("the decision behind a turn", () => {
       verifyOidc: async () => ({ repository_id: REPO }),
       pinnedVerifier: async () => null,
       activePolicy: async () => ({
+        projectId: "proj_1",
         policyDigest: `sha256:${"a".repeat(64)}`,
         pipelineDigest: `sha256:${"b".repeat(64)}`,
         requiredSuites: ["lint"],
@@ -223,7 +295,7 @@ describe("the decision behind a turn", () => {
         daggerEngineDigest: null,
       }),
       dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced" }),
+      queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
       principalFor: async () => "alice",
       pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
       commitFacts: async () => ({ treeOid: TREE, parentShas: [BASE], message: `feat: work\n\nthwip-proof: ${CARRIER}\n` }),
@@ -242,7 +314,7 @@ describe("the decision behind a turn", () => {
       baseContainsSha: async () => true,
     });
 
-    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO });
+    const recordDecision = queueDecisionRecorder({ db, bucket: store, repositoryId: REPO, projectId: PROJECT });
     const held = await withQueueState(db, REPO, REF, async (s) => {
       const commands = commandsFor(s, undefined, recordDecision);
       enqueue(commands, "entry_1", "alice", "1", 82);
@@ -302,7 +374,7 @@ describe("the decision behind a turn", () => {
       pinnedVerifier: async () => null,
       activePolicy: async () => null,
       dispatchCandidateVerification: async () => ({ ok: true }),
-      queueProject: async () => ({ activationState: "enforced" }),
+      queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
       principalFor: async () => "alice",
       pullRequestPlacement: async () => ({ authorGithubUserId: "1", baseRef: REF, authorIsBot: false }),
       commitFacts: async () => null,

@@ -45,6 +45,10 @@ describe("paths that reach the Worker", () => {
   it("routes the verification keys past them", () => {
     expect(runWorkerFirst()).toContain("/.well-known/*");
   });
+
+  it("isolates each installation reconciliation in its own queue invocation", () => {
+    expect(wrangler).toMatch(/"queue"\s*:\s*"thwip-sync-staging"[\s\S]*?"max_batch_size"\s*:\s*1/);
+  });
 });
 
 /**

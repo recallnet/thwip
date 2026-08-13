@@ -56,15 +56,15 @@ async function seedProject(e: QueueRouteEnv, repositoryId: string, chainPublic: 
     .bind("org_1", "1", "acme")
     .run();
   await e.DB.prepare(
-    `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public)
-     VALUES (?, 'org_1', ?, ?, 1, 'enforced', ?)`,
-  )
-    .bind(`qp_${repositoryId}`, repositoryId, REF, chainPublic)
-    .run();
-  await e.DB.prepare(
     "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, 'org_1', ?, ?, 1)",
   )
     .bind(`proj_${repositoryId}`, repositoryId, `acme/repo-${repositoryId}`)
+    .run();
+  await e.DB.prepare(
+    `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, project_id)
+     VALUES (?, 'org_1', ?, ?, 1, 'enforced', ?, ?)`,
+  )
+    .bind(`qp_${repositoryId}`, repositoryId, REF, chainPublic, `proj_${repositoryId}`)
     .run();
   await e.DB.prepare(
     "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, 'org_1', ?, ?, datetime('now'))",
@@ -93,7 +93,7 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
     const e = env();
     await seedProject(e, PUBLIC_REPO, 1);
     await e.DB.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org_1', ?, 'now', '1')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org_1', ?, 'project', 'owner/repo', 'main')",
     )
       .bind(PUBLIC_REPO)
       .run();
@@ -116,7 +116,7 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
       .bind(digest, PUBLIC_REPO, REF)
       .run();
     await e.DB.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org_1', ?, 'now', '1')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org_1', ?, 'project', 'owner/repo', 'main')",
     )
       .bind(PUBLIC_REPO)
       .run();

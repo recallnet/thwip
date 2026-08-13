@@ -20,6 +20,7 @@ import type { SubmittedReceiptSuite } from "./integration-receipt.js";
 export interface IssuedAssignmentRecord {
   readonly assignmentId: string;
   readonly repositoryId: string;
+  readonly projectId?: string;
   readonly baseRef: string;
   readonly attemptId: string;
   readonly assignmentDigest: string;
@@ -51,6 +52,7 @@ export interface StoredAssignment extends IssuedAssignmentRecord {
 interface AssignmentRow {
   assignment_id: string;
   github_repository_id: string;
+  project_id: string;
   base_ref: string;
   attempt_id: string;
   assignment_digest: string;
@@ -66,7 +68,7 @@ interface AssignmentRow {
   receipt_accepted_at: string | null;
 }
 
-const COLUMNS = `assignment_id, github_repository_id, base_ref, attempt_id, assignment_digest,
+const COLUMNS = `assignment_id, github_repository_id, project_id, base_ref, attempt_id, assignment_digest,
                  candidate_sha, candidate_tree_oid, principal_id, device_key_id, required_suites,
                  execution_seconds, issued_at, receipt_digest, receipt_suites, receipt_accepted_at`;
 
@@ -87,6 +89,7 @@ function fromRow(row: AssignmentRow): StoredAssignment {
   return {
     assignmentId: row.assignment_id,
     repositoryId: row.github_repository_id,
+    projectId: row.project_id,
     baseRef: row.base_ref,
     attemptId: row.attempt_id,
     assignmentDigest: row.assignment_digest,
@@ -114,16 +117,23 @@ export async function recordIssuedAssignment(
   record: IssuedAssignmentRecord,
 ): Promise<{ status: "applied" } | { status: "duplicate"; held: StoredAssignment }> {
   const held = await issuedAssignmentForAttempt(db, record.attemptId);
-  if (held !== null) return { status: "duplicate", held };
+  if (held !== null) {
+    if (record.projectId !== undefined && held.projectId !== record.projectId) {
+      throw new Error(`project ${record.projectId} does not own attempt ${record.attemptId}`);
+    }
+    return { status: "duplicate", held };
+  }
 
   try {
-    await db
+    const inserted = await db
       .prepare(
         `INSERT INTO queue_assignments (
-           assignment_id, github_repository_id, base_ref, attempt_id, assignment_digest,
+           assignment_id, github_repository_id, project_id, base_ref, attempt_id, assignment_digest,
            candidate_sha, candidate_tree_oid, principal_id, device_key_id, required_suites,
            execution_seconds, issued_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) SELECT ?, ?, p.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             FROM projects p
+            WHERE p.github_repository_id = ? AND (? IS NULL OR p.id = ?)`,
       )
       .bind(
         record.assignmentId,
@@ -138,15 +148,25 @@ export async function recordIssuedAssignment(
         JSON.stringify([...record.requiredSuites]),
         record.executionSeconds,
         record.issuedAt,
+        record.repositoryId,
+        record.projectId ?? null,
+        record.projectId ?? null,
       )
       .run();
-    return { status: "applied" };
+    if (((inserted as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1) {
+      return { status: "applied" };
+    }
+    const current = await issuedAssignmentForAttempt(db, record.attemptId);
+    if (current !== null && (record.projectId === undefined || current.projectId === record.projectId)) {
+      return { status: "duplicate", held: current };
+    }
+    throw new Error(`project ${record.projectId ?? "unknown"} is unavailable for assignment ${record.assignmentId}`);
   } catch (error) {
     // The read above narrows the race, the unique index closes it. A loser
     // reports the winner rather than throwing, because losing a race is not
     // this caller's error.
     const winner = await issuedAssignmentForAttempt(db, record.attemptId);
-    if (winner === null) throw error;
+    if (winner === null || (record.projectId !== undefined && winner.projectId !== record.projectId)) throw error;
     return { status: "duplicate", held: winner };
   }
 }
@@ -179,6 +199,7 @@ export async function recordAcceptedReceipt(
   db: D1Like,
   input: {
     readonly assignmentId: string;
+    readonly projectId?: string;
     readonly receiptDigest: string;
     readonly suites: readonly SubmittedReceiptSuite[];
     readonly acceptedAt: string;
@@ -186,16 +207,36 @@ export async function recordAcceptedReceipt(
 ): Promise<{ status: "applied" | "duplicate" | "unknown-assignment" }> {
   const existing = await issuedAssignment(db, input.assignmentId);
   if (existing === null) return { status: "unknown-assignment" };
+  if (input.projectId !== undefined && existing.projectId !== input.projectId) {
+    return { status: "unknown-assignment" };
+  }
   if (existing.receipt !== null) return { status: "duplicate" };
 
-  await db
+  const written = await db
     .prepare(
       `UPDATE queue_assignments
           SET receipt_digest = ?, receipt_suites = ?, receipt_accepted_at = ?
-        WHERE assignment_id = ? AND receipt_digest IS NULL`,
+        WHERE assignment_id = ? AND receipt_digest IS NULL
+          AND (? IS NULL OR project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_assignments.project_id)`,
     )
-    .bind(input.receiptDigest, JSON.stringify([...input.suites]), input.acceptedAt, input.assignmentId)
+    .bind(
+      input.receiptDigest,
+      JSON.stringify([...input.suites]),
+      input.acceptedAt,
+      input.assignmentId,
+      input.projectId ?? null,
+      input.projectId ?? null,
+    )
     .run();
+
+  if (((written as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    const after = await issuedAssignment(db, input.assignmentId);
+    if (after === null || (input.projectId !== undefined && after.projectId !== input.projectId)) {
+      return { status: "unknown-assignment" };
+    }
+    return { status: "duplicate" };
+  }
 
   const after = await issuedAssignment(db, input.assignmentId);
   return { status: after?.receipt?.receiptDigest === input.receiptDigest ? "applied" : "duplicate" };

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import {
   acceptedReceiptFor,
   issuedAssignment,
@@ -24,6 +24,7 @@ let db: D1Like;
 
 function fresh(): D1Like {
   const t = testD1();
+  seedActiveProject(t, { repositoryId: REPO });
   open.push(t);
   db = t.db;
   return t.db;
@@ -88,6 +89,23 @@ describe("the assignments the queue has issued", () => {
 
   it("has no assignment for an attempt nobody was dispatched for", async () => {
     expect(await issuedAssignmentForAttempt(fresh(), "att_nobody")).toBeNull();
+  });
+
+  it("rejects a delayed assignment from a released project incarnation", async () => {
+    const store = fresh();
+    await store.prepare(`DELETE FROM projects WHERE id = ?`).bind(`proj_${REPO}`).run();
+    await store
+      .prepare(
+        `INSERT INTO projects (id, organization_id, github_repository_id, github_name)
+         VALUES ('project_new', ?, ?, 'owner/repo')`,
+      )
+      .bind(`org_${REPO}`, REPO)
+      .run();
+
+    await expect(
+      recordIssuedAssignment(store, assignment({ projectId: `proj_${REPO}` })),
+    ).rejects.toThrow(/unavailable/);
+    expect(await issuedAssignment(store, "asg_1")).toBeNull();
   });
 });
 

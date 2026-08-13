@@ -30,6 +30,89 @@ export interface TestD1 {
   close(): void;
 }
 
+export interface ActiveTestProject {
+  readonly repositoryId: string;
+  readonly organizationId?: string;
+  readonly projectId?: string;
+  readonly githubName?: string;
+  readonly defaultBranch?: string;
+  readonly enabled?: boolean;
+}
+
+export const TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE = JSON.stringify({
+  d1: {
+    oldDatabase: "thwip-old",
+    newDatabase: "thwip-new",
+    oldDatabaseId: "00000000-0000-4000-8000-000000000001",
+    newDatabaseId: "00000000-0000-4000-8000-000000000002",
+    maintenanceEnabledAt: "2000-01-01T00:00:00.000Z",
+    exportCompletedAt: "2000-01-01T00:10:00.000Z",
+    importCompletedAt: "2000-01-01T00:20:00.000Z",
+    newDatabaseRoundTripAt: "2000-01-01T00:21:00.000Z",
+    newBindingActivatedAt: "2000-01-01T00:30:00.000Z",
+    oldDatabaseDeletedAt: "2000-01-01T00:40:00.000Z",
+    exportSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    schemaSha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    rowCountSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    quickCheck: "ok",
+    foreignKeyViolations: 0,
+  },
+  r2: {
+    oldBucket: "evidence-old",
+    newBucket: "evidence-new",
+    copyCompletedAt: "2000-01-01T00:00:00.000Z",
+    newBucketRoundTripAt: "2000-01-01T00:00:00.000Z",
+    oldBucketDeletedAt: "2000-01-01T00:00:00.000Z",
+  },
+  github: {
+    oldKeyFingerprint: "old-key",
+    newKeyFingerprint: "new-key",
+    newKeyAcceptedAt: "2000-01-01T00:00:00.000Z",
+    oldKeyRejectedAt: "2000-01-01T00:00:00.000Z",
+    oldPrivateKeyDeletedAt: "2000-01-01T00:00:00.000Z",
+    oldInstallationTokensExpiredAt: "2000-01-01T01:00:00.000Z",
+    oldInstallationTokenRejectedAt: "2000-01-01T01:00:00.000Z",
+  },
+  approvedBy: "test",
+  changeUrl: "https://example.invalid/change/test",
+});
+
+/**
+ * Seed the lifecycle owner of repository-keyed test state.
+ *
+ * Migration 0030 makes a live project incarnation a precondition for every
+ * repository-keyed write. Tests that exercise queues, runners, attestations,
+ * or projections therefore need the same organization and project records as
+ * production. Keeping that setup here avoids another set of hand-written
+ * lifecycle fixtures drifting from the real migrations.
+ */
+export function seedActiveProject(test: Pick<TestD1, "raw">, input: ActiveTestProject): string {
+  const organizationId = input.organizationId ?? `org_${input.repositoryId}`;
+  const projectId = input.projectId ?? `proj_${input.repositoryId}`;
+  const githubName = input.githubName ?? `test/repository-${input.repositoryId}`;
+  test.raw
+    .prepare(
+      `INSERT OR IGNORE INTO organizations (id, github_org_id, github_login, status)
+       VALUES (?, ?, ?, 'active')`,
+    )
+    .run(organizationId, `github_${organizationId}`, `test-${organizationId}`);
+  test.raw
+    .prepare(
+      `INSERT OR IGNORE INTO projects
+         (id, organization_id, github_repository_id, github_name, default_branch, enabled)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      projectId,
+      organizationId,
+      input.repositoryId,
+      githubName,
+      input.defaultBranch ?? "main",
+      input.enabled === false ? 0 : 1,
+    );
+  return projectId;
+}
+
 function statements(sql: string): string[] {
   const withoutComments = sql
     .split("\n")
@@ -99,7 +182,39 @@ export function testD1(options: { upTo?: string } = {}): TestD1 {
   const raw = new Database(":memory:");
   for (const file of migrationFiles()) {
     if (options.upTo !== undefined && file >= options.upTo) break;
+    // The finishing migration is allowed only after the explicit capability
+    // cutover. Most tests model the finished steady state, so establish the
+    // same durable authorization that production's migration runner requires
+    // immediately before applying 0031.
+    if (file === "0031_finish_github_repository_lifecycle.sql") {
+      raw.prepare(
+        `UPDATE project_lifecycle_rollout
+            SET maintenance_mode = 1,
+                worker_activated_at = '2000-01-01T00:00:00.000Z',
+                remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
+                remote_capability_evidence = ?,
+                destructive_schema_ready_at = NULL
+          WHERE id = 1`,
+      ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+    }
     runMigrationFile(raw, file);
+  }
+
+  // Most tests model steady state after the explicit R2/GitHub capability
+  // cutover and finishing schema. Rollout tests clear these fields themselves.
+  if (
+    raw
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_lifecycle_rollout'")
+      .get() !== undefined
+  ) {
+    raw.prepare(
+      `UPDATE project_lifecycle_rollout
+          SET worker_activated_at = '2000-01-01T00:00:00.000Z',
+              remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
+              remote_capability_evidence = ?,
+              destructive_schema_ready_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = 1`,
+    ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
   }
 
   const db = {

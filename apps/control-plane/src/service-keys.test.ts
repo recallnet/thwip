@@ -66,6 +66,18 @@ describe("the keys a reader can verify with", () => {
     expect(await verificationKeys(store)).toHaveLength(1);
   });
 
+  it("can reuse the published health key while D1 maintenance blocks writes", async () => {
+    const t = testD1({ upTo: "0031_finish_github_repository_lifecycle.sql" });
+    open.push(t);
+    await recordActiveKey(t.db, key("thwip-svc-1"));
+    t.raw.prepare("UPDATE project_lifecycle_rollout SET maintenance_mode = 1 WHERE id = 1").run();
+
+    await expect(recordActiveKey(t.db, key("thwip-svc-1"))).resolves.toBeUndefined();
+    await expect(recordActiveKey(t.db, key("missing-during-maintenance"))).rejects.toThrow(
+      "project lifecycle maintenance is active",
+    );
+  });
+
   /** The point of the table: a rotation must not orphan what the old key signed. */
   it("keeps a retired key alongside the new one", async () => {
     const store = db();

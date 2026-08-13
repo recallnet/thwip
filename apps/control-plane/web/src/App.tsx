@@ -51,7 +51,9 @@ interface Me {
     github_login: string;
     plan: string;
     installation_id: string | null;
+    repository_selection: "all" | "selected" | null;
     better_auth_org_id: string | null;
+    pending_reimports?: { count: number; ready_at: string | null } | null;
   } | null;
   organizations: OrgSummary[];
   appSlug: string;
@@ -568,7 +570,8 @@ function OrgHome({ me }: { me: Me }) {
           {actionError && <p className="thwip-error">{actionError}</p>}
           {data.projects.length === 0 && (
             <p>
-              No projects yet. <NavLink to="/dashboard/settings">Add one from Settings.</NavLink>
+              No projects yet. Select repositories for the Thwip GitHub App. Thwip imports each newly selected
+              repository as a disabled project.
             </p>
           )}
           {data.projects.length > 0 && (
@@ -1216,71 +1219,7 @@ function ProjectVerification({ project, me, reload }: { project: ProjectRow; me:
           )}
         </div>
       </Panel>
-      {me.viewer.githubOrgRole === "owner" && <RemoveProject project={project} me={me} />}
     </>
-  );
-}
-
-export function RemoveProject({ project, me }: { project: ProjectRow; me: Me }) {
-  const [confirmation, setConfirmation] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const installationUrl = me.organization?.installation_id
-    ? `https://github.com/organizations/${me.organization.github_login}/settings/installations/${me.organization.installation_id}`
-    : null;
-  const remove = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api(`/v1/dashboard/projects/${project.id}/remove`, {
-        method: "POST",
-        body: JSON.stringify({ confirmation, repositoryId: project.github_repository_id }),
-      });
-      navigate("/dashboard");
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Panel title="Remove project from Thwip" meta="permanent deletion; disabling above is reversible">
-      <p>
-        This deletes this project's policies, proofs, queue, signed chain, access grants, and measured history. It
-        does not uninstall the GitHub App or change which repositories the App can see.
-      </p>
-      <p>
-        A later full sync will not recreate it. Adding it again from organization Settings creates a new, disabled
-        project with no restored history.
-      </p>
-      {installationUrl && (
-        <p>
-          To revoke App access too, change the organization's{" "}
-          <a href={installationUrl} target="_blank" rel="noreferrer">
-            GitHub App installation settings
-          </a>
-          .
-        </p>
-      )}
-      {project.enabled === 1 && <p className="thwip-error">Disable this project before removing it.</p>}
-      {error && <p className="thwip-error">{error}</p>}
-      <label className="thwip-field">
-        Type <code>{project.github_name}</code> to confirm
-        <input
-          value={confirmation}
-          autoComplete="off"
-          spellCheck={false}
-          onChange={(event) => setConfirmation(event.target.value)}
-        />
-      </label>
-      <button
-        className="gp-btn gp-btn--sm gp-btn--danger"
-        disabled={busy || project.enabled === 1 || confirmation !== project.github_name}
-        onClick={() => void remove()}
-      >
-        {busy ? "Removing…" : "Remove project from Thwip"}
-      </button>
-    </Panel>
   );
 }
 
@@ -1960,58 +1899,56 @@ function OrgSettings({ me }: { me: Me }) {
   return (
     <>
       <ProofDefaults canEdit={me.viewer.githubOrgRole === "owner"} />
-      <AddProject canAdd={me.viewer.githubOrgRole === "owner"} />
+      <ManageRepositories me={me} />
       <GitHubSync canSync={me.viewer.githubOrgRole === "owner"} />
       <Billing />
     </>
   );
 }
 
-export function AddProject({ canAdd }: { canAdd: boolean }) {
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const add = async () => {
-    setBusy(true);
-    setNote(null);
-    try {
-      const result = await api<{ project: { name: string } }>("/v1/dashboard/projects", {
-        method: "POST",
-        body: JSON.stringify({ name }),
-      });
-      navigate(projectPath(result.project.name));
-    } catch (cause) {
-      setNote((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+export function ManageRepositories({ me }: { me: Me }) {
+  const organization = me.organization;
+  const installationUrl = organization?.installation_id
+    ? `https://github.com/organizations/${organization.github_login}/settings/installations/${organization.installation_id}`
+    : null;
   return (
-    <Panel title="Add project" meta="creates a fresh, disabled project from a repository the GitHub App can see">
-      {canAdd ? (
-        <>
-          <label className="thwip-field">
-            Repository
-            <input
-              value={name}
-              placeholder="OWNER/REPOSITORY"
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <button
-            className="gp-btn gp-btn--sm"
-            disabled={busy || !/^[^/\s]+\/[^/\s]+$/.test(name)}
-            onClick={() => void add()}
-          >
-            {busy ? "Adding…" : "Add project"}
-          </button>
-        </>
-      ) : (
-        <p className="gp-panel__meta">Only GitHub organization owners can add a project.</p>
+    <Panel title="Repositories" meta="managed by the Thwip GitHub App">
+      <p>
+        GitHub repository selection controls which projects exist in Thwip. Newly selected repositories arrive
+        disabled. Removing access deletes their Thwip policies, proofs, queue, signed chain, access grants, and
+        measured history.
+      </p>
+      <p>
+        Before removing an enforced Queue project, disable its two Thwip rulesets in GitHub. The App cannot change
+        repository rules after you remove its access.
+      </p>
+      <p>
+        Selecting a removed repository again starts a clean import after a one-hour safety period. During that hour,
+        Thwip shows the selection as pending and does not accept old GitHub App tokens or project work.
+      </p>
+      {organization?.pending_reimports && (
+        <p role="status">
+          {organization.pending_reimports.count} repository{organization.pending_reimports.count === 1 ? " is" : "s are"}{" "}
+          pending a clean import{organization.pending_reimports.ready_at
+            ? ` until ${new Date(organization.pending_reimports.ready_at).toLocaleString()}`
+            : ""}.
+        </p>
       )}
-      {note && <p className="thwip-error">{note}</p>}
+      {organization?.repository_selection === "all" && (
+        <p>
+          This installation currently covers all repositories. To remove one repository, change it to only selected
+          repositories on GitHub.
+        </p>
+      )}
+      {installationUrl ? (
+        <a className="gp-btn gp-btn--sm" href={installationUrl} target="_blank" rel="noreferrer">
+          Manage repositories on GitHub
+        </a>
+      ) : (
+        <a className="gp-btn gp-btn--sm" href={`https://github.com/apps/${me.appSlug}/installations/new`}>
+          Install the GitHub App
+        </a>
+      )}
     </Panel>
   );
 }
@@ -2032,7 +1969,7 @@ export function GitHubSync({ canSync }: { canSync: boolean }) {
     }
   };
   return (
-    <Panel title="GitHub sync" meta="updates current projects; it never restores a project removed from Thwip">
+    <Panel title="GitHub sync" meta="reconciles Thwip with the repositories selected on GitHub">
       {canSync ? (
         <button className="gp-btn gp-btn--sm" disabled={syncing} onClick={() => void sync()}>
           {syncing ? "Syncing…" : "Run full sync"}

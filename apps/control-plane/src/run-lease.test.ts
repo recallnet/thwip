@@ -1,8 +1,9 @@
 import { LEASE_AUDIENCE } from "@thwip/protocol";
 import { exportJWK, generateKeyPair, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
-import { mintRunLease } from "./run-lease.js";
+import { mintRunLease, withAuthorizedRunLeaseProject } from "./run-lease.js";
 import type { Env } from "./env.js";
+import { testD1 } from "../test/d1.js";
 
 /**
  * The window a lease opens.
@@ -62,7 +63,7 @@ const request = {
   deviceKeyId: "SHA256:device",
 };
 
-const project = { activePolicyDigest: `sha256:${"1".repeat(64)}`, securityProfile: "fresh" };
+const project = { id: "project_1", activePolicyDigest: `sha256:${"1".repeat(64)}`, securityProfile: "fresh" };
 
 describe("minting a run lease", () => {
   it("names the run it was minted for, so it proves nothing about another one", async () => {
@@ -74,6 +75,7 @@ describe("minting a run lease", () => {
     });
     expect(protectedHeader.kid).toBe(kid);
     expect(payload).toMatchObject({
+      projectId: project.id,
       repositoryId: request.repositoryId,
       treeOid: TREE,
       parentOids: [PARENT],
@@ -104,6 +106,134 @@ describe("minting a run lease", () => {
   it("refuses a window nobody bounded", async () => {
     const { env } = await envWithKey();
     await expect(mintRunLease(env, { project, request, leaseSeconds: 0 })).rejects.toThrow(/lease/i);
+  });
+
+  it("authorizes the exact user, project, and live device before calling the signer", async () => {
+    const t = testD1();
+    try {
+      t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_a', '1', 'alpha')").run();
+      t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_b', '2', 'beta')").run();
+      t.raw
+        .prepare(
+          "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('project_a', 'org_a', '100', 'alpha/repo', 1)",
+        )
+        .run();
+      t.raw
+        .prepare(
+          "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('project_b', 'org_b', ?, 'beta/repo', 1)",
+        )
+        .run(request.repositoryId);
+      t.raw
+        .prepare(
+          "INSERT INTO repository_grants (project_id, github_user_id, github_login, permission, active) VALUES ('project_a', 'user_a', 'alice', 'admin', 1)",
+        )
+        .run();
+      t.raw
+        .prepare(
+          "INSERT INTO repository_grants (project_id, github_user_id, github_login, permission, active) VALUES ('project_b', 'user_b', 'bob', 'write', 1)",
+        )
+        .run();
+      t.raw
+        .prepare(
+          "INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label) VALUES ('device_a', 'user_a', 'ssh-ed25519', 'key-a', 'device_a', 'a')",
+        )
+        .run();
+      t.raw
+        .prepare(
+          "INSERT INTO device_keys (key_id, github_user_id, algorithm, public_key, fingerprint, device_label) VALUES ('device_b', 'user_b', 'ssh-ed25519', 'key-b', 'device_b', 'b')",
+        )
+        .run();
+
+      let signed = 0;
+      const sign = async () => {
+        signed += 1;
+        return "signed";
+      };
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_a" },
+          "device_a",
+          sign,
+        ),
+      ).resolves.toEqual({ kind: "forbidden" });
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_b" },
+          "device_a",
+          sign,
+        ),
+      ).resolves.toEqual({ kind: "forbidden" });
+      t.raw.prepare("UPDATE device_keys SET revoked_at = 'now' WHERE key_id = 'device_b'").run();
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_b" },
+          "device_b",
+          sign,
+        ),
+      ).resolves.toEqual({ kind: "forbidden" });
+      expect(signed).toBe(0);
+
+      await expect(
+        withAuthorizedRunLeaseProject(t.db, request.repositoryId, { kind: "admin" }, "operator-device", sign),
+      ).resolves.toEqual({ kind: "current", value: "signed" });
+      expect(signed).toBe(1);
+
+      t.raw.prepare("UPDATE device_keys SET revoked_at = NULL WHERE key_id = 'device_b'").run();
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_b" },
+          "device_b",
+          sign,
+        ),
+      ).resolves.toEqual({ kind: "current", value: "signed" });
+      expect(signed).toBe(2);
+
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_b" },
+          "device_b",
+          async () => {
+            signed += 1;
+            t.raw.prepare("UPDATE device_keys SET revoked_at = 'during-mint' WHERE key_id = 'device_b'").run();
+            return "signed-but-revoked";
+          },
+        ),
+      ).resolves.toEqual({ kind: "released" });
+      expect(signed).toBe(3);
+
+      t.raw.prepare("UPDATE device_keys SET revoked_at = NULL WHERE key_id = 'device_b'").run();
+      await expect(
+        withAuthorizedRunLeaseProject(
+          t.db,
+          request.repositoryId,
+          { kind: "user", githubUserId: "user_b" },
+          "device_b",
+          sign,
+          {
+            beforeFinalAuthorityCheck: async () => {
+              t.raw
+                .prepare(
+                  "INSERT INTO project_release_requests (github_repository_id, project_id, organization_id, github_name, default_branch) VALUES (?, 'project_b', 'org_b', 'beta/repo', 'main')",
+                )
+                .run(request.repositoryId);
+            },
+          },
+        ),
+      ).resolves.toEqual({ kind: "released" });
+      expect(signed).toBe(4);
+    } finally {
+      t.close();
+    }
   });
 });
 

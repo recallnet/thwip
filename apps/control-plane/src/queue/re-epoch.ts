@@ -1,9 +1,10 @@
 import { recordDigest, type Sha256 } from "@thwip/queue-protocol";
 import { buildGenesisRecord, signTransitionRecord } from "./evidence.js";
-import { storeAttestation } from "./attestation.js";
+import { clearAttestationChainPosition, storeAttestation } from "./attestation.js";
 import type { D1Like } from "./projection.js";
 import { readQueue, type RecordFromIntentDeps } from "./record-from-intent.js";
 import type { QueueRouteEnv } from "./routes.js";
+import type { ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
  * Open a new attested range on a branch whose early history is archaeology.
@@ -62,6 +63,7 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
     readonly atSha: string;
     readonly actorPrincipalId: string;
     readonly reason: string;
+    readonly writeLease?: ProjectWriteLease;
   },
 ): Promise<ReEpochOutcome> {
   const { repositoryId, baseRef, atSha } = input;
@@ -69,10 +71,12 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
 
   const project = await db
     .prepare(
-      "SELECT attested_from_sequence AS epoch FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?",
+      `SELECT attested_from_sequence AS epoch, project_id AS projectId
+         FROM queue_projects WHERE github_repository_id = ? AND base_ref = ?
+          AND (? IS NULL OR project_id = ?)`,
     )
-    .bind(repositoryId, baseRef)
-    .first<{ epoch: number }>();
+    .bind(repositoryId, baseRef, input.writeLease?.projectId ?? null, input.writeLease?.projectId ?? null)
+    .first<{ epoch: number; projectId: string }>();
   if (project === null) return { status: "refused", detail: "no queue for that branch", code: "NO_QUEUE" };
 
   const facts = await deps.commitFacts(env, repositoryId, atSha);
@@ -139,6 +143,7 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
     digest: signed.digest,
     kind: "genesis",
     repositoryId,
+    projectId: input.writeLease?.projectId ?? project.projectId,
     baseRef,
     transitionSequence,
     // Synthetic and unique to the position, so a second call for the same
@@ -160,6 +165,8 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
           }) =>
             deps
               .storeEvidence(env, {
+                projectId: policy.projectId,
+                ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
                 organizationId: mirrored.organizationId,
                 repositoryId: mirrored.repositoryId,
                 kind: mirrored.kind,
@@ -189,15 +196,12 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
       witnessPrincipalIds: [input.actorPrincipalId],
     });
     return { moved: false as const };
-  });
+  }, undefined, undefined, input.writeLease);
 
   if (result.moved) {
     // The chain grew while this was being signed. The bytes stay, because the
     // queue really did sign them, and what goes is the claim to a position.
-    await db
-      .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-      .bind(signed.digest)
-      .run();
+    await clearAttestationChainPosition(db, signed.digest, input.writeLease?.projectId ?? project.projectId);
     return { status: "refused", detail: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" };
   }
 
@@ -207,9 +211,11 @@ export async function openAttestedRange<TEnv extends QueueRouteEnv>(
   // avoid.
   await db
     .prepare(
-      "UPDATE queue_projects SET attested_from_sequence = ? WHERE github_repository_id = ? AND base_ref = ?",
+      `UPDATE queue_projects SET attested_from_sequence = ?
+        WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_projects.project_id)`,
     )
-    .bind(transitionSequence, repositoryId, baseRef)
+    .bind(transitionSequence, repositoryId, baseRef, input.writeLease?.projectId ?? project.projectId)
     .run();
 
   return {

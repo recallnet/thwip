@@ -93,15 +93,15 @@ function queueProject(): void {
   raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)").run(ORG, "1", "acme");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', ?, ?, ?, 1, 'enforced')`,
-    )
-    .run(ORG, REPO, REF);
-  raw
-    .prepare(
       "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
     .run("proj_1", ORG, REPO, "acme/repo");
+  raw
+    .prepare(
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', ?, ?, ?, 1, 'enforced', ?)`,
+    )
+    .run(ORG, REPO, REF, "proj_1");
   for (const [id, githubUserId, login] of [
     ["alice", "1", "alice"],
     ["bob", "2", "bob"],

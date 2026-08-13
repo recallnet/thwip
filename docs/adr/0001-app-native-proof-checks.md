@@ -114,11 +114,19 @@ Every state-changing webhook and queue route wakes the App writer. A scheduled
 Worker reconciliation also drives quiet lanes, so repository Actions are not a
 runtime wake-up mechanism.
 
-If the App is removed, its permission upgrade is incomplete, a bundle cannot be
-resolved, or audit signing fails, the required check remains missing, failing,
-or in progress rather than producing success. Rollback pauses the queue and has
-an administrator disable or remove the generated rulesets; it does not switch to
-a second writer. Audit records and policy versions remain append-only.
+If the App is suspended, its permission upgrade is incomplete, a bundle cannot
+be resolved, or audit signing fails, the required check remains missing,
+failing, or in progress rather than producing success. Rollback pauses the queue
+and has an administrator disable or remove the generated rulesets; it does not
+switch to a second writer. Suspension preserves project state.
+
+Removing a repository from the App selection, or uninstalling the App, is a
+different operation. GitHub selection is authoritative. Thwip stops new work
+and deletes that project's policies, proofs, queue history, signed records,
+grants, metrics, and stored evidence. A later selection creates a new disabled
+project rather than restoring audit history. An administrator must disable or
+remove the generated rulesets before revoking access because the runtime App
+does not hold Administration permission.
 
 ## Consequences
 

@@ -1,5 +1,5 @@
 import type { D1Like } from "./projection.js";
-import { setupPullRequestFiles, type SetupFile } from "./bootstrap-workflows.js";
+import { setupPullRequestFiles, verifierWorkflowFile, type SetupFile } from "./bootstrap-workflows.js";
 import {
   bootstrapCheckRuns,
   BOOTSTRAP_STEPS,
@@ -53,6 +53,8 @@ export interface QueueProject {
   readonly activationState: string;
   readonly chainPublic: boolean;
   readonly progress: BootstrapProgress;
+  readonly projectId: string;
+  readonly verifierWorkflowVersion: 1 | 2;
 }
 
 export interface SetupPullRequestState {
@@ -78,6 +80,11 @@ export interface BootstrapGitHub {
   baseSha(): Promise<string>;
   setupPullRequest(): Promise<SetupPullRequestState | null>;
   openSetupPullRequest(input: {
+    files: readonly SetupFile[];
+    baseSha: string;
+  }): Promise<SetupPullRequestState>;
+  verifierUpgradePullRequest(): Promise<SetupPullRequestState | null>;
+  openVerifierUpgradePullRequest(input: {
     files: readonly SetupFile[];
     baseSha: string;
   }): Promise<SetupPullRequestState>;
@@ -129,23 +136,25 @@ export interface ExpectedBypassActors {
  * back out of the prose with a regular expression, which breaks silently the day
  * the sentence is reworded.
  */
+export type BootstrapActivityStep = BootstrapStep | "merge-verifier-v2-pr";
+
 export type StepOutcome =
   | {
       readonly kind: "advanced";
-      readonly step: BootstrapStep;
+      readonly step: BootstrapActivityStep;
       readonly detail: string;
       readonly pullRequestNumber?: number;
     }
   | {
       readonly kind: "waiting";
-      readonly step: BootstrapStep;
+      readonly step: BootstrapActivityStep;
       readonly detail: string;
       readonly pullRequestNumber?: number;
       readonly manualRulesets?: readonly ManualRulesetChange[];
       readonly confirmationRequired?: "queue-enforcement" | "ruleset-bypass-actors";
       readonly expectedBypassActors?: readonly ExpectedBypassActors[];
     }
-  | { readonly kind: "refused"; readonly step: BootstrapStep; readonly detail: string }
+  | { readonly kind: "refused"; readonly step: BootstrapActivityStep; readonly detail: string }
   | { readonly kind: "complete" };
 
 /* ---------------------------------------------------------------- */
@@ -161,6 +170,8 @@ interface ProjectRow {
   activation_state: string;
   chain_public: number;
   bootstrap_progress_json: string;
+  project_id: string;
+  verifier_workflow_version: number;
 }
 
 function toProject(row: ProjectRow): QueueProject {
@@ -184,22 +195,41 @@ function toProject(row: ProjectRow): QueueProject {
     activationState: row.activation_state,
     chainPublic: row.chain_public === 1,
     progress,
+    projectId: row.project_id,
+    verifierWorkflowVersion: row.verifier_workflow_version === 2 ? 2 : 1,
   };
+}
+
+export interface BootstrapProjectBinding {
+  readonly projectId: string;
+  readonly organizationId: string;
 }
 
 export async function readQueueProject(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
+  expected?: BootstrapProjectBinding,
 ): Promise<QueueProject | null> {
   const row = await db
     .prepare(
       `SELECT id, organization_id, github_repository_id, base_ref,
-              enabled, activation_state, chain_public, bootstrap_progress_json
+              enabled, activation_state, chain_public, bootstrap_progress_json, project_id,
+              verifier_workflow_version
          FROM queue_projects
-        WHERE github_repository_id = ? AND base_ref = ?`,
+        WHERE github_repository_id = ? AND base_ref = ?
+          AND project_id IS NOT NULL
+          AND (? IS NULL OR project_id = ?)
+          AND (? IS NULL OR organization_id = ?)`,
     )
-    .bind(repositoryId, baseRef)
+    .bind(
+      repositoryId,
+      baseRef,
+      expected?.projectId ?? null,
+      expected?.projectId ?? null,
+      expected?.organizationId ?? null,
+      expected?.organizationId ?? null,
+    )
     .first<ProjectRow>();
   return row === null ? null : toProject(row);
 }
@@ -207,6 +237,8 @@ export async function readQueueProject(
 export interface EnrollmentRequest {
   readonly repositoryId: string;
   readonly baseRef: string;
+  readonly expectedProjectId: string;
+  readonly expectedOrganizationId: string;
   /** Public chains need no session to read. Private is the safe default. */
   readonly chainPublic?: boolean;
 }
@@ -265,17 +297,18 @@ export function pinnedVerifierFor(input: {
 export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest): Promise<Enrollment> {
   const installed = await db
     .prepare(
-      `SELECT p.organization_id AS organizationId, p.github_name AS repository, o.github_org_id AS ownerId
+      `SELECT p.id AS projectId, p.organization_id AS organizationId, p.github_name AS repository, o.github_org_id AS ownerId
          FROM projects p JOIN organizations o ON o.id = p.organization_id
-        WHERE p.github_repository_id = ?
+        WHERE p.github_repository_id = ? AND p.id = ? AND p.organization_id = ?
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
-            SELECT 1 FROM removed_projects r
+            SELECT 1 FROM project_release_jobs r
              WHERE r.organization_id = p.organization_id
                AND r.github_repository_id = p.github_repository_id
           )`,
     )
-    .bind(request.repositoryId)
-    .first<{ organizationId: string; repository: string; ownerId: string }>();
+    .bind(request.repositoryId, request.expectedProjectId, request.expectedOrganizationId)
+    .first<{ projectId: string; organizationId: string; repository: string; ownerId: string }>();
   if (installed === null) {
     return { ok: false, reason: "the Thwip App is not installed on this repository" };
   }
@@ -283,9 +316,23 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
   await db
     .prepare(
       `INSERT INTO queue_projects
-         (id, organization_id, github_repository_id, base_ref,
-          enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json)
-       VALUES (?, ?, ?, ?, 0, 'configured', ?, '{}', ?)
+       (id, organization_id, github_repository_id, base_ref,
+          enabled, activation_state, chain_public, bootstrap_progress_json, verifier_json, project_id,
+          verifier_workflow_version)
+       SELECT ?, ?, ?, ?, 0, 'configured', ?, '{}', ?, ?, 2
+        WHERE EXISTS (
+          SELECT 1 FROM projects p
+           WHERE p.id = ? AND p.organization_id = ? AND p.github_repository_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM project_release_requests r
+                WHERE r.github_repository_id = p.github_repository_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM project_release_jobs r
+                WHERE r.organization_id = p.organization_id
+                  AND r.github_repository_id = p.github_repository_id
+             )
+        )
        ON CONFLICT (github_repository_id, base_ref) DO NOTHING`,
     )
     .bind(
@@ -302,6 +349,10 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
           baseRef: request.baseRef,
         }),
       ),
+      installed.projectId,
+      request.expectedProjectId,
+      request.expectedOrganizationId,
+      request.repositoryId,
     )
     .run();
 
@@ -311,13 +362,39 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
   if (request.chainPublic !== undefined) {
     await db
       .prepare(
-        "UPDATE queue_projects SET chain_public = ? WHERE github_repository_id = ? AND base_ref = ?",
+        `UPDATE queue_projects SET chain_public = ?
+          WHERE github_repository_id = ? AND base_ref = ?
+            AND project_id = ? AND organization_id = ?
+            AND EXISTS (
+              SELECT 1 FROM projects p
+               WHERE p.id = queue_projects.project_id
+                 AND p.organization_id = queue_projects.organization_id
+                 AND p.github_repository_id = queue_projects.github_repository_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM project_release_requests r
+               WHERE r.github_repository_id = queue_projects.github_repository_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM project_release_jobs r
+               WHERE r.organization_id = queue_projects.organization_id
+                 AND r.github_repository_id = queue_projects.github_repository_id
+            )`,
       )
-      .bind(request.chainPublic ? 1 : 0, request.repositoryId, request.baseRef)
+      .bind(
+        request.chainPublic ? 1 : 0,
+        request.repositoryId,
+        request.baseRef,
+        request.expectedProjectId,
+        request.expectedOrganizationId,
+      )
       .run();
   }
 
-  const project = await readQueueProject(db, request.repositoryId, request.baseRef);
+  const project = await readQueueProject(db, request.repositoryId, request.baseRef, {
+    projectId: request.expectedProjectId,
+    organizationId: request.expectedOrganizationId,
+  });
   if (project === null) return { ok: false, reason: "the queue project could not be read back" };
   return { ok: true, project };
 }
@@ -332,21 +409,55 @@ export async function recordBootstrapStep(
   db: D1Like,
   project: QueueProject,
   step: BootstrapStep,
-): Promise<BootstrapProgress> {
+): Promise<BootstrapProgress | null> {
   const progress: BootstrapProgress = { ...project.progress, [step]: true };
-  await db
-    .prepare("UPDATE queue_projects SET bootstrap_progress_json = ? WHERE id = ?")
-    .bind(JSON.stringify(progress), project.id)
+  return (await guardedProjectUpdate(db, project, "bootstrap_progress_json = ?", [JSON.stringify(progress)]))
+    ? progress
+    : null;
+}
+
+async function guardedProjectUpdate(
+  db: D1Like,
+  project: QueueProject,
+  set: string,
+  bindings: readonly unknown[] = [],
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE queue_projects SET ${set}
+        WHERE id = ? AND project_id = ? AND organization_id = ?
+          AND github_repository_id = ? AND base_ref = ?
+          AND EXISTS (
+            SELECT 1 FROM projects p
+             WHERE p.id = queue_projects.project_id
+               AND p.organization_id = queue_projects.organization_id
+               AND p.github_repository_id = queue_projects.github_repository_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_requests r
+             WHERE r.github_repository_id = queue_projects.github_repository_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_jobs r
+             WHERE r.organization_id = queue_projects.organization_id
+               AND r.github_repository_id = queue_projects.github_repository_id
+          )`,
+    )
+    .bind(
+      ...bindings,
+      project.id,
+      project.projectId,
+      project.organizationId,
+      project.repositoryId,
+      project.baseRef,
+    )
     .run();
-  return progress;
+  return ((written as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1;
 }
 
 /** The queue starts observing under the repository's existing controls. */
-export async function observeQueueProject(db: D1Like, project: QueueProject): Promise<void> {
-  await db
-    .prepare("UPDATE queue_projects SET enabled = 1, activation_state = 'observe' WHERE id = ?")
-    .bind(project.id)
-    .run();
+export async function observeQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
+  return guardedProjectUpdate(db, project, "enabled = 1, activation_state = 'observe'");
 }
 
 /**
@@ -356,26 +467,28 @@ export async function observeQueueProject(db: D1Like, project: QueueProject): Pr
  * out between the ownership write and the next setup request.
  */
 export async function beginQueueEnforcement(db: D1Like, project: QueueProject): Promise<boolean> {
-  await db
-    .prepare("UPDATE queue_projects SET activation_state = 'canary' WHERE id = ? AND activation_state = 'observe'")
-    .bind(project.id)
-    .run();
+  await guardedProjectUpdate(
+    db,
+    project,
+    "activation_state = CASE WHEN activation_state = 'observe' THEN 'canary' ELSE activation_state END",
+  );
   const stored = await db
-    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
-    .bind(project.id)
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ? AND project_id = ? AND organization_id = ?")
+    .bind(project.id, project.projectId, project.organizationId)
     .first<{ activation_state: string }>();
   return stored?.activation_state === "canary";
 }
 
 /** The durable state follows only after ownership and policy were read back. */
 export async function enforceQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
-  await db
-    .prepare("UPDATE queue_projects SET activation_state = 'enforced' WHERE id = ? AND activation_state IN ('canary', 'enforced')")
-    .bind(project.id)
-    .run();
+  await guardedProjectUpdate(
+    db,
+    project,
+    "activation_state = CASE WHEN activation_state IN ('canary', 'enforced') THEN 'enforced' ELSE activation_state END",
+  );
   const stored = await db
-    .prepare("SELECT activation_state FROM queue_projects WHERE id = ?")
-    .bind(project.id)
+    .prepare("SELECT activation_state FROM queue_projects WHERE id = ? AND project_id = ? AND organization_id = ?")
+    .bind(project.id, project.projectId, project.organizationId)
     .first<{ activation_state: string }>();
   return stored?.activation_state === "enforced";
 }
@@ -391,13 +504,14 @@ export interface BootstrapStatus {
   readonly activationState: string;
   readonly chainPublic: boolean;
   readonly progress: BootstrapProgress;
-  readonly nextStep: BootstrapStep | null;
+  readonly nextStep: BootstrapActivityStep | null;
   readonly complete: boolean;
   readonly mayActivate: ReturnType<typeof mayActivate>;
 }
 
 export function bootstrapStatus(project: QueueProject): BootstrapStatus {
-  const next = nextBootstrapStep(project.progress);
+  const ordinary = nextBootstrapStep(project.progress);
+  const next = ordinary ?? (project.verifierWorkflowVersion === 1 ? "merge-verifier-v2-pr" : null);
   return {
     repositoryId: project.repositoryId,
     baseRef: project.baseRef,
@@ -439,14 +553,16 @@ function policyFor(
 async function proofCheckMode(deps: BootstrapDeps, project: QueueProject): Promise<ProofCheckMode> {
   const row = await deps.db
     .prepare(
-      `SELECT p.proof_check_mode FROM projects p WHERE p.github_repository_id = ?
+      `SELECT p.proof_check_mode FROM projects p
+        WHERE p.github_repository_id = ? AND p.id = ? AND p.organization_id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
     )
-    .bind(project.repositoryId)
+    .bind(project.repositoryId, project.projectId, project.organizationId)
     .first<{ proof_check_mode: string }>();
   return row?.proof_check_mode === "enforced" ? "enforced" : "observe";
 }
@@ -613,7 +729,9 @@ export async function advanceBootstrap(
   if (step === null) return { kind: "complete" };
 
   const outcome = await performStep(deps, project, step);
-  if (outcome.kind === "advanced") await recordBootstrapStep(deps.db, project, step);
+  if (outcome.kind === "advanced" && (await recordBootstrapStep(deps.db, project, step)) === null) {
+    return { kind: "refused", step, detail: "the repository project changed while setup was running" };
+  }
   return outcome;
 }
 
@@ -891,7 +1009,9 @@ async function performStep(
       // moves the branch. What enrolment owes it is a project that is on and
       // observing: observe reports what the queue would have done without being
       // able to block anything, which is what makes adoption reversible.
-      await observeQueueProject(deps.db, project);
+      if (!(await observeQueueProject(deps.db, project))) {
+        return { kind: "refused", step, detail: "the repository project changed while setup was running" };
+      }
       return { kind: "advanced", step, detail: "the queue is enabled and observing" };
   }
 }
@@ -901,6 +1021,41 @@ export interface BootstrapRun {
   readonly progress: BootstrapProgress;
   readonly enabled: boolean;
   readonly status: BootstrapStatus;
+}
+
+async function upgradeVerifierWorkflow(deps: BootstrapDeps, project: QueueProject): Promise<StepOutcome> {
+  const step = "merge-verifier-v2-pr" as const;
+  const open = await deps.github.verifierUpgradePullRequest();
+  if (open === null) {
+    const baseSha = await deps.github.baseSha();
+    const opened = await deps.github.openVerifierUpgradePullRequest({
+      files: [verifierWorkflowFile({ endpoint: deps.endpoint, actionRef: deps.actionRef })],
+      baseSha,
+    });
+    return {
+      kind: "waiting",
+      step,
+      detail: `opened verifier protocol upgrade pull request #${opened.number}; merge it to continue`,
+      pullRequestNumber: opened.number,
+    };
+  }
+  if (!open.merged) {
+    return {
+      kind: "waiting",
+      step,
+      detail: `verifier protocol upgrade pull request #${open.number} is not merged`,
+      pullRequestNumber: open.number,
+    };
+  }
+  if (!(await guardedProjectUpdate(deps.db, project, "verifier_workflow_version = 2"))) {
+    return { kind: "refused", step, detail: "the repository project changed while setup was running" };
+  }
+  return {
+    kind: "advanced",
+    step,
+    detail: `verifier protocol upgrade pull request #${open.number} merged`,
+    pullRequestNumber: open.number,
+  };
 }
 
 /**
@@ -920,16 +1075,24 @@ export async function runBootstrap(
   // One pass per step, plus the pass that answers `complete`. Bound from the
   // list rather than a literal, so adding a step cannot silently stop the run
   // one short of the end.
-  for (let i = 0; i <= BOOTSTRAP_STEPS.length; i += 1) {
-    const outcome = await advanceBootstrap(deps, current);
+  for (let i = 0; i <= BOOTSTRAP_STEPS.length + 1; i += 1) {
+    const outcome = nextBootstrapStep(current.progress) === null && current.verifierWorkflowVersion === 1
+      ? await upgradeVerifierWorkflow(deps, current)
+      : await advanceBootstrap(deps, current);
     outcomes.push(outcome);
     if (outcome.kind !== "advanced") break;
-    const reloaded = await readQueueProject(deps.db, current.repositoryId, current.baseRef);
+    const reloaded = await readQueueProject(deps.db, current.repositoryId, current.baseRef, {
+      projectId: current.projectId,
+      organizationId: current.organizationId,
+    });
     if (reloaded === null) break;
     current = reloaded;
   }
 
-  const finished = (await readQueueProject(deps.db, project.repositoryId, project.baseRef)) ?? current;
+  const finished = (await readQueueProject(deps.db, project.repositoryId, project.baseRef, {
+    projectId: project.projectId,
+    organizationId: project.organizationId,
+  })) ?? current;
   return {
     outcomes,
     progress: finished.progress,
@@ -945,6 +1108,8 @@ export async function runBootstrap(
 export interface BootstrapRequest extends BootstrapDeps {
   readonly repositoryId: string;
   readonly baseRef: string;
+  readonly expectedProjectId: string;
+  readonly expectedOrganizationId: string;
   readonly chainPublic?: boolean;
 }
 
@@ -966,6 +1131,8 @@ export async function handleBootstrapRequest(request: BootstrapRequest): Promise
   const enrolled = await enrollQueueProject(request.db, {
     repositoryId: request.repositoryId,
     baseRef: request.baseRef,
+    expectedProjectId: request.expectedProjectId,
+    expectedOrganizationId: request.expectedOrganizationId,
     ...(request.chainPublic !== undefined ? { chainPublic: request.chainPublic } : {}),
   });
   if (!enrolled.ok) return { status: 404, body: { error: enrolled.reason } };
@@ -997,10 +1164,73 @@ interface HttpLike {
 export function bootstrapGitHub(
   http: HttpLike,
   repo: { owner: string; repo: string; baseRef: string },
-  setup: { branch: string; title: string; body: string },
+  setup: {
+    branch: string;
+    title: string;
+    body: string;
+    verifierUpgrade?: { branch: string; title: string; body: string };
+  },
+  beforeWrite: () => Promise<void> = async () => {},
 ): BootstrapGitHub {
   const base = `/repos/${repo.owner}/${repo.repo}`;
   const branch = repo.baseRef.replace(/^refs\/heads\//, "");
+
+  const pullRequest = async (configuration: { branch: string }): Promise<SetupPullRequestState | null> => {
+    const found = await http.json<
+      Array<{ number: number; merged_at: string | null; head: { sha: string } }>
+    >(`${base}/pulls?state=all&head=${repo.owner}:${configuration.branch}&per_page=1`);
+    const pull = found[0];
+    if (pull === undefined) return null;
+    return { number: pull.number, merged: pull.merged_at !== null, headSha: pull.head.sha };
+  };
+
+  const openPullRequest = async (
+    configuration: { branch: string; title: string; body: string },
+    input: { files: readonly SetupFile[]; baseSha: string },
+  ): Promise<SetupPullRequestState> => {
+    // A tree built from blobs rather than the contents API, so every file
+    // lands in one commit and a reviewer sees one diff.
+    const blobs: Array<{ path: string; mode: string; type: string; sha: string }> = [];
+    for (const file of input.files) {
+      await beforeWrite();
+      const blob = await http.json<{ sha: string }>(`${base}/git/blobs`, {
+        method: "POST",
+        body: JSON.stringify({ content: file.content, encoding: "utf-8" }),
+        headers: { "content-type": "application/json" },
+      });
+      blobs.push({ path: file.path, mode: "100644", type: "blob", sha: blob.sha });
+    }
+    await beforeWrite();
+    const tree = await http.json<{ sha: string }>(`${base}/git/trees`, {
+      method: "POST",
+      body: JSON.stringify({ base_tree: input.baseSha, tree: blobs }),
+      headers: { "content-type": "application/json" },
+    });
+    await beforeWrite();
+    const commit = await http.json<{ sha: string }>(`${base}/git/commits`, {
+      method: "POST",
+      body: JSON.stringify({ message: configuration.title, tree: tree.sha, parents: [input.baseSha] }),
+      headers: { "content-type": "application/json" },
+    });
+    await beforeWrite();
+    await http.json(`${base}/git/refs`, {
+      method: "POST",
+      body: JSON.stringify({ ref: `refs/heads/${configuration.branch}`, sha: commit.sha }),
+      headers: { "content-type": "application/json" },
+    });
+    await beforeWrite();
+    const pull = await http.json<{ number: number; head: { sha: string } }>(`${base}/pulls`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: configuration.title,
+        body: configuration.body,
+        head: configuration.branch,
+        base: branch,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    return { number: pull.number, merged: false, headSha: pull.head.sha };
+  };
 
   return {
     async baseSha() {
@@ -1009,48 +1239,20 @@ export function bootstrapGitHub(
     },
 
     async setupPullRequest() {
-      const found = await http.json<
-        Array<{ number: number; merged_at: string | null; head: { sha: string } }>
-      >(`${base}/pulls?state=all&head=${repo.owner}:${setup.branch}&per_page=1`);
-      const pull = found[0];
-      if (pull === undefined) return null;
-      return { number: pull.number, merged: pull.merged_at !== null, headSha: pull.head.sha };
+      return pullRequest(setup);
     },
 
     async openSetupPullRequest(input) {
-      // A tree built from blobs rather than the contents API, so every file
-      // lands in one commit and a reviewer sees one diff.
-      const blobs = await Promise.all(
-        input.files.map(async (file) => {
-          const blob = await http.json<{ sha: string }>(`${base}/git/blobs`, {
-            method: "POST",
-            body: JSON.stringify({ content: file.content, encoding: "utf-8" }),
-            headers: { "content-type": "application/json" },
-          });
-          return { path: file.path, mode: "100644", type: "blob", sha: blob.sha };
-        }),
-      );
-      const tree = await http.json<{ sha: string }>(`${base}/git/trees`, {
-        method: "POST",
-        body: JSON.stringify({ base_tree: input.baseSha, tree: blobs }),
-        headers: { "content-type": "application/json" },
-      });
-      const commit = await http.json<{ sha: string }>(`${base}/git/commits`, {
-        method: "POST",
-        body: JSON.stringify({ message: setup.title, tree: tree.sha, parents: [input.baseSha] }),
-        headers: { "content-type": "application/json" },
-      });
-      await http.json(`${base}/git/refs`, {
-        method: "POST",
-        body: JSON.stringify({ ref: `refs/heads/${setup.branch}`, sha: commit.sha }),
-        headers: { "content-type": "application/json" },
-      });
-      const pull = await http.json<{ number: number; head: { sha: string } }>(`${base}/pulls`, {
-        method: "POST",
-        body: JSON.stringify({ title: setup.title, body: setup.body, head: setup.branch, base: branch }),
-        headers: { "content-type": "application/json" },
-      });
-      return { number: pull.number, merged: false, headSha: pull.head.sha };
+      return openPullRequest(setup, input);
+    },
+
+    async verifierUpgradePullRequest() {
+      return setup.verifierUpgrade === undefined ? null : pullRequest(setup.verifierUpgrade);
+    },
+
+    async openVerifierUpgradePullRequest(input) {
+      if (setup.verifierUpgrade === undefined) throw new Error("verifier upgrade pull request is not configured");
+      return openPullRequest(setup.verifierUpgrade, input);
     },
 
     async rulesetNamed(name) {
@@ -1062,6 +1264,7 @@ export function bootstrapGitHub(
     },
 
     async publishBootstrapCheck(run) {
+      await beforeWrite();
       const created = await http.json<{ app?: { id?: number } }>(`${base}/check-runs`, {
         method: "POST",
         body: JSON.stringify(run),

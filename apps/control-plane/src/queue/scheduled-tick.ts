@@ -29,6 +29,7 @@ import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-
 import { findingsForChain } from "./chain-self-check.js";
 import type { CommentBudget } from "./status-comment-write.js";
 import { reconcileTerminalEntries } from "./terminal-reconciliation.js";
+import { acquireProjectWriteLease, repositoryAllowsExternalWrite } from "../project-lifecycle.js";
 
 /**
  * The real dependencies `recordMergeFromIntent` needs, built once from the same
@@ -210,11 +211,11 @@ export async function tickAllQueues(
   const db = env.DB as unknown as D1Like;
   const rows = await db
     .prepare(
-      "SELECT github_repository_id AS repositoryId, base_ref AS baseRef, attested_from_sequence AS epochStartsAt " +
+      "SELECT github_repository_id AS repositoryId, base_ref AS baseRef, attested_from_sequence AS epochStartsAt, project_id AS projectId " +
         "FROM queue_projects WHERE enabled = 1 ORDER BY github_repository_id, base_ref",
     )
     .bind()
-    .all<{ repositoryId: string; baseRef: string; epochStartsAt: number }>();
+    .all<{ repositoryId: string; baseRef: string; epochStartsAt: number; projectId: string | null }>();
 
   const now = new Date().toISOString();
   // Retire stale runners once per repository, not once per queue: the table is
@@ -249,10 +250,14 @@ export async function tickAllQueues(
   let terminalEntriesReconciled = 0;
   const sweptQueues: Array<{ row: (typeof rows.results)[number]; snapshot: QueueSnapshot }> = [];
   for (const row of rows.results) {
+    const lifecycleLease =
+      row.projectId === null ? null : await acquireProjectWriteLease(db, row.repositoryId, row.projectId);
     try {
+      if (lifecycleLease === null) throw new Error(`repository ${row.repositoryId} project is unavailable`);
+      await lifecycleLease.renew();
       let offlinePrincipals = offlinePrincipalsByRepo.get(row.repositoryId);
       if (offlinePrincipals === undefined) {
-        offlinePrincipals = await retireStaleRunners(db, row.repositoryId, now);
+        offlinePrincipals = await retireStaleRunners(db, row.repositoryId, now, lifecycleLease.projectId);
         offlinePrincipalsByRepo.set(row.repositoryId, offlinePrincipals);
       }
       let deviceOnly = deviceOnlyByRepo.get(row.repositoryId);
@@ -269,6 +274,11 @@ export async function tickAllQueues(
             db,
             bucket: env.EVIDENCE as unknown as R2Like | undefined,
             repositoryId: row.repositoryId,
+            projectId: lifecycleLease.projectId,
+            beforeWrite: async () => {
+              await lifecycleLease.renew();
+              return repositoryAllowsExternalWrite(db, row.repositoryId, lifecycleLease.projectId);
+            },
           }),
         );
         await commands.runAlarm();
@@ -340,7 +350,14 @@ export async function tickAllQueues(
       // takes seconds.
       let snapshot = swept.snapshot;
       if (swept.reconciliation !== null) {
-        const settled = await settleReconciliation(env, row.repositoryId, row.baseRef, swept.reconciliation, reads);
+        const settled = await settleReconciliation(
+          env,
+          row.repositoryId,
+          row.baseRef,
+          swept.reconciliation,
+          reads,
+          lifecycleLease,
+        );
         snapshot = settled.snapshot;
         reconciled += 1;
         // Said out loud, on the channel this account watches. A person used to
@@ -379,6 +396,8 @@ export async function tickAllQueues(
       // way to report it.
       failed += 1;
       ports.onQueueFailed(row.repositoryId, error);
+    } finally {
+      await lifecycleLease?.release();
     }
   }
 
@@ -403,7 +422,11 @@ export async function tickAllQueues(
   for (const maintained of maintenanceQueues) {
     const { row } = maintained;
     let { snapshot } = maintained;
+    const lifecycleLease =
+      row.projectId === null ? null : await acquireProjectWriteLease(db, row.repositoryId, row.projectId);
     try {
+      if (lifecycleLease === null) throw new Error(`repository ${row.repositoryId} project is unavailable`);
+      await lifecycleLease.renew();
       // The webhook is the fast path, not the only path. Walk a persisted page
       // of every nonterminal entry and compare it with GitHub. A merged entry
       // is settled only after its existing signed record is found or the
@@ -416,6 +439,7 @@ export async function tickAllQueues(
         { repositoryId: row.repositoryId, baseRef: row.baseRef },
         terminalReads,
         recordDeps,
+        lifecycleLease,
       );
       snapshot = terminals.snapshot;
       terminalEntriesExamined += terminals.examined;
@@ -456,7 +480,6 @@ export async function tickAllQueues(
           driven += 1;
         }
       }
-
       // A write whose response was lost is nobody's job until it is this one's.
       // `settleReconciliation` above needs a surviving attempt; these rows
       // outlive every attempt, which is why four merges sat unrecorded.
@@ -465,7 +488,7 @@ export async function tickAllQueues(
       // the subrequest budget must not starve the simpler missed-webhook repair.
       // Both stay after the lane-critical fleet pass, so neither can stop the
       // clock or initial drive for another queue.
-      settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
+      settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps, lifecycleLease);
 
       // Readiness the webhook was supposed to refresh and did not.
       //
@@ -524,6 +547,8 @@ export async function tickAllQueues(
       // importantly, it cannot prevent another repository's clock from moving.
       failed += 1;
       ports.onQueueFailed(row.repositoryId, error);
+    } finally {
+      await lifecycleLease?.release();
     }
   }
   const retiredComments = await retireAbandonedComments(db, ports);
@@ -559,26 +584,34 @@ export async function tickAllQueues(
 async function retireAbandonedComments(db: D1Like, ports: TickPorts): Promise<number> {
   const abandoned = await db
     .prepare(
-      "SELECT c.github_repository_id AS repositoryId, c.base_ref AS baseRef, c.pull_request_number AS pullRequestNumber " +
+      "SELECT c.github_repository_id AS repositoryId, c.project_id AS projectId, c.base_ref AS baseRef, c.pull_request_number AS pullRequestNumber " +
         "FROM queue_status_comments c LEFT JOIN queue_projects q " +
-        "ON q.github_repository_id = c.github_repository_id AND q.base_ref = c.base_ref AND q.enabled = 1 " +
+        "ON q.github_repository_id = c.github_repository_id AND q.base_ref = c.base_ref AND q.project_id = c.project_id AND q.enabled = 1 " +
         "WHERE q.id IS NULL",
     )
     .bind()
-    .all<{ repositoryId: string; baseRef: string; pullRequestNumber: number }>();
+    .all<{ repositoryId: string; projectId: string; baseRef: string; pullRequestNumber: number }>();
   if (abandoned.results.length === 0) return 0;
 
-  const byBranch = new Map<string, { repositoryId: string; baseRef: string; numbers: number[] }>();
+  const byBranch = new Map<string, { repositoryId: string; projectId: string; baseRef: string; numbers: number[] }>();
   for (const row of abandoned.results) {
-    const key = `${row.repositoryId} ${row.baseRef}`;
-    const branch = byBranch.get(key) ?? { repositoryId: row.repositoryId, baseRef: row.baseRef, numbers: [] };
+    const key = `${row.projectId} ${row.baseRef}`;
+    const branch = byBranch.get(key) ?? {
+      repositoryId: row.repositoryId,
+      projectId: row.projectId,
+      baseRef: row.baseRef,
+      numbers: [],
+    };
     branch.numbers.push(row.pullRequestNumber);
     byBranch.set(key, branch);
   }
 
   let retired = 0;
   for (const branch of byBranch.values()) {
+    const lifecycleLease = await acquireProjectWriteLease(db, branch.repositoryId, branch.projectId);
+    if (lifecycleLease === null) continue;
     try {
+      await lifecycleLease.renew();
       await ports.retireStatusComments(branch.repositoryId, branch.baseRef, branch.numbers);
     } catch (error) {
       console.error(
@@ -586,15 +619,23 @@ async function retireAbandonedComments(db: D1Like, ports: TickPorts): Promise<nu
           `${String(error)}`,
       );
     }
-    await db
-      .prepare("DELETE FROM queue_status_comments WHERE github_repository_id = ? AND base_ref = ?")
-      .bind(branch.repositoryId, branch.baseRef)
-      .run();
-    retired += branch.numbers.length;
-    console.log(
-      `[queue heartbeat] retired ${branch.numbers.length} status comment(s) on ${branch.repositoryId} ` +
-        `${branch.baseRef}, which the queue no longer manages`,
-    );
+    try {
+      await db
+        .prepare(
+          `DELETE FROM queue_status_comments
+            WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?
+              AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_status_comments.project_id)`,
+        )
+        .bind(branch.repositoryId, branch.baseRef, branch.projectId)
+        .run();
+      retired += branch.numbers.length;
+      console.log(
+        `[queue heartbeat] retired ${branch.numbers.length} status comment(s) on ${branch.repositoryId} ` +
+          `${branch.baseRef}, which the queue no longer manages`,
+      );
+    } finally {
+      await lifecycleLease.release();
+    }
   }
   return retired;
 }
@@ -646,6 +687,7 @@ async function sweepOrphanedWrites(
   row: { repositoryId: string; baseRef: string },
   reads: ReconciliationReads,
   recordDeps: RecordFromIntentDeps<QueueRouteEnv>,
+  lifecycleLease: NonNullable<Awaited<ReturnType<typeof acquireProjectWriteLease>>>,
 ): Promise<number> {
   const now = new Date().toISOString();
   const cutoff = new Date(Date.now() - ORPHANED_WRITE_GRACE_MS).toISOString();
@@ -656,7 +698,7 @@ async function sweepOrphanedWrites(
   const { open, settledRecently } = await withQueueState(db, row.repositoryId, row.baseRef, async (store) => ({
     open: store.unresolvedMergeOperations(cutoff, now),
     settledRecently: store.mergedWritesResolvedAfter(since, now),
-  }));
+  }), { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease });
 
   // A write is finished when the chain has a record for it, not when the row
   // says MERGED. The two came apart on 4 August 2026 and nothing owned the
@@ -673,11 +715,13 @@ async function sweepOrphanedWrites(
             repositoryId: row.repositoryId,
             baseRef: row.baseRef,
             pullRequestNumber: write.pullRequestNumber,
+            projectId: lifecycleLease.projectId,
           })
         : await durableTransitionForAttemptId(db, {
             repositoryId: row.repositoryId,
             baseRef: row.baseRef,
             attemptId: write.attemptId,
+            projectId: lifecycleLease.projectId,
           });
     if (linked === null) {
       unrecorded.push(write);
@@ -709,10 +753,15 @@ async function sweepOrphanedWrites(
           witnessPrincipalId: "queue",
           reason: `automatic repair of settled merge operation ${write.operationId}`,
           attemptId: write.attemptId,
+          writeLease: lifecycleLease,
         }),
       resolve: (operationId, resolvedAs) =>
-        withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
-          store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
+        withQueueState(
+          db,
+          row.repositoryId,
+          row.baseRef,
+          async (store) => store.resolveMergeOperation(operationId, resolvedAs, new Date().toISOString()),
+          { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease },
         ),
       ...(reads.sleep === undefined ? {} : { sleep: reads.sleep }),
     });
@@ -724,8 +773,13 @@ async function sweepOrphanedWrites(
     // the sweep will look again, so a write nobody can settle is a thing a
     // person can find rather than a line somebody had to be watching for.
     if (outcome.settled === "unknown") {
-      const refusal = await withQueueState(db, row.repositoryId, row.baseRef, async (store) =>
-        store.refuseMergeOperation(write.operationId, outcome.reason, new Date().toISOString(), retryAfter),
+      const refusal = await withQueueState(
+        db,
+        row.repositoryId,
+        row.baseRef,
+        async (store) =>
+          store.refuseMergeOperation(write.operationId, outcome.reason, new Date().toISOString(), retryAfter),
+        { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease },
       );
       console.log(
         `[queue heartbeat] orphaned merge write ${write.operationId} for repository ` +

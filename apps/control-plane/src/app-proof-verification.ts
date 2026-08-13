@@ -25,6 +25,7 @@ import {
 } from "./verification-bundle.js";
 import type { Env } from "./env.js";
 import type { D1Like } from "./queue/projection.js";
+import { acquireProjectWriteLease, repositoryAllowsExternalWrite } from "./project-lifecycle.js";
 
 const API = "https://api.github.com";
 export const APP_PROOF_CHECK = "thwip";
@@ -32,6 +33,8 @@ export const APP_PROOF_OBSERVE_CHECK = "thwip / proof (observe)";
 const EXTERNAL_ID_PREFIX = "proof-verification:";
 
 export interface AppProofRequest {
+  /** Project incarnation at enqueue time. Old work cannot cross a remove/re-add. */
+  projectId?: string;
   repositoryId: string;
   repository: string;
   ownerId: string;
@@ -755,19 +758,21 @@ export function checkSummary(evaluation: AppProofEvaluation, detailsUrl: string)
     .slice(0, 60_000);
 }
 
-async function loadProofProject(env: Env, repositoryId: string): Promise<ProofProject | null> {
+async function loadProofProject(env: Env, repositoryId: string, projectId?: string): Promise<ProofProject | null> {
   const row = await env.DB.prepare(
     `SELECT p.id, p.github_repository_id, p.github_name, p.enabled, p.proof_check_mode,
             o.github_org_id, o.installation_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.github_repository_id = ?
-        AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+        AND (? IS NULL OR p.id = ?)
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
+          AND NOT EXISTS (
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
-    .bind(repositoryId)
+    .bind(repositoryId, projectId ?? null, projectId ?? null)
     .first<{
       id: string;
       github_repository_id: string;
@@ -801,7 +806,7 @@ const defaultStorageDependencies: Pick<
   | "now"
   | "verifierVersion"
 > = {
-  loadProject: (env, request) => loadProofProject(env, request.repositoryId),
+  loadProject: (env, request) => loadProofProject(env, request.repositoryId, request.projectId),
   async insertStarted(env, input) {
     await env.DB.prepare(
       `INSERT INTO proof_verifications
@@ -875,13 +880,13 @@ const defaultStorageDependencies: Pick<
 };
 
 function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
-  const tokenByInstallation = new Map<string, Promise<string>>();
+  const tokenByProject = new Map<string, Promise<string>>();
   const pullByRequest = new WeakMap<AppProofRequest, Promise<PullRequestDetails>>();
   const token = (project: ProofProject): Promise<string> => {
-    let pending = tokenByInstallation.get(project.installationId);
+    let pending = tokenByProject.get(project.id);
     if (pending === undefined) {
-      pending = installationToken(env, project.installationId);
-      tokenByInstallation.set(project.installationId, pending);
+      pending = installationToken(env, project.installationId, undefined, project.repositoryId);
+      tokenByProject.set(project.id, pending);
     }
     return pending;
   };
@@ -901,7 +906,11 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
       return (await pull(project, request)).merged === true;
     },
     async createCheck(project, request, id, checkName) {
-      const body = await github<{ id?: number }>(await token(project), project.repository, "/check-runs", {
+      const installationToken = await token(project);
+      if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, project.repositoryId, project.id))) {
+        throw new Error(`project ${project.repositoryId} was removed before the proof check write`);
+      }
+      const body = await github<{ id?: number }>(installationToken, project.repository, "/check-runs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -921,7 +930,11 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
       return idValue;
     },
     async completeCheck(project, _request, checkRunId, _checkName, evaluation, conclusion, detailsUrl) {
-      await github(await token(project), project.repository, `/check-runs/${encodeURIComponent(checkRunId)}`, {
+      const installationToken = await token(project);
+      if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, project.repositoryId, project.id))) {
+        throw new Error(`project ${project.repositoryId} was removed before the proof check write`);
+      }
+      await github(installationToken, project.repository, `/check-runs/${encodeURIComponent(checkRunId)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -942,7 +955,11 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
     async reportPending(project, _request, checkRunId, _checkName, evaluation, detailsUrl) {
       // The check keeps running. GitHub shows it as pending, branch protection
       // waits, and the developer reads why instead of reading a failure.
-      await github(await token(project), project.repository, `/check-runs/${encodeURIComponent(checkRunId)}`, {
+      const installationToken = await token(project);
+      if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, project.repositoryId, project.id))) {
+        throw new Error(`project ${project.repositoryId} was removed before the proof check write`);
+      }
+      await github(installationToken, project.repository, `/check-runs/${encodeURIComponent(checkRunId)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -983,17 +1000,27 @@ function defaultDependenciesForEnv(env: Env): AppProofProcessDependencies {
 }
 
 /** Production entrypoint; the explicit wrapper keeps the core easy to test. */
-export function processAppProof(env: Env, request: AppProofRequest) {
-  return processAppProofVerification(env, request, defaultDependenciesForEnv(env));
+export async function processAppProof(env: Env, request: AppProofRequest) {
+  const lease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    request.repositoryId,
+    request.projectId,
+  );
+  if (lease === null) throw new Error(`project ${request.repositoryId} is not available for proof work`);
+  try {
+    return await processAppProofVerification(env, { ...request, projectId: lease.projectId }, defaultDependenciesForEnv(env));
+  } finally {
+    await lease.release();
+  }
 }
 
 export async function requestForRerequest(env: Env, verificationId: string): Promise<AppProofRequest | null> {
-  const row = await env.DB.prepare("SELECT request_json FROM proof_verifications WHERE id = ?")
+  const row = await env.DB.prepare("SELECT project_id, request_json FROM proof_verifications WHERE id = ?")
     .bind(verificationId)
-    .first<{ request_json: string }>();
+    .first<{ project_id: string; request_json: string }>();
   if (row === null) return null;
   try {
-    return JSON.parse(row.request_json) as AppProofRequest;
+    return { ...(JSON.parse(row.request_json) as AppProofRequest), projectId: row.project_id };
   } catch {
     return null;
   }
@@ -1013,6 +1040,7 @@ function requestFromOpenPull(project: ProofProject, pull: OpenPullRequest): AppP
   if (!Number.isInteger(number) || (number ?? 0) < 1 || subjectSha === null || typeof base !== "string") return null;
   const author = decimal(pull.user?.id);
   return {
+    projectId: project.id,
     repositoryId: project.repositoryId,
     repository: project.repository,
     ownerId: project.ownerId,
@@ -1028,10 +1056,11 @@ export async function reconcileProjectProofChecks(
   env: Env,
   repositoryId: string,
   dependencies: AppProofProcessDependencies = defaultDependenciesForEnv(env),
+  expectedProjectId?: string,
 ): Promise<number> {
-  const project = await loadProofProject(env, repositoryId);
+  const project = await loadProofProject(env, repositoryId, expectedProjectId);
   if (project === null) return 0;
-  const token = await installationToken(env, project.installationId);
+  const token = await installationToken(env, project.installationId, undefined, project.repositoryId);
   let processed = 0;
   for (let page = 1; page <= 10; page++) {
     const pulls = await github<OpenPullRequest[]>(
@@ -1042,7 +1071,13 @@ export async function reconcileProjectProofChecks(
     for (const pull of pulls) {
       const request = requestFromOpenPull(project, pull);
       if (request !== null) {
-        await processAppProofVerification(env, request, dependencies);
+        const lease = await acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId, project.id);
+        if (lease === null) return processed;
+        try {
+          await processAppProofVerification(env, request, dependencies);
+        } finally {
+          await lease.release();
+        }
         processed++;
       }
     }
@@ -1051,23 +1086,38 @@ export async function reconcileProjectProofChecks(
   return processed;
 }
 
-export async function reconcileInstallationProofChecks(env: Env, installationId: string): Promise<number> {
+export async function reconcileInstallationProofChecks(
+  env: Env,
+  installationId: string,
+  dependencies: {
+    /** Deterministic race hook used only by lifecycle tests. */
+    afterSelected?: () => Promise<void>;
+    process?: AppProofProcessDependencies;
+  } = {},
+): Promise<number> {
   const projects = await env.DB.prepare(
-    `SELECT p.github_repository_id
+    `SELECT p.id, p.github_repository_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE o.installation_id = ? AND p.enabled = 1
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
     .bind(installationId)
-    .all<{ github_repository_id: string }>();
-  const dependencies = defaultDependenciesForEnv(env);
+    .all<{ id: string; github_repository_id: string }>();
+  await dependencies.afterSelected?.();
+  const process = dependencies.process ?? defaultDependenciesForEnv(env);
   let processed = 0;
   for (const project of projects.results) {
-    processed += await reconcileProjectProofChecks(env, project.github_repository_id, dependencies);
+    processed += await reconcileProjectProofChecks(
+      env,
+      project.github_repository_id,
+      process,
+      project.id,
+    );
   }
   return processed;
 }

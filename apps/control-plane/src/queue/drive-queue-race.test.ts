@@ -110,7 +110,7 @@ describe("the final App-write revalidation", () => {
     const writes: number[] = [];
     const reads = {
       ...deps(writes),
-      queueProject: async () => ({ activationState: "observe" }),
+      queueProject: async () => ({ activationState: "observe", projectId: "proj_1" }),
     } as Parameters<typeof driveQueue>[1];
     await place(e, reads, 1);
 

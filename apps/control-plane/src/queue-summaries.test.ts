@@ -52,13 +52,17 @@ function seedOrg(): void {
 
 /** What the projection has caught up to for a queue. */
 function projectedAt(repositoryId: string, generation: number): void {
+  const project = raw
+    .prepare("SELECT id FROM projects WHERE github_repository_id = ?")
+    .get(repositoryId) as { id: string };
   raw
     .prepare(
-      `INSERT INTO queue_projection_marks (github_repository_id, base_ref, generation)
-       VALUES (?, 'refs/heads/main', ?)
-       ON CONFLICT (github_repository_id, base_ref) DO UPDATE SET generation = excluded.generation`,
+      `INSERT INTO queue_projection_marks (github_repository_id, base_ref, generation, project_id)
+       VALUES (?, 'refs/heads/main', ?, ?)
+       ON CONFLICT (github_repository_id, base_ref) DO UPDATE
+         SET generation = excluded.generation, project_id = excluded.project_id`,
     )
-    .run(repositoryId, generation);
+    .run(repositoryId, generation, project.id);
 }
 
 let entryOrdinal = 0;
@@ -70,12 +74,15 @@ function entry(
   generation = 1,
 ): void {
   entryOrdinal += 1;
+  const project = raw
+    .prepare("SELECT id FROM projects WHERE github_repository_id = ?")
+    .get(repositoryId) as { id: string };
   raw
     .prepare(
       `INSERT INTO queue_entries_index
          (id, github_repository_id, base_ref, entry_id, pull_request_number, sponsor_principal_id,
-          state, primary_reason, fairness_ordinal, generation)
-       VALUES (?, ?, 'refs/heads/main', ?, ?, 'prn_1', ?, ?, ?, ?)`,
+          state, primary_reason, fairness_ordinal, generation, project_id)
+       VALUES (?, ?, 'refs/heads/main', ?, ?, 'prn_1', ?, ?, ?, ?, ?)`,
     )
     .run(
       `qei_${repositoryId}_${pullRequestNumber}`,
@@ -86,6 +93,7 @@ function entry(
       primaryReason,
       String(entryOrdinal).padStart(4, "0"),
       generation,
+      project.id,
     );
 }
 

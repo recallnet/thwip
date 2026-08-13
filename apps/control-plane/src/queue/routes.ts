@@ -54,6 +54,7 @@ import { unsatisfiedRequiredChecks, type RequiredCheckState } from "./github-por
 import type { CandidateStateReason, IntegratedCandidate } from "./candidate.js";
 import {
   authorizationFor,
+  clearAttestationChainPosition,
   readAttestation,
   readChain,
   reuseEvidenceFor,
@@ -80,6 +81,12 @@ import {
 } from "@thwip/queue-protocol";
 import { buildBaseCorrectionRecord, signTransitionRecord } from "./evidence.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
+import {
+  acquireProjectWriteLease,
+  repositoryAllowsExternalWrite,
+  type ProjectWriteLease,
+} from "../project-lifecycle.js";
+import { principalForRepository } from "../repository-resolution.js";
 import { namesNoDecision, type QueueCommands } from "./commands.js";
 import {
   candidateResultBytes,
@@ -108,7 +115,7 @@ import {
 import { verifySshSigEd25519 } from "../sshsig-verify.js";
 import { DEFAULT_TIMINGS } from "./commands.js";
 import type { CandidateSuite } from "./store.js";
-import { claimCandidateDispatch, recordCandidateVerdict } from "./candidate-store.js";
+import { candidateDispatchBinding, claimCandidateDispatch, recordCandidateVerdict } from "./candidate-store.js";
 import { readQueue, recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { authorizationResponse, authorizeTurn } from "./authorize-turn.js";
 import {
@@ -351,15 +358,27 @@ export async function runOnQueue<T>(
    * publisher compares before it writes.
    */
   comment?: (snapshot: QueueSnapshot) => Promise<void>,
+  existingLease?: ProjectWriteLease,
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
+  const borrowed = existingLease !== undefined;
+  const lease = existingLease ?? await acquireProjectWriteLease(db, repositoryId);
+  if (lease === null) throw new Error(`repository ${repositoryId} is not available for queue writes`);
+  try {
   const recordDecision = queueDecisionRecorder({
     db,
     bucket: env.EVIDENCE as unknown as R2Like | undefined,
     repositoryId,
+    projectId: lease.projectId,
+    beforeWrite: async () => {
+      await lease.renew();
+      return repositoryAllowsExternalWrite(db, repositoryId, lease.projectId);
+    },
   });
   let before: QueueSnapshot | null = null;
-  const out = await withQueueState(db, repositoryId, baseRef, async (store) => {
+  let projectId: string | null = null;
+  const out = await withQueueState(db, repositoryId, baseRef, async (store, owningProjectId) => {
+    projectId = owningProjectId;
     // Read before the commands run, so what changed can be worked out afterwards
     // rather than guessed at. Re-read on every retry, because the state this
     // attempt started from is the only honest baseline for what it changed.
@@ -389,9 +408,9 @@ export async function runOnQueue<T>(
       await commands.tick({ idempotencyKey: `settle:${store.generation()}` });
     }
     return { result, snapshot: buildSnapshot(store) };
-  });
+  }, { expectedProjectId: lease.projectId, lease });
   try {
-    await projectAuthoritativeQueue(db, repositoryId, baseRef);
+    await projectAuthoritativeQueue(db, repositoryId, baseRef, lease);
   } catch (error) {
     // The projection may lag; the command already succeeded, so this is not
     // fatal. It still has to be seen: a write that fails every time looks, from
@@ -426,6 +445,9 @@ export async function runOnQueue<T>(
     }
   }
   return out;
+  } finally {
+    if (!borrowed) await lease.release();
+  }
 }
 
 /** What a refused command said, for a caller that has to be told why. */
@@ -614,6 +636,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
   ): Promise<{
+    projectId: string;
     policyDigest: string;
     /**
      * The pipeline the proof had to satisfy, which a reuse record binds. Null
@@ -665,6 +688,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     payload: {
+      projectId: string;
       baseRef: string;
       pullRequestNumber: number;
       attemptId: string;
@@ -680,14 +704,19 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string } | null>;
+  ): Promise<{ activationState: string; projectId?: string; verifierWorkflowVersion?: 1 | 2 } | null>;
   /**
    * Perform the merge the queue just authorized, from the Worker.
    *
    */
-  mergeWrite(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
+  mergeWrite(
+    env: TEnv,
+    repositoryId: string,
+    intent: MergeIntent,
+    lease?: ProjectWriteLease,
+  ): Promise<MergeWriteOutcome>;
   /** The activated principal for a GitHub user id, or null. */
-  principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  principalFor(env: TEnv, repositoryId: string, githubUserId: string): Promise<string | null>;
   /**
    * Who wrote a pull request and which branch it targets, from GitHub.
    *
@@ -719,7 +748,12 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * clocks, and because a required check that goes red for merely waiting keeps
    * refusing the merge after the queue has said yes.
    */
-  publishTurnCheck?(env: TEnv, repositoryId: string, update: TurnCheckUpdate): Promise<void>;
+  publishTurnCheck?(
+    env: TEnv,
+    repositoryId: string,
+    update: TurnCheckUpdate,
+    lifecycleLease?: ProjectWriteLease,
+  ): Promise<void>;
   /** Read a commit's tree and parents from GitHub, for confirming from facts. */
   commitFacts(
     env: TEnv,
@@ -744,7 +778,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   publishCandidateCheck?(
     env: TEnv,
     repositoryId: string,
-    update: { headSha: string; accepted: boolean; summary: string },
+    update: { projectId: string; headSha: string; accepted: boolean; summary: string },
   ): Promise<void>;
   /**
    * Sign canonical record bytes with the service key, returning a compact JWS.
@@ -845,7 +879,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /** The backoff between confirmation reads. Overridden in tests. */
   sleep?(ms: number): Promise<void>;
 }) {
-  const app = new Hono<{ Bindings: TEnv; Variables: { caller: QueueCaller } }>();
+  const app = new Hono<{
+    Bindings: TEnv;
+    Variables: { caller: QueueCaller; projectLease: Awaited<ReturnType<typeof acquireProjectWriteLease>> };
+  }>();
 
   /**
    * Establish that the caller may act on the repository in the path, before any
@@ -881,13 +918,43 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Past that point the caller has been told by GitHub that the repository
     // exists, so a refusal may say what they are short of.
     if (!atLeast(level, requirement.need ?? "write")) return c.json({ error: REPOSITORY_READ_ONLY }, 403);
+    const principalId = who.operator === true
+      ? who.principalId
+      : await principalForRepository(c.env.DB as unknown as D1Like, repositoryId, who.githubUserId);
+    if (principalId === null) {
+      // Access follows the GitHub person, but queue records name a tenant-local
+      // principal. A session can be selected to another organization while the
+      // same person holds this repository as a member or collaborator. Persisting
+      // that selected principal would put another tenant's identity into this
+      // repository's queue history. Refuse an incomplete projection instead.
+      return c.json({ error: "repository principal is unavailable" }, 409);
+    }
     // `isAdmin` is the repository's answer, not the session's. `authenticate`
     // reports the role of whichever organization the session selected, so a
     // handler reading it directly made an owner of one organization an
     // administrator of every other, and it says nothing at all about somebody
     // who holds this repository and belongs to no organization.
-    c.set("caller", { ...who, isAdmin: level === "admin" });
+    c.set("caller", { ...who, principalId, isAdmin: level === "admin" });
     return next();
+  });
+
+  // Hold the exact project incarnation for the complete lifetime of every
+  // repository mutation. This covers D1, R2 and GitHub work that happens before
+  // or after the queue CAS. A deselection waits for this lease; a request that
+  // carried an old incarnation cannot resume against a newly selected project.
+  app.use("/v1/queue/*", async (c, next) => {
+    if (c.req.method === "GET" || c.req.method === "HEAD") return next();
+    const repositoryId = decimal(c.req.path.split("/")[3]);
+    if (repositoryId === null) return next();
+    const lease = await acquireProjectWriteLease(c.env.DB as unknown as D1Like, repositoryId);
+    if (lease === null) return c.json({ error: "repository project is unavailable" }, 409);
+    c.set("projectLease", lease);
+    try {
+      await lease.renew();
+      return await next();
+    } finally {
+      await lease.release();
+    }
   });
 
   /**
@@ -902,12 +969,30 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     repositoryId: string,
     baseRef: string,
     decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T | Promise<T>,
+    lease?: ProjectWriteLease,
   ) =>
-    runOnQueue(env, repositoryId, baseRef, decide, (update) =>
-      deps.publishTurnCheck === undefined
-        ? Promise.resolve()
-        : deps.publishTurnCheck(env, repositoryId, update),
-    );
+    runOnQueue(
+      env,
+      repositoryId,
+      baseRef,
+      decide,
+      (update) =>
+        deps.publishTurnCheck === undefined
+          ? Promise.resolve()
+          : deps.publishTurnCheck(env, repositoryId, update, lease),
+      undefined,
+      lease,
+  );
+
+  const recordOnQueue: RecordFromIntentDeps<TEnv>["onQueue"] = (
+    env,
+    repositoryId,
+    baseRef,
+    decide,
+    _publish,
+    _comment,
+    lease,
+  ) => onQueue(env, repositoryId, baseRef, decide, lease);
 
   const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
 
@@ -978,17 +1063,27 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // Nothing projected yet, which is not the same as no queue. Read the
     // authoritative document and fill the projection from it, so a migration that
     // reset the marks does not leave every read doing this forever.
-    const { snapshot } = await readQueue(c.env, repositoryId, baseRef);
+    const { snapshot, projectId } = await readQueue(c.env, repositoryId, baseRef);
+    if (projectId === null) return c.json({ error: "repository project is unavailable" }, 409);
+    const projectionLease = await acquireProjectWriteLease(
+      c.env.DB as unknown as D1Like,
+      repositoryId,
+      projectId,
+    );
+    if (projectionLease === null) return c.json({ error: "repository project is unavailable" }, 409);
     try {
       await projectQueueState(
         c.env.DB as unknown as D1Like,
-        projectionMessageFrom(repositoryId, baseRef, snapshot),
+        projectionMessageFrom(repositoryId, baseRef, snapshot, projectId),
+        projectionLease,
       );
     } catch (error) {
       // Same argument as the write in `runOnQueue`: the read already has its
       // answer, so this cannot be fatal, but a failure here is a projection
       // that is never getting backfilled, and that has to be visible.
       console.error(`[queue projection] write failed for ${repositoryId} ${baseRef}:`, error);
+    } finally {
+      await projectionLease.release();
     }
     return c.json({ ...(pages === undefined ? snapshot : pageLiveQueue(snapshot, pages)), source: "queue" });
   });
@@ -1056,7 +1151,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const who = c.get("caller");
     const sponsorPrincipalId = placement.authorIsBot
       ? who.principalId
-      : await deps.principalFor(c.env, placement.authorGithubUserId);
+      : await deps.principalFor(c.env, repositoryId, placement.authorGithubUserId);
     if (sponsorPrincipalId === null) {
       return c.json(
         { error: "AUTHOR_NOT_ACTIVATED", detail: "the pull request's author has no activated principal here" },
@@ -1159,6 +1254,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const now = new Date().toISOString();
     const { wasOffline } = await recordHeartbeat(db, {
       repositoryId,
+      projectId: c.get("projectLease")!.projectId,
       principalId: who.principalId,
       deviceKeyId,
       now,
@@ -1466,6 +1562,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       digest: signed.digest,
       kind: "integration-assignment",
       repositoryId,
+      projectId: c.get("projectLease")!.projectId,
       baseRef,
       transitionSequence: null,
       attemptId,
@@ -1476,6 +1573,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const stored = await recordIssuedAssignment(db, {
       assignmentId,
       repositoryId,
+      projectId: c.get("projectLease")!.projectId,
       baseRef,
       attemptId,
       assignmentDigest: signed.digest,
@@ -1611,6 +1709,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const receiptDigest = await integrationReceiptDigest(receipt);
     const recorded = await recordAcceptedReceipt(db, {
       assignmentId: issued.assignmentId,
+      projectId: c.get("projectLease")!.projectId,
       receiptDigest,
       suites: receipt.suites,
       acceptedAt: new Date().toISOString(),
@@ -1840,6 +1939,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!identity.ok) return c.json({ error: identity.reason, code: "VERIFIER_NOT_PINNED" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as {
+      projectId?: string;
+      attemptId?: string;
       baseRef?: string;
       pullRequestNumber?: number;
       candidateSha?: string;
@@ -1861,6 +1962,51 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (typeof body.accepted !== "boolean") return c.json({ error: "accepted required" }, 400);
     if (typeof body.pullRequestNumber !== "number" || !Number.isSafeInteger(body.pullRequestNumber)) {
       return c.json({ error: "pullRequestNumber required" }, 400);
+    }
+
+    const lease = c.get("projectLease");
+    if (lease === null) return c.json({ error: "repository project is unavailable" }, 409);
+    const hasProjectId = typeof body.projectId === "string";
+    const hasAttemptId = typeof body.attemptId === "string";
+    if (hasProjectId !== hasAttemptId) {
+      return c.json({ error: "projectId and attemptId must be provided together" }, 400);
+    }
+
+    const { snapshot: candidateQueue } = await readQueue(c.env, repositoryId, baseRef);
+    const dispatch = await candidateDispatchBinding(
+      c.env.DB as unknown as D1Like,
+      repositoryId,
+      baseRef,
+      candidateTreeOid,
+      lease.projectId,
+    );
+    if (dispatch === null) {
+      return c.json({ error: "candidate result has no current dispatch binding" }, 409);
+    }
+
+    let projectId: string;
+    let attemptId: string;
+    if (hasProjectId && hasAttemptId) {
+      projectId = body.projectId!;
+      attemptId = body.attemptId!;
+      if (projectId !== lease.projectId) {
+        return c.json({ error: "candidate result belongs to another project incarnation" }, 409);
+      }
+      if (dispatch.attemptId !== null && dispatch.attemptId !== attemptId) {
+        return c.json({ error: "candidate result belongs to another queue attempt" }, 409);
+      }
+    } else {
+      // Version 1 workflows were already installed before project incarnation
+      // fields were added. They remain valid only for a dispatch durably
+      // recorded as protocol 1 on this exact current project and candidate.
+      if (dispatch.workflowProtocol !== 1 || candidateQueue.activeAttemptId === null) {
+        return c.json({ error: "projectId and attemptId are required by this verifier workflow" }, 400);
+      }
+      projectId = lease.projectId;
+      attemptId = dispatch.attemptId ?? candidateQueue.activeAttemptId;
+    }
+    if (candidateQueue.activeAttemptId !== attemptId) {
+      return c.json({ error: "candidate result belongs to another queue attempt" }, 409);
     }
 
     const suites: CandidateSuite[] = [];
@@ -1886,6 +2032,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
 
     const policy = await deps.activePolicy(c.env, repositoryId);
     if (policy === null) return c.json({ error: "no active policy for this repository" }, 409);
+    if (policy.projectId !== projectId) {
+      return c.json({ error: "candidate result belongs to another project incarnation" }, 409);
+    }
 
     // The identity fields come from the pinned record, which verifyVerifierIdentity
     // has just proved the token matches. Taking them from the token instead would
@@ -1910,21 +2059,27 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     // D1, not the object. A verdict is an immutable record about a tree; waking
     // the coordination object to store or read one is what made the merge
     // workflow's wait cost a Durable Object request every twenty seconds.
-    const stored = await recordCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, {
+    await lease.renew();
+    const stored = await recordCandidateVerdict(c.env.DB as unknown as D1Like, repositoryId, baseRef, lease.projectId, {
       ...content,
       resultDigest,
       observedAt: new Date().toISOString(),
     });
+    if (stored.status === "unavailable") {
+      return c.json({ error: "candidate result belongs to a released project incarnation" }, 409);
+    }
 
     // Persist the bytes the digest was taken over, so the digest the transition
     // chain records resolves to something a reader can fetch and check. Without
     // this the chain holds a hash of evidence nobody outside the object can see.
     const evidence = await storeEvidence(c.env, {
+      projectId: policy.projectId,
       organizationId: policy.organizationId,
       repositoryId,
       kind: "verifier-result",
       digest: resultDigest as `sha256:${string}`,
       bytes: candidateResultBytes(content),
+      writeLease: lease,
     });
 
     // Say so on the pull request. The verifier workflow cannot: it asks GitHub
@@ -1938,14 +2093,18 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
         const lines = suites
           .map((s) => `- \`${s.name}\`: ${s.outcome} in ${Math.round(s.durationMs / 100) / 10}s`)
           .join("\n");
-        try {
-          await deps.publishCandidateCheck(c.env, repositoryId, {
-            headSha: head,
-            accepted: body.accepted === true,
-            summary: `Ran against merge tree \`${candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
-          });
-        } catch {
-          /* the verdict stands; the check is how it is shown, not what it is */
+        await lease.renew();
+        if (await repositoryAllowsExternalWrite(c.env.DB as unknown as D1Like, repositoryId, lease.projectId)) {
+          try {
+            await deps.publishCandidateCheck(c.env, repositoryId, {
+              projectId: lease.projectId,
+              headSha: head,
+              accepted: body.accepted === true,
+              summary: `Ran against merge tree \`${candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
+            });
+          } catch {
+            /* the verdict stands; the check is how it is shown, not what it is */
+          }
         }
       }
     }
@@ -2279,13 +2438,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     const mergeSha = body.mergeSha;
     const reason = body.reason.trim();
 
-    const recordFromIntentDeps = recordFromIntentDepsFor<TEnv>(deps, onQueue);
+    const recordFromIntentDeps = recordFromIntentDepsFor<TEnv>(deps, recordOnQueue);
     const outcome = await recordMergeFromIntent(c.env, recordFromIntentDeps, {
       repositoryId,
       baseRef,
       mergeSha,
       witnessPrincipalId: who.principalId,
       reason,
+      ...(c.get("projectLease") === null ? {} : { writeLease: c.get("projectLease")! }),
       ...(typeof body.attemptId === "string" ? { attemptId: body.attemptId } : {}),
     });
 
@@ -2397,12 +2557,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "this branch's chain has no such finding", code: "NO_SUCH_FINDING" }, 404);
     }
 
-    const outcome = await applyHeal(c.env, recordFromIntentDepsFor<TEnv>(deps, onQueue), {
+    const outcome = await applyHeal(c.env, recordFromIntentDepsFor<TEnv>(deps, recordOnQueue), {
       repositoryId,
       baseRef,
       plan,
       actorPrincipalId: who.principalId,
       reason,
+      writeLease: c.get("projectLease")!,
     });
     if (outcome.status === "refused") {
       return c.json({ error: outcome.detail, code: outcome.code, steps: plan.steps }, 409);
@@ -2454,12 +2615,13 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "atSha required: the commit the branch stands at" }, 400);
     }
 
-    const outcome = await openAttestedRange(c.env, recordFromIntentDepsFor<TEnv>(deps, onQueue), {
+    const outcome = await openAttestedRange(c.env, recordFromIntentDepsFor<TEnv>(deps, recordOnQueue), {
       repositoryId,
       baseRef,
       atSha: body.atSha,
       actorPrincipalId: who.principalId,
       reason: body.reason.trim(),
+      writeLease: c.get("projectLease")!,
     });
     if (outcome.status === "refused") {
       return c.json({ error: outcome.detail, code: outcome.code }, outcome.code === "NO_QUEUE" ? 404 : 409);
@@ -2669,6 +2831,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       digest: signed.digest,
       kind: "base-correction",
       repositoryId,
+      projectId: c.get("projectLease")!.projectId,
       baseRef,
       transitionSequence,
       attemptId: correctionKey,
@@ -2686,6 +2849,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
               bytes: Uint8Array;
             }) =>
               storeEvidence(c.env, {
+                projectId: policy.projectId,
+                writeLease: c.get("projectLease")!,
                 organizationId: mirrored.organizationId,
                 repositoryId: mirrored.repositoryId,
                 kind: mirrored.kind,
@@ -2720,10 +2885,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     });
 
     if (result.moved) {
-      await db
-        .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-        .bind(signed.digest)
-        .run();
+      await clearAttestationChainPosition(db, signed.digest, c.get("projectLease")!.projectId);
       return c.json(
         { error: "the chain moved while this record was being signed; try again", code: "CHAIN_MOVED" },
         409,
@@ -2758,10 +2920,14 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (!/^sha256:[0-9a-f]{64}$/.test(digest)) return c.json({ error: "not a digest" }, 400);
     const removed = await c.env.DB.prepare(
       `SELECT 1 AS found FROM queue_attestations a
-        JOIN removed_projects r ON r.github_repository_id = a.github_repository_id
+        JOIN project_release_requests r ON r.github_repository_id = a.github_repository_id
+       WHERE a.digest = ?
+       UNION
+       SELECT 1 FROM queue_attestations a
+        JOIN project_release_jobs r ON r.github_repository_id = a.github_repository_id
        WHERE a.digest = ? LIMIT 1`,
     )
-      .bind(digest)
+      .bind(digest, digest)
       .first<{ found: number }>();
     if (removed !== null) return c.json({ error: "no record with that digest" }, 404);
     const found = await readAttestation(c.env.DB as unknown as D1Like, digest);
@@ -2799,15 +2965,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     if (c.env.EVIDENCE === undefined) {
       return c.json({ error: "NO_EVIDENCE_STORE", detail: "this deployment archives no decisions" }, 503);
     }
-    const organizationId = await c.env.DB.prepare(
-      "SELECT organization_id AS id FROM projects WHERE github_repository_id = ?",
+    const project = await c.env.DB.prepare(
+      "SELECT id AS projectId, organization_id AS organizationId FROM projects WHERE github_repository_id = ?",
     )
       .bind(repositoryId)
-      .first<{ id: string }>();
-    if (organizationId === null) return c.json({ error: "no queue for that repository" }, 404);
+      .first<{ projectId: string; organizationId: string }>();
+    if (project === null) return c.json({ error: "no queue for that repository" }, 404);
 
     const found = await getEvidence(c.env.EVIDENCE as unknown as R2Like, {
-      organizationId: organizationId.id,
+      projectId: project.projectId,
+      organizationId: project.organizationId,
       repositoryId,
       kind: "queue-decision",
       digest: digest as Sha256,
@@ -2854,9 +3021,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       return c.json({ error: "the repository id must be GitHub's numeric repository id" }, 400);
     }
     const removed = await c.env.DB.prepare(
-      "SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1",
+      `SELECT 1 AS found FROM project_release_requests WHERE github_repository_id = ?
+       UNION SELECT 1 FROM project_release_jobs WHERE github_repository_id = ? LIMIT 1`,
     )
-      .bind(repositoryId)
+      .bind(repositoryId, repositoryId)
       .first<{ found: number }>();
     if (removed !== null) return c.json({ error: "no queue for that repository" }, 404);
 

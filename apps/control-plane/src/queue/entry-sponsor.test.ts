@@ -45,10 +45,10 @@ function seed(): void {
     .run("proj_1", ORG, REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', ?, ?, ?, 1, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', ?, ?, ?, 1, 'enforced', ?)`,
     )
-    .run(ORG, REPO, REF);
+    .run(ORG, REPO, REF, "proj_1");
   for (const [id, githubUserId] of [
     ["alice", "1"],
     ["bob", "2"],
@@ -69,7 +69,8 @@ function app(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF, headShaFor: () => "a".repeat(40) }, {
       activePolicy: async () => null,
-      principalFor: async (_e: unknown, githubUserId: string) => (githubUserId === "2" ? "bob" : "alice"),
+      principalFor: async (_e: unknown, _repositoryId: string, githubUserId: string) =>
+        githubUserId === "2" ? "bob" : "alice",
       pullRequestPlacement: async () => ({ authorGithubUserId: "2", baseRef: REF, authorIsBot: false, draft: false, headSha: "a".repeat(40) }),
       ...over,
     }) as Parameters<typeof queueRoutes>[0],
@@ -242,8 +243,8 @@ describe("whose machine a fresh turn waits for", () => {
   function connected(principalId: string): void {
     raw
       .prepare(
-        `INSERT INTO queue_runners (github_repository_id, principal_id, device_key_id, last_heartbeat_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO queue_runners (github_repository_id, principal_id, device_key_id, last_heartbeat_at, project_id)
+         VALUES (?, ?, ?, ?, 'proj_1')`,
       )
       .run(REPO, principalId, `SHA256:${"a".repeat(43)}`, new Date().toISOString());
   }
