@@ -27,6 +27,16 @@ export interface ProjectionEntry {
   readonly headSha: string | null;
 }
 
+/** Final state of an entry compacted out of the live queue snapshot. */
+export interface TerminalProjectionEntry extends ProjectionEntry {
+  readonly generation: number;
+}
+
+/** A terminal history row whose existing status comment still needs closing. */
+export type TrackedTerminalEntry = QueueSnapshot["entries"][number] & {
+  readonly transition: ProjectionTransition | null;
+};
+
 export interface ProjectionTransition {
   readonly transitionSequence: number;
   readonly kind: string;
@@ -141,6 +151,335 @@ function rowKey(prefix: string, repositoryId: string, baseRef: string, suffix: s
   return `${prefix}_${repositoryId}_${ref}_${suffix}`;
 }
 
+function entryProjectionStatement(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  generation: number,
+  entry: ProjectionEntry,
+): unknown {
+  return db
+    .prepare(
+      `INSERT INTO queue_entries_index (
+         id, github_repository_id, base_ref, entry_id, pull_request_number,
+         sponsor_principal_id, state, primary_reason, fairness_ordinal,
+         scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
+         state = excluded.state,
+         primary_reason = excluded.primary_reason,
+         fairness_ordinal = excluded.fairness_ordinal,
+         sponsor_principal_id = excluded.sponsor_principal_id,
+         scheduler_eligible = excluded.scheduler_eligible,
+         cooldown_until = excluded.cooldown_until,
+         last_attempt_id = excluded.last_attempt_id,
+         head_sha = excluded.head_sha,
+         -- Which message last saw this entry in the queue. A row left at an
+         -- older generation is one the authority no longer carries, and that
+         -- is the only thing anybody can say about it without guessing.
+         generation = excluded.generation,
+         updated_at = excluded.updated_at
+       WHERE excluded.generation >= queue_entries_index.generation`,
+    )
+    .bind(
+      rowKey("qei", repositoryId, baseRef, entry.entryId),
+      repositoryId,
+      baseRef,
+      entry.entryId,
+      entry.pullRequestNumber,
+      entry.sponsorPrincipalId,
+      entry.state,
+      entry.primaryReason,
+      entry.fairnessOrdinal,
+      entry.schedulerEligible ? 1 : 0,
+      entry.cooldownUntil,
+      entry.lastAttemptId,
+      entry.headSha,
+      generation,
+    );
+}
+
+/**
+ * Persist final states that compaction removed from the live snapshot.
+ *
+ * This deliberately does not advance the projection mark. These rows are
+ * history and carry a generation below current authority, so queue reads omit
+ * them while the status publisher can still close the conversation it opened.
+ */
+export async function projectTerminalEntryHistory(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  entries: readonly TerminalProjectionEntry[],
+): Promise<void> {
+  if (entries.length === 0) return;
+  await db.batch(entries.map((entry) => entryProjectionStatement(db, repositoryId, baseRef, entry.generation, entry)));
+}
+
+/**
+ * Recover the one deploy-window gap that existed before terminal handoffs were
+ * stored in queue authority.
+ *
+ * The terminal event is still authoritative. D1 supplies only the entry fields
+ * that the event no longer carries, and only for a stale row whose status
+ * comment proves there is something to retire. Current admissions are fenced
+ * by both entry id and pull request number.
+ */
+export async function terminalEntryHistoryFromRecentEvents(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  currentEntries: readonly ProjectionEntry[],
+  events: readonly { sequence: number; type: string; body: unknown }[],
+): Promise<TerminalProjectionEntry[]> {
+  const terminalEvents = new Map<
+    string,
+    { sequence: number; state: "Merged" | "Cancelled"; attemptId: string | null }
+  >();
+  for (const event of events) {
+    if (event.type !== "EntryMergeReconciled" && event.type !== "EntryCancelled") continue;
+    const body = event.body as { entryId?: unknown; attemptId?: unknown };
+    if (typeof body.entryId !== "string" || terminalEvents.has(body.entryId)) continue;
+    if (event.type === "EntryMergeReconciled" && typeof body.attemptId !== "string") continue;
+    terminalEvents.set(body.entryId, {
+      sequence: event.sequence,
+      state: event.type === "EntryMergeReconciled" ? "Merged" : "Cancelled",
+      attemptId: event.type === "EntryMergeReconciled" ? (body.attemptId as string) : null,
+    });
+  }
+  if (terminalEvents.size === 0) return [];
+  const eventEntryIds = [...terminalEvents.keys()];
+
+  type LegacyTerminalRow = {
+    entry_id: string;
+    pull_request_number: number;
+    sponsor_principal_id: string;
+    primary_reason: string | null;
+    fairness_ordinal: string;
+    scheduler_eligible: number;
+    cooldown_until: string | null;
+    last_attempt_id: string | null;
+    head_sha: string | null;
+    generation: number;
+  };
+  const rows: LegacyTerminalRow[] = [];
+  // D1 accepts at most 100 bound parameters in one statement. Repository and
+  // ref spend two, and a fixed page of 50 leaves room if this lookup grows.
+  for (let offset = 0; offset < eventEntryIds.length; offset += 50) {
+    const entryIds = eventEntryIds.slice(offset, offset + 50);
+    const page = await db
+      .prepare(
+        `SELECT e.entry_id, e.pull_request_number, e.sponsor_principal_id,
+                e.primary_reason, e.fairness_ordinal, e.scheduler_eligible,
+                e.cooldown_until, e.last_attempt_id, e.head_sha, e.generation
+           FROM queue_entries_index e
+           JOIN queue_status_comments c
+             ON c.github_repository_id = e.github_repository_id
+            AND c.base_ref = e.base_ref
+            AND c.pull_request_number = e.pull_request_number
+           JOIN queue_projection_marks m
+             ON m.github_repository_id = e.github_repository_id
+            AND m.base_ref = e.base_ref
+          WHERE e.github_repository_id = ? AND e.base_ref = ?
+            AND e.generation < m.generation
+            AND e.state NOT IN ('Merged', 'Cancelled')
+            AND e.entry_id IN (${entryIds.map(() => "?").join(", ")})`,
+      )
+      .bind(repositoryId, baseRef, ...entryIds)
+      .all<LegacyTerminalRow>();
+    rows.push(...page.results);
+  }
+  const liveEntryIds = new Set(currentEntries.map((entry) => entry.entryId));
+  const livePullRequests = new Set(currentEntries.map((entry) => entry.pullRequestNumber));
+  return rows.flatMap((row) => {
+    const event = terminalEvents.get(row.entry_id);
+    if (
+      event === undefined ||
+      row.head_sha === null ||
+      liveEntryIds.has(row.entry_id) ||
+      livePullRequests.has(row.pull_request_number)
+    ) {
+      return [];
+    }
+    return [
+      {
+        generation: row.generation,
+        entryId: row.entry_id,
+        pullRequestNumber: row.pull_request_number,
+        sponsorPrincipalId: row.sponsor_principal_id,
+        state: event.state,
+        primaryReason: row.primary_reason,
+        fairnessOrdinal: row.fairness_ordinal,
+        schedulerEligible: false,
+        cooldownUntil: row.cooldown_until,
+        lastAttemptId: event.attemptId ?? row.last_attempt_id,
+        headSha: row.head_sha,
+      },
+    ];
+  });
+}
+
+/**
+ * Remove terminal handoff rows that have no status conversation left to close.
+ * A current admission of the same pull request also supersedes the old ending.
+ */
+export async function pruneTerminalEntryHistory(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM queue_entries_index AS terminal
+        WHERE terminal.github_repository_id = ? AND terminal.base_ref = ?
+          AND terminal.state IN ('Merged', 'Cancelled')
+          AND terminal.generation < (
+            SELECT generation FROM queue_projection_marks
+             WHERE github_repository_id = terminal.github_repository_id
+               AND base_ref = terminal.base_ref
+          )
+          AND (
+            NOT EXISTS (
+              SELECT 1 FROM queue_status_comments c
+               WHERE c.github_repository_id = terminal.github_repository_id
+                 AND c.base_ref = terminal.base_ref
+                 AND c.pull_request_number = terminal.pull_request_number
+            )
+            OR EXISTS (
+              SELECT 1 FROM queue_entries_index current
+               JOIN queue_projection_marks m
+                 ON m.github_repository_id = current.github_repository_id
+                AND m.base_ref = current.base_ref
+               WHERE current.github_repository_id = terminal.github_repository_id
+                 AND current.base_ref = terminal.base_ref
+                 AND current.pull_request_number = terminal.pull_request_number
+                 AND current.generation = m.generation
+                 AND current.state NOT IN ('Merged', 'Cancelled')
+            )
+          )`,
+    )
+    .bind(repositoryId, baseRef)
+    .run();
+}
+
+/** A terminal comment is current, so its temporary handoff row can retire. */
+export async function acknowledgeTerminalEntryStatus(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  entryId: string,
+  fairnessOrdinal: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM queue_entries_index
+        WHERE github_repository_id = ? AND base_ref = ?
+          AND entry_id = ? AND fairness_ordinal = ?
+          AND state IN ('Merged', 'Cancelled')
+          AND generation < (
+            SELECT generation FROM queue_projection_marks
+             WHERE github_repository_id = ? AND base_ref = ?
+          )`,
+    )
+    .bind(repositoryId, baseRef, entryId, fairnessOrdinal, repositoryId, baseRef)
+    .run();
+}
+
+/**
+ * Terminal history that may still have a live queue-status comment.
+ *
+ * The anti-join is the reopen fence. A new admission of the same pull request
+ * must keep its current status; an older terminal row must never overwrite it.
+ */
+export async function trackedTerminalEntries(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+): Promise<TrackedTerminalEntry[]> {
+  const rows = await db
+    .prepare(
+      `SELECT e.entry_id, e.pull_request_number, e.sponsor_principal_id, e.state,
+              e.primary_reason, e.fairness_ordinal, e.scheduler_eligible,
+              e.cooldown_until, e.last_attempt_id, e.head_sha,
+              t.transition_sequence, t.kind AS transition_kind, t.digest,
+              t.prior_digest, t.base_sha AS transition_base_sha,
+              t.witness_count, t.observed_at
+         FROM queue_entries_index e
+         JOIN queue_status_comments c
+           ON c.github_repository_id = e.github_repository_id
+          AND c.base_ref = e.base_ref
+          AND c.pull_request_number = e.pull_request_number
+         JOIN queue_projection_marks m
+           ON m.github_repository_id = e.github_repository_id
+          AND m.base_ref = e.base_ref
+         LEFT JOIN queue_transitions_index t
+           ON t.github_repository_id = e.github_repository_id
+          AND t.base_ref = e.base_ref
+          AND t.queue_epoch = m.queue_epoch
+          AND t.attempt_id = e.last_attempt_id
+        WHERE e.github_repository_id = ? AND e.base_ref = ?
+          AND e.state IN ('Merged', 'Cancelled')
+          AND e.generation < m.generation
+          AND NOT EXISTS (
+            SELECT 1 FROM queue_entries_index current
+             WHERE current.github_repository_id = e.github_repository_id
+               AND current.base_ref = e.base_ref
+               AND current.pull_request_number = e.pull_request_number
+               AND current.generation = m.generation
+               AND current.state NOT IN ('Merged', 'Cancelled')
+          )
+        ORDER BY length(e.fairness_ordinal), e.fairness_ordinal, e.entry_id`,
+    )
+    .bind(repositoryId, baseRef)
+    .all<{
+      entry_id: string;
+      pull_request_number: number;
+      sponsor_principal_id: string;
+      state: string;
+      primary_reason: string | null;
+      fairness_ordinal: string;
+      scheduler_eligible: number;
+      cooldown_until: string | null;
+      last_attempt_id: string | null;
+      head_sha: string | null;
+      transition_sequence: number | null;
+      transition_kind: string | null;
+      digest: string | null;
+      prior_digest: string | null;
+      transition_base_sha: string | null;
+      witness_count: number | null;
+      observed_at: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    entryId: row.entry_id,
+    pullRequestNumber: row.pull_request_number,
+    sponsorPrincipalId: row.sponsor_principal_id,
+    state: row.state,
+    primaryReason: row.primary_reason as TrackedTerminalEntry["primaryReason"],
+    fairnessOrdinal: row.fairness_ordinal,
+    schedulerEligible: row.scheduler_eligible === 1,
+    cooldownUntil: row.cooldown_until,
+    lastAttemptId: row.last_attempt_id,
+    headSha: row.head_sha,
+    transition:
+      row.transition_sequence === null ||
+      row.transition_kind === null ||
+      row.digest === null ||
+      row.transition_base_sha === null
+        ? null
+        : {
+            transitionSequence: row.transition_sequence,
+            kind: row.transition_kind,
+            digest: row.digest,
+            priorDigest: row.prior_digest,
+            baseSha: row.transition_base_sha,
+            attemptId: row.last_attempt_id,
+            witnessCount: row.witness_count ?? 0,
+            observedAt: row.observed_at,
+          },
+  }));
+}
+
 export type ProjectionResult =
   | { readonly applied: true; readonly entries: number; readonly transitions: number }
   | { readonly applied: false; readonly reason: "STALE_GENERATION"; readonly seen: number }
@@ -171,46 +510,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
   const statements: unknown[] = [];
 
   for (const entry of message.entries) {
-    statements.push(
-      db
-        .prepare(
-          `INSERT INTO queue_entries_index (
-             id, github_repository_id, base_ref, entry_id, pull_request_number,
-             sponsor_principal_id, state, primary_reason, fairness_ordinal,
-             scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-           ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
-             state = excluded.state,
-             primary_reason = excluded.primary_reason,
-             fairness_ordinal = excluded.fairness_ordinal,
-             sponsor_principal_id = excluded.sponsor_principal_id,
-             scheduler_eligible = excluded.scheduler_eligible,
-             cooldown_until = excluded.cooldown_until,
-             last_attempt_id = excluded.last_attempt_id,
-             head_sha = excluded.head_sha,
-             -- Which message last saw this entry in the queue. A row left at an
-             -- older generation is one the authority no longer carries, and that
-             -- is the only thing anybody can say about it without guessing.
-             generation = excluded.generation,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(
-          rowKey("qei", message.repositoryId, message.baseRef, entry.entryId),
-          message.repositoryId,
-          message.baseRef,
-          entry.entryId,
-          entry.pullRequestNumber,
-          entry.sponsorPrincipalId,
-          entry.state,
-          entry.primaryReason,
-          entry.fairnessOrdinal,
-          entry.schedulerEligible ? 1 : 0,
-          entry.cooldownUntil,
-          entry.lastAttemptId,
-          entry.headSha,
-          message.generation,
-        ),
-    );
+    statements.push(entryProjectionStatement(db, message.repositoryId, message.baseRef, message.generation, entry));
   }
 
   for (const transition of message.transitions) {

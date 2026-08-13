@@ -44,6 +44,38 @@ function request(s: SnapshotQueueStore, entryId: string, ordinal: number): void 
 }
 
 describe("what the document keeps", () => {
+  it("hands a compacted terminal entry to projection until its exact row is acknowledged", () => {
+    const s = store();
+    for (let i = 1; i <= 21; i += 1) {
+      request(s, `e${i}`, i);
+      s.append(
+        {
+          idempotencyKey: `cancel-e${i}`,
+          at: "2026-08-12T12:00:00.000Z",
+          type: "EntryCancelled",
+          entryId: `e${i}`,
+          actorPrincipalId: "github",
+          reason: "closed on GitHub",
+        } as unknown as SubmittedEvent,
+      );
+    }
+
+    const pending = s.pendingTerminalEntryProjections();
+    expect(pending).toEqual([
+      expect.objectContaining({
+        entryId: "e1",
+        pullRequestNumber: 1,
+        state: "Cancelled",
+        fairnessOrdinal: "1",
+      }),
+    ]);
+    s.acknowledgeTerminalEntryProjections(["not-the-row"]);
+    expect(s.pendingTerminalEntryProjections()).toHaveLength(1);
+    s.acknowledgeTerminalEntryProjections([pending[0]!.projectionId]);
+    s.acknowledgeTerminalEntryProjections([pending[0]!.projectionId]);
+    expect(s.pendingTerminalEntryProjections()).toEqual([]);
+  });
+
   /**
    * The one that took the queue down.
    *
@@ -213,7 +245,12 @@ describe("what the document keeps", () => {
    * seventh field will be added by somebody who never reads this file.
    */
   describe("what one invocation can afford", () => {
-    /** A long history: entries that came and went, each leaving its traces. */
+    /**
+     * A long completed history: entries came and went, and the final projection
+     * accepted each compacted row. Pending projection handoffs are live work,
+     * like unresolved merge writes, rather than completed history that a byte
+     * bound may discard.
+     */
     async function longHistory(entries: number): Promise<SnapshotQueueStore> {
       const s = store();
       for (let i = 0; i < entries; i += 1) {
@@ -228,6 +265,9 @@ describe("what the document keeps", () => {
             reason: "withdrawn by the sponsor before it took a turn",
           } as unknown as SubmittedEvent,
           { outbox: [{ kind: "start-workflow", attemptId: `a${i}`, payload: { attemptId: `a${i}` } }] },
+        );
+        s.acknowledgeTerminalEntryProjections(
+          s.pendingTerminalEntryProjections().map((row) => row.projectionId),
         );
         s.beginMergeOperation({
           operationId: `merge_${i}`,

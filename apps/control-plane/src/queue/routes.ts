@@ -23,6 +23,7 @@ import {
   type QueueSnapshot,
 } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
+import { projectAuthoritativeQueue } from "./queue-projection.js";
 import {
   capabilityFor,
   deviceKeyClaimedByAnother,
@@ -390,7 +391,7 @@ export async function runOnQueue<T>(
     return { result, snapshot: buildSnapshot(store) };
   });
   try {
-    await projectQueueState(db, projectionMessageFrom(repositoryId, baseRef, out.snapshot));
+    await projectAuthoritativeQueue(db, repositoryId, baseRef);
   } catch (error) {
     // The projection may lag; the command already succeeded, so this is not
     // fatal. It still has to be seen: a write that fails every time looks, from

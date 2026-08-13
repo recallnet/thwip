@@ -10,6 +10,7 @@ import {
   selectNext,
   type BranchQueueState,
   type CompactionLimits,
+  type Entry,
   type EligibleEntry,
   type QueueEvent,
 } from "@thwip/queue-domain";
@@ -184,6 +185,29 @@ interface MergeOperationRow {
   retryAfter?: string | null;
 }
 
+/**
+ * A terminal entry compacted from live authority before its final projection
+ * could be published.
+ *
+ * The row stays in the queue document until D1 has accepted the terminal
+ * history update. This closes the crash window between the authoritative
+ * terminal event and the best-effort projection/comment work that follows it.
+ */
+export interface TerminalEntryProjection {
+  readonly projectionId: string;
+  readonly generation: number;
+  readonly entryId: string;
+  readonly pullRequestNumber: number;
+  readonly sponsorPrincipalId: string;
+  readonly state: "Merged" | "Cancelled";
+  readonly primaryReason: string | null;
+  readonly fairnessOrdinal: string;
+  readonly schedulerEligible: boolean;
+  readonly cooldownUntil: string | null;
+  readonly lastAttemptId: string | null;
+  readonly headSha: string;
+}
+
 export interface EventRow {
   sequence: number;
   at: string;
@@ -215,6 +239,8 @@ interface Document {
   terminalReconciliationLease?: { pass: number; until: string } | null;
   /** Serializes signed transition-record creation across normal and repair paths. */
   transitionSigningLease?: { owner: string; until: string } | null;
+  /** Terminal rows waiting for their final D1 history projection. */
+  terminalEntryProjectionBacklog?: TerminalEntryProjection[];
 }
 
 /** Whether the sweep may read GitHub about this write on a tick at `now`. */
@@ -428,6 +454,27 @@ export class SnapshotQueueStore {
     this.flush();
   }
 
+  /** Terminal rows that must reach D1 before they may be forgotten. */
+  pendingTerminalEntryProjections(): readonly TerminalEntryProjection[] {
+    return this.doc.terminalEntryProjectionBacklog ?? [];
+  }
+
+  /**
+   * Forget only projection handoffs D1 has accepted.
+   *
+   * Exact ids make an acknowledgement safe across a concurrent terminal
+   * event for a later admission of the same pull request.
+   */
+  acknowledgeTerminalEntryProjections(projectionIds: readonly string[]): void {
+    if (projectionIds.length === 0) return;
+    const acknowledged = new Set(projectionIds);
+    const before = this.doc.terminalEntryProjectionBacklog ?? [];
+    const after = before.filter((row) => !acknowledged.has(row.projectionId));
+    if (after.length === before.length) return;
+    this.doc.terminalEntryProjectionBacklog = after;
+    this.flush();
+  }
+
   /**
    * Claim the one transition-record signer for this branch.
    *
@@ -582,7 +629,9 @@ export class SnapshotQueueStore {
     // Entries, attempts and the chain were all append-only, so this document grew
     // with the repository's whole merge history and was read and written whole on
     // every request. The projection keeps the history; this keeps what is live.
+    const beforeCompaction = [...next.entries.values()];
     compactState(next, this.compaction);
+    this.stageCompactedTerminalEntries(beforeCompaction, next);
     this.doc.state = encodeState(next);
     for (const transition of next.transitions) {
       const key = String(transition.transitionSequence);
@@ -624,6 +673,35 @@ export class SnapshotQueueStore {
       generation: this.doc.generation,
       attemptRevision: this.doc.attemptRevision,
     };
+  }
+
+  /** Preserve final facts for entries compaction removed in this append. */
+  private stageCompactedTerminalEntries(before: readonly Entry[], after: BranchQueueState): void {
+    const backlog = this.doc.terminalEntryProjectionBacklog ?? [];
+    const byId = new Map(backlog.map((row) => [row.projectionId, row]));
+    for (const entry of before) {
+      if (after.entries.has(entry.entryId)) continue;
+      if (entry.state !== "Merged" && entry.state !== "Cancelled") continue;
+      const projectionId = `${entry.entryId}:${entry.fairnessOrdinal}:${entry.state}`;
+      byId.set(projectionId, {
+        projectionId,
+        // This row is history, not a member of the compacted current snapshot.
+        // Keeping it one generation behind lets projection reads omit it while
+        // retaining its final state for comments and audit.
+        generation: Math.max(0, this.doc.generation - 1),
+        entryId: entry.entryId,
+        pullRequestNumber: entry.pullRequestNumber,
+        sponsorPrincipalId: entry.sponsorPrincipalId,
+        state: entry.state,
+        primaryReason: entry.primaryReason,
+        fairnessOrdinal: entry.fairnessOrdinal.toString(),
+        schedulerEligible: entry.schedulerEligible,
+        cooldownUntil: entry.cooldownUntil,
+        lastAttemptId: entry.lastAttemptId ?? entry.currentAttemptId,
+        headSha: entry.headSha,
+      });
+    }
+    this.doc.terminalEntryProjectionBacklog = [...byId.values()];
   }
 
   private remember(row: DedupeRow): void {

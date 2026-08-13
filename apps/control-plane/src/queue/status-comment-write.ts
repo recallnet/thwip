@@ -1,5 +1,16 @@
-import type { D1Like } from "./projection.js";
-import { COMMENT_MARKER, commentFingerprint, statusCommentBody, type CommentView } from "./status-comment.js";
+import {
+  acknowledgeTerminalEntryStatus,
+  trackedTerminalEntries,
+  type D1Like,
+} from "./projection.js";
+import type { QueueSnapshot } from "./queue-operations.js";
+import {
+  COMMENT_MARKER,
+  commentFingerprint,
+  commentViews,
+  statusCommentBody,
+  type CommentView,
+} from "./status-comment.js";
 
 /**
  * Putting the comment on the pull request, and keeping it to one.
@@ -48,6 +59,73 @@ export type CommentWriteOutcome =
  */
 export interface CommentBudget {
   remaining: number;
+}
+
+/**
+ * Publish live entries together with terminal rows already compacted from the
+ * authoritative snapshot.
+ *
+ * The terminal rows live in D1 after their queue-document handoff is
+ * acknowledged. Keeping this composition beside the writer gives a failed
+ * GitHub edit a durable retry owner even when the next heartbeat sees an empty
+ * terminal page and an empty handoff backlog.
+ */
+export async function writeStatusCommentsForSnapshot(
+  db: D1Like,
+  api: CommentApi,
+  where: { repositoryId: string; baseRef: string },
+  snapshot: QueueSnapshot,
+  options: { observing: boolean; now: string },
+  budget?: CommentBudget,
+): Promise<CommentWriteOutcome[]> {
+  const currentPullRequests = new Set(snapshot.entries.map((entry) => entry.pullRequestNumber));
+  const compactedTerminals = (
+    await trackedTerminalEntries(db, where.repositoryId, where.baseRef)
+  ).filter((entry) => !currentPullRequests.has(entry.pullRequestNumber));
+  const completeSnapshot: QueueSnapshot = {
+    ...snapshot,
+    entries: [...snapshot.entries, ...compactedTerminals],
+    transitions: [
+      ...snapshot.transitions,
+      ...compactedTerminals.flatMap((entry) =>
+        entry.transition === null
+          ? []
+          : [
+              {
+                transitionSequence: entry.transition.transitionSequence,
+                kind: entry.transition.kind,
+                digest: entry.transition.digest,
+                priorDigest: entry.transition.priorDigest,
+                baseSha: entry.transition.baseSha,
+                attemptId: entry.transition.attemptId,
+                witnessPrincipalIds: [],
+                recordedAt: entry.transition.observedAt,
+              },
+            ],
+      ),
+    ],
+  };
+  const outcomes: CommentWriteOutcome[] = [];
+  for (const view of commentViews(completeSnapshot, options)) {
+    const outcome = await writeStatusComment(db, api, where, view, options.now, budget);
+    outcomes.push(outcome);
+    if (
+      (view.state === "merged" || view.state === "cancelled" || view.state === "withdrawn-draft") &&
+      (outcome === "updated" || outcome === "unchanged")
+    ) {
+      const entry = compactedTerminals.find((candidate) => candidate.entryId === view.entryId);
+      if (entry !== undefined) {
+        await acknowledgeTerminalEntryStatus(
+          db,
+          where.repositoryId,
+          where.baseRef,
+          entry.entryId,
+          entry.fairnessOrdinal,
+        );
+      }
+    }
+  }
+  return outcomes;
 }
 
 /**
