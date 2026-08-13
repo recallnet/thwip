@@ -782,7 +782,12 @@ describe("GitHub App repository lifecycle", () => {
         WHERE id = 1`,
     ).run();
     const deployedAt = new Date("2026-08-12T10:00:00.000Z");
-    await activateProjectLifecycleWorker(t.db, deployedAt);
+    await activateProjectLifecycleWorker(
+      t.db,
+      "test-build",
+      "00000000-0000-4000-8000-000000000003",
+      deployedAt,
+    );
 
     await expect(
       reconcileInstalledProjects(env, ORG, [], { now: () => deployedAt }),
@@ -1150,7 +1155,7 @@ describe("GitHub App repository lifecycle", () => {
     ).run(REPO);
 
     const tables = t.raw
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'project_lifecycle_rollout' ORDER BY name")
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('d1_migrations', 'project_lifecycle_rollout') ORDER BY name")
       .all() as Array<{ name: string }>;
     const triggers = new Set(
       (t.raw
@@ -1182,17 +1187,17 @@ describe("GitHub App repository lifecycle", () => {
     expect(t.raw.prepare("SELECT document FROM queue_state WHERE github_repository_id = ?").get(REPO)).toEqual({ document: "{}" });
 
     // This models the imported, still-fenced copy. Migration 0031 removes the
-    // copied source guards before its table rebuilds and reopens the Worker only
-    // in its final statement.
+    // copied source guards before its table rebuilds. The Worker-level gate
+    // remains active until 0034 reopens traffic.
     authorizeFinishingMigration(t);
     applyMigration(t.raw, "0031_finish_github_repository_lifecycle.sql");
     expect(t.raw.prepare("SELECT maintenance_mode, destructive_schema_ready_at FROM project_lifecycle_rollout").get())
-      .toEqual({ maintenance_mode: 0, destructive_schema_ready_at: expect.any(String) });
+      .toEqual({ maintenance_mode: 1, destructive_schema_ready_at: expect.any(String) });
     expect(t.raw.prepare(
       "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'project_lifecycle_maintenance_%'",
     ).get()).toEqual({ n: 0 });
-    expect(() => t.raw.prepare("UPDATE queue_state SET document = '{\"new\":true}' WHERE github_repository_id = ?").run(REPO))
-      .not.toThrow();
+    // Direct SQL has no Worker-level gate. The service itself remains closed,
+    // and 0034's guarded final statement is the only supported reopen.
   });
 
   it("blocks the old manual restore endpoint during the two-phase migration window", () => {

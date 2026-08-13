@@ -1,4 +1,5 @@
 import type { D1Like } from "./queue/projection.js";
+import { databaseSchemaCapabilities } from "./schema-state.js";
 
 const RETENTION_LOOKAHEAD_MS = 5 * 60_000;
 const RETENTION_CLAIM_MS = 4 * 60_000;
@@ -36,10 +37,9 @@ export async function runPrivateFeedbackRetention(
   // The #398 maintenance generation deliberately runs the new Worker against
   // the schema immediately before 0031/0032. Feedback is still dark there, so
   // there is no content to retain and no safe table to claim yet.
-  const storage = await db.prepare(
-    "SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'agent_report_retention_clock'",
-  ).bind().first<{ found: number }>();
-  if (storage === null) return { skipped: true, privateRootsDeleted: 0, receiptsDeleted: 0 };
+  if (!(await databaseSchemaCapabilities(db)).privateAgentFeedback) {
+    return { skipped: true, privateRootsDeleted: 0, receiptsDeleted: 0 };
+  }
   const token = randomId("afc");
   const startedAt = now.toISOString();
   const deleteBefore = new Date(now.getTime() + RETENTION_LOOKAHEAD_MS).toISOString();

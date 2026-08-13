@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   blockingMigrations,
   formatSchemaRefusal,
-  parseDeployOrder,
+  migrationReleaseState,
+  missingMigrationFiles,
   readMigrations,
   unappliedAgainst,
   undeclaredMigrations,
@@ -25,6 +26,7 @@ describe("what every migration says about deploy order", () => {
     const migrations = readMigrations(migrationsDir);
     expect(migrations.length).toBeGreaterThan(20);
     expect(undeclaredMigrations(migrations)).toEqual([]);
+    expect(missingMigrationFiles(migrations)).toEqual([]);
   });
 
   /**
@@ -34,26 +36,37 @@ describe("what every migration says about deploy order", () => {
    * have been wrong for it.
    */
   it("keeps 0018 after its Worker and the tables 0020 and 0021 add before theirs", () => {
-    const orders = new Map(readMigrations(migrationsDir).map((m) => [m.name, m.order]));
+    const orders = new Map(readMigrations(migrationsDir).map((m) => [m.name, m.phase]));
     expect(orders.get("0018_one_record_per_merge.sql")).toBe("after-worker");
     expect(orders.get("0020_queue_runners.sql")).toBe("before-worker");
     expect(orders.get("0021_local_run_assignments.sql")).toBe("before-worker");
     expect(orders.get("0033_verifier_protocol_v3.sql")).toBe("before-worker");
   });
 
-  it("reads the order out of the header and nothing else", () => {
-    expect(parseDeployOrder("-- DEPLOY ORDER: before-worker\nCREATE TABLE t (a TEXT);")).toBe("before-worker");
-    expect(parseDeployOrder("-- DEPLOY ORDER: after-worker\nCREATE TABLE t (a TEXT);")).toBe("after-worker");
-    expect(parseDeployOrder("-- adds a table\nCREATE TABLE t (a TEXT);")).toBeNull();
-    expect(parseDeployOrder("-- the worker goes before this, probably\nCREATE TABLE t (a TEXT);")).toBeNull();
+  it("uses one shared model instead of independently scanning SQL prose", () => {
+    const release = migrationReleaseState(readMigrations(migrationsDir), [
+      ...readMigrations(migrationsDir)
+        .map((migration) => migration.name)
+        .filter((name) => name <= "0030_github_repository_lifecycle.sql"),
+    ]);
+    expect(release).toMatchObject({
+      kind: "after-worker",
+      selected: ["0031_finish_github_repository_lifecycle.sql"],
+      deployBlockers: [],
+      blockedBehindBarrier: [
+        "0032_private_agent_feedback_foundation.sql",
+        "0033_verifier_protocol_v3.sql",
+      ],
+      barrier: { id: "project-lifecycle-capability-cutover" },
+    });
   });
 });
 
 describe("which unapplied migrations refuse a deploy", () => {
   const migrations = [
-    { name: "0001_first.sql", order: "before-worker" },
-    { name: "0002_second.sql", order: "after-worker" },
-    { name: "0003_third.sql", order: "before-worker" },
+    { name: "0001_first.sql", phase: "before-worker" },
+    { name: "0002_second.sql", phase: "after-worker", barrier: "second" },
+    { name: "0003_third.sql", phase: "before-worker" },
   ];
 
   it("refuses when the code's tables are not in the database yet", () => {
@@ -62,6 +75,12 @@ describe("which unapplied migrations refuse a deploy", () => {
 
   it("lets a migration that belongs after its Worker stay unapplied", () => {
     expect(blockingMigrations(migrations, ["0002_second.sql"])).toEqual([]);
+  });
+
+  it("does not mistake a later before-worker phase for a preparatory deploy blocker", () => {
+    const release = migrationReleaseState(migrations, ["0001_first.sql"]);
+    expect(release.deployBlockers).toEqual([]);
+    expect(release.blockedBehindBarrier).toEqual(["0003_third.sql"]);
   });
 
   it("says nothing when the database is level with the code", () => {
@@ -89,9 +108,9 @@ describe("which unapplied migrations refuse a deploy", () => {
  */
 describe("what is still pending, given what the database says it has", () => {
   const migrations = [
-    { name: "0001_first.sql", order: "before-worker" },
-    { name: "0002_second.sql", order: "after-worker" },
-    { name: "0003_third.sql", order: "before-worker" },
+    { name: "0001_first.sql", phase: "before-worker" },
+    { name: "0002_second.sql", phase: "after-worker", barrier: "second" },
+    { name: "0003_third.sql", phase: "before-worker" },
   ];
 
   it("is every migration the database has not named", () => {

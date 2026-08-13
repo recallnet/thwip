@@ -18,11 +18,15 @@ function fakeClock() {
 describe("waiting for the deployed sha to serve", () => {
   it("succeeds the moment /health reports the sha just deployed", async () => {
     const { now, sleep } = fakeClock();
-    const fetchImpl = async () => ({ ok: true, json: async () => ({ buildSha: "abc123" }) });
+    const fetchImpl = async () => ({ ok: true, json: async () => ({
+      buildSha: "abc123",
+      projectLifecycle: { workerDeploymentId: "00000000-0000-4000-8000-000000000001" },
+    }) });
 
     const result = await waitForBuildSha({
       url: "https://example.test/health",
       expectedSha: "abc123",
+      expectedDeploymentId: "00000000-0000-4000-8000-000000000001",
       fetchImpl,
       now,
       sleep,
@@ -55,6 +59,27 @@ describe("waiting for the deployed sha to serve", () => {
 
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(3);
+  });
+
+  it("does not confuse a previous deployment of the same SHA with the new generation", async () => {
+    const { now, sleep } = fakeClock();
+    let call = 0;
+    const seen = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"];
+    const fetchImpl = async () => ({ ok: true, json: async () => ({
+      buildSha: "same-sha",
+      projectLifecycle: { workerDeploymentId: seen[call++] },
+    }) });
+    const result = await waitForBuildSha({
+      url: "https://example.test/health",
+      expectedSha: "same-sha",
+      expectedDeploymentId: "00000000-0000-4000-8000-000000000002",
+      fetchImpl,
+      now,
+      sleep,
+      sleepMs: 1000,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.attempts).toBe(2);
   });
 
   /**
@@ -150,7 +175,8 @@ describe("the deploy command", () => {
     const assignments = command.match(/BUILD_SHA=/g) ?? [];
     expect(assignments.length).toBe(1);
     expect(command).toMatch(/--var BUILD_SHA:"\$BUILD_SHA"/);
-    expect(command).toMatch(/confirm-deploy\.mjs --env staging --sha "\$BUILD_SHA"/);
+    expect(command).toMatch(/--var DEPLOYMENT_ID:"\$DEPLOYMENT_ID"/);
+    expect(command).toMatch(/confirm-deploy\.mjs --env staging --sha "\$BUILD_SHA" --deployment-id "\$DEPLOYMENT_ID"/);
   });
 
   it("still refuses to fail silently: confirm-deploy runs after wrangler deploy, chained with &&", () => {

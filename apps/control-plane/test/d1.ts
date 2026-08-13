@@ -176,10 +176,18 @@ export function applyMigration(raw: Database.Database, file: string): void {
   for (const statement of statements(readFileSync(join(migrationsDir, file), "utf8"))) {
     raw.exec(statement);
   }
+  recordMigration(raw, file);
 }
 
-export function testD1(options: { upTo?: string } = {}): TestD1 {
+function recordMigration(raw: Database.Database, file: string): void {
+  raw.prepare(
+    "INSERT OR IGNORE INTO d1_migrations (name, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+  ).run(file);
+}
+
+export function testD1(options: { upTo?: string; rollout?: "steady" | "as-migrated" } = {}): TestD1 {
   const raw = new Database(":memory:");
+  raw.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)");
   for (const file of migrationFiles()) {
     if (options.upTo !== undefined && file >= options.upTo) break;
     // The finishing migration is allowed only after the explicit capability
@@ -191,6 +199,8 @@ export function testD1(options: { upTo?: string } = {}): TestD1 {
         `UPDATE project_lifecycle_rollout
             SET maintenance_mode = 1,
                 worker_activated_at = '2000-01-01T00:00:00.000Z',
+                worker_build_sha = 'test-worker-build',
+                worker_deployment_id = '00000000-0000-4000-8000-000000000001',
                 remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
                 remote_capability_evidence = ?,
                 destructive_schema_ready_at = NULL
@@ -198,11 +208,22 @@ export function testD1(options: { upTo?: string } = {}): TestD1 {
       ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
     }
     runMigrationFile(raw, file);
+    recordMigration(raw, file);
+    if (file === "0033_verifier_protocol_v3.sql" && options.rollout !== "as-migrated") {
+      // Most tests build the fully reopened steady state. Model the required
+      // post-0033 deployment before the loader reaches 0034.
+      raw.prepare(
+        `UPDATE project_lifecycle_rollout
+            SET worker_deployment_id = '00000000-0000-4000-8000-000000000099'
+          WHERE id = 1`,
+      ).run();
+    }
   }
 
   // Most tests model steady state after the explicit R2/GitHub capability
   // cutover and finishing schema. Rollout tests clear these fields themselves.
   if (
+    options.rollout !== "as-migrated" &&
     raw
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_lifecycle_rollout'")
       .get() !== undefined
@@ -210,6 +231,8 @@ export function testD1(options: { upTo?: string } = {}): TestD1 {
     raw.prepare(
       `UPDATE project_lifecycle_rollout
           SET worker_activated_at = '2000-01-01T00:00:00.000Z',
+              worker_build_sha = 'test-worker-build',
+              worker_deployment_id = '00000000-0000-4000-8000-000000000002',
               remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
               remote_capability_evidence = ?,
               destructive_schema_ready_at = '2000-01-01T00:00:00.000Z'

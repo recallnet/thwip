@@ -1,6 +1,7 @@
 import { projectQueueObjectName, queueKey } from "@thwip/queue-domain";
 import type { Env } from "./env.js";
 import type { D1Like } from "./queue/projection.js";
+import { databaseSchemaCapabilities } from "./schema-state.js";
 
 export interface InstalledProjectRepository {
   readonly id: string;
@@ -406,6 +407,9 @@ async function acquireReleaseCleanupLease(
 export interface ProjectLifecycleRollout {
   readonly maintenanceMode: boolean;
   readonly workerActivatedAt: string | null;
+  readonly workerBuildSha: string | null;
+  readonly workerDeploymentId: string | null;
+  readonly verifierV3PredeployId: string | null;
   readonly remoteCapabilitiesRetiredAt: string | null;
   readonly remoteCapabilityEvidenceComplete: boolean;
   readonly destructiveSchemaReadyAt: string | null;
@@ -541,14 +545,21 @@ function cutoverEvidenceComplete(raw: string | null, capabilitiesRetiredAt: stri
  * only. It never authorizes cleanup; retiring the old D1, R2, and GitHub
  * capabilities plus the final schema marker below does that.
  */
-export async function activateProjectLifecycleWorker(db: D1Like, now = new Date()): Promise<void> {
+export async function activateProjectLifecycleWorker(
+  db: D1Like,
+  buildSha: string,
+  deploymentId: string,
+  now = new Date(),
+): Promise<void> {
   await db
     .prepare(
       `UPDATE project_lifecycle_rollout
-          SET worker_activated_at = COALESCE(worker_activated_at, ?)
+          SET worker_activated_at = COALESCE(worker_activated_at, ?),
+              worker_build_sha = ?,
+              worker_deployment_id = ?
         WHERE id = 1`,
     )
-    .bind(now.toISOString())
+    .bind(now.toISOString(), buildSha, deploymentId)
     .run();
 }
 
@@ -561,6 +572,9 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
     .prepare(
       `SELECT maintenance_mode AS maintenanceMode,
               worker_activated_at AS activatedAt,
+              worker_build_sha AS buildSha,
+              worker_deployment_id AS deploymentId,
+              verifier_v3_predeploy_id AS verifierV3PredeployId,
               remote_capabilities_retired_at AS capabilitiesRetiredAt,
               remote_capability_evidence AS capabilityEvidence,
               destructive_schema_ready_at AS schemaReadyAt
@@ -570,11 +584,17 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
     .first<{
       maintenanceMode: number;
       activatedAt: string | null;
+      buildSha: string | null;
+      deploymentId: string | null;
+      verifierV3PredeployId: string | null;
       capabilitiesRetiredAt: string | null;
       capabilityEvidence: string | null;
       schemaReadyAt: string | null;
     }>();
   const workerActivatedAt = row?.activatedAt ?? null;
+  const workerBuildSha = row?.buildSha ?? null;
+  const workerDeploymentId = row?.deploymentId ?? null;
+  const verifierV3PredeployId = row?.verifierV3PredeployId ?? null;
   const maintenanceMode = row?.maintenanceMode === 1;
   const remoteCapabilitiesRetiredAt = row?.capabilitiesRetiredAt ?? null;
   const remoteCapabilityEvidence = row?.capabilityEvidence ?? null;
@@ -590,6 +610,9 @@ export async function projectLifecycleRollout(db: D1Like): Promise<ProjectLifecy
   return {
     maintenanceMode,
     workerActivatedAt,
+    workerBuildSha,
+    workerDeploymentId,
+    verifierV3PredeployId,
     remoteCapabilitiesRetiredAt,
     remoteCapabilityEvidenceComplete,
     destructiveSchemaReadyAt,
@@ -1090,6 +1113,7 @@ function cleanupStatements(
   db: D1Like,
   project: ProjectLifecycleRow,
   cleanupOwner: string,
+  privateFeedbackReady: boolean,
 ): unknown[] {
   const byProject = ["repository_grants", "proof_verifications", "verification_observations", "policy_bundles"];
   const privateFeedbackChildren = ["agent_report_events", "agent_report_provenance", "agent_report_content"];
@@ -1136,7 +1160,7 @@ function cleanupStatements(
       project.projectId,
       cleanupOwner,
     ),
-    db.prepare(
+    ...(privateFeedbackReady ? [db.prepare(
       `UPDATE agent_report_receipts
           SET status = 'closed',
               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
@@ -1166,7 +1190,7 @@ function cleanupStatements(
          SELECT 1 FROM project_release_jobs
           WHERE github_repository_id = ? AND project_id = ? AND cleanup_owner_token = ?
        )`,
-    ).bind(project.projectId, project.repositoryId, project.projectId, cleanupOwner),
+    ).bind(project.projectId, project.repositoryId, project.projectId, cleanupOwner)] : []),
     ...byProject.map((table) =>
       db.prepare(
         `DELETE FROM ${table} WHERE project_id = ? AND EXISTS (
@@ -1293,7 +1317,8 @@ export async function releaseProject(
     await dependencies.beforeD1Cleanup?.(project.repositoryId);
     await authorityLease?.assert();
     await cleanup.assert();
-    await db.batch(cleanupStatements(db, project, cleanup.owner));
+    const privateFeedbackReady = (await databaseSchemaCapabilities(db)).privateAgentFeedback;
+    await db.batch(cleanupStatements(db, project, cleanup.owner, privateFeedbackReady));
     return true;
   } finally {
     await cleanup.release();

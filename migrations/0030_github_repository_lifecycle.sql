@@ -453,6 +453,9 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_rollout (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   maintenance_mode INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_mode IN (0, 1)),
   worker_activated_at TEXT,
+  worker_build_sha TEXT,
+  worker_deployment_id TEXT,
+  verifier_v3_predeploy_id TEXT,
   remote_capabilities_retired_at TEXT,
   remote_capability_evidence TEXT,
   destructive_schema_ready_at TEXT,
@@ -462,8 +465,10 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_rollout (
   )
 );
 INSERT OR IGNORE INTO project_lifecycle_rollout
-  (id, maintenance_mode, worker_activated_at, remote_capabilities_retired_at, remote_capability_evidence, destructive_schema_ready_at)
-VALUES (1, 0, NULL, NULL, NULL, NULL);
+  (id, maintenance_mode, worker_activated_at, worker_build_sha, worker_deployment_id,
+   verifier_v3_predeploy_id,
+   remote_capabilities_retired_at, remote_capability_evidence, destructive_schema_ready_at)
+VALUES (1, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 
 -- Serialise authoritative reads of one installation. Webhook deliveries are
 -- hints and can arrive in any order; the holder always re-reads GitHub. A lease
