@@ -209,6 +209,37 @@ describe("GitHub App repository lifecycle", () => {
     t.raw
       .prepare("INSERT INTO stripe_state (organization_id, stripe_customer_id) VALUES (?, 'cus_1')")
       .run(ORG);
+    const privateReceiptId = "afr_project_removal";
+    const privateRootId = "afp_project_removal";
+    const privateLease = await acquireProjectWriteLease(t.db, REPO, PROJECT);
+    expect(privateLease).not.toBeNull();
+    t.raw.prepare(
+      `INSERT INTO agent_report_receipts
+         (id, status, created_at, updated_at, expires_at)
+       VALUES (?, 'submitted', '2026-08-13T12:00:00.000Z',
+               '2026-08-13T12:00:00.000Z', '2027-08-13T12:00:00.000Z')`,
+    ).run(privateReceiptId);
+    t.raw.prepare(
+      `INSERT INTO agent_report_private_roots
+         (id, receipt_id, project_id, payload_binding, submitted_at, delete_at)
+       VALUES (?, ?, ?, ?, '2026-08-13T12:00:00.000Z', '2026-11-11T12:00:00.000Z')`,
+    ).run(privateRootId, privateReceiptId, PROJECT, `hmac-sha256:v1:${"a".repeat(64)}`);
+    t.raw.prepare(
+      `INSERT INTO agent_report_content (private_root_id, kind, title, description)
+       VALUES (?, 'bug', 'Queue status is unclear',
+               'The status does not explain what the user should do next.')`,
+    ).run(privateRootId);
+    t.raw.prepare(
+      `INSERT INTO agent_report_provenance
+         (private_root_id, better_auth_user_id, github_user_id, github_installation_id,
+          github_repository_id, cli_version, accepted_at)
+       VALUES (?, 'better-auth-carson', '7', '44', ?, '0.1.0', '2026-08-13T12:00:00.000Z')`,
+    ).run(privateRootId, REPO);
+    t.raw.prepare(
+      `INSERT INTO agent_report_events (id, private_root_id, action, actor_role, occurred_at)
+       VALUES ('afe_project_removal', ?, 'submitted', 'submitter', '2026-08-13T12:00:00.000Z')`,
+    ).run(privateRootId);
+    await privateLease!.release();
 
     expect(await releaseInstallationProjects(env, ORG)).toBe(1);
 
@@ -224,6 +255,17 @@ describe("GitHub App repository lifecycle", () => {
       expect(t.raw.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE github_repository_id = ?`).get(REPO)).toEqual({ n: 0 });
     }
     expect(t.raw.prepare("SELECT COUNT(*) AS n FROM proof_verifications WHERE project_id = ?").get(PROJECT)).toEqual({ n: 0 });
+    expect(t.raw.prepare("SELECT COUNT(*) AS n FROM agent_report_private_roots WHERE project_id = ?").get(PROJECT)).toEqual({ n: 0 });
+    for (const table of ["agent_report_content", "agent_report_provenance", "agent_report_events"]) {
+      expect(t.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+    }
+    expect(t.raw.prepare(
+      `SELECT status, final_at IS NOT NULL AS final, content_deleted_at IS NOT NULL AS contentDeleted
+         FROM agent_report_receipts WHERE id = ?`,
+    ).get(privateReceiptId)).toEqual({ status: "closed", final: 1, contentDeleted: 1 });
+    expect(JSON.stringify(t.raw.prepare(
+      "SELECT * FROM agent_report_receipts WHERE id = ?",
+    ).get(privateReceiptId))).not.toMatch(/1319756073|prj_old_incarnation|carson|recallnet/i);
     expect(t.raw.prepare("SELECT COUNT(*) AS n FROM project_release_jobs").get()).toEqual({ n: 0 });
     expect(t.raw.prepare(
       `SELECT organization_id, installation_id, selected
