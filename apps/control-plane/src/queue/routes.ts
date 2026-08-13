@@ -123,6 +123,7 @@ import {
   recordMergedTransition,
   storeEvidence,
 } from "./merge-lane.js";
+import { readQueueDoctorReadiness } from "./doctor-readiness.js";
 
 /**
  * The dependencies `recordMergeFromIntent` needs, assembled from the pieces
@@ -580,6 +581,7 @@ const REPOSITORY_ACCESS: Readonly<Record<string, Requirement>> = {
   // with triage on the repository is there to do, and neither moves anything.
   "": { need: "read" },
   explain: { need: "read" },
+  readiness: { need: "read" },
 };
 
 /**
@@ -1034,6 +1036,23 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     }));
 
     return c.json({ ...report, why, now });
+  });
+
+  /**
+   * The durable setup state behind the queue, without waking or creating a
+   * Durable Object. A successful read of an empty object is not evidence that
+   * the current project incarnation is enabled.
+   */
+  app.get("/v1/queue/:repositoryId/readiness", async (c) => {
+    const selected = requestedQueue(c);
+    if ("error" in selected) return c.json({ error: selected.error }, 400);
+    const readiness = await readQueueDoctorReadiness(
+      c.env.DB as unknown as D1Like,
+      selected.repositoryId,
+      selected.baseRef,
+    );
+    if (readiness === null) return c.json({ error: "repository project is unavailable" }, 409);
+    return c.json(readiness);
   });
 
   /** Read the queue. Safe for any authenticated member of the repository. */

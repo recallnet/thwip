@@ -7,6 +7,7 @@ export type RepositoryResolutionIdentity =
 export interface RepositoryResolution {
   readonly ownerId: string;
   readonly repositoryId: string;
+  readonly projectId: string;
 }
 
 /** Resolve a GitHub identity only inside the repository owner's tenant. */
@@ -44,7 +45,7 @@ export async function resolveRepositoryFor(
           WHERE g.project_id = p.id AND g.github_user_id = ? AND g.active = 1
        )`;
   const statement = db.prepare(
-    `SELECT p.github_repository_id, o.github_org_id FROM projects p
+    `SELECT p.id, p.github_repository_id, o.github_org_id FROM projects p
      JOIN organizations o ON o.id = p.organization_id
      WHERE p.github_name = ? AND o.status = 'active'
        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
@@ -52,7 +53,7 @@ export async function resolveRepositoryFor(
        ${userPredicate}`,
   );
   const row = identity.kind === "admin"
-    ? await statement.bind(name).first<{ github_repository_id: string; github_org_id: string }>()
-    : await statement.bind(name, identity.githubUserId).first<{ github_repository_id: string; github_org_id: string }>();
-  return row === null ? null : { ownerId: row.github_org_id, repositoryId: row.github_repository_id };
+    ? await statement.bind(name).first<{ id: string; github_repository_id: string; github_org_id: string }>()
+    : await statement.bind(name, identity.githubUserId).first<{ id: string; github_repository_id: string; github_org_id: string }>();
+  return row === null ? null : { ownerId: row.github_org_id, repositoryId: row.github_repository_id, projectId: row.id };
 }
