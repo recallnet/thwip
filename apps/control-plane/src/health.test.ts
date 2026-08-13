@@ -45,6 +45,7 @@ describe("the public health signal", () => {
       DB: opened.db,
       THWIP_ENV: "test",
       BUILD_SHA: "health-test-build",
+      DEPLOYMENT_ID: "00000000-0000-4000-8000-000000000001",
       THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(privateJwk),
     } as unknown as Env;
     const pending: Promise<unknown>[] = [];
@@ -71,6 +72,18 @@ describe("the public health signal", () => {
         remoteCapabilityEvidenceComplete: false,
         destructiveSchemaReadyAt: null,
         cleanupReady: false,
+      },
+      schema: {
+        phase: "current",
+        selected: [],
+        deployBlockers: [],
+        blockedBehindBarrier: [],
+        outOfOrderApplied: [],
+        capabilities: {
+          privateAgentFeedback: true,
+          verifierProtocolV3: true,
+          lifecycleReopened: true,
+        },
       },
       jws: expect.any(String),
     });
@@ -127,6 +140,7 @@ describe("the public health signal", () => {
       DB: opened.db,
       THWIP_ENV: "test",
       BUILD_SHA: "maintenance-test-build",
+      DEPLOYMENT_ID: "00000000-0000-4000-8000-000000000002",
       THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(privateJwk),
       SYNC_QUEUE: { send: sends },
     } as unknown as Env;
@@ -159,5 +173,58 @@ describe("the public health signal", () => {
     expect(sends).toHaveBeenCalledWith(body, { delaySeconds: 300 });
     expect(acknowledge).toHaveBeenCalledOnce();
     expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("keeps every service entry point fenced between 0031 and 0034", async () => {
+    opened = testD1({ upTo: "0034_reopen_after_project_lifecycle.sql", rollout: "as-migrated" });
+    const pair = await generateKeyPair("ES256", { extractable: true });
+    const privateJwk = {
+      ...(await exportJWK(pair.privateKey)),
+      kid: `schema-gap-${crypto.randomUUID()}`,
+      alg: "ES256",
+    };
+    const sends = vi.fn(async (_body: unknown, _options?: { delaySeconds: number }) => undefined);
+    const env = {
+      DB: opened.db,
+      THWIP_ENV: "test",
+      BUILD_SHA: "schema-gap-build",
+      DEPLOYMENT_ID: "00000000-0000-4000-8000-000000000003",
+      THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(privateJwk),
+      SYNC_QUEUE: { send: sends },
+    } as unknown as Env;
+    const execution = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+
+    expect((await worker.fetch(new Request("https://thwip.test/v1/metrics"), env, execution)).status).toBe(503);
+    const health = await worker.fetch(new Request("https://thwip.test/health"), env, execution);
+    await expect(health.json()).resolves.toMatchObject({
+      projectLifecycle: {
+        maintenanceMode: true,
+        workerBuildSha: "schema-gap-build",
+        workerDeploymentId: "00000000-0000-4000-8000-000000000003",
+        verifierV3PredeployId: "00000000-0000-4000-8000-000000000001",
+      },
+      schema: {
+        phase: "after-worker",
+        selected: ["0034_reopen_after_project_lifecycle.sql"],
+        capabilities: {
+          lifecycleFinished: true,
+          privateAgentFeedback: true,
+          verifierProtocolV3: true,
+          lifecycleReopened: false,
+        },
+      },
+    });
+    const schema = await worker.fetch(new Request("https://thwip.test/v1/schema"), env, execution);
+    await expect(schema.json()).resolves.toMatchObject({
+      schema: { phase: "after-worker", selected: ["0034_reopen_after_project_lifecycle.sql"] },
+    });
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const body = { installationId: "42", syncInstallation: true };
+    await worker.queue({ messages: [{ body, ack, retry }] } as unknown as MessageBatch, env);
+    expect(sends).toHaveBeenCalledWith(body, { delaySeconds: 300 });
+    expect(ack).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+    await expect(worker.scheduled({ cron: "*/5 * * * *" } as ScheduledController, env)).resolves.toBeUndefined();
   });
 });

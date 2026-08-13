@@ -48,7 +48,11 @@ describe("the canonical main deployment workflow", () => {
     const deploy = workflow.jobs.deploy.steps.find((step) => step.id === "deploy");
     expect(deploy.env.BUILD_SHA).toBe("${{ github.sha }}");
     expect(deploy.run).toBe("pnpm --filter @thwip/control-plane run deploy:staging");
+    expect(readFileSync(fileURLToPath(new URL("../apps/control-plane/package.json", import.meta.url)), "utf8"))
+      .toContain('--var DEPLOYMENT_ID:\\"$DEPLOYMENT_ID\\"');
     expect(source).toContain("/health serves the exact SHA");
+    expect(readFileSync(fileURLToPath(new URL("./predeploy.mjs", import.meta.url)), "utf8"))
+      .toContain("migrationReleaseState");
   });
 
   it("contains no command that changes the database", () => {

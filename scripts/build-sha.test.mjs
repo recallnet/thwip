@@ -11,7 +11,8 @@ const fakeGit =
 
 describe("the stamp a deploy carries", () => {
   it("names the commit", () => {
-    expect(buildStamp(fakeGit("385bafd91c2a", ""))).toBe("385bafd91c2a");
+    const sha = "385bafd91c2a".padEnd(40, "0");
+    expect(buildStamp(fakeGit(sha, ""))).toBe(sha);
   });
 
   /**
@@ -19,7 +20,8 @@ describe("the stamp a deploy carries", () => {
    * point at one and imply otherwise.
    */
   it("says so when the tree has uncommitted changes", () => {
-    expect(buildStamp(fakeGit("385bafd91c2a", " M src/index.ts\n"))).toBe("385bafd91c2a-dirty");
+    const sha = "385bafd91c2a".padEnd(40, "0");
+    expect(buildStamp(fakeGit(sha, " M src/index.ts\n"))).toBe(`${sha}-dirty`);
   });
 
   it("keeps the full exact SHA in the canonical GitHub Actions deploy", () => {

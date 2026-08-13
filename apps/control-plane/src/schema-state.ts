@@ -1,3 +1,9 @@
+import {
+  publicMigrationState,
+  schemaCapabilities,
+  type PublicMigrationState,
+  type SchemaCapabilities,
+} from "@thwip/migration-plan";
 import type { D1Like } from "./queue/projection.js";
 
 /**
@@ -17,12 +23,20 @@ import type { D1Like } from "./queue/projection.js";
  * this is public in the same way `/health` publishes the build it is running.
  */
 export async function appliedMigrations(db: D1Like): Promise<string[]> {
+  return (await appliedMigrationRecords(db)).map((row) => row.name);
+}
+
+interface AppliedMigrationRecord {
+  readonly name: string;
+}
+
+async function appliedMigrationRecords(db: D1Like): Promise<AppliedMigrationRecord[]> {
   try {
     const rows = await db
       .prepare("SELECT name FROM d1_migrations ORDER BY name")
       .bind()
-      .all<{ name: string }>();
-    return rows.results.map((row) => row.name);
+      .all<AppliedMigrationRecord>();
+    return rows.results;
   } catch (error) {
     // A database wrangler has never applied a migration to has no bookkeeping
     // table, and "nothing applied" is the true answer for it. Every other
@@ -32,4 +46,24 @@ export async function appliedMigrations(db: D1Like): Promise<string[]> {
     if (/no such table/i.test(message)) return [];
     throw error;
   }
+}
+
+export interface DatabaseSchemaState {
+  readonly applied: readonly string[];
+  readonly release: PublicMigrationState;
+}
+
+/** The public release and capability view derived from Wrangler's durable ledger. */
+export async function databaseSchemaState(db: D1Like): Promise<DatabaseSchemaState> {
+  const records = await appliedMigrationRecords(db);
+  const applied = records.map((row) => row.name);
+  return {
+    applied,
+    release: publicMigrationState(applied),
+  };
+}
+
+/** Runtime feature gates use the same capability mapping as deploy and migrate. */
+export async function databaseSchemaCapabilities(db: D1Like): Promise<SchemaCapabilities> {
+  return schemaCapabilities(await appliedMigrations(db));
 }

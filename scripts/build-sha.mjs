@@ -34,7 +34,9 @@ export function buildStamp(git, env = {}) {
     return env.GITHUB_SHA;
   }
 
-  const head = git("rev-parse", "--short=12", "HEAD");
+  // Use the full object id everywhere. GitHub Actions deploys carry the full
+  // SHA, and the migration runner must compare the same canonical identity.
+  const head = git("rev-parse", "HEAD");
   const dirty = git("status", "--porcelain").length > 0;
   return dirty ? `${head}-dirty` : head;
 }

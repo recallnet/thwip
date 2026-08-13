@@ -39,10 +39,10 @@ import { deployCheckout } from "./deploy-checkout.mjs";
 import { deployIdentity, liveD1Target, liveSchemaUrl } from "./deploy-identity.mjs";
 import { preflightDeployCredential } from "./d1-identity.mjs";
 import {
-  blockingMigrations,
   formatSchemaRefusal,
+  migrationReleaseState,
+  missingMigrationFiles,
   readMigrations,
-  unappliedAgainst,
   undeclaredMigrations,
 } from "./schema-guard.mjs";
 
@@ -158,9 +158,17 @@ const migrations = readMigrations(migrationsDir);
 const undeclared = undeclaredMigrations(migrations);
 if (undeclared.length > 0) {
   console.error(
-    `\nRefusing: these migrations do not say which side of the deploy they belong on:\n` +
+    `\nRefusing: these migrations are absent from the shared release model:\n` +
       undeclared.map((name) => `  ${name}`).join("\n") +
-      `\n\nAdd "-- DEPLOY ORDER: before-worker" or "-- DEPLOY ORDER: after-worker" as the first line.`,
+      `\n\nAdd the file to @thwip/migration-plan before it can ship.`,
+  );
+  process.exit(1);
+}
+const missing = missingMigrationFiles(migrations);
+if (missing.length > 0) {
+  console.error(
+    `\nRefusing: the shared release model names SQL files missing from this checkout:\n`
+      + missing.map((name) => `  ${name}`).join("\n"),
   );
   process.exit(1);
 }
@@ -175,7 +183,7 @@ if (undeclared.length > 0) {
 // Applying migrations is `migrate:staging` now, run deliberately by whoever does
 // hold that authority. See docs/production-access.md.
 const schemaUrl = liveSchemaUrl(targetEnv);
-let unapplied = null;
+let release = null;
 try {
   const response = await fetch(schemaUrl, { headers: { accept: "application/json" } });
   if (response.status === 404) {
@@ -192,13 +200,13 @@ try {
   const body = await response.json();
   // A body without the field is not an empty list of migrations. Reading it as
   // one is the exact shape of the failure this check was added for.
-  unapplied = Array.isArray(body.applied) ? unappliedAgainst(migrations, body.applied) : null;
+  release = Array.isArray(body.applied) ? migrationReleaseState(migrations, body.applied) : null;
 } catch (error) {
-  unapplied = null;
+  release = null;
   console.error(`\nCould not ask ${targetEnv} which migrations it has: ${error.message.split("\n")[0]}`);
 }
 
-if (unapplied === null) {
+if (release === null) {
   // An unreadable answer is not a clean one.
   if (!excuses(declared, "schema-unreadable")) {
     console.error(
@@ -211,15 +219,24 @@ if (unapplied === null) {
     process.exit(1);
   }
 } else {
-  const blockers = blockingMigrations(migrations, unapplied);
+  if (release.outOfOrderApplied.length > 0) {
+    console.error(
+      `\nRefusing: ${targetEnv} has an out-of-order migration ledger; these known migrations are recorded after an earlier missing migration:\n`
+        + release.outOfOrderApplied.map((name) => `  ${name}`).join("\n"),
+    );
+    process.exit(1);
+  }
+  const blockers = release.deployBlockers;
   if (blockers.length > 0 && !excuses(declared, "pending-migrations")) {
     console.error(`\n${formatSchemaRefusal(blockers, targetEnv)}`);
     console.error(`\n${breakGlassRefusal("pending-migrations", "the schema this code needs is not there yet.")}`);
     process.exit(1);
   }
-  const deferred = unapplied.filter((name) => !blockers.includes(name));
   console.log(
-    `schema: ${targetEnv} is ${unapplied.length === 0 ? "level with this tree" : `missing ${unapplied.length} migration(s)`}` +
-      (deferred.length > 0 ? `, ${deferred.length} of which apply after this deploy: ${deferred.join(", ")}` : ""),
+    `schema: ${targetEnv} release phase ${release.kind}; selected: ${release.selected.join(", ") || "none"}`
+      + (release.barrier === null ? "" : `; barrier: ${release.barrier.name}`)
+      + (release.blockedBehindBarrier.length === 0
+        ? ""
+        : `; blocked behind barrier: ${release.blockedBehindBarrier.join(", ")}`),
   );
 }

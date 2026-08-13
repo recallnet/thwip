@@ -1,5 +1,10 @@
 import type { CandidateSuite, CandidateVerdict } from "./store.js";
 import type { D1Like } from "./projection.js";
+import { databaseSchemaCapabilities } from "../schema-state.js";
+
+async function verifierProtocolV3Ready(db: D1Like): Promise<boolean> {
+  return (await databaseSchemaCapabilities(db)).verifierProtocolV3;
+}
 
 /**
  * Candidate verdicts and dispatch claims, in D1 rather than in the Durable Object.
@@ -31,9 +36,10 @@ export async function recordCandidateVerdictV2(
 ): Promise<{ status: "applied" | "duplicate" | "unavailable" }> {
   const existing = await candidateVerdict(db, repositoryId, baseRef, verdict.candidateTreeOid, projectId);
   if (existing !== null) return { status: "duplicate" };
+  const v3Ready = await verifierProtocolV3Ready(db);
   const inserted = await db
     .prepare(
-      `INSERT INTO candidate_verdicts (
+      v3Ready ? `INSERT INTO candidate_verdicts (
          github_repository_id, base_ref, project_id, candidate_tree_oid, candidate_sha, base_sha,
          pull_request_number, accepted, result_digest, policy_digest, suites,
          reason_codes, workflow_ref, workflow_sha, run_id, observed_at, verifier_protocol
@@ -44,9 +50,19 @@ export async function recordCandidateVerdictV2(
             WHERE q.github_repository_id = ? AND q.base_ref = ? AND q.project_id = ?
               AND q.verifier_protocol <> 3 AND p.github_repository_id = q.github_repository_id
           )
+       ON CONFLICT (github_repository_id, base_ref, candidate_tree_oid) DO NOTHING`
+      : `INSERT INTO candidate_verdicts (
+         github_repository_id, base_ref, project_id, candidate_tree_oid, candidate_sha, base_sha,
+         pull_request_number, accepted, result_digest, policy_digest, suites,
+         reason_codes, workflow_ref, workflow_sha, run_id, observed_at
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM projects p
+             WHERE p.id = ? AND p.github_repository_id = ?
+          )
        ON CONFLICT (github_repository_id, base_ref, candidate_tree_oid) DO NOTHING`,
     )
-    .bind(
+    .bind(...(v3Ready ? [
       repositoryId,
       baseRef,
       projectId,
@@ -66,7 +82,26 @@ export async function recordCandidateVerdictV2(
       repositoryId,
       baseRef,
       projectId,
-    )
+    ] : [
+      repositoryId,
+      baseRef,
+      projectId,
+      verdict.candidateTreeOid,
+      verdict.candidateSha,
+      verdict.baseSha,
+      verdict.pullRequestNumber,
+      verdict.accepted ? 1 : 0,
+      verdict.resultDigest,
+      verdict.policyDigest,
+      JSON.stringify(verdict.suites),
+      JSON.stringify(verdict.reasonCodes),
+      verdict.workflowRef,
+      verdict.workflowSha,
+      verdict.runId,
+      verdict.observedAt,
+      projectId,
+      repositoryId,
+    ]))
     .run();
   if (((inserted as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1) return { status: "applied" };
   return (await candidateVerdict(db, repositoryId, baseRef, verdict.candidateTreeOid, projectId)) === null
@@ -81,9 +116,10 @@ export async function candidateVerdict(
   candidateTreeOid: string,
   projectId?: string,
 ): Promise<CandidateVerdict | null> {
+  const v3Ready = await verifierProtocolV3Ready(db);
   const row = await db
     .prepare(
-      `SELECT * FROM candidate_verdicts
+      v3Ready ? `SELECT * FROM candidate_verdicts
         WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
           AND (? IS NULL OR project_id = ?)
           AND NOT EXISTS (
@@ -93,7 +129,10 @@ export async function candidateVerdict(
                AND q.project_id = candidate_verdicts.project_id
                AND q.verifier_protocol = 3
                AND candidate_verdicts.verifier_protocol <> 3
-          )`,
+          )`
+      : `SELECT * FROM candidate_verdicts
+        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
+          AND (? IS NULL OR project_id = ?)`,
     )
     .bind(repositoryId, baseRef, candidateTreeOid, projectId ?? null, projectId ?? null)
     .first<{
@@ -197,11 +236,15 @@ export async function claimCandidateDispatchV2(
   at: string,
   staleAfterMs: number,
 ): Promise<boolean> {
+  const v3Ready = await verifierProtocolV3Ready(db);
   const row = await db
     .prepare(
-      `SELECT dispatched_at FROM candidate_dispatches
+      v3Ready ? `SELECT dispatched_at FROM candidate_dispatches
         WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
-          AND project_id = ? AND verifier_protocol <> 3`,
+          AND project_id = ? AND verifier_protocol <> 3`
+      : `SELECT dispatched_at FROM candidate_dispatches
+        WHERE github_repository_id = ? AND base_ref = ? AND candidate_tree_oid = ?
+          AND project_id = ?`,
     )
     .bind(repositoryId, baseRef, candidateTreeOid, projectId)
     .first<{ dispatched_at: string }>();
@@ -211,7 +254,7 @@ export async function claimCandidateDispatchV2(
   }
   const written = await db
     .prepare(
-      `INSERT INTO candidate_dispatches
+      v3Ready ? `INSERT INTO candidate_dispatches
          (github_repository_id, base_ref, project_id, attempt_id, workflow_protocol,
           candidate_tree_oid, dispatched_at, verifier_protocol)
        SELECT ?, ?, ?, ?, ?, ?, ?, 2
@@ -225,9 +268,19 @@ export async function claimCandidateDispatchV2(
                      attempt_id = excluded.attempt_id,
                      workflow_protocol = excluded.workflow_protocol
         WHERE candidate_dispatches.project_id = excluded.project_id
-          AND candidate_dispatches.verifier_protocol <> 3`,
+          AND candidate_dispatches.verifier_protocol <> 3`
+      : `INSERT INTO candidate_dispatches
+         (github_repository_id, base_ref, project_id, attempt_id, workflow_protocol,
+          candidate_tree_oid, dispatched_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM projects p WHERE p.id = ? AND p.github_repository_id = ?)
+       ON CONFLICT (github_repository_id, base_ref, candidate_tree_oid)
+       DO UPDATE SET dispatched_at = excluded.dispatched_at,
+                     attempt_id = excluded.attempt_id,
+                     workflow_protocol = excluded.workflow_protocol
+        WHERE candidate_dispatches.project_id = excluded.project_id`,
     )
-    .bind(
+    .bind(...(v3Ready ? [
       repositoryId,
       baseRef,
       projectId,
@@ -238,7 +291,17 @@ export async function claimCandidateDispatchV2(
       repositoryId,
       baseRef,
       projectId,
-    )
+    ] : [
+      repositoryId,
+      baseRef,
+      projectId,
+      attemptId,
+      workflowProtocol,
+      candidateTreeOid,
+      at,
+      projectId,
+      repositoryId,
+    ]))
     .run();
   return ((written as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1;
 }
@@ -250,9 +313,10 @@ export async function candidateDispatchBindingV2(
   candidateTreeOid: string,
   projectId: string,
 ): Promise<CandidateDispatchBindingV2 | null> {
+  const v3Ready = await verifierProtocolV3Ready(db);
   const row = await db
     .prepare(
-      `SELECT d.project_id AS projectId, d.attempt_id AS attemptId,
+      v3Ready ? `SELECT d.project_id AS projectId, d.attempt_id AS attemptId,
               d.workflow_protocol AS workflowProtocol
          FROM candidate_dispatches d
          JOIN projects p ON p.id = d.project_id
@@ -261,6 +325,21 @@ export async function candidateDispatchBindingV2(
         WHERE d.github_repository_id = ? AND d.base_ref = ?
           AND d.candidate_tree_oid = ? AND d.project_id = ?
           AND d.verifier_protocol <> 3 AND q.verifier_protocol <> 3
+          AND p.github_repository_id = d.github_repository_id
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_requests r
+             WHERE r.github_repository_id = d.github_repository_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_release_jobs r
+             WHERE r.github_repository_id = d.github_repository_id
+          )`
+      : `SELECT d.project_id AS projectId, d.attempt_id AS attemptId,
+              d.workflow_protocol AS workflowProtocol
+         FROM candidate_dispatches d
+         JOIN projects p ON p.id = d.project_id
+        WHERE d.github_repository_id = ? AND d.base_ref = ?
+          AND d.candidate_tree_oid = ? AND d.project_id = ?
           AND p.github_repository_id = d.github_repository_id
           AND NOT EXISTS (
             SELECT 1 FROM project_release_requests r
@@ -284,6 +363,7 @@ export async function claimCandidateDispatchV3(
   at: string,
   staleAfterMs: number,
 ): Promise<boolean> {
+  if (!(await verifierProtocolV3Ready(db))) return false;
   const row = await db
     .prepare(
       `SELECT dispatched_at, pending_at, terminal_reason
@@ -390,6 +470,7 @@ export async function registerCandidateReport(
   identity: { runId: string; runAttempt: number; checkRunId: string; jti: string },
   at: string,
 ): Promise<"registered" | "duplicate" | "unavailable"> {
+  if (!(await verifierProtocolV3Ready(db))) return "unavailable";
   const result = await db
     .prepare(
       `UPDATE candidate_dispatches
@@ -452,6 +533,7 @@ export async function candidateDispatchV3ByNonce(
   repositoryId: string,
   dispatchNonce: string,
 ): Promise<CandidateDispatchV3 | null> {
+  if (!(await verifierProtocolV3Ready(db))) return null;
   const row = await db
     .prepare(
       `SELECT github_repository_id AS repositoryId, base_ref AS baseRef,
@@ -493,6 +575,7 @@ export async function claimPendingCandidateReports(
   expiresAt: string,
   limit: number,
 ): Promise<readonly PendingCandidateFinalization[]> {
+  if (!(await verifierProtocolV3Ready(db))) return [];
   const rows = await db
     .prepare(
       `SELECT github_repository_id AS repositoryId, base_ref AS baseRef,
@@ -563,6 +646,7 @@ export async function retryPendingCandidateReport(
   claim: string,
   after: string,
 ): Promise<void> {
+  if (!(await verifierProtocolV3Ready(db))) return;
   await db
     .prepare(
       `UPDATE candidate_dispatches
@@ -581,6 +665,7 @@ export async function finishPendingCandidateReport(
   claim: string,
   outcome: { finalizedAt: string } | { terminalReason: string },
 ): Promise<boolean> {
+  if (!(await verifierProtocolV3Ready(db))) return false;
   const result = await db
     .prepare(
       `UPDATE candidate_dispatches
@@ -618,6 +703,7 @@ export async function finalizeCandidateVerdictV3(
   verdict: CandidateVerdict,
   finalizedAt: string,
 ): Promise<boolean> {
+  if (!(await verifierProtocolV3Ready(db))) return false;
   if (
     verdict.candidateTreeOid !== row.candidateTreeOid ||
     verdict.candidateSha !== row.candidateSha ||

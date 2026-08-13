@@ -16,35 +16,25 @@ import { fileURLToPath } from "node:url";
 
 import { buildStamp } from "./build-sha.mjs";
 import { liveD1Target, liveHealthUrl, liveSchemaUrl } from "./deploy-identity.mjs";
+import { validDeploymentId } from "./deployment-id.mjs";
 import {
   d1CredentialFromEnv,
   liveTargetRefusal,
   preflightD1Credential,
   wranglerEnvironment,
 } from "./d1-identity.mjs";
-import { readMigrations, unappliedAgainst, undeclaredMigrations } from "./schema-guard.mjs";
+import {
+  migrationReleaseState,
+  missingMigrationFiles,
+  readMigrations,
+  undeclaredMigrations,
+} from "./schema-guard.mjs";
 
 const PROJECT_LIFECYCLE_FINISH_MIGRATION = "0031_finish_github_repository_lifecycle.sql";
+const PROJECT_LIFECYCLE_REOPEN_MIGRATION = "0034_reopen_after_project_lifecycle.sql";
 
 export function migrationPlan(migrations, applied) {
-  const pendingNames = new Set(unappliedAgainst(migrations, applied));
-  const pending = migrations.filter((migration) => pendingNames.has(migration.name));
-  if (pending.length === 0) return { kind: "current", before: [], after: [], deferred: [] };
-  // Only one contiguous phase may move. A before/after pair in one reviewed
-  // tree is safe when the first command exposes only the before files to
-  // Wrangler, the Worker deploys, and the next command exposes only the after
-  // files. Never skip an earlier phase to reach a later file.
-  const kind = pending[0].order;
-  const selected = pending.slice(0, pending.findIndex((migration) => migration.order !== kind) === -1
-    ? pending.length
-    : pending.findIndex((migration) => migration.order !== kind));
-  const names = selected.map((migration) => migration.name);
-  return {
-    kind,
-    before: kind === "before-worker" ? names : [],
-    after: kind === "after-worker" ? names : [],
-    deferred: pending.slice(selected.length).map((migration) => migration.name),
-  };
+  return migrationReleaseState(migrations, applied);
 }
 
 async function readJson(fetchImpl, url, description) {
@@ -75,6 +65,7 @@ export async function applyMigrations({
   migrations,
   fetchImpl,
   build,
+  canonicalBuild = build,
   identity,
   run,
   log = console.log,
@@ -86,7 +77,7 @@ export async function applyMigrations({
   if (undeclared.length > 0) {
     throw new Error(
       [
-        "Refusing: these migrations do not declare a deploy order:",
+        "Refusing: these migrations are absent from the shared release model:",
         ...undeclared.map((name) => `  ${name}`),
       ].join("\n"),
     );
@@ -99,17 +90,37 @@ export async function applyMigrations({
   }
 
   const plan = migrationPlan(migrations, schema.applied);
+  if (plan.outOfOrderApplied.length > 0) {
+    throw new Error(
+      [
+        "Refusing: the live migration ledger is not a valid prefix of the shared release model.",
+        "These migrations are recorded after an earlier known migration that is still missing:",
+        ...plan.outOfOrderApplied.map((name) => `  ${name}`),
+      ].join("\n"),
+    );
+  }
   if (plan.kind === "current") {
     log(`schema: ${env} is level with this tree; nothing to apply.`);
     return plan;
   }
+  const expectedBuild = build();
+  if (expectedBuild.endsWith("-dirty")) {
+    throw new Error(
+      `Refusing: migrations require a clean checkout, and this tree is ${expectedBuild}.`,
+    );
+  }
+  const canonical = canonicalBuild();
+  if (expectedBuild !== canonical) {
+    throw new Error(
+      [
+        "Refusing: migrations require the exact current canonical main checkout.",
+        `  checkout:    ${expectedBuild}`,
+        `  origin/main: ${canonical}`,
+        "Fetch origin/main and run from that clean commit.",
+      ].join("\n"),
+    );
+  }
   if (plan.kind === "after-worker") {
-    const expectedBuild = build();
-    if (expectedBuild.endsWith("-dirty")) {
-      throw new Error(
-        `Refusing: after-worker migrations require a clean checkout, and this tree is ${expectedBuild}.`,
-      );
-    }
     const healthUrl = liveHealthUrl(env);
     const health = await readJson(fetchImpl, healthUrl, `${env} Worker health`);
     if (health.buildSha !== expectedBuild) {
@@ -141,10 +152,46 @@ export async function applyMigrations({
         ].join("\n"),
       );
     }
+    if (
+      plan.after.includes(PROJECT_LIFECYCLE_REOPEN_MIGRATION)
+      && (
+        health.schema?.capabilities?.lifecycleFinished !== true
+        || health.schema?.capabilities?.privateAgentFeedback !== true
+        || health.schema?.capabilities?.verifierProtocolV3 !== true
+        || health.schema?.phase !== "after-worker"
+        || !health.schema?.selected?.includes(PROJECT_LIFECYCLE_REOPEN_MIGRATION)
+        || health.projectLifecycle?.workerBuildSha !== expectedBuild
+        || !validDeploymentId(health.projectLifecycle?.workerDeploymentId)
+        || !validDeploymentId(health.projectLifecycle?.verifierV3PredeployId)
+        || health.projectLifecycle.workerDeploymentId === health.projectLifecycle.verifierV3PredeployId
+        || typeof health.projectLifecycle?.remoteCapabilitiesRetiredAt !== "string"
+        || health.projectLifecycle?.remoteCapabilityEvidenceComplete !== true
+        || health.projectLifecycle?.maintenanceMode !== true
+        || health.projectLifecycle?.backfillReady !== true
+        || typeof health.projectLifecycle?.destructiveSchemaReadyAt !== "string"
+        || health.projectLifecycle?.cleanupReady !== true
+      )
+    ) {
+      throw new Error(
+        [
+          "Refusing: the lifecycle schema is not ready to reopen traffic.",
+          "Migration 0034 requires canonical main to report maintenanceMode=true, its own build SHA,",
+          "and a deployment generation different from the one migration 0033 snapshotted,",
+          "complete capability evidence and backfill, the 0031 cleanup marker, and the 0032/0033 capabilities.",
+          "Keep maintenance active, finish the guarded migration phases, deploy this exact build, then retry.",
+        ].join("\n"),
+      );
+    }
   }
 
   const names = plan.kind === "before-worker" ? plan.before : plan.after;
   log(`applying ${names.length} ${plan.kind} migration(s) to ${env}: ${names.join(", ")}`);
+  if (plan.blockedBehindBarrier.length > 0) {
+    log(
+      `blocked behind ${plan.barrier?.name ?? "the next after-worker barrier"}: `
+      + plan.blockedBehindBarrier.join(", "),
+    );
+  }
   run(names);
   return plan;
 }
@@ -235,12 +282,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       configPath,
       wranglerEnv,
     });
+    const migrations = readMigrations(migrationsDir);
+    const missing = missingMigrationFiles(migrations);
+    if (missing.length > 0) {
+      throw new Error(`Refusing: the shared release model names missing SQL files:\n${missing.map((name) => `  ${name}`).join("\n")}`);
+    }
+    git("fetch", "--quiet", "origin", "main");
     await applyMigrations({
       env,
       database,
-      migrations: readMigrations(migrationsDir),
+      migrations,
       fetchImpl: fetch,
       build: () => buildStamp(git),
+      canonicalBuild: () => git("rev-parse", "origin/main"),
       identity: { wranglerEnv },
       run,
     });
