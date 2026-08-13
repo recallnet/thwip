@@ -23,7 +23,7 @@ describe("the supported 0028 to project-lifecycle reopen sequence", () => {
       kind: "after-worker",
       selected: ["0031_finish_github_repository_lifecycle.sql"],
       deployBlockers: [],
-      barrier: { id: "project-lifecycle-capability-cutover" },
+      barrier: { id: "project-lifecycle-in-place" },
       blockedBehindBarrier: [
         "0032_private_agent_feedback_foundation.sql",
         "0033_verifier_protocol_v3.sql",

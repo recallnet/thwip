@@ -39,44 +39,6 @@ export interface ActiveTestProject {
   readonly enabled?: boolean;
 }
 
-export const TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE = JSON.stringify({
-  d1: {
-    oldDatabase: "thwip-old",
-    newDatabase: "thwip-new",
-    oldDatabaseId: "00000000-0000-4000-8000-000000000001",
-    newDatabaseId: "00000000-0000-4000-8000-000000000002",
-    maintenanceEnabledAt: "2000-01-01T00:00:00.000Z",
-    exportCompletedAt: "2000-01-01T00:10:00.000Z",
-    importCompletedAt: "2000-01-01T00:20:00.000Z",
-    newDatabaseRoundTripAt: "2000-01-01T00:21:00.000Z",
-    newBindingActivatedAt: "2000-01-01T00:30:00.000Z",
-    oldDatabaseDeletedAt: "2000-01-01T00:40:00.000Z",
-    exportSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    schemaSha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    rowCountSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    quickCheck: "ok",
-    foreignKeyViolations: 0,
-  },
-  r2: {
-    oldBucket: "evidence-old",
-    newBucket: "evidence-new",
-    copyCompletedAt: "2000-01-01T00:00:00.000Z",
-    newBucketRoundTripAt: "2000-01-01T00:00:00.000Z",
-    oldBucketDeletedAt: "2000-01-01T00:00:00.000Z",
-  },
-  github: {
-    oldKeyFingerprint: "old-key",
-    newKeyFingerprint: "new-key",
-    newKeyAcceptedAt: "2000-01-01T00:00:00.000Z",
-    oldKeyRejectedAt: "2000-01-01T00:00:00.000Z",
-    oldPrivateKeyDeletedAt: "2000-01-01T00:00:00.000Z",
-    oldInstallationTokensExpiredAt: "2000-01-01T01:00:00.000Z",
-    oldInstallationTokenRejectedAt: "2000-01-01T01:00:00.000Z",
-  },
-  approvedBy: "test",
-  changeUrl: "https://example.invalid/change/test",
-});
-
 /**
  * Seed the lifecycle owner of repository-keyed test state.
  *
@@ -190,22 +152,19 @@ export function testD1(options: { upTo?: string; rollout?: "steady" | "as-migrat
   raw.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)");
   for (const file of migrationFiles()) {
     if (options.upTo !== undefined && file >= options.upTo) break;
-    // The finishing migration is allowed only after the explicit capability
-    // cutover. Most tests model the finished steady state, so establish the
-    // same durable authorization that production's migration runner requires
-    // immediately before applying 0031.
+    // The finishing migration is allowed only after the lifecycle-aware Worker
+    // has served for the compatibility window and the bounded backfill is
+    // complete. Most tests model that ready state before applying 0031.
     if (file === "0031_finish_github_repository_lifecycle.sql") {
       raw.prepare(
         `UPDATE project_lifecycle_rollout
-            SET maintenance_mode = 1,
+            SET maintenance_mode = 0,
                 worker_activated_at = '2000-01-01T00:00:00.000Z',
                 worker_build_sha = 'test-worker-build',
                 worker_deployment_id = '00000000-0000-4000-8000-000000000001',
-                remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-                remote_capability_evidence = ?,
                 destructive_schema_ready_at = NULL
           WHERE id = 1`,
-      ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+      ).run();
     }
     runMigrationFile(raw, file);
     recordMigration(raw, file);
@@ -220,8 +179,8 @@ export function testD1(options: { upTo?: string; rollout?: "steady" | "as-migrat
     }
   }
 
-  // Most tests model steady state after the explicit R2/GitHub capability
-  // cutover and finishing schema. Rollout tests clear these fields themselves.
+  // Most tests model steady state after the in-place finishing schema. Rollout
+  // tests clear these fields themselves.
   if (
     options.rollout !== "as-migrated" &&
     raw
@@ -233,11 +192,9 @@ export function testD1(options: { upTo?: string; rollout?: "steady" | "as-migrat
           SET worker_activated_at = '2000-01-01T00:00:00.000Z',
               worker_build_sha = 'test-worker-build',
               worker_deployment_id = '00000000-0000-4000-8000-000000000002',
-              remote_capabilities_retired_at = '2000-01-01T01:00:00.000Z',
-              remote_capability_evidence = ?,
               destructive_schema_ready_at = '2000-01-01T00:00:00.000Z'
         WHERE id = 1`,
-    ).run(TEST_PROJECT_LIFECYCLE_CUTOVER_EVIDENCE);
+    ).run();
   }
 
   const db = {
