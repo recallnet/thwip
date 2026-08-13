@@ -271,14 +271,17 @@ Every non-empty migration phase also requires a clean checkout whose full HEAD
 SHA equals freshly fetched `origin/main`; an operator cannot apply even an
 additive batch from a stale or unmerged tree.
 
-For the #398 capability cutover, the supported order is exact:
+For the #398 in-place lifecycle migration, the supported order is exact:
 
 1. Apply `0029` and `0030`.
 2. Deploy the current canonical `main` Worker. Its v2 paths are compatible with
    schema through `0030`; do not deploy an older SHA.
-3. Complete the reviewed human cutover, backfill, maintenance fence, and remote
-   capability evidence.
-4. Run the migration command to apply only `0031`. It leaves maintenance on.
+3. Wait for the bounded project-ID backfill and the one-hour compatibility
+   window reported by `/health`. No database, bucket, or GitHub App key is
+   replaced.
+4. Run the migration command to apply only `0031`. It enters maintenance,
+   rebuilds the lifecycle tables in the existing D1 database, and leaves
+   maintenance on.
 5. Run it again to apply `0032` and `0033` while all traffic stays fenced.
 6. Deploy the exact current canonical `main` Worker again. Confirm `/health`
    reports that build, maintenance mode, the `0032`/`0033` capabilities, and a
@@ -289,11 +292,11 @@ For the #398 capability cutover, the supported order is exact:
    so a correctly stamped deployment can repair and retry safely.
 7. Run it once more to apply `0034`. Only `0034` reopens traffic.
 
-Each invocation re-reads public schema and health first. `0031` still refuses
-without the cutover evidence. `0034` independently refuses unless the exact
-Worker build, all three preceding migrations, complete evidence/backfill, and
-maintenance fence are present. A break-glass deploy or direct migration is not
-part of this sequence.
+Each invocation re-reads public schema and health first. `0031` refuses until
+the lifecycle-aware Worker has served for one hour and the backfill is complete.
+`0034` independently refuses unless the exact Worker build, all three preceding
+migrations, complete backfill, and maintenance fence are present. A break-glass
+deploy or direct migration is not part of this sequence.
 
 Never work around a refusal with raw `wrangler d1 migrations apply`. For a mixed
 tree, run the guarded command, deploy when the next phase is `after-worker`, then

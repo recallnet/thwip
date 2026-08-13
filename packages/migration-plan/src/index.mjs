@@ -46,7 +46,7 @@ export const MIGRATION_RELEASES = Object.freeze([
   {
     name: "0031_finish_github_repository_lifecycle.sql",
     phase: "after-worker",
-    barrier: "project-lifecycle-capability-cutover",
+    barrier: "project-lifecycle-in-place",
   },
   { name: "0032_private_agent_feedback_foundation.sql", phase: "before-worker" },
   { name: "0033_verifier_protocol_v3.sql", phase: "before-worker" },
