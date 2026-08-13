@@ -144,6 +144,16 @@ describe("Home", () => {
     }
   });
 
+  it("keeps the queue junction compact and evenly spaced", () => {
+    const css = readFileSync(new URL("./notary.css", import.meta.url), "utf8");
+    const upstreamBody = css.match(/\.mq-row--upstream \.mq-row__body\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+    const queueLane = css.match(/\.mq-lane\s*\{(?<rule>[^}]*)\}/)?.groups?.rule;
+
+    expect(upstreamBody).toContain("padding-bottom: 0;");
+    expect(queueLane).toContain("padding: 15px 0;");
+    expect(queueLane).not.toContain("padding-top:");
+  });
+
   /**
    * A real agent's verdict is the only claim on the page with a signer
    * behind it. It says the agent kept using the queue after the experiment,
