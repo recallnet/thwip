@@ -1,5 +1,6 @@
-import { defineCollection, z } from "astro:content";
+import { defineCollection } from "astro:content";
 import { glob } from "astro/loaders";
+import { z } from "astro/zod";
 
 const blog = defineCollection({
   loader: glob({ pattern: "**/*.mdoc", base: "./src/content/blog" }),
@@ -18,7 +19,7 @@ const blog = defineCollection({
     .superRefine((data, ctx) => {
       if (data.heroImage && !data.heroAlt) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: "heroAlt is required when heroImage is set",
           path: ["heroAlt"],
         });
