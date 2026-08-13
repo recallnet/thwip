@@ -5,6 +5,7 @@ export type BundleResolutionBody =
       code: "POLICY_AWAITING_FIRST_MERGE";
       repository: string;
       repositoryId: string;
+      projectId: string;
       defaultBranch: string;
     };
 
@@ -23,6 +24,7 @@ export function parseBundleResolutionBody(value: unknown): BundleResolutionBody 
       value["code"] !== "POLICY_AWAITING_FIRST_MERGE" ||
       typeof value["repository"] !== "string" ||
       typeof value["repositoryId"] !== "string" ||
+      typeof value["projectId"] !== "string" ||
       typeof value["defaultBranch"] !== "string"
     ) {
       throw new Error("BUNDLE_UNAVAILABLE: malformed bootstrap state");
@@ -32,6 +34,7 @@ export function parseBundleResolutionBody(value: unknown): BundleResolutionBody 
       code: value["code"],
       repository: value["repository"],
       repositoryId: value["repositoryId"],
+      projectId: value["projectId"],
       defaultBranch: value["defaultBranch"],
     };
   }

@@ -202,6 +202,8 @@ jobs:
 
 const VERIFY_WORKFLOW = `name: thwip-queue-verify
 
+# Thwip verifier callback protocol: 2
+
 run-name: >-
   thwip: verify candidate \${{ github.event.client_payload.candidateSha }}
   for PR #\${{ github.event.client_payload.pullRequestNumber }}
@@ -318,6 +320,8 @@ jobs:
           SUITES: \${{ steps.suites.outputs.suites }}
           ACCEPTED: \${{ steps.suites.outputs.accepted }}
           PR: \${{ github.event.client_payload.pullRequestNumber }}
+          PROJECT_ID: \${{ github.event.client_payload.projectId }}
+          ATTEMPT_ID: \${{ github.event.client_payload.attemptId }}
           BASE_REF: \${{ github.event.client_payload.baseRef }}
           BASE_SHA: \${{ github.event.client_payload.baseSha }}
           CANDIDATE_SHA: \${{ github.event.client_payload.candidateSha }}
@@ -347,10 +351,11 @@ jobs:
           fi
 
           body=$(jq -nc \\
+            --arg project "$PROJECT_ID" --arg attempt "$ATTEMPT_ID" \\
             --arg base "$BASE_REF" --argjson pr "$PR" \\
             --arg bsha "$BASE_SHA" --arg csha "$CANDIDATE_SHA" --arg tree "$CANDIDATE_TREE" \\
             --argjson accepted "$accepted" --argjson suites "$suites" --argjson reasons "$reasons" \\
-            '{baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
+            '{projectId:$project, attemptId:$attempt, baseRef:$base, pullRequestNumber:$pr, baseSha:$bsha, candidateSha:$csha,
               candidateTreeOid:$tree, accepted:$accepted, suites:$suites, reasonCodes:$reasons}')
 
           out=$(curl -sS -w '\\n%{http_code}' -X POST \\
@@ -397,9 +402,24 @@ function render(template: string, input: SetupPullRequestInput): string {
 export function setupPullRequestFiles(input: SetupPullRequestInput): readonly SetupFile[] {
   return [
     { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) },
-    { path: ".github/workflows/thwip-queue-verify.yml", content: render(VERIFY_WORKFLOW, input) },
+    verifierWorkflowFile(input),
     ...(input.includeRepositoryConfig === true ? [{ path: "thwip.yaml", content: THWIP_YAML }] : []),
   ];
+}
+
+export function verifierWorkflowFile(input: SetupPullRequestInput): SetupFile {
+  return { path: ".github/workflows/thwip-queue-verify.yml", content: render(VERIFY_WORKFLOW, input) };
+}
+
+export function verifierUpgradePullRequestBody(input: SetupPullRequestInput): string {
+  return [
+    "This reviewed change upgrades only Thwip's candidate verifier callback protocol.",
+    "",
+    "Protocol 2 binds every result to the exact Thwip project incarnation and queue attempt that dispatched it.",
+    "The required suites, permissions, and candidate checkout behavior are unchanged.",
+    "",
+    `The workflow reports to ${input.endpoint}.`,
+  ].join("\n");
 }
 
 /** What the pull request says it is for, so a reviewer is not guessing. */

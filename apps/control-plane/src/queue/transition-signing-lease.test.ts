@@ -17,6 +17,8 @@ describe("the signed-transition writer claim", () => {
     vi.setSystemTime(new Date("2026-08-12T00:00:00.000Z"));
     const t = testD1();
     open.push(t);
+    t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_signing', '1', 'acme')").run();
+    t.raw.prepare("INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('prj_signing', 'org_signing', ?, 'acme/repo', 1)").run(REPO);
     const writes: string[] = [];
     let releaseA!: () => void;
     let startedA!: () => void;
@@ -60,6 +62,8 @@ describe("the signed-transition writer claim", () => {
     vi.setSystemTime(new Date("2026-08-12T00:00:00.000Z"));
     const t = testD1();
     open.push(t);
+    t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_signing', '1', 'acme')").run();
+    t.raw.prepare("INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('prj_signing', 'org_signing', ?, 'acme/repo', 1)").run(REPO);
     let releaseA!: () => void;
     let startedA!: () => void;
     const held = new Promise<void>((resolve) => {

@@ -60,10 +60,10 @@ function seed(chainPublic: 0 | 1 = 0): void {
     .run("proj_acme", "org_acme", VICTIM_REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public)
-       VALUES (?, ?, ?, ?, 1, 'enforced', ?)`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, project_id)
+       VALUES (?, ?, ?, ?, 1, 'enforced', ?, ?)`,
     )
-    .run("qp_acme", "org_acme", VICTIM_REPO, REF, chainPublic);
+    .run("qp_acme", "org_acme", VICTIM_REPO, REF, chainPublic, "proj_acme");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -98,7 +98,7 @@ function routes(
     pinnedVerifier: async () => null,
     activePolicy: async () => null,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_acme" }),
     principalFor: async () => null,
     pullRequestPlacement: async () => ({
       authorGithubUserId: "1",

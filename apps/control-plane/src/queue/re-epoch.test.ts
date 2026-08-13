@@ -86,10 +86,10 @@ function seed(): void {
     .run("proj_acme", "org_acme", REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, attested_from_sequence)
-       VALUES (?, ?, ?, ?, 1, 'enforced', 1, 1)`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, attested_from_sequence, project_id)
+       VALUES (?, ?, ?, ?, 1, 'enforced', 1, 1, ?)`,
     )
-    .run("qp_acme", "org_acme", REPO, REF);
+    .run("qp_acme", "org_acme", REPO, REF, "proj_acme");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -131,8 +131,8 @@ async function seedIntent(): Promise<void> {
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+         (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+       VALUES (?, 'merge-intent', ?, 'proj_acme', ?, NULL, ?, ?, ?, ?)`,
     )
     .run(
       signed.digest,
@@ -151,6 +151,7 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
     verifyOidc: async () => null,
     pinnedVerifier: async () => null,
     activePolicy: async () => ({
+      projectId: "proj_acme",
       policyDigest: `sha256:${"2".repeat(64)}`,
       pipelineDigest: `sha256:${"3".repeat(64)}`,
       requiredSuites: ["unit"],
@@ -159,7 +160,7 @@ function routes(isAdmin = true, over: Partial<Parameters<typeof queueRoutes>[0]>
       verifier: null,
     }),
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_acme" }),
     principalFor: async () => null,
     pullRequestPlacement: async () => ({
       authorGithubUserId: "1",

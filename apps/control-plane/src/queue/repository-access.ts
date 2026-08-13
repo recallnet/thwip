@@ -98,7 +98,7 @@ const GRANT_LEVEL: Readonly<Record<string, RepositoryLevel>> = {
  * carried the column, which was a member when it was written.
  */
 export function isOrganizationMember(githubOrgRole: string | null): boolean {
-  return githubOrgRole !== "outside";
+  return githubOrgRole !== "outside" && githubOrgRole !== "removed";
 }
 
 /**
@@ -165,8 +165,9 @@ export async function repositoryAccess(
          LEFT JOIN repository_grants g
                 ON g.project_id = p.id AND g.github_user_id = ? AND g.active = 1
         WHERE p.github_repository_id = ?
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
-            SELECT 1 FROM removed_projects r
+            SELECT 1 FROM project_release_jobs r
              WHERE r.organization_id = p.organization_id
                AND r.github_repository_id = p.github_repository_id
           )

@@ -31,11 +31,35 @@ export interface WebhookWork {
   readonly delivery: string;
   readonly event: string;
   readonly installationId: string | null;
+  readonly installationAction: string | null;
   readonly policyPush: PolicyPush | null;
   readonly appProofTask: AppProofTask | null;
   readonly reconcileProofRepositoryId: string | null;
+  readonly reconcileProofProjectId: string | null;
   /** Whether the consumer should re-read the installation from GitHub. */
   readonly syncInstallation: boolean;
+}
+
+/** Bind queued repository work to the project incarnation read by its producer. */
+export function bindWebhookProject(work: WebhookWork, projectId: string | null): WebhookWork {
+  if (projectId === null) {
+    return {
+      ...work,
+      policyPush: null,
+      appProofTask: work.appProofTask?.kind === "verify" ? null : work.appProofTask,
+      reconcileProofRepositoryId: null,
+      reconcileProofProjectId: null,
+    };
+  }
+  return {
+    ...work,
+    policyPush: work.policyPush === null ? null : { ...work.policyPush, projectId },
+    appProofTask:
+      work.appProofTask?.kind !== "verify"
+        ? work.appProofTask
+        : { kind: "verify", request: { ...work.appProofTask.request, projectId } },
+    reconcileProofProjectId: work.reconcileProofRepositoryId === null ? null : projectId,
+  };
 }
 
 export function webhookWork(
@@ -85,9 +109,14 @@ export function webhookWork(
     delivery: context.delivery,
     event,
     installationId: context.installationId,
+    installationAction: event === "installation" && typeof payload.action === "string" ? payload.action : null,
     policyPush,
     appProofTask,
     reconcileProofRepositoryId,
-    syncInstallation: membership || installationState,
+    reconcileProofProjectId: null,
+    syncInstallation:
+      membership ||
+      event === "installation_repositories" ||
+      (event === "installation" && payload.action !== "deleted"),
   };
 }

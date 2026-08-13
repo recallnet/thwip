@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import { recordAcceptedReceipt, recordIssuedAssignment } from "./assignment-store.js";
 import { localRunEvidenceFor } from "./local-run-gate.js";
 import { commandsFor, walkToMergeReady } from "./queue-operations.js";
@@ -25,6 +25,7 @@ let db: D1Like;
 
 function fresh(): D1Like {
   const t = testD1();
+  seedActiveProject(t, { repositoryId: REPO });
   open.push(t);
   db = t.db;
   return t.db;

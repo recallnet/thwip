@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
 import { DEFAULT_TIMINGS } from "./commands.js";
 import {
@@ -25,6 +25,7 @@ const open: Array<{ close(): void }> = [];
 
 function d1(): D1Like {
   const t = testD1();
+  seedActiveProject(t, { repositoryId: REPO });
   open.push(t);
   return t.db;
 }
@@ -109,6 +110,29 @@ describe("recordHeartbeat", () => {
     // alice exactly once, not twice.
     expect(stale).toEqual(["alice"]);
   });
+
+  it("rejects a delayed heartbeat from a released project incarnation", async () => {
+    const db = d1();
+    await db.prepare(`DELETE FROM projects WHERE id = ?`).bind(`proj_${REPO}`).run();
+    await db
+      .prepare(
+        `INSERT INTO projects (id, organization_id, github_repository_id, github_name)
+         VALUES ('project_new', ?, ?, 'owner/repo')`,
+      )
+      .bind(`org_${REPO}`, REPO)
+      .run();
+
+    await expect(
+      recordHeartbeat(db, {
+        repositoryId: REPO,
+        projectId: `proj_${REPO}`,
+        principalId: "alice",
+        deviceKeyId: "d1",
+        now: T0,
+      }),
+    ).rejects.toThrow(/unavailable/);
+    expect(await isPrincipalConnected(db, REPO, "alice", T0)).toBe(false);
+  });
 });
 
 describe("isPrincipalConnected", () => {
@@ -149,6 +173,16 @@ describe("retireStaleRunners", () => {
 
   it("does not touch another repository's runners", async () => {
     const db = d1();
+    await db
+      .prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_other', 'other', 'other')")
+      .bind()
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('proj_other', 'org_other', 'other_repo', 'other/repo')",
+      )
+      .bind()
+      .run();
     await recordHeartbeat(db, { repositoryId: "other_repo", principalId: "alice", deviceKeyId: "d1", now: T0 });
     const later = new Date(new Date(T0).getTime() + (GRACE_SECONDS + 1) * 1000).toISOString();
     expect(await retireStaleRunners(db, REPO, later)).toEqual([]);

@@ -7,6 +7,7 @@ import { buildSnapshot } from "./queue-operations.js";
 import { mergeOperationId } from "./merge-commit.js";
 import { readAttestation } from "./attestation.js";
 import { parseMergeIntent } from "@thwip/queue-protocol";
+import { acquireProjectWriteLease } from "../project-lifecycle.js";
 
 /** The states in which an entry is the one the lane belongs to. */
 export const HOLDING = ["Offered", "Active", "Verifying", "MergeGuard", "Merging"];
@@ -129,29 +130,41 @@ export async function driveQueue<TEnv extends QueueRouteEnv>(
   // the final side-effect boundary; the publisher is idempotent when it is
   // already green, and a rejected publication stops before any branch write.
   if (deps.publishTurnCheck === undefined) return 1;
-  await deps.publishTurnCheck(env, input.repositoryId, {
-    entryId: entry.entryId,
-    pullRequestNumber: entry.pullRequestNumber,
-    headSha: candidate.headSha,
-    state: "holds",
-    waiting: 0,
-    primaryReason: entry.primaryReason,
-    haltReason: null,
-  });
-
-  const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
-  await performMergeFromWorker(env, {
-    repositoryId: input.repositoryId,
-    baseRef: input.baseRef,
-    attemptId,
-    operationId: result.operationId,
-    pullRequestNumber: entry.pullRequestNumber,
-    merge: {
-      baseSha: candidate.baseSha,
+  if (project.projectId === undefined) return 1;
+  const lifecycleLease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    input.repositoryId,
+    project.projectId,
+  );
+  if (lifecycleLease === null) return 1;
+  try {
+    await deps.publishTurnCheck(env, input.repositoryId, {
+      entryId: entry.entryId,
+      pullRequestNumber: entry.pullRequestNumber,
       headSha: candidate.headSha,
-      treeOid: candidate.candidateTree,
-      parentShas: [candidate.baseSha, candidate.headSha],
-    },
-  });
+      state: "holds",
+      waiting: 0,
+      primaryReason: entry.primaryReason,
+      haltReason: null,
+    }, lifecycleLease);
+
+    const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
+    await performMergeFromWorker(env, {
+      repositoryId: input.repositoryId,
+      baseRef: input.baseRef,
+      attemptId,
+      operationId: result.operationId,
+      pullRequestNumber: entry.pullRequestNumber,
+      merge: {
+        baseSha: candidate.baseSha,
+        headSha: candidate.headSha,
+        treeOid: candidate.candidateTree,
+        parentShas: [candidate.baseSha, candidate.headSha],
+      },
+      projectId: lifecycleLease.projectId,
+    });
+  } finally {
+    await lifecycleLease.release();
+  }
   return 1;
 }

@@ -2,7 +2,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import type { Sha256 } from "@thwip/queue-protocol";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
@@ -87,7 +87,11 @@ function withFailingRepository(db: D1Like, repositoryId: string): D1Like {
   return {
     prepare: (query: string) => ({
       bind: (...values: unknown[]) => {
-        const fails = values.includes(repositoryId);
+        // Let the lifecycle lease be acquired so the injected repository
+        // failure still happens inside the queue's per-row recovery boundary.
+        // The test is about isolating one broken queue, not about the lease
+        // helper's own database error propagation.
+        const fails = !query.includes("project_write_leases") && values.includes(repositoryId);
         const real = db.prepare(query).bind(...values);
         const failure = () => Promise.reject(new Error(`database unavailable for repository ${repositoryId}`));
         return {
@@ -110,26 +114,28 @@ function withFailingRepository(db: D1Like, repositoryId: string): D1Like {
  * `anchor`).
  */
 function queue(repositoryId: string, enabled: number, epochStartsAt = 0) {
+  const projectId = seedActiveProject(
+    { raw },
+    { repositoryId, organizationId: "org_1", projectId: `prj_${repositoryId}`, githubName: "recallnet/thwip" },
+  );
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence)
-       VALUES (?, 'org_1', ?, 'refs/heads/main', ?, 'enforced', ?)`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence, project_id)
+       VALUES (?, 'org_1', ?, 'refs/heads/main', ?, 'enforced', ?, ?)`,
     )
-    .run(`qp_${repositoryId}`, repositoryId, enabled, epochStartsAt);
+    .run(`qp_${repositoryId}`, repositoryId, enabled, epochStartsAt, projectId);
 }
 
 /** An active policy bundle naming `securityProfile`, for `readActivePolicy`. */
 function activePolicy(repositoryId: string, securityProfile: string) {
   const digest = `sha256:${"b".repeat(64)}`;
   raw
-    .prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES ('org_1', '1', 'recallnet')")
-    .run();
-  raw
     .prepare(
-      `INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch, enabled, active_policy_digest, security_profile)
-       VALUES (?, 'org_1', ?, 'recallnet/thwip', 'main', 1, ?, ?)`,
+      `UPDATE projects
+          SET active_policy_digest = ?, security_profile = ?, enabled = 1
+        WHERE id = ? AND github_repository_id = ?`,
     )
-    .run(`prj_${repositoryId}`, repositoryId, digest, securityProfile);
+    .run(digest, securityProfile, `prj_${repositoryId}`, repositoryId);
   raw
     .prepare(
       "INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status) VALUES (?, ?, 4, ?, 'active')",
@@ -1246,8 +1252,8 @@ async function seedIntent(shape: OrphanShape = ORPHAN): Promise<void> {
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at, project_id)
+       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?, 'prj_1')`,
     )
     .run(
       signed.digest,
@@ -1306,6 +1312,7 @@ function recordDepsThatRecord(): RecordFromIntentDeps<QueueRouteEnv> {
       return { merged: shape !== undefined, mergeCommitSha: shape?.mergeSha ?? null };
     },
     activePolicy: async () => ({
+      projectId: "prj_1",
       policyDigest: `sha256:${"2".repeat(64)}`,
       pipelineDigest: `sha256:${"3".repeat(64)}`,
       requiredSuites: ["unit"],
@@ -1907,7 +1914,7 @@ describe("the status comments the heartbeat keeps in step", () => {
     queue("1", 0);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'prj_1')",
       )
       .run("1", REF, 184, 500, "abcd1234", "2026-08-04T21:00:00.000Z");
     const retired: Array<{ repositoryId: string; numbers: readonly number[] }> = [];
@@ -1929,7 +1936,7 @@ describe("the status comments the heartbeat keeps in step", () => {
     queue("1", 0);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'prj_1')",
       )
       .run("1", REF, 184, 500, "abcd1234", "2026-08-04T21:00:00.000Z");
 
@@ -1944,7 +1951,7 @@ describe("the status comments the heartbeat keeps in step", () => {
     queue("1", 1);
     raw
       .prepare(
-        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'prj_1')",
       )
       .run("1", REF, 184, 500, "abcd1234", "2026-08-04T21:00:00.000Z");
     const retired: number[] = [];

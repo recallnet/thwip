@@ -9,6 +9,8 @@ import { canonicalJson } from "@thwip/protocol";
 import { installationToken } from "./github-app.js";
 import { GithubApiError } from "./github-error.js";
 import type { Env } from "./env.js";
+import { acquireProjectWriteLease } from "./project-lifecycle.js";
+import type { D1Like } from "./queue/projection.js";
 
 const API = "https://api.github.com";
 const td = new TextDecoder();
@@ -109,6 +111,8 @@ export class GitHubRepositorySnapshot implements RepositorySnapshot {
 }
 
 export interface PolicyPush {
+  /** Project incarnation at enqueue time. */
+  projectId?: string | null;
   repositoryId?: string | null;
   ref?: string | null;
   after?: string | null;
@@ -172,13 +176,14 @@ interface ActivationProject {
 }
 
 export interface PolicyActivationDependencies {
-  installationToken(env: Env, installationId: string): Promise<string>;
+  installationToken(env: Env, installationId: string, repositoryId?: string): Promise<string>;
   currentCommitSha(token: string, repository: string, branch: string): Promise<string>;
   loadSnapshot(token: string, repository: string, commitSha: string): Promise<RepositorySnapshot>;
 }
 
 const defaultDependencies: PolicyActivationDependencies = {
-  installationToken,
+  installationToken: (env, installationId, repositoryId) =>
+    installationToken(env, installationId, undefined, repositoryId),
   async currentCommitSha(token, repository, branch) {
     const commit = await githubJson<{ sha?: string }>(
       token,
@@ -209,18 +214,27 @@ export async function activatePolicyFromDefaultBranchPush(
   if (typeof push.after !== "string" || !validCommitSha(push.after)) {
     return { status: "ignored", reason: "push has no live commit" };
   }
+  const lease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    push.repositoryId,
+    push.projectId ?? undefined,
+  );
+  if (lease === null) return { status: "ignored", reason: "project is no longer selected" };
+  try {
   const project = await env.DB.prepare(
     `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch, p.enabled, p.active_policy_digest,
             o.github_org_id, o.installation_id, o.proof_defaults_json
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.github_repository_id = ?
-        AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+        AND (? IS NULL OR p.id = ?)
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
+          AND NOT EXISTS (
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
-    .bind(push.repositoryId)
+    .bind(push.repositoryId, push.projectId ?? null, push.projectId ?? null)
     .first<ActivationProject>();
   if (project === null) return { status: "ignored", reason: "repository is not imported" };
   if (project.enabled !== 1) return { status: "ignored", reason: "project is disabled" };
@@ -229,7 +243,7 @@ export async function activatePolicyFromDefaultBranchPush(
   if (push.ref !== defaultRef) return { status: "ignored", reason: "push is not for the default branch" };
   if (project.installation_id === null) throw new Error(`project ${project.github_name} has no GitHub installation`);
 
-  const token = await dependencies.installationToken(env, project.installation_id);
+  const token = await dependencies.installationToken(env, project.installation_id, project.github_repository_id);
   const currentSha = await dependencies.currentCommitSha(token, project.github_name, project.default_branch);
   if (currentSha !== push.after) {
     return { status: "ignored", reason: "a newer default-branch commit already exists" };
@@ -330,6 +344,7 @@ export async function activatePolicyFromDefaultBranchPush(
     policyPush: null,
     appProofTask: null,
     reconcileProofRepositoryId: project.github_repository_id,
+    reconcileProofProjectId: project.id,
   });
 
   return {
@@ -338,6 +353,9 @@ export async function activatePolicyFromDefaultBranchPush(
     version: derived.policy.version,
     sourceSha: push.after,
   };
+  } finally {
+    await lease.release();
+  }
 }
 
 /**
@@ -351,27 +369,29 @@ export async function reconcileInstallationPolicies(
   dependencies: PolicyActivationDependencies = defaultDependencies,
 ): Promise<PolicyActivationResult[]> {
   const projects = await env.DB.prepare(
-    `SELECT p.github_repository_id, p.github_name, p.default_branch
+    `SELECT p.id, p.github_repository_id, p.github_name, p.default_branch
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE o.installation_id = ? AND p.enabled = 1
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
     .bind(installationId)
-    .all<{ github_repository_id: string; github_name: string; default_branch: string }>();
+    .all<{ id: string; github_repository_id: string; github_name: string; default_branch: string }>();
   if (projects.results.length === 0) return [];
-  const token = await dependencies.installationToken(env, installationId);
   const results: PolicyActivationResult[] = [];
   for (const project of projects.results) {
     try {
+      const token = await dependencies.installationToken(env, installationId, project.github_repository_id);
       const sha = await dependencies.currentCommitSha(token, project.github_name, project.default_branch);
       results.push(
         await activatePolicyFromDefaultBranchPush(
           env,
           {
+            projectId: project.id,
             repositoryId: project.github_repository_id,
             ref: `refs/heads/${project.default_branch}`,
             after: sha,

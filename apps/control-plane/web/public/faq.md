@@ -112,18 +112,19 @@ mapping sections merge with their defaults.
 Only the file on the protected default branch applies. A pull request cannot
 approve itself by changing its own policy.
 
-## What is the difference between disabling and removing a project?
+## How do I remove a project?
 
-Disabling is reversible. Thwip stops verifying the project, but keeps its
-policy, proof, queue, access, and measurement history.
+Remove the repository from the Thwip GitHub App installation. GitHub repository
+selection is the source of truth, so there is no separate Thwip removal step.
+Thwip stops new work and deletes that project's policy, proofs, queue, grants,
+signed records, and measurements.
 
-Removing is permanent. An organization owner must first disable the project,
-wait for all queue work to finish, and type its full `OWNER/REPOSITORY` name.
-Thwip then deletes the project's stored history and will not restore it during a
-GitHub sync. Explicitly adding the repository later creates a fresh, disabled
-project. Removing it from Thwip does not change the GitHub App installation;
-change the installation separately if the App should also lose repository
-access.
+Before removing access, remove or disable the two Thwip rulesets in GitHub.
+Thwip cannot remove them after the App loses repository access. If you select
+the repository again later, Thwip imports it as a fresh, disabled project.
+The clean import waits for a one-hour safety period. The dashboard shows the
+selection as pending during that time. This prevents a GitHub App token minted
+for the removed project from acting on the new project.
 
 ## Who publishes the required proof check?
 

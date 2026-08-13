@@ -53,6 +53,7 @@ export const SWEEP_INTERVAL_SECONDS = 5 * 60;
 
 export interface HeartbeatInput {
   readonly repositoryId: string;
+  readonly projectId?: string;
   readonly principalId: string;
   readonly deviceKeyId: string;
   readonly now: string;
@@ -189,21 +190,35 @@ export async function recordHeartbeat(db: D1Like, input: HeartbeatInput): Promis
     .prepare(
       `SELECT 1 FROM queue_runners
         WHERE github_repository_id = ? AND principal_id = ? AND last_heartbeat_at >= ?
+          AND (? IS NULL OR project_id = ?)
         LIMIT 1`,
     )
-    .bind(input.repositoryId, input.principalId, live)
+    .bind(input.repositoryId, input.principalId, live, input.projectId ?? null, input.projectId ?? null)
     .first<{ 1: number }>();
   const wasOffline = existing === null;
 
-  await db
+  const written = await db
     .prepare(
-      `INSERT INTO queue_runners (github_repository_id, principal_id, device_key_id, last_heartbeat_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO queue_runners (github_repository_id, project_id, principal_id, device_key_id, last_heartbeat_at)
+       SELECT ?, p.id, ?, ?, ? FROM projects p
+        WHERE p.github_repository_id = ? AND (? IS NULL OR p.id = ?)
        ON CONFLICT (github_repository_id, principal_id, device_key_id)
-       DO UPDATE SET last_heartbeat_at = excluded.last_heartbeat_at`,
+       DO UPDATE SET last_heartbeat_at = excluded.last_heartbeat_at
+        WHERE queue_runners.project_id = excluded.project_id`,
     )
-    .bind(input.repositoryId, input.principalId, input.deviceKeyId, input.now)
+    .bind(
+      input.repositoryId,
+      input.principalId,
+      input.deviceKeyId,
+      input.now,
+      input.repositoryId,
+      input.projectId ?? null,
+      input.projectId ?? null,
+    )
     .run();
+  if (((written as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    throw new Error(`project ${input.projectId ?? "unknown"} is unavailable for the runner heartbeat`);
+  }
 
   return { wasOffline };
 }
@@ -259,27 +274,40 @@ export async function capabilityFor(
  * device left at all — the present-to-absent transition the scheduler cares
  * about. A principal with one stale device and one live one is not offline.
  */
-export async function retireStaleRunners(db: D1Like, repositoryId: string, now: string): Promise<string[]> {
+export async function retireStaleRunners(
+  db: D1Like,
+  repositoryId: string,
+  now: string,
+  projectId?: string,
+): Promise<string[]> {
   const before = cutoff(now);
   const stale = await db
     .prepare(
       `SELECT DISTINCT principal_id AS principalId FROM queue_runners
-        WHERE github_repository_id = ? AND last_heartbeat_at < ?`,
+        WHERE github_repository_id = ? AND last_heartbeat_at < ?
+          AND (? IS NULL OR project_id = ?)`,
     )
-    .bind(repositoryId, before)
+    .bind(repositoryId, before, projectId ?? null, projectId ?? null)
     .all<{ principalId: string }>();
   if (stale.results.length === 0) return [];
 
   await db
-    .prepare(`DELETE FROM queue_runners WHERE github_repository_id = ? AND last_heartbeat_at < ?`)
-    .bind(repositoryId, before)
+    .prepare(
+      `DELETE FROM queue_runners WHERE github_repository_id = ? AND last_heartbeat_at < ?
+         AND (? IS NULL OR project_id = ?)
+         AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_runners.project_id)`,
+    )
+    .bind(repositoryId, before, projectId ?? null, projectId ?? null)
     .run();
 
   const offline: string[] = [];
   for (const { principalId } of stale.results) {
     const remaining = await db
-      .prepare(`SELECT 1 FROM queue_runners WHERE github_repository_id = ? AND principal_id = ? LIMIT 1`)
-      .bind(repositoryId, principalId)
+      .prepare(
+        `SELECT 1 FROM queue_runners WHERE github_repository_id = ? AND principal_id = ?
+           AND (? IS NULL OR project_id = ?) LIMIT 1`,
+      )
+      .bind(repositoryId, principalId, projectId ?? null, projectId ?? null)
       .first<{ 1: number }>();
     if (remaining === null) offline.push(principalId);
   }

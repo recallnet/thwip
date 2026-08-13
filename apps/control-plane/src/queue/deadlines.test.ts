@@ -48,7 +48,7 @@ function seedSessionMembership(principalId: string, githubUserId: string): void 
     .prepare(
       "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
-    .run("proj_session", "org_1", REPO, "acme/repo");
+    .run("proj_1", "org_1", REPO, "acme/repo");
   raw
     .prepare(
       "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -185,10 +185,10 @@ const MERGE_SHA = "f".repeat(40);
 function queueProject(repositoryId: string): void {
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES (?, 'org_1', ?, 'refs/heads/main', 1, 'enforced')`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES (?, 'org_1', ?, 'refs/heads/main', 1, 'enforced', ?)`,
     )
-    .run(`qp_${repositoryId}`, repositoryId);
+    .run(`qp_${repositoryId}`, repositoryId, "proj_1");
 }
 
 /**

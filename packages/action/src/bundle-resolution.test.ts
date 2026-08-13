@@ -9,6 +9,7 @@ describe("verification bundle resolution contract", () => {
         code: "POLICY_AWAITING_FIRST_MERGE",
         repository: "recallnet/playhouse",
         repositoryId: "123",
+        projectId: "project-old",
         defaultBranch: "main",
       }),
     ).toEqual({
@@ -16,6 +17,7 @@ describe("verification bundle resolution contract", () => {
       code: "POLICY_AWAITING_FIRST_MERGE",
       repository: "recallnet/playhouse",
       repositoryId: "123",
+      projectId: "project-old",
       defaultBranch: "main",
     });
   });
@@ -36,6 +38,7 @@ describe("verification bundle resolution contract", () => {
         code: "PROJECT_DISABLED",
         repository: "recallnet/playhouse",
         repositoryId: "123",
+        projectId: "project-old",
         defaultBranch: "main",
       }),
     ).toThrow("malformed bootstrap state");

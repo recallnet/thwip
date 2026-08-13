@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { testD1 } from "../../test/d1.js";
 import type { D1Like } from "./projection.js";
-import { loadQueueState, QueueProjectRemovedError, withQueueState } from "./queue-state.js";
+import { loadQueueState, QueueProjectUnavailableError, withQueueState } from "./queue-state.js";
 import type { SnapshotQueueStore } from "./snapshot-store.js";
 import type { SubmittedEvent } from "./store.js";
 
@@ -18,6 +18,10 @@ const open: Array<{ close(): void }> = [];
 function d1(): D1Like {
   const t = testD1();
   open.push(t);
+  t.raw.prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+  t.raw.prepare(
+    "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project', 'org', ?, 'owner/repo')",
+  ).run(REPO);
   return t.db;
 }
 
@@ -86,7 +90,7 @@ describe("the queue document in D1", () => {
     open.push(test);
     test.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
     test.raw.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org', ?, 'project', 'owner/repo', 'main')",
     ).run(REPO);
     const loaded = await loadQueueState(test.db, REPO, REF);
     request(loaded.store, "e1", 59);
@@ -98,17 +102,20 @@ describe("the queue document in D1", () => {
     const test = testD1();
     open.push(test);
     test.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+    test.raw.prepare(
+      "INSERT INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project', 'org', ?, 'owner/repo')",
+    ).run(REPO);
     const loaded = await loadQueueState(test.db, REPO, REF);
     request(loaded.store, "e1", 59);
     expect(await loaded.save()).toBe("saved");
     test.raw.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org', ?, 'project', 'owner/repo', 'main')",
     ).run(REPO);
     const stale = await loadQueueState(test.db, REPO, REF);
     request(stale.store, "e2", 61);
     expect(await stale.save()).toBe("removed");
     await expect(withQueueState(test.db, REPO, REF, (store) => request(store, "e3", 62))).rejects.toBeInstanceOf(
-      QueueProjectRemovedError,
+      QueueProjectUnavailableError,
     );
   });
 

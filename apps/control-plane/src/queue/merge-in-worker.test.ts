@@ -81,7 +81,7 @@ afterEach(() => {
 function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
   return queueRoutes(
     queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD }, {
-      queueProject: async () => ({ activationState: "enforced" }),
+      queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
       commitFacts: async (_e: unknown, _r: string, sha: string) =>
         sha === LANDED
           ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "Merge pull request #117 (Thwip Queue)" }
@@ -283,8 +283,8 @@ describe("the Worker performing the merge", () => {
     raw
       .prepare(
         `INSERT INTO queue_projects
-           (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence)
-         VALUES ('queue_1', 'org_1', ?, ?, 1, 'enforced', 0)`,
+           (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence, project_id)
+         VALUES ('queue_1', 'org_1', ?, ?, 1, 'enforced', 0, 'proj_1')`,
       )
       .run(REPO, REF);
 
@@ -547,6 +547,29 @@ describe("the Worker performing the merge", () => {
       .prepare("SELECT digest FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
       .get() as { digest: string } | undefined;
     expect(record?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("records a landed merge with its original lease when release starts during the write", async () => {
+    const e = env();
+    const app = routes({
+      mergeWrite: async () => {
+        raw.prepare(
+          `INSERT INTO project_release_requests
+             (github_repository_id, project_id, organization_id, github_name, default_branch)
+           VALUES (?, 'proj_1', 'org_1', 'acme/repo', 'main')`,
+        ).run(REPO);
+        return { kind: "merged", mergeSha: LANDED };
+      },
+    });
+
+    await drive(app, e);
+
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM project_release_requests").get()).toEqual({ n: 1 });
+    const record = raw
+      .prepare("SELECT digest FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
+      .get() as { digest: string } | undefined;
+    expect(record?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 1 });
   });
 
   /**

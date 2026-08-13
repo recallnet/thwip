@@ -76,8 +76,8 @@ function measuredMerge(t: TestD1, projectId: string, organizationId: string, rep
   t.raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, 'reused-proof-merge', ?, 'refs/heads/main', ?, ?, ?, 'signed')`,
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, project_id)
+       VALUES (?, 'reused-proof-merge', ?, 'refs/heads/main', ?, ?, ?, 'signed', ?)`,
     )
     .run(
       `sha256:merge${number}`,
@@ -88,6 +88,7 @@ function measuredMerge(t: TestD1, projectId: string, organizationId: string, rep
         kind: "reused-proof-merge",
         reusedProof: { checkRunId: `check_${number}`, headSha: head, policyDigest: policy },
       }),
+      projectId,
     );
 }
 

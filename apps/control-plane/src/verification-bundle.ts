@@ -19,6 +19,8 @@ export class VerificationBundleError extends Error {
 
 export interface VerificationBundleInput {
   repositoryId: string;
+  /** Exact project incarnation held by the caller's lifecycle lease. */
+  expectedProjectId?: string;
   signerGithubUserId?: string;
   keyFingerprint?: string;
 }
@@ -61,7 +63,9 @@ function permission(value: string, active: boolean): SignerGrant["permission"] {
 }
 
 async function installationAccessToken(env: Env, project: ProjectRow): Promise<string | undefined> {
-  if (project.installation_id !== null) return installationToken(env, project.installation_id);
+  if (project.installation_id !== null) {
+    return installationToken(env, project.installation_id, undefined, project.github_repository_id);
+  }
   return env.GITHUB_SYNC_TOKEN;
 }
 
@@ -74,13 +78,15 @@ export async function resolveVerificationBundle(
             p.active_policy_digest, o.github_org_id, o.installation_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.github_repository_id = ?
+        AND (? IS NULL OR p.id = ?)
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
-    .bind(input.repositoryId)
+    .bind(input.repositoryId, input.expectedProjectId ?? null, input.expectedProjectId ?? null)
     .first<ProjectRow>();
   if (project === null) {
     throw new VerificationBundleError(404, projectPolicyState(null).code, "project is not imported");

@@ -2,6 +2,8 @@ import type { QueueRouteEnv } from "./routes.js";
 import { authorizeTurn, type AuthorizeTurnDeps } from "./authorize-turn.js";
 import { driveQueue } from "./drive-queue.js";
 import type { OnQueue } from "./merge-lane.js";
+import type { D1Like } from "./projection.js";
+import { acquireProjectWriteLease } from "../project-lifecycle.js";
 
 /** What naming the pull requests on a commit needs of GitHub. */
 export interface ReconsiderHeadDeps<TEnv extends QueueRouteEnv> extends AuthorizeTurnDeps<TEnv> {
@@ -30,8 +32,16 @@ export async function reconsiderHead<TEnv extends QueueRouteEnv>(
   env: TEnv,
   deps: ReconsiderHeadDeps<TEnv>,
   onQueue: OnQueue<TEnv>,
-  input: { repositoryId: string; headSha: string },
+  input: { repositoryId: string; headSha: string; expectedProjectId?: string },
 ): Promise<number> {
+  const lease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    input.repositoryId,
+    input.expectedProjectId,
+  );
+  if (lease === null) return 0;
+  try {
+  await lease.renew();
   const numbers = await deps.pullRequestNumbersForCommit(env, input.repositoryId, input.headSha);
   if (numbers === null) return 0;
 
@@ -59,4 +69,7 @@ export async function reconsiderHead<TEnv extends QueueRouteEnv>(
     walked += 1;
   }
   return walked;
+  } finally {
+    await lease.release();
+  }
 }

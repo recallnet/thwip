@@ -1,5 +1,6 @@
 import type { D1Like } from "./projection.js";
 import { withQueueState } from "./queue-state.js";
+import type { ProjectWriteLease } from "../project-lifecycle.js";
 
 /** Shorter than the five-minute heartbeat, so a crashed signer cannot wedge the chain. */
 const TRANSITION_SIGNING_LEASE_MS = 4 * 60 * 1_000;
@@ -21,11 +22,19 @@ export async function withTransitionSigningLease<T>(
   db: D1Like,
   input: { repositoryId: string; baseRef: string; owner: string },
   work: (claim: TransitionSigningFence) => Promise<T>,
+  lifecycleLease?: ProjectWriteLease,
 ): Promise<{ acquired: true; result: T } | { acquired: false }> {
   const now = new Date().toISOString();
   const until = new Date(Date.parse(now) + TRANSITION_SIGNING_LEASE_MS).toISOString();
-  const acquired = await withQueueState(db, input.repositoryId, input.baseRef, (store) =>
-    store.claimTransitionSigning(input.owner, now, until),
+  const options = lifecycleLease === undefined
+    ? {}
+    : { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease };
+  const acquired = await withQueueState(
+    db,
+    input.repositoryId,
+    input.baseRef,
+    (store) => store.claimTransitionSigning(input.owner, now, until),
+    options,
   );
   if (!acquired) return { acquired: false };
 
@@ -33,8 +42,12 @@ export async function withTransitionSigningLease<T>(
   const renew = async (): Promise<boolean> => {
     if (fencedOut) return false;
     const renewedUntil = new Date(Date.now() + TRANSITION_SIGNING_LEASE_MS).toISOString();
-    const stillOwned = await withQueueState(db, input.repositoryId, input.baseRef, (store) =>
-      store.renewTransitionSigning(input.owner, renewedUntil),
+    const stillOwned = await withQueueState(
+      db,
+      input.repositoryId,
+      input.baseRef,
+      (store) => store.renewTransitionSigning(input.owner, renewedUntil),
+      options,
     );
     if (!stillOwned) fencedOut = true;
     return stillOwned;
@@ -55,8 +68,12 @@ export async function withTransitionSigningLease<T>(
     return { acquired: true, result: await work(claim) };
   } finally {
     clearInterval(renewal);
-    await withQueueState(db, input.repositoryId, input.baseRef, (store) => {
-      store.releaseTransitionSigning(input.owner);
-    });
+    await withQueueState(
+      db,
+      input.repositoryId,
+      input.baseRef,
+      (store) => { store.releaseTransitionSigning(input.owner); },
+      options,
+    );
   }
 }

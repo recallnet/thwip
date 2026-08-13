@@ -123,6 +123,9 @@ function reusedMerge(
     kind?: string;
   },
 ): void {
+  const project = t.raw
+    .prepare("SELECT id FROM projects WHERE github_repository_id = ?")
+    .get(input.repositoryId) as { id: string };
   const recordKind = input.kind ?? "reused-proof-merge";
   const bytes = JSON.stringify({
     kind: recordKind,
@@ -135,10 +138,10 @@ function reusedMerge(
   t.raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, ?, ?, 'refs/heads/main', ?, ?, ?, 'signed')`,
+         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, project_id)
+       VALUES (?, ?, ?, 'refs/heads/main', ?, ?, ?, 'signed', ?)`,
     )
-    .run(input.digest, recordKind, input.repositoryId, input.sequence, input.attemptId, bytes);
+    .run(input.digest, recordKind, input.repositoryId, input.sequence, input.attemptId, bytes, project.id);
 }
 
 describe("accepted proof duration collection", () => {

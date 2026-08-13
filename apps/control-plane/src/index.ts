@@ -12,17 +12,33 @@ import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
 import { createAuth } from "./auth.js";
 import {
+  drainGithubSyncSnapshots,
+  deleteInstallation,
+  enqueueDueProjectReimportReconciliation,
+  GithubInstallationSyncBusyError,
   githubSigningKeys,
   installationToken,
-  installedRepository,
-  isCurrentOrganizationOwner,
   listInstallations,
+  enqueueAppInstallationReconciliation,
+  syncOrDeleteInstallation,
   syncInstallation,
 } from "./github-app.js";
-import { addProject, removeProject } from "./project-removal.js";
+import { GithubRateLimitError } from "./github-error.js";
+import {
+  activateProjectLifecycleWorker,
+  acquireProjectWriteLease,
+  drainProjectReleases,
+  drainProjectLifecycleBackfill,
+  pendingProjectReimports,
+  projectLifecycleRollout,
+  projectLifecycleMaintenanceMode,
+  repositoryAcceptsProject,
+  repositoryAllowsExternalWrite,
+  repositoryIsUnavailable,
+  type ProjectWriteLease,
+} from "./project-lifecycle.js";
 import { APP_MANIFEST_PERMISSIONS, REQUIRED_APP_PERMISSIONS } from "./app-permissions.js";
 import { APP_MANIFEST_EVENTS, webhookEventDrift } from "./github-events.js";
-import { syncInstallations } from "./admin-sync.js";
 import {
   activatePolicyFromDefaultBranchPush,
   reconcileInstallationPolicies,
@@ -30,7 +46,9 @@ import {
   type PolicyPush,
 } from "./policy-activation.js";
 import { projectPolicyState } from "./policy-state.js";
-import { mintRunLease } from "./run-lease.js";
+import { recordVerificationObservation } from "./verification-observation.js";
+import { mintRunLease, withAuthorizedRunLeaseProject } from "./run-lease.js";
+import { principalForRepository, resolveRepositoryFor } from "./repository-resolution.js";
 import { serviceKey, signPayload } from "./service-signing.js";
 import { appliedMigrations } from "./schema-state.js";
 import { verificationKeys } from "./service-keys.js";
@@ -102,7 +120,7 @@ import {
   requestForRerequest,
   type AppProofTask,
 } from "./app-proof-verification.js";
-import { webhookWork } from "./webhook-work.js";
+import { bindWebhookProject, webhookWork } from "./webhook-work.js";
 import { processQueueMessage, type QueueConsumerDeps, type QueueConsumerMessage } from "./queue-consumer.js";
 import type { Env } from "./env.js";
 
@@ -132,25 +150,16 @@ function randomId(prefix: string): string {
   return `${prefix}_${hex}`;
 }
 
-async function repositoryWasRemoved(env: Env, repositoryId: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    "SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1",
-  )
-    .bind(repositoryId)
-    .first<{ found: number }>();
-  return row !== null;
-}
-
 async function reconcileProofsForGithubUser(env: Env, githubUserId: string): Promise<void> {
   const projects = await env.DB.prepare(
-    `SELECT DISTINCT p.github_repository_id, o.installation_id
+    `SELECT DISTINCT p.id, p.github_repository_id, o.installation_id
        FROM repository_grants g
        JOIN projects p ON p.id = g.project_id
        JOIN organizations o ON o.id = p.organization_id
       WHERE g.github_user_id = ? AND p.enabled = 1 AND o.installation_id IS NOT NULL`,
   )
     .bind(githubUserId)
-    .all<{ github_repository_id: string; installation_id: string }>();
+    .all<{ id: string; github_repository_id: string; installation_id: string }>();
   await Promise.all(
     projects.results.map((project) =>
       env.SYNC_QUEUE.send({
@@ -161,6 +170,7 @@ async function reconcileProofsForGithubUser(env: Env, githubUserId: string): Pro
         policyPush: null,
         appProofTask: null,
         reconcileProofRepositoryId: project.github_repository_id,
+        reconcileProofProjectId: project.id,
       }),
     ),
   );
@@ -349,6 +359,11 @@ app.use("*", async (c, next) => {
   if (ctx === undefined) return;
   const env = c.env;
   const db = env.DB as unknown as D1Like;
+  const pathname = new URL(c.req.url).pathname;
+  if (
+    (pathname === "/health" || pathname === "/v1/schema") &&
+    (await projectLifecycleMaintenanceMode(db))
+  ) return;
   ctx.waitUntil(
     tickOwedByTraffic(
       {
@@ -398,11 +413,13 @@ app.get("/health", async (c) => {
   const clock = await readClock(c.env.DB as unknown as D1Like);
   const now = nowIso();
   const ageSeconds = tickAgeSeconds(clock, now);
+  const projectLifecycle = await projectLifecycleRollout(c.env.DB as unknown as D1Like);
   const payload = {
     service: "thwip",
     env: c.env.THWIP_ENV,
     buildSha: c.env.BUILD_SHA,
     now,
+    projectLifecycle,
     tick: {
       finishedAt: clock.finishedAt,
       source: clock.source,
@@ -501,11 +518,23 @@ app.get("/v1/me", async (c) => {
   let org: Record<string, unknown> | null = null;
   if (viewer.organizationId) {
     const row = await c.env.DB.prepare(
-      "SELECT id, github_org_id, github_login, installation_id, better_auth_org_id, status FROM organizations WHERE id = ?",
+      "SELECT id, github_org_id, github_login, installation_id, repository_selection, better_auth_org_id, status FROM organizations WHERE id = ?",
     )
       .bind(viewer.organizationId)
       .first();
-    if (row) org = { ...row, plan: await orgPlan(c.env, viewer.organizationId) };
+    if (row) {
+      const pendingReimports = await pendingProjectReimports(
+        c.env.DB as unknown as D1Like,
+        viewer.organizationId,
+      );
+      org = {
+        ...row,
+        plan: await orgPlan(c.env, viewer.organizationId),
+        pending_reimports: (pendingReimports?.count ?? 0) > 0
+          ? { count: pendingReimports!.count, ready_at: pendingReimports!.readyAt }
+          : null,
+      };
+    }
   }
   const principal = viewer.principalId
     ? await c.env.DB.prepare("SELECT github_login, avatar_url, github_org_role, activated_at FROM principals WHERE id = ?")
@@ -583,8 +612,9 @@ app.get("/v1/dashboard/projects/:id/metrics", async (c) => {
     `SELECT p.id
       FROM projects p
       WHERE p.id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )
@@ -642,6 +672,7 @@ app.put("/v1/dashboard/proof-defaults", async (c) => {
       policyPush: null,
       appProofTask: null,
       reconcileProofRepositoryId: null,
+      reconcileProofProjectId: null,
     });
   }
   return c.json({ defaults });
@@ -663,37 +694,6 @@ app.get("/v1/dashboard/projects", async (c) => {
   return c.json({ projects });
 });
 
-app.post("/v1/dashboard/projects", async (c) => {
-  const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
-  if (typeof body.name !== "string") return c.json({ error: "name the repository as OWNER/REPOSITORY" }, 400);
-  try {
-    const result = await addProject(
-      c.env,
-      {
-        fullName: body.name.trim(),
-        actor: {
-          organizationId: viewer.organizationId,
-          githubUserId: viewer.githubUserId,
-          githubOrgRole: viewer.githubOrgRole,
-        },
-      },
-      {
-        isCurrentOrganizationOwner: (input) => isCurrentOrganizationOwner(c.env, input),
-        installedRepository: (installationId, fullName) => installedRepository(c.env, installationId, fullName),
-      },
-    );
-    if (!result.ok) return c.json({ error: result.code, detail: result.detail }, result.status);
-    return c.json({ project: { id: result.projectId, githubRepositoryId: result.repositoryId, name: result.name } }, 201);
-  } catch (error) {
-    return c.json(
-      { error: "GITHUB_OWNER_CHECK_FAILED", detail: `GitHub could not confirm ownership: ${String(error)}` },
-      503,
-    );
-  }
-});
-
 /**
  * One line of queue per repository, so the project list can say which of them
  * needs somebody. Read from the projection, which is what it is for: one query
@@ -712,15 +712,16 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   const projectId = c.req.param("id");
   const project = await c.env.DB.prepare(
-    `SELECT p.id FROM projects p WHERE p.id = ? AND p.organization_id = ?
+    `SELECT p.id, p.github_repository_id FROM projects p WHERE p.id = ? AND p.organization_id = ?
+      AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
       AND NOT EXISTS (
-        SELECT 1 FROM removed_projects r
+        SELECT 1 FROM project_release_jobs r
          WHERE r.organization_id = p.organization_id
            AND r.github_repository_id = p.github_repository_id
       )`,
   )
     .bind(projectId, viewer.organizationId)
-    .first<{ id: string }>();
+    .first<{ id: string; github_repository_id: string }>();
   if (project === null) return c.json({ error: "project not found" }, 404);
   // Repo admins (from the GitHub projection) or org owners may enable.
   const grant = await c.env.DB.prepare(
@@ -731,12 +732,20 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
   if (viewer.githubOrgRole !== "owner" && grant?.permission !== "admin") {
     return c.json({ error: "repository admin (per GitHub) required" }, 403);
   }
+  const lease = await acquireProjectWriteLease(
+    c.env.DB as unknown as D1Like,
+    project.github_repository_id,
+    project.id,
+  );
+  if (lease === null) return c.json({ error: "project not found" }, 404);
+  try {
   const plan = await orgPlan(c.env, viewer.organizationId);
   const limit = PLAN_LIMITS[plan]!.projects;
   const result = await c.env.DB.prepare(
     `UPDATE projects SET enabled = 1 WHERE id = ? AND organization_id = ?
+     AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = projects.github_repository_id)
      AND NOT EXISTS (
-       SELECT 1 FROM removed_projects r
+       SELECT 1 FROM project_release_jobs r
         WHERE r.organization_id = projects.organization_id
           AND r.github_repository_id = projects.github_repository_id
      )
@@ -762,6 +771,9 @@ app.post("/v1/dashboard/projects/:id/enable", async (c) => {
     }).catch(() => undefined);
   }
   return c.json({ enabled: true });
+  } finally {
+    await lease.release();
+  }
 });
 
 app.post("/v1/dashboard/projects/:id/disable", async (c) => {
@@ -777,18 +789,26 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
     return c.json({ error: "repository admin (per GitHub) required" }, 403);
   }
   const project = await c.env.DB.prepare(
-    `SELECT p.github_repository_id, o.installation_id
+    `SELECT p.id, p.github_repository_id, o.installation_id
        FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.id = ? AND p.organization_id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
     .bind(projectId, viewer.organizationId)
-    .first<{ github_repository_id: string; installation_id: string | null }>();
+    .first<{ id: string; github_repository_id: string; installation_id: string | null }>();
   if (project === null) return c.json({ error: "project not found" }, 404);
+  const lease = await acquireProjectWriteLease(
+    c.env.DB as unknown as D1Like,
+    project.github_repository_id,
+    project.id,
+  );
+  if (lease === null) return c.json({ error: "project not found" }, 404);
+  try {
   await c.env.DB.prepare("UPDATE projects SET enabled = 0 WHERE id = ? AND organization_id = ?")
     .bind(projectId, viewer.organizationId)
     .run();
@@ -801,50 +821,12 @@ app.post("/v1/dashboard/projects/:id/disable", async (c) => {
       policyPush: null,
       appProofTask: null,
       reconcileProofRepositoryId: project.github_repository_id,
+      reconcileProofProjectId: project.id,
     });
   }
   return c.json({ enabled: false });
-});
-
-app.post("/v1/dashboard/projects/:id/remove", async (c) => {
-  const viewer = await resolveViewer(c.env, c.req.raw);
-  if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
-  const body = (await c.req.json().catch(() => ({}))) as { confirmation?: unknown; repositoryId?: unknown };
-  if (typeof body.confirmation !== "string") {
-    return c.json({ error: "CONFIRMATION_REQUIRED", detail: "type the full OWNER/REPOSITORY name" }, 400);
-  }
-  const repositoryId =
-    typeof body.repositoryId === "string" && /^[0-9]{1,32}$/.test(body.repositoryId) ? body.repositoryId : null;
-  try {
-    const result = await removeProject(
-      c.env,
-      {
-        projectId: c.req.param("id"),
-        repositoryId,
-        confirmation: body.confirmation,
-        actor: {
-          organizationId: viewer.organizationId,
-          githubUserId: viewer.githubUserId,
-          githubOrgRole: viewer.githubOrgRole,
-        },
-      },
-      {
-        now: nowIso,
-        isCurrentOrganizationOwner: (input) => isCurrentOrganizationOwner(c.env, input),
-        retireStatusComments: (repo, baseRef, pullRequestNumbers) =>
-          retireStatusCommentsFor(c.env, repo, baseRef, pullRequestNumbers),
-      },
-    );
-    if (!result.ok) return c.json({ error: result.code, detail: result.detail }, result.status);
-    return c.json({ removed: true, repositoryId: result.repositoryId, alreadyRemoved: result.alreadyRemoved });
-  } catch (error) {
-    return c.json(
-      {
-        error: "PROJECT_REMOVAL_INCOMPLETE",
-        detail: `removal is safe to retry; cleanup stopped before completion: ${String(error)}`,
-      },
-      503,
-    );
+  } finally {
+    await lease.release();
   }
 });
 
@@ -876,19 +858,27 @@ app.post("/v1/dashboard/projects/:id/proof-mode", async (c) => {
     return c.json({ error: "mode must be observe or enforced" }, 400);
   }
   const project = await c.env.DB.prepare(
-    `SELECT p.github_repository_id, p.enabled, o.installation_id
+    `SELECT p.id, p.github_repository_id, p.enabled, o.installation_id
       FROM projects p JOIN organizations o ON o.id = p.organization_id
       WHERE p.id = ? AND p.organization_id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
   )
     .bind(projectId, viewer.organizationId)
-    .first<{ github_repository_id: string; enabled: number; installation_id: string | null }>();
+    .first<{ id: string; github_repository_id: string; enabled: number; installation_id: string | null }>();
   if (project === null) return c.json({ error: "project not found" }, 404);
   if (project.enabled !== 1) return c.json({ error: "enable the project before changing proof mode" }, 409);
+  const lease = await acquireProjectWriteLease(
+    c.env.DB as unknown as D1Like,
+    project.github_repository_id,
+    project.id,
+  );
+  if (lease === null) return c.json({ error: "project not found" }, 404);
+  try {
   if (body.mode === "enforced") {
     const observed = await c.env.DB.prepare(
       `SELECT id FROM proof_verifications
@@ -921,9 +911,13 @@ app.post("/v1/dashboard/projects/:id/proof-mode", async (c) => {
       policyPush: null,
       appProofTask: null,
       reconcileProofRepositoryId: project.github_repository_id,
+      reconcileProofProjectId: project.id,
     });
   }
   return c.json({ mode: body.mode });
+  } finally {
+    await lease.release();
+  }
 });
 
 // --- Dashboard: people, teams, devices ------------------------------------
@@ -934,7 +928,7 @@ app.get("/v1/dashboard/people", async (c) => {
   const orgId = viewer.organizationId;
   const members = await c.env.DB.prepare(
     `SELECT github_user_id, github_login, avatar_url, github_org_role, activated_at
-     FROM principals WHERE organization_id = ? ORDER BY github_login`,
+     FROM principals WHERE organization_id = ? AND github_org_role != 'removed' ORDER BY github_login`,
   )
     .bind(orgId)
     .all();
@@ -968,8 +962,9 @@ app.get("/v1/dashboard/projects/:id/access", async (c) => {
   const projectId = c.req.param("id");
   const project = await c.env.DB.prepare(
     `SELECT p.id, p.github_name FROM projects p WHERE p.id = ? AND p.organization_id = ?
+      AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
       AND NOT EXISTS (
-        SELECT 1 FROM removed_projects r
+        SELECT 1 FROM project_release_jobs r
          WHERE r.organization_id = p.organization_id
            AND r.github_repository_id = p.github_repository_id
       )`,
@@ -1043,8 +1038,9 @@ app.get("/v1/dashboard/profile", async (c) => {
     `SELECT p.github_name, g.permission, g.active
      FROM repository_grants g JOIN projects p ON p.id = g.project_id
      WHERE g.github_user_id = ? AND p.organization_id = ?
+       AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
        AND NOT EXISTS (
-         SELECT 1 FROM removed_projects r
+         SELECT 1 FROM project_release_jobs r
           WHERE r.organization_id = p.organization_id
             AND r.github_repository_id = p.github_repository_id
        )
@@ -1226,17 +1222,11 @@ app.post("/v1/devices/:keyId/revoke", async (c) => {
 
 app.post("/admin/sync", async (c) => {
   if (!requireAdmin(c.env, c.req.raw)) return c.json({ error: "unauthorized" }, 401);
-  const installations = await listInstallations(c.env);
-  // The proof-check pass reads open pull requests, which needs a permission an
-  // installation may not hold. It used to throw out of here, so a reconcile
-  // that had already finished came back as a 500 and an operator retried work
-  // that was done. See admin-sync.ts.
-  const report = await syncInstallations(installations, {
-    syncInstallation: (installationId) => syncInstallation(c.env, installationId),
-    reconcilePolicies: (installationId) => reconcileInstallationPolicies(c.env, installationId),
-    reconcileProofChecks: (installationId) => reconcileInstallationProofChecks(c.env, installationId),
-  });
-  return c.json(report);
+  // Each installation gets a separate queue invocation. A synchronous fleet
+  // walk reset its request budget per tenant while all calls still shared one
+  // Worker invocation, so a large fleet could never finish the last tenants.
+  const installationIds = await enqueueAppInstallationReconciliation(c.env);
+  return c.json({ queued: installationIds.length, installationIds });
 });
 
 /**
@@ -1327,17 +1317,19 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (viewer === null) return c.json({ error: "unauthorized" }, 401);
   if (!isOrgAdmin(viewer.githubOrgRole)) return c.json({ error: "repository admin required" }, 403);
+  if (viewer.organizationId === null) return c.json({ error: "unknown repository" }, 404);
   const repositoryId = c.req.param("repositoryId");
   if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "invalid repository id" }, 400);
   const row = await c.env.DB.prepare(
-    `SELECT p.github_name FROM projects p WHERE p.github_repository_id = ?
+    `SELECT p.github_name FROM projects p WHERE p.github_repository_id = ? AND p.organization_id = ?
+      AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
       AND NOT EXISTS (
-        SELECT 1 FROM removed_projects r
+        SELECT 1 FROM project_release_jobs r
          WHERE r.organization_id = p.organization_id
            AND r.github_repository_id = p.github_repository_id
       )`,
   )
-    .bind(repositoryId)
+    .bind(repositoryId, viewer.organizationId)
     .first<{ github_name: string }>();
   if (row === null) return c.json({ error: "unknown repository" }, 404);
   return queueDoctor(c.env, row.github_name);
@@ -1372,19 +1364,9 @@ app.get("/v1/resolve-repo", async (c) => {
   if (!identity) return c.json({ error: "unauthorized" }, 401);
   const name = c.req.query("name") ?? "";
   if (!/^[\w.-]+\/[\w.-]+$/.test(name)) return c.json({ error: "name must be owner/repo" }, 400);
-  const row = await c.env.DB.prepare(
-    `SELECT p.github_repository_id, o.github_org_id FROM projects p
-     JOIN organizations o ON o.id = p.organization_id WHERE p.github_name = ?
-       AND NOT EXISTS (
-         SELECT 1 FROM removed_projects r
-          WHERE r.organization_id = p.organization_id
-            AND r.github_repository_id = p.github_repository_id
-       )`,
-  )
-    .bind(name)
-    .first<{ github_repository_id: string; github_org_id: string }>();
-  if (!row) return c.json({ error: "repository not installed for thwip" }, 404);
-  return c.json({ ownerId: row.github_org_id, repositoryId: row.github_repository_id });
+  const row = await resolveRepositoryFor(c.env.DB as unknown as D1Like, identity, name);
+  if (row === null) return c.json({ error: "repository not installed for thwip" }, 404);
+  return c.json(row);
 });
 
 app.get("/v1/project-config/defaults", async (c) => {
@@ -1399,8 +1381,9 @@ app.get("/v1/project-config/defaults", async (c) => {
        JOIN organizations o ON o.id = p.organization_id
       LEFT JOIN policy_bundles b ON b.digest = p.active_policy_digest
       WHERE p.github_repository_id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
@@ -1444,46 +1427,63 @@ app.post("/v1/run-leases", async (c) => {
     deviceKeyId?: string;
   };
   if (!body.repositoryId || !body.treeOid || !body.deviceKeyId) return c.json({ error: "missing fields" }, 400);
-  const project = await c.env.DB.prepare(
-    `SELECT p.id, p.active_policy_digest, p.security_profile FROM projects p
-      WHERE p.github_repository_id = ? AND p.enabled = 1
+  const repositoryId = body.repositoryId;
+  const treeOid = body.treeOid;
+  const deviceKeyId = body.deviceKeyId;
+  const result = await withAuthorizedRunLeaseProject(
+    c.env.DB as unknown as D1Like,
+    repositoryId,
+    identity,
+    deviceKeyId,
+    async (projectId) => {
+      const project = await c.env.DB.prepare(
+        `SELECT p.id, p.active_policy_digest, p.security_profile FROM projects p
+      WHERE p.github_repository_id = ? AND p.id = ? AND p.enabled = 1
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
-  )
-    .bind(body.repositoryId)
-    .first<{ id: string; active_policy_digest: string; security_profile: string }>();
-  if (!project) return c.json({ error: "project not enabled" }, 404);
-  // The window closes when the policy stops accepting it. Read the lifetime
-  // from the active policy rather than restating it here: a lease that outlives
-  // `lease.maxAgeSeconds` is refused by the verifier while still looking valid
-  // to the runner holding it.
-  const activePolicy = await c.env.DB.prepare("SELECT canonical_json FROM policy_bundles WHERE digest = ?")
-    .bind(project.active_policy_digest)
-    .first<{ canonical_json: string }>();
-  if (!activePolicy) return c.json({ error: "no active policy" }, 409);
-  const leaseSeconds = (JSON.parse(activePolicy.canonical_json) as { lease?: { maxAgeSeconds?: unknown } }).lease
-    ?.maxAgeSeconds;
-  if (typeof leaseSeconds !== "number" || leaseSeconds <= 0) {
-    return c.json({ error: "the active policy does not bound a run lease" }, 409);
-  }
-  const lease = await mintRunLease(c.env, {
-    project: {
-      activePolicyDigest: project.active_policy_digest,
-      securityProfile: project.security_profile,
+      )
+        .bind(repositoryId, projectId)
+        .first<{ id: string; active_policy_digest: string; security_profile: string }>();
+      if (!project) return c.json({ error: "project not enabled" }, 404);
+      // The window closes when the policy stops accepting it. Read the lifetime
+      // from the active policy rather than restating it here: a lease that outlives
+      // `lease.maxAgeSeconds` is refused by the verifier while still looking valid
+      // to the runner holding it.
+      const activePolicy = await c.env.DB.prepare("SELECT canonical_json FROM policy_bundles WHERE digest = ?")
+        .bind(project.active_policy_digest)
+        .first<{ canonical_json: string }>();
+      if (!activePolicy) return c.json({ error: "no active policy" }, 409);
+      const leaseSeconds = (JSON.parse(activePolicy.canonical_json) as { lease?: { maxAgeSeconds?: unknown } }).lease
+        ?.maxAgeSeconds;
+      if (typeof leaseSeconds !== "number" || leaseSeconds <= 0) {
+        return c.json({ error: "the active policy does not bound a run lease" }, 409);
+      }
+      const lease = await mintRunLease(c.env, {
+        project: {
+          id: project.id,
+          activePolicyDigest: project.active_policy_digest,
+          securityProfile: project.security_profile,
+        },
+        request: {
+          repositoryId,
+          treeOid,
+          parentOids: body.parentOids ?? [],
+          baseSha: body.baseSha ?? null,
+          deviceKeyId,
+        },
+        leaseSeconds,
+      });
+      return c.json({ lease, expiresInSeconds: leaseSeconds });
     },
-    request: {
-      repositoryId: body.repositoryId,
-      treeOid: body.treeOid,
-      parentOids: body.parentOids ?? [],
-      baseSha: body.baseSha ?? null,
-      deviceKeyId: body.deviceKeyId,
-    },
-    leaseSeconds,
-  });
-  return c.json({ lease, expiresInSeconds: leaseSeconds });
+  );
+  if (result.kind === "unavailable") return c.json({ error: "project not enabled" }, 404);
+  if (result.kind === "forbidden") return c.json({ error: "repository access or device required" }, 403);
+  if (result.kind === "released") return c.json({ error: "project was removed while the lease was minted" }, 409);
+  return result.value;
 });
 
 // --- Verification bundles --------------------------------------------------
@@ -1525,9 +1525,13 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
   if (String(claims.repository_id) !== body.repositoryId) {
     return c.json({ error: "repository not authorized by OIDC token" }, 403);
   }
+  const lease = await acquireProjectWriteLease(c.env.DB as unknown as D1Like, body.repositoryId);
+  if (lease === null) return c.json({ error: "project is unavailable" }, 409);
   try {
+    await lease.renew();
     const resolution = await resolveVerificationBundle(c.env, {
       repositoryId: body.repositoryId,
+      expectedProjectId: lease.projectId,
       ...(body.signerGithubUserId !== undefined ? { signerGithubUserId: body.signerGithubUserId } : {}),
       ...(body.keyFingerprint !== undefined ? { keyFingerprint: body.keyFingerprint } : {}),
     });
@@ -1535,6 +1539,7 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
       return c.json({
         state: resolution.kind,
         code: resolution.code,
+        projectId: resolution.projectId,
         repositoryId: body.repositoryId,
         repository: resolution.repository,
         defaultBranch: resolution.defaultBranch,
@@ -1549,31 +1554,32 @@ app.post("/v1/verification-bundles:resolve", async (c) => {
       return c.json({ error: error.message, code: error.code }, error.status);
     }
     throw error;
+  } finally {
+    await lease.release();
   }
 });
 
 app.post("/v1/verification-observations", async (c) => {
   const claims = await verifyGithubOidc(c);
   if (claims instanceof Response) return claims;
-  const body = (await c.req.json()) as { repositoryId?: string; headSha?: string; outcome?: string; runId?: string };
+  const body = (await c.req.json()) as {
+    repositoryId?: string;
+    projectId?: string;
+    headSha?: string;
+    outcome?: string;
+    runId?: string;
+  };
   if (!body.repositoryId || String(claims.repository_id) !== body.repositoryId) return c.json({ error: "forbidden" }, 403);
+  if (!body.projectId) return c.json({ error: "projectId required" }, 400);
   if (!body.headSha || !body.outcome || body.outcome.length > 64) return c.json({ error: "invalid" }, 400);
-  const project = await c.env.DB.prepare(
-    `SELECT p.id FROM projects p WHERE p.github_repository_id = ?
-      AND NOT EXISTS (
-        SELECT 1 FROM removed_projects r
-         WHERE r.organization_id = p.organization_id
-           AND r.github_repository_id = p.github_repository_id
-      )`,
-  )
-    .bind(body.repositoryId)
-    .first<{ id: string }>();
-  if (!project) return c.json({ error: "unknown project" }, 404);
-  await c.env.DB.prepare(
-    "INSERT INTO verification_observations (project_id, head_sha, outcome, run_id) VALUES (?, ?, ?, ?)",
-  )
-    .bind(project.id, body.headSha, body.outcome, body.runId ?? null)
-    .run();
+  const stored = await recordVerificationObservation(c.env.DB as unknown as D1Like, {
+    repositoryId: body.repositoryId,
+    projectId: body.projectId,
+    headSha: body.headSha,
+    outcome: body.outcome,
+    runId: body.runId ?? null,
+  });
+  if (!stored) return c.json({ error: "project incarnation is unavailable" }, 409);
   return c.json({ ok: true });
 });
 
@@ -1586,8 +1592,9 @@ app.get("/v1/proof-verifications/:id", async (c) => {
             v.check_run_id, v.audit_jws, v.started_at, v.completed_at, p.github_name
        FROM proof_verifications v JOIN projects p ON p.id = v.project_id
       WHERE v.id = ?
+        AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )`,
@@ -1827,10 +1834,8 @@ export async function queueFromPullRequest(env: Env, payload: {
   const author =
     authorIsBot || authorId == null
       ? null
-      : await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
-          .bind(String(authorId))
-          .first<{ id: string }>();
-  const sponsorPrincipalId = placed?.sponsorPrincipalId ?? author?.id ?? null;
+      : await principalForRepository(env.DB as unknown as D1Like, String(repositoryId), String(authorId));
+  const sponsorPrincipalId = placed?.sponsorPrincipalId ?? author ?? null;
   const sponsorGithubUserId = placed?.sponsorGithubUserId ?? String(authorId);
 
   if (sponsorPrincipalId === null) {
@@ -1963,7 +1968,29 @@ app.post("/api/github/webhooks", async (c) => {
     // would cost more than the send did.
     return c.json({ ok: true, duplicate, queued: { handled: false, detail: "no work in this delivery" } });
   }
-  await c.env.SYNC_QUEUE.send(work);
+  const repositoryId =
+    work.appProofTask?.kind === "verify"
+      ? work.appProofTask.request.repositoryId
+      : typeof work.policyPush?.repositoryId === "string"
+        ? work.policyPush.repositoryId
+        : work.reconcileProofRepositoryId;
+  const project =
+    repositoryId === null || installationId === null
+      ? null
+      : await c.env.DB.prepare(
+          `SELECT p.id
+             FROM projects p JOIN organizations o ON o.id = p.organization_id
+            WHERE p.github_repository_id = ? AND o.installation_id = ? AND o.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = p.github_repository_id
+              )`,
+        )
+          .bind(repositoryId, installationId)
+          .first<{ id: string }>();
+  await c.env.SYNC_QUEUE.send(bindWebhookProject(work, project?.id ?? null));
   return c.json({ ok: true, duplicate, queued });
 });
 
@@ -2114,14 +2141,15 @@ app.get("/admin/github/manifest/callback", async (c) => {
  * would move the lane without the check following, which is the failure that
  * left the queue rotating turns nobody could take.
  */
-const queueOnQueue: OnQueue<Env> = (env, repositoryId, baseRef, decide) =>
+const queueOnQueue: OnQueue<Env> = (env, repositoryId, baseRef, decide, lease) =>
   runOnQueue(
     env,
     repositoryId,
     baseRef,
     decide,
-    (update) => publishTurnCheckFor(env, repositoryId, update),
-    (snapshot) => publishStatusCommentsFor(env, repositoryId, baseRef, snapshot),
+    (update) => publishTurnCheckFor(env, repositoryId, update, lease),
+    (snapshot) => publishStatusCommentsFor(env, repositoryId, baseRef, snapshot, { remaining: 8 }, lease),
+    lease,
   );
 
 /**
@@ -2175,10 +2203,20 @@ async function publishStatusCommentsFor(
    * each queue helping itself to a full allowance.
    */
   budget: CommentBudget = { remaining: 8 },
+  borrowedLease?: ProjectWriteLease,
 ): Promise<void> {
+  const lease = borrowedLease ?? await acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId);
+  if (lease === null) return;
+  const ownsLease = borrowedLease === undefined;
+  try {
   const project = await commentingProject(env, repositoryId, baseRef);
   if (project === null) return;
-  const api = await commentApi(env, project);
+  const api = lifecycleCommentApi(
+    env,
+    repositoryId,
+    lease,
+    await commentApi(env, repositoryId, project),
+  );
 
   const now = new Date().toISOString();
   await writeStatusCommentsForSnapshot(
@@ -2186,9 +2224,12 @@ async function publishStatusCommentsFor(
     api,
     { repositoryId, baseRef },
     snapshot,
-    { observing: project.observing, now },
+    { observing: project.observing, now, projectId: lease.projectId },
     budget,
   );
+  } finally {
+    if (ownsLease) await lease.release();
+  }
 }
 
 /**
@@ -2206,6 +2247,9 @@ async function retireStatusCommentsFor(
   baseRef: string,
   pullRequestNumbers: readonly number[],
 ): Promise<void> {
+  const lease = await acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId);
+  if (lease === null) return;
+  try {
   const row = await env.DB.prepare(
     "SELECT p.github_name AS name, o.installation_id AS installationId FROM projects p " +
       "JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
@@ -2213,7 +2257,12 @@ async function retireStatusCommentsFor(
     .bind(repositoryId)
     .first<{ name: string; installationId: string | null }>();
   if (row === null || row.installationId === null) return;
-  const api = await commentApi(env, { name: row.name, installationId: row.installationId });
+  const api = lifecycleCommentApi(
+    env,
+    repositoryId,
+    lease,
+    await commentApi(env, repositoryId, { name: row.name, installationId: row.installationId }),
+  );
 
   const now = new Date().toISOString();
   for (const pullRequestNumber of pullRequestNumbers) {
@@ -2235,13 +2284,47 @@ async function retireStatusCommentsFor(
         observing: false,
       },
       now,
+      undefined,
+      lease.projectId,
     );
+  }
+  } finally {
+    await lease.release();
   }
 }
 
+function lifecycleCommentApi(
+  env: Env,
+  repositoryId: string,
+  lease: ProjectWriteLease,
+  api: CommentApi,
+): CommentApi {
+  const beforeWrite = async () => {
+    await lease.renew();
+    if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lease.projectId))) {
+      throw new Error("repository access was removed before the status comment write");
+    }
+  };
+  return {
+    list: (pullRequestNumber) => api.list(pullRequestNumber),
+    async create(pullRequestNumber, body) {
+      await beforeWrite();
+      return api.create(pullRequestNumber, body);
+    },
+    async update(commentId, body) {
+      await beforeWrite();
+      return api.update(commentId, body);
+    },
+  };
+}
+
 /** The three calls the comment needs, against one repository, as the App. */
-async function commentApi(env: Env, project: { name: string; installationId: string }): Promise<CommentApi> {
-  const token = await installationToken(env, project.installationId);
+async function commentApi(
+  env: Env,
+  repositoryId: string,
+  project: { name: string; installationId: string },
+): Promise<CommentApi> {
+  const token = await installationToken(env, project.installationId, undefined, repositoryId);
   const call = (path: string, init?: RequestInit) =>
     fetch(`https://api.github.com/repos/${project.name}${path}`, {
       ...init,
@@ -2286,14 +2369,25 @@ async function commentApi(env: Env, project: { name: string; installationId: str
   };
 }
 
-async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnCheckUpdate): Promise<void> {
+async function publishTurnCheckFor(
+  env: Env,
+  repositoryId: string,
+  update: TurnCheckUpdate,
+  borrowedLease?: ProjectWriteLease,
+): Promise<void> {
+  const lease = borrowedLease ?? await acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId);
+  if (lease === null) return;
+  const ownsLease = borrowedLease === undefined;
+  try {
   const project = await env.DB.prepare(
-    "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+    `SELECT p.github_name, o.installation_id
+       FROM projects p JOIN organizations o ON o.id = p.organization_id
+      WHERE p.github_repository_id = ? AND p.id = ?`,
   )
-    .bind(repositoryId)
+    .bind(repositoryId, lease.projectId)
     .first<{ github_name: string; installation_id: string | null }>();
   if (project === null || project.installation_id === null) return;
-  const token = await installationToken(env, project.installation_id);
+  const token = await installationToken(env, project.installation_id, undefined, repositoryId);
   const said = turnCheckRun(update);
   const call = (path: string, init?: RequestInit) =>
     fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
@@ -2346,6 +2440,8 @@ async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnC
   });
 
   const id = current?.["id"];
+  await lease.renew();
+  if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lease.projectId))) return;
   if (typeof id === "number") {
     const response = await call(`/check-runs/${id}`, { method: "PATCH", body });
     if (!response.ok) throw new Error(`GitHub refused the turn-check update (${response.status})`);
@@ -2353,6 +2449,9 @@ async function publishTurnCheckFor(env: Env, repositoryId: string, update: TurnC
   }
   const response = await call("/check-runs", { method: "POST", body });
   if (!response.ok) throw new Error(`GitHub refused the turn-check creation (${response.status})`);
+  } finally {
+    if (ownsLease) await lease.release();
+  }
 }
 
 /* The queue's own routes. Authorization reuses the GitHub projection: a viewer
@@ -2389,19 +2488,26 @@ const queueDeps = {
   },
   async queueProject(env: Env, repositoryId: string, baseRef: string) {
     const row = await env.DB.prepare(
-      "SELECT activation_state FROM queue_projects WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1",
+      `SELECT q.activation_state, q.project_id, q.verifier_workflow_version
+         FROM queue_projects q
+         JOIN projects p ON p.id = q.project_id AND p.github_repository_id = q.github_repository_id
+         JOIN organizations o ON o.id = p.organization_id
+        WHERE q.github_repository_id = ? AND q.base_ref = ? AND q.enabled = 1 AND o.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = q.github_repository_id)
+          AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = q.github_repository_id)`,
     )
       .bind(repositoryId, baseRef)
-      .first<{ activation_state: string }>();
+      .first<{ activation_state: string; project_id: string; verifier_workflow_version: number }>();
     if (row === null) return null;
-    return { activationState: row.activation_state };
+    return {
+      activationState: row.activation_state,
+      projectId: row.project_id,
+      verifierWorkflowVersion: row.verifier_workflow_version === 1 ? 1 as const : 2 as const,
+    };
   },
-  async principalFor(env: Env, githubUserId: string) {
+  async principalFor(env: Env, repositoryId: string, githubUserId: string) {
     if (!/^[0-9]{1,32}$/.test(githubUserId)) return null;
-    const row = await env.DB.prepare("SELECT id FROM principals WHERE github_user_id = ?")
-      .bind(githubUserId)
-      .first<{ id: string }>();
-    return row?.id ?? null;
+    return principalForRepository(env.DB as unknown as D1Like, repositoryId, githubUserId);
   },
   /**
    * Who wrote a pull request, whether that author is a bot, and which branch
@@ -2416,7 +2522,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const res = await fetch(`https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`, {
       headers: {
         authorization: `Bearer ${token}`,
@@ -2464,7 +2570,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const res = await fetch(`https://api.github.com/repos/${project.github_name}/git/commits/${sha}`, {
       headers: {
         authorization: `Bearer ${token}`,
@@ -2521,7 +2627,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const res = await fetch(
       `https://api.github.com/repos/${project.github_name}/commits/${encodeURIComponent(headSha)}/check-runs?check_name=${encodeURIComponent(PROOF_CHECK)}&filter=latest`,
       {
@@ -2559,7 +2665,7 @@ const queueDeps = {
     if (project === null || project.installation_id === null) return null;
     const [owner, repo] = project.github_name.split("/");
     if (owner === undefined || repo === undefined) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const pinned = await resolveCandidate(
       githubHttp(token),
       { owner, repo, repositoryId, baseRef },
@@ -2589,16 +2695,27 @@ const queueDeps = {
    * and the ref update does not force, which is what makes GitHub refuse a base
    * that moved.
    */
-  async mergeWrite(env: Env, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome> {
+  async mergeWrite(
+    env: Env,
+    repositoryId: string,
+    intent: MergeIntent,
+    writeLease?: ProjectWriteLease,
+  ): Promise<MergeWriteOutcome> {
+    const expectedProjectId = writeLease?.projectId;
     const project = await env.DB.prepare(
-      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      `SELECT p.id, p.github_name, o.installation_id
+         FROM projects p JOIN organizations o ON o.id = p.organization_id
+        WHERE p.github_repository_id = ? AND o.status = 'active'
+          AND (? IS NULL OR p.id = ?)
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
+          AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = p.github_repository_id)`,
     )
-      .bind(repositoryId)
-      .first<{ github_name: string; installation_id: string | null }>();
+      .bind(repositoryId, expectedProjectId ?? null, expectedProjectId ?? null)
+      .first<{ id: string; github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) {
       return { kind: "unknown", detail: "no installation for this repository" };
     }
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const api = `https://api.github.com/repos/${project.github_name}`;
     const headers = {
       authorization: `Bearer ${token}`,
@@ -2611,7 +2728,7 @@ const queueDeps = {
       message: ((await res.json().catch(() => ({}))) as { message?: string }).message ?? "no message",
     });
 
-    return performMergeWrite(
+    return await performMergeWrite(
       {
         async createCommit(input) {
           const res = await fetch(`${api}/git/commits`, {
@@ -2687,7 +2804,30 @@ const queueDeps = {
         },
       },
       intent,
+      writeLease === undefined
+        ? {}
+        : {
+            async beforeCreateCommit() {
+              await writeLease.renew();
+              return repositoryAllowsExternalWrite(
+                env.DB as unknown as D1Like,
+                repositoryId,
+                writeLease.projectId,
+              );
+            },
+            async beforeRefUpdate() {
+              await writeLease.renew();
+              return repositoryAllowsExternalWrite(
+                env.DB as unknown as D1Like,
+                repositoryId,
+                writeLease.projectId,
+              );
+            },
+          },
     );
+  },
+  projectWriteLease(env: Env, repositoryId: string, projectId?: string) {
+    return acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId, projectId);
   },
   async pullRequestMergeState(env: Env, repositoryId: string, pullRequestNumber: number) {
     const project = await env.DB.prepare(
@@ -2696,7 +2836,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const res = await fetch(
       `https://api.github.com/repos/${project.github_name}/pulls/${pullRequestNumber}`,
       {
@@ -2728,7 +2868,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const branch = baseRef.replace(/^refs\/heads\//, "");
     const res = await fetch(
       `https://api.github.com/repos/${project.github_name}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(sha)}`,
@@ -2767,7 +2907,7 @@ const queueDeps = {
       .bind(repositoryId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const read = async <T>(path: string): Promise<T | null> => {
       const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
         headers: {
@@ -2878,7 +3018,7 @@ const queueDeps = {
       .first<{ github_login: string | null }>();
     if (sponsor?.github_login == null) return null;
 
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const read = async <T>(path: string): Promise<T | null> => {
       const res = await fetch(`https://api.github.com/repos/${project.github_name}${path}`, {
         headers: {
@@ -2977,7 +3117,7 @@ const queueDeps = {
     if (project === null || project.installation_id === null) return null;
     const [owner, repo] = project.github_name.split("/");
     if (owner === undefined || repo === undefined) return null;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
     const headers = {
       authorization: `Bearer ${token}`,
       accept: "application/vnd.github+json",
@@ -3072,15 +3212,20 @@ const queueDeps = {
   async publishCandidateCheck(
     env: Env,
     repositoryId: string,
-    update: { headSha: string; accepted: boolean; summary: string },
+    update: { projectId: string; headSha: string; accepted: boolean; summary: string },
   ) {
     const project = await env.DB.prepare(
-      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      `SELECT p.github_name, o.installation_id FROM projects p
+        JOIN organizations o ON o.id = p.organization_id
+       WHERE p.github_repository_id = ? AND p.id = ?`,
     )
-      .bind(repositoryId)
+      .bind(repositoryId, update.projectId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) return;
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
+    if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, update.projectId))) {
+      return;
+    }
     await fetch(`https://api.github.com/repos/${project.github_name}/check-runs`, {
       method: "POST",
       headers: {
@@ -3106,6 +3251,7 @@ const queueDeps = {
     env: Env,
     repositoryId: string,
     payload: {
+      projectId: string;
       baseRef: string;
       pullRequestNumber: number;
       attemptId: string;
@@ -3116,14 +3262,19 @@ const queueDeps = {
     },
   ) {
     const project = await env.DB.prepare(
-      "SELECT p.github_name, o.installation_id FROM projects p JOIN organizations o ON o.id = p.organization_id WHERE p.github_repository_id = ?",
+      `SELECT p.github_name, o.installation_id FROM projects p
+        JOIN organizations o ON o.id = p.organization_id
+       WHERE p.github_repository_id = ? AND p.id = ?`,
     )
-      .bind(repositoryId)
+      .bind(repositoryId, payload.projectId)
       .first<{ github_name: string; installation_id: string | null }>();
     if (project === null || project.installation_id === null) {
       return { ok: false as const, status: 0, detail: "no installation for this repository" };
     }
-    const token = await installationToken(env, project.installation_id);
+    const token = await installationToken(env, project.installation_id, undefined, repositoryId);
+    if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, payload.projectId))) {
+      return { ok: false as const, status: 409, detail: "repository project was released before dispatch" };
+    }
     // repository_dispatch runs the default branch's copy of the workflow. That is
     // the whole reason the candidate verifier is dispatched rather than triggered
     // by the pull request: a pull request can edit its own workflow file, and a
@@ -3159,36 +3310,100 @@ app.all("*", (c) => {
 });
 
 export default {
-  fetch: app.fetch,
+  async fetch(request: Request, env: Env, executionCtx: ExecutionContext): Promise<Response> {
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname !== "/health" && pathname !== "/v1/schema") {
+        return Response.json(
+          { error: "project lifecycle maintenance is active; retry after the storage cutover" },
+          { status: 503, headers: { "cache-control": "no-store", "retry-after": "300" } },
+        );
+      }
+    }
+    return app.fetch(request, env, executionCtx);
+  },
   async queue(batch: MessageBatch, env: Env): Promise<void> {
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) {
+      for (const msg of batch.messages) {
+        await env.SYNC_QUEUE.send(msg.body, { delaySeconds: 300 });
+        msg.ack();
+      }
+      return;
+    }
     const synced = new Set<string>();
     const deps: QueueConsumerDeps = {
-      syncInstallation: (id) => syncInstallation(env, id),
+      syncInstallation: (id, postSyncWork) => syncOrDeleteInstallation(env, id, {
+        sync: (installationId) => syncInstallation(env, installationId, { postSyncWork }),
+      }),
       reconcileInstallationProofChecks: (id) => reconcileInstallationProofChecks(env, id),
-      activatePolicyFromDefaultBranchPush: (policyPush) => activatePolicyFromDefaultBranchPush(env, policyPush),
+      activatePolicyFromDefaultBranchPush: (policyPush) =>
+        policyPush.projectId == null
+          ? Promise.resolve({ status: "ignored" as const, reason: "delivery predates the current project incarnation" })
+          : activatePolicyFromDefaultBranchPush(env, policyPush),
       reconcileInstallationPolicies: (id) => reconcileInstallationPolicies(env, id),
-      reconcileProjectProofChecks: (id) => reconcileProjectProofChecks(env, id),
+      reconcileProjectProofChecks: (id, projectId) =>
+        reconcileProjectProofChecks(env, id, undefined, projectId),
       processAppProof: async (request) => {
         // A delivery may already be in the queue when its project is removed.
         // Acknowledging it without work is what prevents that old message from
         // retrying forever or recreating proof data after deletion.
-        if (await repositoryWasRemoved(env, request.repositoryId)) return;
+        if (request.projectId === undefined) return;
+        if (!(await repositoryAcceptsProject(env.DB as unknown as D1Like, request.repositoryId, request.projectId))) return;
+        if (await repositoryIsUnavailable(env.DB as unknown as D1Like, request.repositoryId)) return;
         await processAppProof(env, request);
       },
       requestForRerequest: (verificationId) => requestForRerequest(env, verificationId),
-      reconsiderHead: (repositoryId, headSha) =>
-        reconsiderHead(env, queueDeps as never, queueOnQueue, { repositoryId, headSha }),
+      reconsiderHead: (repositoryId, headSha, expectedProjectId) =>
+        reconsiderHead(env, queueDeps as never, queueOnQueue, {
+          repositoryId,
+          headSha,
+          ...(expectedProjectId === undefined ? {} : { expectedProjectId }),
+        }),
     };
     for (const msg of batch.messages) {
       try {
         await processQueueMessage(msg.body as QueueConsumerMessage, synced, deps);
         msg.ack();
-      } catch {
-        msg.retry();
+      } catch (error) {
+        if (error instanceof GithubInstallationSyncBusyError) {
+          // A concurrent webhook or daily sweep for the same installation is
+          // redundant, but acknowledging it outright could lose authority
+          // that changed after the active snapshot began. Re-enqueue it with a
+          // fresh retry budget instead of burning the delivery's five retries
+          // while the current owner still holds its lease.
+          await env.SYNC_QUEUE.send(msg.body, { delaySeconds: 60 });
+          msg.ack();
+        } else if (error instanceof GithubRateLimitError) {
+          // Preserve GitHub's primary or secondary rate-limit reset instead of
+          // burning the queue retry budget immediately. The delay is capped by
+          // the typed error and starts a fresh queue delivery afterward.
+          await env.SYNC_QUEUE.send(msg.body, { delaySeconds: error.retryAfterSeconds });
+          msg.ack();
+        } else {
+          msg.retry();
+        }
       }
     }
   },
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    await activateProjectLifecycleWorker(env.DB as unknown as D1Like);
+    if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) return;
+    await drainProjectLifecycleBackfill(env.DB as unknown as D1Like);
+    await drainGithubSyncSnapshots(env);
+    // The delayed continuation is the primary wake-up. This five-minute
+    // boundary is the durable fallback if that Queue delivery was lost. Enqueue
+    // current GitHub authority before quarantine collection can run.
+    if (controller.cron === "*/5 * * * *") {
+      await enqueueDueProjectReimportReconciliation(env);
+    }
+    const releases = await drainProjectReleases(env);
+    if (releases.attempted > 0) {
+      console.log(
+        `[project release] attempted=${releases.attempted} released=${releases.released} failed=${releases.failed}`,
+      );
+    }
     // The five minute trigger is the queue's clock. It is separate from the
     // daily reconciliation because a queue that only moves when CI traffic
     // arrives will sit on an expired offer indefinitely on a quiet repository.
@@ -3226,18 +3441,8 @@ export default {
       return;
     }
 
-    const orgs = await env.DB.prepare(
-      "SELECT installation_id FROM organizations WHERE installation_id IS NOT NULL AND status = 'active'",
-    ).all<{ installation_id: string }>();
-    for (const o of orgs.results) {
-      try {
-        await syncInstallation(env, o.installation_id);
-        await reconcileInstallationPolicies(env, o.installation_id);
-        await reconcileInstallationProofChecks(env, o.installation_id);
-      } catch {
-        /* retried next run */
-      }
-    }
+    const installationIds = await enqueueAppInstallationReconciliation(env);
+    console.log(`[github installation reconcile] queued=${installationIds.length}`);
 
   },
 } satisfies ExportedHandler<Env>;

@@ -20,6 +20,7 @@ import {
   pendingCheckOutput,
   processAppProofVerification,
   proofHints,
+  reconcileInstallationProofChecks,
   type AppProofEvaluation,
   type AppProofProcessDependencies,
   type AppProofRequest,
@@ -27,6 +28,8 @@ import {
 } from "./app-proof-verification.js";
 import { VerificationBundleError } from "./verification-bundle.js";
 import type { Env } from "./env.js";
+import { testD1 } from "../test/d1.js";
+import { reconcileInstalledProjects } from "./project-lifecycle.js";
 
 const REPOSITORY_ID = "1315419165";
 const OWNER_ID = "162603603";
@@ -494,6 +497,74 @@ describe("App-native check publication", () => {
 
     expect(newRun.checkRunId).not.toBe(oldResult.checkRunId);
     expect(completions).toEqual([newRun.checkRunId, oldResult.checkRunId]);
+  });
+});
+
+describe("installation proof reconciliation project incarnation", () => {
+  it("does not adopt a fresh project after a delayed old-installation sweep resumes", async () => {
+    const t = testD1();
+    try {
+      t.raw
+        .prepare(
+          "INSERT INTO organizations (id, github_org_id, github_login, installation_id) VALUES ('org_old', '1', 'old', '99')",
+        )
+        .run();
+      t.raw
+        .prepare(
+          "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES ('project_old', 'org_old', ?, 'old/repo', 1)",
+        )
+        .run(REPOSITORY_ID);
+      t.raw
+        .prepare("UPDATE project_lifecycle_rollout SET worker_activated_at = '2000-01-01T00:00:00.000Z' WHERE id = 1")
+        .run();
+      const lifecycleEnv = {
+        DB: t.db,
+        EVIDENCE: { list: async () => ({ objects: [], truncated: false }), delete: async () => undefined },
+        BRANCH_QUEUE: {
+          idFromName: (name: string) => name,
+          get: () => ({ purge: async () => undefined }),
+        },
+      } as unknown as Pick<Env, "DB" | "EVIDENCE" | "BRANCH_QUEUE">;
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+
+      let selected!: () => void;
+      const didSelect = new Promise<void>((resolve) => {
+        selected = resolve;
+      });
+      let resume!: () => void;
+      const mayResume = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const delayed = reconcileInstallationProofChecks(
+        { DB: t.db } as Env,
+        "99",
+        {
+          afterSelected: async () => {
+            selected();
+            await mayResume;
+          },
+        },
+      );
+      await didSelect;
+
+      await reconcileInstalledProjects(lifecycleEnv, "org_old", []);
+      await reconcileInstalledProjects(lifecycleEnv, "org_old", [
+        { id: REPOSITORY_ID, fullName: "old/repo", defaultBranch: "main" },
+      ], { now: () => new Date(Date.now() + 2 * 60 * 60_000) });
+      const fresh = t.raw
+        .prepare("SELECT id, enabled FROM projects WHERE github_repository_id = ?")
+        .get(REPOSITORY_ID) as { id: string; enabled: number };
+      expect(fresh).toMatchObject({ enabled: 0 });
+      expect(fresh.id).not.toBe("project_old");
+
+      resume();
+      await expect(delayed).resolves.toBe(0);
+      expect(t.raw.prepare("SELECT COUNT(*) AS count FROM proof_verifications").get()).toEqual({ count: 0 });
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      t.close();
+    }
   });
 });
 

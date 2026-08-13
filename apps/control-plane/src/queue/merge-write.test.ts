@@ -224,6 +224,44 @@ describe("performMergeWrite", () => {
     expect(github.commits).toHaveLength(1);
   });
 
+  it("rechecks lifecycle cancellation immediately before the first branch move", async () => {
+    const github = new FakeGithub();
+    const outcome = await performMergeWrite(github, intent, {
+      ...noWait,
+      beforeRefUpdate: async () => false,
+    });
+    expect(outcome).toMatchObject({ kind: "not-merged" });
+    expect(github.commits).toHaveLength(1);
+    expect(github.refUpdates).toHaveLength(0);
+  });
+
+  it("checks lifecycle cancellation before creating any Git object", async () => {
+    const github = new FakeGithub();
+    const outcome = await performMergeWrite(github, intent, {
+      ...noWait,
+      beforeCreateCommit: async () => false,
+    });
+    expect(outcome).toMatchObject({ kind: "refused" });
+    expect(github.commits).toHaveLength(0);
+    expect(github.refUpdates).toHaveLength(0);
+  });
+
+  it("rechecks lifecycle cancellation before every retrying branch move", async () => {
+    const github = new FakeGithub();
+    github.landings = [IN_PROGRESS, { ok: true, sha: LANDED }];
+    let checks = 0;
+    const outcome = await performMergeWrite(github, intent, {
+      ...noWait,
+      beforeRefUpdate: async () => {
+        checks += 1;
+        return checks === 1;
+      },
+    });
+    expect(outcome).toMatchObject({ kind: "not-merged" });
+    expect(checks).toBe(2);
+    expect(github.refUpdates).toHaveLength(1);
+  });
+
   /**
    * A required check that is genuinely unsatisfied must still refuse the merge.
    * Only the reason that says GitHub has not caught up is retried.
