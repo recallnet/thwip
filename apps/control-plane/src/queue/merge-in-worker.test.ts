@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { queueRouteDeps } from "../../test/queue-deps.js";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
+import { fixturePolicy, queueRouteDeps } from "../../test/queue-deps.js";
 import { testD1 } from "../../test/d1.js";
 import { acceptProof } from "../../test/proof.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
@@ -8,6 +9,11 @@ import { loadQueueState } from "./queue-state.js";
 import { buildSnapshot } from "./queue-operations.js";
 import type { D1Like } from "./projection.js";
 import { envelopeDigest } from "@thwip/queue-protocol";
+import { reconcileTerminalEntries } from "./terminal-reconciliation.js";
+import type { RecordFromIntentDeps } from "./record-from-intent.js";
+import { withTransitionSigningLease } from "./transition-signing-lease.js";
+import { tickAllQueues } from "./scheduled-tick.js";
+import type { ReconciliationReads } from "./deadlines.js";
 
 /**
  * The App performs the merge with the installation credential and keeps the
@@ -31,6 +37,19 @@ thwip-proof: v1.eyJwYXlsb2FkVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24iLCJw
 `;
 
 let raw: import("better-sqlite3").Database;
+let fixtureSigningKey: CryptoKey;
+let fixturePublicJwk: Awaited<ReturnType<typeof exportJWK>>;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("ES256", { extractable: true });
+  fixtureSigningKey = pair.privateKey;
+  fixturePublicJwk = { ...(await exportJWK(pair.publicKey)), kid: "merge-in-worker-fixture", alg: "ES256" };
+});
+
+const signFixture = async (bytes: Uint8Array, typ: string) =>
+  new CompactSign(bytes)
+    .setProtectedHeader({ alg: "ES256", kid: fixturePublicJwk.kid, typ })
+    .sign(fixtureSigningKey);
 
 function env(): QueueRouteEnv {
   const t = testD1();
@@ -49,6 +68,9 @@ function env(): QueueRouteEnv {
       "INSERT OR IGNORE INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
     )
     .run("alice", "org_1", "1", "author1");
+  t.raw
+    .prepare("INSERT OR IGNORE INTO service_keys (kid, public_jwk) VALUES (?, ?)")
+    .run(fixturePublicJwk.kid, JSON.stringify(fixturePublicJwk));
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 
@@ -66,6 +88,7 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
           : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
       baseContainsSha: async () => true,
       pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+      signRecordBytes: async (_environment: unknown, bytes: Uint8Array, typ: string) => signFixture(bytes, typ),
       ...over,
     }) as Parameters<typeof queueRoutes>[0],
   );
@@ -161,6 +184,213 @@ describe("the Worker performing the merge", () => {
     // side effect is real, but none of its authority or outcome crosses the
     // check-facing response boundary.
     expect(w.intents).toHaveLength(1);
+  });
+
+  it("does not let terminal repair sign while the normal merge callback owns the signer", async () => {
+    const e = env();
+    await runOnQueue(e, REPO, REF, ({ commands }) => {
+      commands.requestQueue({
+        idempotencyKey: "seed-before-terminal-read",
+        entryId: `entry_${REPO}_117`,
+        pullRequestNumber: 117,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "1",
+        headSha: HEAD,
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: "block-before-terminal-read",
+        entryId: `entry_${REPO}_117`,
+        ready: false,
+        schedulerEligible: false,
+        primaryReason: "REVIEW_REQUIRED",
+      });
+    });
+
+    let releasePullRead!: () => void;
+    let announcePullRead!: () => void;
+    const pullReadHeld = new Promise<void>((resolve) => {
+      releasePullRead = resolve;
+    });
+    const pullReadStarted = new Promise<void>((resolve) => {
+      announcePullRead = resolve;
+    });
+    const repairDeps: RecordFromIntentDeps<QueueRouteEnv> = {
+      commitFacts: async (_environment, _repositoryId, sha) =>
+        sha === LANDED
+          ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "Merge pull request #117 (Thwip Queue)" }
+          : { treeOid: TREE, parentShas: [], message: "base" },
+      baseContainsSha: async () => true,
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+      activePolicy: async () => fixturePolicy() as Awaited<ReturnType<RecordFromIntentDeps<QueueRouteEnv>["activePolicy"]>>,
+      signRecordBytes: async () => {
+        throw new Error("terminal repair signed while the normal callback held the lease");
+      },
+      storeEvidence: async () => "no-bucket",
+      onQueue: (environment, repositoryId, baseRef, decide) =>
+        runOnQueue(environment, repositoryId, baseRef, decide),
+    };
+    const repair = reconcileTerminalEntries(
+      e,
+      { repositoryId: REPO, baseRef: REF },
+      {
+        pullRequestState: async () => {
+          announcePullRead();
+          await pullReadHeld;
+          return { state: "closed", merged: true, mergeCommitSha: LANDED, headSha: HEAD };
+        },
+      },
+      repairDeps,
+    );
+    await pullReadStarted;
+
+    let releaseNormalSigner!: () => void;
+    let announceNormalSigner!: () => void;
+    const normalSignerHeld = new Promise<void>((resolve) => {
+      releaseNormalSigner = resolve;
+    });
+    const normalSignerStarted = new Promise<void>((resolve) => {
+      announceNormalSigner = resolve;
+    });
+    const normal = authorize(
+      routes({
+        mergeWrite: writer({ kind: "merged", mergeSha: LANDED }).port,
+        signRecordBytes: async (_environment, bytes, typ) => {
+          if (typ.includes("transition-record")) {
+            announceNormalSigner();
+            await normalSignerHeld;
+          }
+          return signFixture(bytes, typ);
+        },
+      }),
+      e,
+    );
+    await normalSignerStarted;
+
+    releasePullRead();
+    const repaired = await repair;
+    expect(repaired.reconciled).toBe(0);
+
+    releaseNormalSigner();
+    await normal;
+    const signed = raw
+      .prepare("SELECT COUNT(*) AS count FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')")
+      .get() as { count: number };
+    expect(signed.count).toBe(1);
+  });
+
+  it("lets the heartbeat record a normal callback that lost the signing lease exactly once", async () => {
+    const e = env();
+    raw
+      .prepare(
+        `INSERT INTO queue_projects
+           (id, organization_id, github_repository_id, base_ref, enabled, activation_state, attested_from_sequence)
+         VALUES ('queue_1', 'org_1', ?, ?, 1, 'enforced', 0)`,
+      )
+      .run(REPO, REF);
+
+    let releaseRepair!: () => void;
+    let announceRepair!: () => void;
+    const repairHeld = new Promise<void>((resolve) => {
+      releaseRepair = resolve;
+    });
+    const repairStarted = new Promise<void>((resolve) => {
+      announceRepair = resolve;
+    });
+    const holdingRepair = withTransitionSigningLease(
+      e.DB as unknown as D1Like,
+      { repositoryId: REPO, baseRef: REF, owner: "terminal-repair-a" },
+      async () => {
+        announceRepair();
+        await repairHeld;
+      },
+    );
+    await repairStarted;
+
+    const w = writer({ kind: "merged", mergeSha: LANDED });
+    await authorize(routes({ mergeWrite: w.port }), e);
+    expect(w.intents).toHaveLength(1);
+    expect(await entryState(e)).toBe("Merged");
+    expect(
+      (
+        raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')",
+          )
+          .get() as { count: number }
+      ).count,
+    ).toBe(0);
+
+    releaseRepair();
+    await holdingRepair;
+    const message = w.intents[0]!.message;
+    const recordDeps: RecordFromIntentDeps<QueueRouteEnv> = {
+      commitFacts: async (_environment, _repositoryId, sha) =>
+        sha === LANDED
+          ? { treeOid: TREE, parentShas: [BASE, HEAD], message }
+          : sha === BASE
+            ? { treeOid: "6".repeat(40), parentShas: [], message: "base" }
+            : null,
+      baseContainsSha: async () => true,
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+      activePolicy: async () =>
+        fixturePolicy() as Awaited<ReturnType<RecordFromIntentDeps<QueueRouteEnv>["activePolicy"]>>,
+      signRecordBytes: async (_environment, bytes, typ) => signFixture(bytes, typ),
+      storeEvidence: async () => "no-bucket",
+      onQueue: (environment, repositoryId, baseRef, decide) =>
+        runOnQueue(environment, repositoryId, baseRef, decide),
+    };
+    const heartbeatReads: ReconciliationReads = {
+      pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+      baseContainsSha: async () => true,
+      pullRequestNumbersForCommit: async () => [117],
+      commitFacts: recordDeps.commitFacts,
+      sleep: async () => {},
+    };
+    const ports = {
+      driveQueue: async () => {},
+      onQueueTicked: () => {},
+      onQueueFailed: () => {},
+      reconsiderHead: async () => 0,
+      publishStatusComments: async () => {},
+      retireStatusComments: async () => {},
+    };
+
+    const repaired = await tickAllQueues(e, ports, heartbeatReads, recordDeps, {
+      pullRequestState: async () => ({ state: "closed", merged: true, mergeCommitSha: LANDED, headSha: HEAD }),
+    });
+    const record = raw
+      .prepare(
+        "SELECT digest, transition_sequence AS sequence FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')",
+      )
+      .get() as { digest: string; sequence: number };
+    raw.prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?").run(record.digest);
+
+    const restored = await tickAllQueues(e, ports, heartbeatReads, recordDeps, {
+      pullRequestState: async () => ({ state: "closed", merged: true, mergeCommitSha: LANDED, headSha: HEAD }),
+    });
+    const repeated = await tickAllQueues(e, ports, heartbeatReads, recordDeps, {
+      pullRequestState: async () => ({ state: "closed", merged: true, mergeCommitSha: LANDED, headSha: HEAD }),
+    });
+
+    expect(repaired.settledWrites).toBe(1);
+    expect(restored.settledWrites).toBe(1);
+    expect(repeated.settledWrites).toBe(0);
+    expect(
+      (
+        raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge')",
+          )
+          .get() as { count: number }
+      ).count,
+    ).toBe(1);
+    expect(
+      (
+        raw.prepare("SELECT transition_sequence AS sequence FROM queue_attestations WHERE digest = ?").get(record.digest) as {
+          sequence: number | null;
+        }
+      ).sequence,
+    ).toBe(record.sequence);
   });
 
   /**

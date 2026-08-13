@@ -128,10 +128,11 @@ describe("projectQueueState", () => {
       expect((await rows(db, "queue_entries_index")).results[0]).toMatchObject({ state: "Merged" });
     });
 
-    it("drops a replay of the current generation", async () => {
+    it("replays the current generation idempotently so it can repair missing rows", async () => {
       const db = d1();
       await projectQueueState(db, message());
-      expect(await projectQueueState(db, message())).toMatchObject({ applied: false });
+      expect(await projectQueueState(db, message())).toMatchObject({ applied: true });
+      expect((await rows(db, "queue_entries_index")).results).toHaveLength(1);
     });
 
     it("is unaffected by the arrival order of two messages", async () => {
@@ -175,6 +176,17 @@ describe("projectQueueState", () => {
     it("records a transition once", async () => {
       const db = d1();
       await projectQueueState(db, message({ generation: 5, transitions: [transition] }));
+      expect((await rows(db, "queue_transitions_index")).results).toHaveLength(1);
+    });
+
+    it("restores a missing transition from a replay of current authority", async () => {
+      const db = d1();
+      const current = message({ generation: 5, transitions: [transition] });
+      await projectQueueState(db, current);
+      await db.prepare("DELETE FROM queue_transitions_index").bind().run();
+
+      await projectQueueState(db, current);
+
       expect((await rows(db, "queue_transitions_index")).results).toHaveLength(1);
     });
 

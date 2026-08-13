@@ -786,6 +786,38 @@ export class QueueCommands {
   }
 
   /**
+   * Settle an entry from a signed merge record that is already in the durable
+   * chain. The caller verifies that record before issuing this command; the
+   * event repeats its identity so the correction remains auditable after the
+   * record's original attempt has been compacted out of the live document.
+   */
+  reconcileMerged(input: {
+    idempotencyKey: string;
+    entryId: string;
+    attemptId: string;
+    mergeSha: string;
+    transitionDigest: string;
+    transitionSequence: number;
+  }): CommandResult {
+    return this.store.append(
+      {
+        idempotencyKey: input.idempotencyKey,
+        at: this.clock.now(),
+        type: "EntryMergeReconciled",
+        entryId: input.entryId,
+        attemptId: input.attemptId,
+        mergeSha: input.mergeSha,
+        transitionDigest: input.transitionDigest,
+        transitionSequence: input.transitionSequence,
+      },
+      // A surviving callback or queue drive was authorized against the attempt
+      // revision that this repair has just ended. Fence it exactly as cancel,
+      // merge confirmation and attempt termination do.
+      { bumpAttemptRevision: true },
+    );
+  }
+
+  /**
    * One alarm, every due deadline. Delivery is at-least-once, so
    * each action carries a deadline-derived idempotency key and a second delivery
    * finds nothing left to do.

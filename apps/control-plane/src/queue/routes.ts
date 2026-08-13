@@ -4,6 +4,7 @@ import type { BranchQueue } from "./BranchQueue.js";
 import { verifyVerifierIdentity, type PinnedVerifier } from "./verifier-identity.js";
 import {
   projectQueueState,
+  projectionMessageFrom,
   queuePageInfo,
   readProjectedQueue,
   type D1Like,
@@ -321,56 +322,7 @@ function branchRef(value: string | undefined): string | null {
   return value;
 }
 
-/**
- * Shape a snapshot into the message the projection tables expect.
- *
- * The projection exists so organization-wide reads and exports do not have to load
- * every queue document, and so a check that is only going to be told to wait can be
- * answered from a row read.
- */
-export function projectionMessageFrom(
-  repositoryId: string,
-  baseRef: string,
-  snapshot: QueueSnapshot,
-): ProjectionMessage {
-  return {
-    repositoryId,
-    baseRef,
-    queueEpoch: snapshot.queueEpoch,
-    generation: snapshot.generation,
-    activeAttemptId: snapshot.activeAttemptId,
-    paused: snapshot.paused,
-    pauseReason: snapshot.pauseReason,
-    rebaselineRequired: snapshot.rebaselineRequired,
-    baseSha: snapshot.baseSha,
-    entries: snapshot.entries.map((e) => ({
-      entryId: e.entryId,
-      pullRequestNumber: e.pullRequestNumber,
-      sponsorPrincipalId: e.sponsorPrincipalId,
-      state: e.state,
-      primaryReason: e.primaryReason,
-      fairnessOrdinal: e.fairnessOrdinal,
-      schedulerEligible: e.schedulerEligible,
-      cooldownUntil: e.cooldownUntil,
-      lastAttemptId: e.lastAttemptId,
-      headSha: e.headSha,
-    })),
-    // The whole chain, as recorded. An earlier version of this synthesised one
-    // row from the head pointer with kind "verified" hardcoded and no prior
-    // digest, which meant an external or override transition was projected as
-    // verified and the links could not be checked from D1 at all.
-    transitions: snapshot.transitions.map((t) => ({
-      transitionSequence: t.transitionSequence,
-      kind: t.kind,
-      digest: t.digest,
-      priorDigest: t.priorDigest,
-      baseSha: t.baseSha,
-      attemptId: t.attemptId,
-      witnessCount: t.witnessPrincipalIds.length,
-      observedAt: t.recordedAt,
-    })),
-  };
-}
+export { projectionMessageFrom } from "./projection.js";
 
 
 /**

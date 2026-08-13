@@ -12,6 +12,7 @@
  * retried older message would overwrite a newer truth and stay wrong until the
  * next change.
  */
+import type { QueueSnapshot } from "./queue-operations.js";
 
 export interface ProjectionEntry {
   readonly entryId: string;
@@ -63,6 +64,47 @@ export interface D1Like {
     };
   };
   batch(statements: unknown[]): Promise<unknown>;
+}
+
+/** Shape authoritative queue state for the cross-queue read projection. */
+export function projectionMessageFrom(
+  repositoryId: string,
+  baseRef: string,
+  snapshot: QueueSnapshot,
+): ProjectionMessage {
+  return {
+    repositoryId,
+    baseRef,
+    queueEpoch: snapshot.queueEpoch,
+    generation: snapshot.generation,
+    activeAttemptId: snapshot.activeAttemptId,
+    paused: snapshot.paused,
+    pauseReason: snapshot.pauseReason,
+    rebaselineRequired: snapshot.rebaselineRequired,
+    baseSha: snapshot.baseSha,
+    entries: snapshot.entries.map((entry) => ({
+      entryId: entry.entryId,
+      pullRequestNumber: entry.pullRequestNumber,
+      sponsorPrincipalId: entry.sponsorPrincipalId,
+      state: entry.state,
+      primaryReason: entry.primaryReason,
+      fairnessOrdinal: entry.fairnessOrdinal,
+      schedulerEligible: entry.schedulerEligible,
+      cooldownUntil: entry.cooldownUntil,
+      lastAttemptId: entry.lastAttemptId,
+      headSha: entry.headSha,
+    })),
+    transitions: snapshot.transitions.map((transition) => ({
+      transitionSequence: transition.transitionSequence,
+      kind: transition.kind,
+      digest: transition.digest,
+      priorDigest: transition.priorDigest,
+      baseSha: transition.baseSha,
+      attemptId: transition.attemptId,
+      witnessCount: transition.witnessPrincipalIds.length,
+      observedAt: transition.recordedAt,
+    })),
+  };
 }
 
 /** One independently selected page of the project Queue view. */
@@ -124,7 +166,7 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
   const seen = marker?.generation ?? 0;
   // A message from a generation we have already projected tells us nothing new,
   // and applying it would move the projection backwards.
-  if (message.generation <= seen) return { applied: false, reason: "STALE_GENERATION", seen };
+  if (message.generation < seen) return { applied: false, reason: "STALE_GENERATION", seen };
 
   const statements: unknown[] = [];
 
@@ -171,29 +213,12 @@ export async function projectQueueState(db: D1Like, message: ProjectionMessage):
     );
   }
 
-  // Only the links this table has not already got.
-  //
-  // The chain is append-only and immutable, so re-offering the older links wrote
-  // rows that could only ever conflict and do nothing. It also made the write
-  // cost of a merge grow with the length of the chain, which is the one number
-  // here that never stops rising. One read replaces all of it.
-  //
-  // Scoped to the epoch: a rebaseline starts the chain again from sequence one,
-  // and a high-water mark taken across epochs would discard every link of the new
-  // chain until it passed the length of the old one.
-  const highest = await db
-    .prepare(
-      `SELECT MAX(transition_sequence) AS seq FROM queue_transitions_index
-        WHERE github_repository_id = ? AND base_ref = ? AND queue_epoch = ?`,
-    )
-    .bind(message.repositoryId, message.baseRef, message.queueEpoch)
-    .first<{ seq: number | null }>();
-  const projectedThrough = highest?.seq ?? 0;
-
   for (const transition of message.transitions) {
-    if (transition.transitionSequence <= projectedThrough) continue;
     // Transitions are immutable once recorded, so a conflict means we have already
-    // seen this one and there is nothing to change.
+    // seen this one and there is nothing to change. Re-offering the bounded live
+    // tail also repairs a missing row when the authoritative queue write landed
+    // but its projection did not. A high-water mark cannot do that because one
+    // missing row below a later row looks complete from MAX(sequence).
     statements.push(
       db
         .prepare(

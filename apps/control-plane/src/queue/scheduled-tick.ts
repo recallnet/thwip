@@ -6,7 +6,12 @@ import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
 import { withQueueState } from "./queue-state.js";
 import { requiresDeviceOnly, retireStaleRunners } from "./runners.js";
 import { overdueReconciliation } from "@thwip/queue-domain";
-import { GITHUB_READS, settleReconciliation, type ReconciliationReads } from "./deadlines.js";
+import {
+  GITHUB_READS,
+  settleReconciliation,
+  type ReconciliationReads,
+  type TerminalPullRequestReads,
+} from "./deadlines.js";
 import type { D1Like } from "./projection.js";
 import { recordFromIntentDepsFor, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { readActivePolicy } from "../active-policy.js";
@@ -19,10 +24,11 @@ import {
   retryAfter,
   settleOrphanedWrite,
 } from "./orphaned-writes.js";
-import { durableTransitionForAttempt } from "./attestation.js";
+import { durableMergeRecordForPullRequestNumber, durableTransitionForAttemptId } from "./attestation.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { findingsForChain } from "./chain-self-check.js";
 import type { CommentBudget } from "./status-comment-write.js";
+import { reconcileTerminalEntries } from "./terminal-reconciliation.js";
 
 /**
  * The real dependencies `recordMergeFromIntent` needs, built once from the same
@@ -187,6 +193,8 @@ export async function tickAllQueues(
    * should depend on somebody remembering to wire it up.
    */
   recordDeps: RecordFromIntentDeps<QueueRouteEnv> = RECORD_FROM_INTENT_DEPS,
+  /** Full PR state for the bounded missed-webhook repair. */
+  terminalReads: TerminalPullRequestReads = GITHUB_READS,
 ): Promise<{
   ticked: number;
   driven: number;
@@ -196,6 +204,8 @@ export async function tickAllQueues(
   readinessRechecked: number;
   chainFindings: number;
   retiredComments: number;
+  terminalEntriesExamined: number;
+  terminalEntriesReconciled: number;
 }> {
   const db = env.DB as unknown as D1Like;
   const rows = await db
@@ -235,6 +245,8 @@ export async function tickAllQueues(
   let settledWrites = 0;
   let readinessRechecked = 0;
   let chainFindings = 0;
+  let terminalEntriesExamined = 0;
+  let terminalEntriesReconciled = 0;
   const sweptQueues: Array<{ row: (typeof rows.results)[number]; snapshot: QueueSnapshot }> = [];
   for (const row of rows.results) {
     try {
@@ -346,15 +358,19 @@ export async function tickAllQueues(
       const running = snapshot.entries.find((e) => e.state === "Offered" || e.state === "Active");
       const ran = snapshot.entries.find((e) => e.state === "Verifying" || e.state === "MergeGuard");
       const holder = running ?? ran;
+
+      // A lane driver can fail for the exact stale holder the terminal sweep
+      // is able to remove. Preserve the authoritative snapshot for maintenance
+      // before making that fallible call, or a missed close webhook plus a
+      // persistent driver failure excludes this queue from reconciliation
+      // forever. The outer catch still reports the driver failure and the
+      // second pass still isolates this queue's maintenance from every other
+      // queue in the fleet.
+      sweptQueues.push({ row, snapshot });
       if (holder !== undefined) {
         await ports.driveQueue(row.repositoryId, row.baseRef);
         driven += 1;
       }
-
-      // The lane-critical pass ends here. Keep its result so the bounded
-      // maintenance pass below can work from the same snapshot, after every
-      // enabled queue has had its clock advanced and its held lane driven.
-      sweptQueues.push({ row, snapshot });
     } catch (error) {
       // A heartbeat that reports the same number whether it worked or failed
       // is not a signal. Keep this out of `ticked` so a fleet-wide outage
@@ -384,19 +400,71 @@ export async function tickAllQueues(
     (_, index) => sweptQueues[(start + index) % sweptQueues.length]!,
   );
 
-  for (const { row, snapshot } of maintenanceQueues) {
+  for (const maintained of maintenanceQueues) {
+    const { row } = maintained;
+    let { snapshot } = maintained;
     try {
+      // The webhook is the fast path, not the only path. Walk a persisted page
+      // of every nonterminal entry and compare it with GitHub. A merged entry
+      // is settled only after its existing signed record is found or the
+      // existing signed-intent recovery creates the missing first record.
+      // Closed-unmerged entries use the ordinary cancel command. Both mutations
+      // therefore share the queue compare-and-swap with webhooks, heartbeats,
+      // lane driving and merge callbacks.
+      const terminals = await reconcileTerminalEntries(
+        env,
+        { repositoryId: row.repositoryId, baseRef: row.baseRef },
+        terminalReads,
+        recordDeps,
+      );
+      snapshot = terminals.snapshot;
+      terminalEntriesExamined += terminals.examined;
+      terminalEntriesReconciled += terminals.reconciled;
+      if (terminals.reconciled > 0) {
+        console.log(
+          `[queue heartbeat] reconciled ${terminals.reconciled} terminal pull request(s) for repository ` +
+            `${row.repositoryId} after examining ${terminals.examined}`,
+        );
+      }
+
+      // Publish the authoritative repair before any later maintenance that can
+      // fail. In particular, driving the newly offered lane and recovering an
+      // orphaned write both call GitHub. If either exhausts the subrequest
+      // budget, the pull request that just became terminal must not keep the
+      // status from before the committed queue mutation. This remains safe to
+      // retry on every pass because the publisher fingerprints its content.
+      try {
+        await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot, commentBudget);
+      } catch (error) {
+        console.error(
+          `[queue heartbeat] could not refresh the status comments on ${row.repositoryId} ${row.baseRef}: ` +
+            `${String(error)}`,
+        );
+      }
+
+      if (terminals.reconciled > 0) {
+        // Cancelling a lane holder offers the next turn in the reconciliation
+        // transaction. Continue that turn now instead of waiting for another
+        // five-minute clock.
+        const holder = snapshot.entries.find(
+          (entry) =>
+            entry.entryId === snapshot.activeEntryId &&
+            ["Offered", "Active", "Verifying", "MergeGuard"].includes(entry.state),
+        );
+        if (holder !== undefined) {
+          await ports.driveQueue(row.repositoryId, row.baseRef);
+          driven += 1;
+        }
+      }
+
       // A write whose response was lost is nobody's job until it is this one's.
-      // `settleReconciliation` above needs a surviving attempt; these
-      // rows outlive every attempt, which is why four merges sat unrecorded.
+      // `settleReconciliation` above needs a surviving attempt; these rows
+      // outlive every attempt, which is why four merges sat unrecorded.
       //
-      // Last, after the lane has been driven. Settling a write reads GitHub
-      // several times and writes the chain, and both can throw: `withQueueState`
-      // gives up after five lost compare-and-swaps and `recordMergeFromIntent`
-      // raises whatever the signer or the evidence store raises. Standing ahead
-      // of the drive, one queue with a write it could not settle would stop that
-      // queue's turns from ever being driven, which is a worse failure than the
-      // one the sweep repairs.
+      // The terminal-entry page goes first because an old orphan that exhausts
+      // the subrequest budget must not starve the simpler missed-webhook repair.
+      // Both stay after the lane-critical fleet pass, so neither can stop the
+      // clock or initial drive for another queue.
       settledWrites += await sweepOrphanedWrites(env, db, row, reads, recordDeps);
 
       // Readiness the webhook was supposed to refresh and did not.
@@ -411,31 +479,6 @@ export async function tickAllQueues(
       // This does. It re-reads the head and runs the same derivation the
       // delivery runs, through `reconsiderHead`, so there is one answer to what
       // readiness means and this is not a second opinion about it.
-      // The comment on each pull request, held against the queue this tick just
-      // advanced. Comments are written on transition and a write GitHub refused
-      // leaves the page behind the queue with nothing that owns coming back for
-      // it, which is this repository's recurring defect wearing a new hat.
-      //
-      // Ahead of `recheckBlockedReadiness`, and the order is the whole point. A
-      // re-read that clears `PR_DRAFT` moves the entry, and it moves it through
-      // `runOnQueue`, which publishes the comment for the state it moved to. A
-      // publish standing after that would write the snapshot taken before it
-      // and put the old answer back on the page.
-      //
-      // Held inside its own catch, because a comment must never cost a queue
-      // its tick. On 4 August the first sweep after this shipped ran the
-      // Worker out of subrequests, and the throw came back through here and
-      // failed both repositories: no lane driven, no write settled, no chain
-      // read, over a sentence on a web page.
-      try {
-        await ports.publishStatusComments(row.repositoryId, row.baseRef, snapshot, commentBudget);
-      } catch (error) {
-        console.error(
-          `[queue heartbeat] could not refresh the status comments on ${row.repositoryId} ${row.baseRef}: ` +
-            `${String(error)}`,
-        );
-      }
-
       readinessRechecked += await recheckBlockedReadiness(snapshot, row.repositoryId, ports);
 
       // The queue reads its own chain here, once per queue per tick, the same
@@ -484,7 +527,18 @@ export async function tickAllQueues(
     }
   }
   const retiredComments = await retireAbandonedComments(db, ports);
-  return { ticked, driven, failed, reconciled, settledWrites, readinessRechecked, chainFindings, retiredComments };
+  return {
+    ticked,
+    driven,
+    failed,
+    reconciled,
+    settledWrites,
+    readinessRechecked,
+    chainFindings,
+    retiredComments,
+    terminalEntriesExamined,
+    terminalEntriesReconciled,
+  };
 }
 
 /**
@@ -613,27 +667,19 @@ async function sweepOrphanedWrites(
   // absence there is not an absence.
   const unrecorded: typeof open = [];
   for (const write of settledRecently) {
-    const intents = await db
-      .prepare(
-        `SELECT DISTINCT json_extract(bytes, '$.git.candidateSha') AS mergeSha
-           FROM queue_attestations
-          WHERE github_repository_id = ? AND base_ref = ? AND attempt_id = ? AND kind = 'merge-intent'`,
-      )
-      .bind(row.repositoryId, row.baseRef, write.attemptId)
-      .all<{ mergeSha: string | null }>();
-    let linked = false;
-    for (const intent of intents.results) {
-      if (intent.mergeSha === null) continue;
-      linked =
-        (await durableTransitionForAttempt(db, {
-          repositoryId: row.repositoryId,
-          baseRef: row.baseRef,
-          attemptId: write.attemptId,
-          mergeSha: intent.mergeSha,
-        })) !== null;
-      if (linked) break;
-    }
-    if (!linked) {
+    const linked =
+      write.pullRequestNumber !== null
+        ? await durableMergeRecordForPullRequestNumber(db, {
+            repositoryId: row.repositoryId,
+            baseRef: row.baseRef,
+            pullRequestNumber: write.pullRequestNumber,
+          })
+        : await durableTransitionForAttemptId(db, {
+            repositoryId: row.repositoryId,
+            baseRef: row.baseRef,
+            attemptId: write.attemptId,
+          });
+    if (linked === null) {
       unrecorded.push(write);
     }
   }

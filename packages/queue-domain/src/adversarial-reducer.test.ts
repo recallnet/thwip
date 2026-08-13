@@ -111,6 +111,51 @@ function upTo(
 }
 
 describe("ADVERSARIAL: the queue and the pull request underneath it", () => {
+  it("settles a stale entry from the exact signed record and frees its lane", () => {
+    const held = applyEvents(base(), upTo("claimed"));
+    const reconciled = ev(
+      {
+        type: "EntryMergeReconciled",
+        entryId: "e1",
+        attemptId: "recorded-attempt",
+        mergeSha: M,
+        transitionDigest: `sha256:${"a".repeat(64)}`,
+        transitionSequence: 170,
+      },
+      "reconcile-record-170",
+    );
+
+    const after = applyEvent(held, reconciled);
+    expect(after.entries.get("e1")).toMatchObject({
+      state: "Merged",
+      currentAttemptId: null,
+      lastAttemptId: "recorded-attempt",
+    });
+    expect(after.attempts.get("a1")?.outcome).toBe("SUPERSEDED");
+    expect(after.activeAttemptId).toBeNull();
+
+    // Repeated reconciliation is the same event, not a second ending.
+    expect(applyEvent(after, { ...reconciled, sequence: reconciled.sequence + 100 })).toBe(after);
+  });
+
+  it("does not move the branch head back when repairing an old merged entry", () => {
+    const requested = applyEvents(base(), upTo("offered").slice(0, 2));
+    requested.baseSha = "f".repeat(40);
+    const after = applyEvent(
+      requested,
+      ev({
+        type: "EntryMergeReconciled",
+        entryId: "e1",
+        attemptId: "old-attempt",
+        mergeSha: M,
+        transitionDigest: `sha256:${"b".repeat(64)}`,
+        transitionSequence: 12,
+      }),
+    );
+    expect(after.entries.get("e1")?.state).toBe("Merged");
+    expect(after.baseSha).toBe("f".repeat(40));
+  });
+
   it("does not let a cancel erase a merge that already happened", () => {
     // An administrator ejects an entry a second after it merged, or a stale
     // close webhook is replayed. The merge is a fact; the chain already links it.
