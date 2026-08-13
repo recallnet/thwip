@@ -55,8 +55,12 @@ import { verificationKeys } from "./service-keys.js";
 import { readActivePolicy } from "./active-policy.js";
 import { GITHUB_OIDC_ISSUER, githubOidcAudience } from "./github-oidc.js";
 import { capabilityFor, enrolDeviceKey } from "./queue/runners.js";
-import { isOrgAdmin } from "./queue/repository-access.js";
+import { atLeast, isOrgAdmin, repositoryAccess } from "./queue/repository-access.js";
 import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
+import { managedRulesetHealth, type StoredDoctorRuleset } from "./queue/doctor-rulesets.js";
+import { managedWorkflowHealth } from "./queue/doctor-workflows.js";
+import { QUEUE_ACTION_REF, setupPullRequestFiles } from "./queue/bootstrap-workflows.js";
+import { OWNERSHIP_RULESET_NAME, POLICY_RULESET_NAME, type Ruleset } from "./queue/rulesets.js";
 import {
   deriveReadiness,
   foldCapability,
@@ -1234,6 +1238,54 @@ app.post("/admin/sync", async (c) => {
   return c.json({ queued: installationIds.length, installationIds });
 });
 
+/** Reject a successful GitHub response that does not carry a ruleset. */
+function validRuleset(value: unknown): value is Ruleset {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const ruleset = value as Record<string, unknown>;
+  if (
+    typeof ruleset["name"] !== "string" ||
+    ruleset["target"] !== "branch" ||
+    !(
+      ruleset["enforcement"] === "active" ||
+      ruleset["enforcement"] === "disabled" ||
+      ruleset["enforcement"] === "evaluate"
+    ) ||
+    !Array.isArray(ruleset["rules"])
+  ) {
+    return false;
+  }
+  if (ruleset["bypass_actors"] !== undefined && !Array.isArray(ruleset["bypass_actors"])) return false;
+  const conditions = ruleset["conditions"];
+  if (conditions === null || typeof conditions !== "object" || Array.isArray(conditions)) return false;
+  const refName = (conditions as Record<string, unknown>)["ref_name"];
+  if (refName === null || typeof refName !== "object" || Array.isArray(refName)) return false;
+  const refs = refName as Record<string, unknown>;
+  if (!Array.isArray(refs["include"]) || !Array.isArray(refs["exclude"])) return false;
+  return (ruleset["rules"] as unknown[]).every((rule) => {
+    if (rule === null || typeof rule !== "object" || Array.isArray(rule)) return false;
+    const candidate = rule as Record<string, unknown>;
+    return (
+      typeof candidate["type"] === "string" &&
+      (candidate["parameters"] === undefined ||
+        (candidate["parameters"] !== null &&
+          typeof candidate["parameters"] === "object" &&
+          !Array.isArray(candidate["parameters"])))
+    );
+  });
+}
+
+function decodeGithubFile(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const file = value as Record<string, unknown>;
+  if (file["type"] !== "file" || file["encoding"] !== "base64" || typeof file["content"] !== "string") return null;
+  try {
+    const bytes = Uint8Array.from(atob(file["content"].replaceAll("\n", "")), (character) => character.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Queue doctor. Reports what the App is actually granted and what
  * the branch actually requires, because setup must never assume that applying a
@@ -1246,28 +1298,217 @@ app.post("/admin/sync", async (c) => {
  * App can actually publish the check it would require; making that operator-only
  * would mean the people doing the setup cannot check their own work.
  */
-async function queueDoctor(env: Env, repo: string): Promise<Response> {
-  const installations = await listInstallations(env);
+async function queueDoctor(env: Env, repo: string, expectedProjectId: string | null = null): Promise<Response> {
+  const project = await env.DB.prepare(
+    `SELECT p.id, p.github_repository_id, p.default_branch, p.proof_check_mode
+       FROM projects p
+       JOIN organizations o ON o.id = p.organization_id
+      WHERE p.github_name = ? AND o.status = 'active'
+        AND (? IS NULL OR p.id = ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM project_release_requests r
+           WHERE r.github_repository_id = p.github_repository_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM project_release_jobs r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )
+      LIMIT 1`,
+  )
+    .bind(repo, expectedProjectId, expectedProjectId)
+    .first<{
+      id: string;
+      github_repository_id: string;
+      default_branch: string | null;
+      proof_check_mode: string;
+    }>();
+  if (project === null) return Response.json({ error: "repository not installed for thwip" }, { status: 404 });
+
+  const installations = await listInstallations(env).catch(() => null);
+  if (installations === null) {
+    return Response.json(
+      { error: "GitHub App installation state could not be read", code: "GITHUB_UNAVAILABLE" },
+      { status: 502 },
+    );
+  }
   const owner = repo.split("/")[0];
   const installation = installations.find((i) => i.account.login.toLowerCase() === owner?.toLowerCase());
   if (installation === undefined) return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
 
-  const token = await installationToken(env, String(installation.id));
-  const gh = async <T>(path: string): Promise<T | { error: string; status: number }> => {
+  const token = await installationToken(
+    env,
+    String(installation.id),
+    undefined,
+    project.github_repository_id,
+  ).catch(() => null);
+  if (token === null) {
+    return Response.json(
+      { error: "GitHub App access could not be granted", code: "GITHUB_UNAVAILABLE" },
+      { status: 502 },
+    );
+  }
+  const gh = async <T>(
+    path: string,
+    authenticated = true,
+  ): Promise<{ ok: true; value: T } | { ok: false; status: number; detail: string }> => {
     const res = await fetch(`https://api.github.com${path}`, {
       headers: {
-        authorization: `Bearer ${token}`,
+        ...(authenticated ? { authorization: `Bearer ${token}` } : {}),
         accept: "application/vnd.github+json",
         "user-agent": "thwip-control-plane",
       },
-    });
-    if (!res.ok) return { error: await res.text(), status: res.status };
-    return (await res.json()) as T;
+    }).catch(() => null);
+    if (res === null) return { ok: false, status: 0, detail: "network request failed" };
+    if (!res.ok) return { ok: false, status: res.status, detail: (await res.text()).slice(0, 500) };
+    const value = await res.json().catch(() => null);
+    if (value === null) return { ok: false, status: res.status, detail: "GitHub returned invalid JSON" };
+    return { ok: true, value: value as T };
   };
 
-  const rulesets = await gh<Array<{ id: number; name: string; enforcement: string }>>(
-    `/repos/${repo}/rulesets`,
-  );
+  type RulesetSummary = { id: number; name: string; enforcement: string };
+  const rulesets: RulesetSummary[] = [];
+  const seenRulesets = new Set<number>();
+  for (let page = 1; page <= 10; page += 1) {
+    const listed = await gh<RulesetSummary[]>(`/repos/${repo}/rulesets?per_page=100&page=${page}`);
+    if (!listed.ok || !Array.isArray(listed.value)) {
+      return Response.json(
+        {
+          error: "GitHub rulesets could not be read",
+          code: "GITHUB_RULESETS_UNAVAILABLE",
+          githubStatus: listed.ok ? 200 : listed.status,
+        },
+        { status: 502 },
+      );
+    }
+    const before = seenRulesets.size;
+    for (const summary of listed.value) {
+      if (
+        typeof summary?.id !== "number" ||
+        typeof summary.name !== "string" ||
+        typeof summary.enforcement !== "string"
+      ) {
+        return Response.json(
+          { error: "GitHub returned an invalid ruleset list", code: "GITHUB_RULESETS_UNAVAILABLE" },
+          { status: 502 },
+        );
+      }
+      if (!seenRulesets.has(summary.id)) {
+        seenRulesets.add(summary.id);
+        rulesets.push(summary);
+      }
+    }
+    if (listed.value.length < 100) break;
+    if (seenRulesets.size === before || page === 10) {
+      return Response.json(
+        { error: "GitHub ruleset listing did not complete", code: "GITHUB_RULESETS_UNAVAILABLE" },
+        { status: 502 },
+      );
+    }
+  }
+  const managedNames = new Set<string>([OWNERSHIP_RULESET_NAME, POLICY_RULESET_NAME]);
+  const managedSummaries = rulesets.filter((ruleset) => managedNames.has(ruleset.name));
+  const fullRulesets: StoredDoctorRuleset[] = [];
+  for (const summary of managedSummaries) {
+    const full = await gh<Ruleset>(`/repos/${repo}/rulesets/${summary.id}`);
+    if (!full.ok || !validRuleset(full.value)) {
+      return Response.json(
+        {
+          error: `GitHub ruleset ${summary.id} could not be read`,
+          code: "GITHUB_RULESETS_UNAVAILABLE",
+          githubStatus: full.ok ? 200 : full.status,
+        },
+        { status: 502 },
+      );
+    }
+    fullRulesets.push({ id: summary.id, ruleset: full.value });
+  }
+  const rulesetHealth = managedRulesetHealth({
+    rulesets: fullRulesets,
+    baseRef: `refs/heads/${project.default_branch ?? "main"}`,
+    integrationId: Number(env.GITHUB_APP_ID),
+    proofCheckMode: project.proof_check_mode === "enforced" ? "enforced" : "observe",
+  });
+  const expectedWorkflows = setupPullRequestFiles({ endpoint: env.PUBLIC_ORIGIN, actionRef: QUEUE_ACTION_REF });
+  const liveWorkflows: Record<string, string | null> = {};
+  for (const expected of expectedWorkflows) {
+    const path = expected.path.split("/").map(encodeURIComponent).join("/");
+    const live = await gh<unknown>(
+      `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(project.default_branch ?? "main")}`,
+    );
+    if (!live.ok) {
+      if (live.status === 404) {
+        liveWorkflows[expected.path] = null;
+        continue;
+      }
+      return Response.json(
+        {
+          error: `GitHub workflow ${expected.path} could not be read`,
+          code: "GITHUB_WORKFLOWS_UNAVAILABLE",
+          githubStatus: live.status,
+        },
+        { status: 502 },
+      );
+    }
+    const content = decodeGithubFile(live.value);
+    if (content === null) {
+      return Response.json(
+        { error: `GitHub returned an invalid workflow file for ${expected.path}`, code: "GITHUB_WORKFLOWS_UNAVAILABLE" },
+        { status: 502 },
+      );
+    }
+    liveWorkflows[expected.path] = content;
+  }
+  const action = /^([^/]+\/[^@]+)@([0-9a-f]{40})$/.exec(QUEUE_ACTION_REF);
+  if (action === null) {
+    return Response.json({ error: "the configured queue action is not commit-pinned", code: "INVARIANT_FAILURE" }, { status: 500 });
+  }
+  // The target repository token is deliberately scoped to that one repository.
+  // The published action is public, so test its exact commit without pretending
+  // the target installation token can read a different repository.
+  const actionCommit = await gh<unknown>(`/repos/${action[1]}/git/commits/${action[2]}`, false);
+  let actionAccessible = true;
+  if (!actionCommit.ok) {
+    if (actionCommit.status === 404) actionAccessible = false;
+    else {
+      return Response.json(
+        { error: "the pinned queue action could not be read", code: "GITHUB_WORKFLOWS_UNAVAILABLE", githubStatus: actionCommit.status },
+        { status: 502 },
+      );
+    }
+  } else if (
+    actionCommit.value === null ||
+    typeof actionCommit.value !== "object" ||
+    Array.isArray(actionCommit.value) ||
+    (actionCommit.value as Record<string, unknown>)["sha"] !== action[2]
+  ) {
+    return Response.json({ error: "GitHub returned an invalid queue action commit", code: "GITHUB_WORKFLOWS_UNAVAILABLE" }, { status: 502 });
+  }
+  const workflowHealth = managedWorkflowHealth({
+    endpoint: env.PUBLIC_ORIGIN,
+    files: liveWorkflows,
+    actionAccessible,
+  });
+  const stillCurrent = await env.DB.prepare(
+    `SELECT p.id
+       FROM projects p
+       JOIN organizations o ON o.id = p.organization_id AND o.status = 'active'
+      WHERE p.id = ? AND p.github_repository_id = ? AND p.github_name = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM project_release_requests r
+           WHERE r.github_repository_id = p.github_repository_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM project_release_jobs r
+           WHERE r.organization_id = p.organization_id
+             AND r.github_repository_id = p.github_repository_id
+        )`,
+  )
+    .bind(project.id, project.github_repository_id, repo)
+    .first<{ id: string }>();
+  if (stillCurrent === null) {
+    return Response.json({ error: "repository access is being removed", code: "PROJECT_RELEASED" }, { status: 409 });
+  }
   const granted = installation.permissions ?? {};
   const missing = Object.entries(REQUIRED_APP_PERMISSIONS).filter(
     ([scope, level]) => granted[scope] !== level,
@@ -1299,7 +1540,7 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     // Read off `pull_requests` rather than `issues`: the App wrote a comment on
     // pull request 180 holding no `issues` scope, so that is what carries it.
     canComment: missing.every(([scope]) => scope !== "pull_requests"),
-    canInspectRulesets: Array.isArray(rulesets),
+    canInspectRulesets: true,
     canConfigureRulesets: false,
     subscribedEvents: events.subscribed,
     handledEvents: events.handled,
@@ -1308,6 +1549,8 @@ async function queueDoctor(env: Env, repo: string): Promise<Response> {
     subscriptionKnown: events.known,
     receivesEveryHandledEvent: events.healthy,
     rulesets,
+    rulesetHealth,
+    workflowHealth,
   });
 }
 
@@ -1321,12 +1564,18 @@ app.get("/admin/queue/doctor", async (c) => {
 app.get("/v1/queue/:repositoryId/doctor", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (viewer === null) return c.json({ error: "unauthorized" }, 401);
-  if (!isOrgAdmin(viewer.githubOrgRole)) return c.json({ error: "repository admin required" }, 403);
-  if (viewer.organizationId === null) return c.json({ error: "unknown repository" }, 404);
   const repositoryId = c.req.param("repositoryId");
   if (!/^[0-9]{1,32}$/.test(repositoryId)) return c.json({ error: "invalid repository id" }, 400);
+  const projectId = c.req.query("projectId") ?? "";
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(projectId)) return c.json({ error: "projectId is required" }, 400);
+  const level = await repositoryAccess(c.env.DB as unknown as D1Like, repositoryId, {
+    principalId: viewer.principalId ?? "",
+    githubUserId: viewer.githubUserId,
+    isAdmin: isOrgAdmin(viewer.githubOrgRole),
+  });
+  if (!atLeast(level, "admin")) return c.json({ error: "repository admin required" }, 403);
   const row = await c.env.DB.prepare(
-    `SELECT p.github_name FROM projects p WHERE p.github_repository_id = ? AND p.organization_id = ?
+    `SELECT p.github_name FROM projects p WHERE p.github_repository_id = ? AND p.id = ?
       AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
       AND NOT EXISTS (
         SELECT 1 FROM project_release_jobs r
@@ -1334,10 +1583,10 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
            AND r.github_repository_id = p.github_repository_id
       )`,
   )
-    .bind(repositoryId, viewer.organizationId)
+    .bind(repositoryId, projectId)
     .first<{ github_name: string }>();
   if (row === null) return c.json({ error: "unknown repository" }, 404);
-  return queueDoctor(c.env, row.github_name);
+  return queueDoctor(c.env, row.github_name, projectId);
 });
 
 /**

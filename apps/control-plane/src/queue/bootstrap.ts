@@ -3,6 +3,8 @@ import { setupPullRequestFiles, verifierWorkflowFile, type SetupFile } from "./b
 import {
   bootstrapCheckRuns,
   BOOTSTRAP_STEPS,
+  bypassActorsMatch,
+  bypassActorsVisible,
   checkAppRuleset,
   diffRuleset,
   GITHUB_ACTIONS_INTEGRATION_ID,
@@ -13,6 +15,7 @@ import {
   POLICY_RULESET_NAME,
   proofContextFor,
   proofIntegrationFor,
+  rulesetConfigurationMatches,
   type ProofCheckMode,
   type BootstrapProgress,
   type BootstrapStep,
@@ -623,57 +626,6 @@ function requiredChecksOf(ruleset: Ruleset | null): Array<{ context: string; int
   }>;
 }
 
-function matchesExpected(actual: unknown, expected: unknown): boolean {
-  if (Array.isArray(expected)) {
-    if (!Array.isArray(actual) || actual.length !== expected.length) return false;
-    const unmatched = [...actual];
-    for (const value of expected) {
-      const index = unmatched.findIndex((candidate) => matchesExpected(candidate, value));
-      if (index === -1) return false;
-      unmatched.splice(index, 1);
-    }
-    return true;
-  }
-  if (expected !== null && typeof expected === "object") {
-    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
-    const record = actual as Record<string, unknown>;
-    return Object.entries(expected).every(([key, value]) => matchesExpected(record[key], value));
-  }
-  return Object.is(actual, expected);
-}
-
-/**
- * Compare the configuration GitHub exposes to the payload setup generated.
- * Server-owned response fields are ignored, but every generated field other
- * than bypass actors must match. GitHub deliberately hides bypass actors from
- * callers without ruleset-write access, so those are handled separately by an
- * explicit administrator confirmation before activation.
- */
-function rulesetConfigurationMatches(actual: Ruleset, expected: Ruleset): boolean {
-  const { bypass_actors: _ignored, ...visibleExpected } = expected;
-  // GitHub drops the `parameters` object from an `update` rule when
-  // `update_allows_fetch_and_merge` is false (its safe default). Normalize the
-  // read-back to the explicit payload we generated, otherwise setup asks an
-  // administrator to reapply the already-correct ownership ruleset forever.
-  const normalizedActual = {
-    ...actual,
-    rules: actual.rules.map((rule) =>
-      rule.type === "update" && rule.parameters === undefined
-        ? { ...rule, parameters: { update_allows_fetch_and_merge: false } }
-        : rule,
-    ),
-  };
-  return matchesExpected(normalizedActual, visibleExpected);
-}
-
-function bypassActorsVisible(ruleset: Ruleset): boolean {
-  return Object.hasOwn(ruleset, "bypass_actors");
-}
-
-function bypassActorsMatch(actual: Ruleset, expected: Ruleset): boolean {
-  return !bypassActorsVisible(actual) || matchesExpected(actual.bypass_actors, expected.bypass_actors);
-}
-
 function manualChange(existing: StoredRuleset | null, ruleset: Ruleset): ManualRulesetChange {
   return existing === null
     ? { operation: "create", ruleset }
@@ -788,6 +740,9 @@ async function performStep(
     case "publish-bootstrap-check": {
       const policy = await deps.github.rulesetNamed(POLICY_RULESET_NAME);
       if (policy === null) return { kind: "refused", step, detail: "the policy ruleset is missing" };
+      if (policy.ruleset.enforcement === "evaluate") {
+        return { kind: "refused", step, detail: "the policy ruleset is in evaluate mode" };
+      }
 
       const baseSha = await deps.github.baseSha();
       const runs = bootstrapCheckRuns({ headSha: baseSha, policyEnforcement: policy.ruleset.enforcement });

@@ -284,6 +284,54 @@ describe("GET /v1/queue/:repositoryId/chain", () => {
   });
 });
 
+describe("GET /v1/queue/:repositoryId/readiness", () => {
+  it("returns the current project incarnation instead of waking an empty queue document", async () => {
+    const e = env();
+    seed();
+    const policy = `sha256:${"a".repeat(64)}`;
+    raw.prepare(
+      `INSERT INTO policy_bundles (digest, project_id, version, canonical_json, status)
+       VALUES (?, 'proj_acme', 1, '{"version":1,"securityProfile":"fast"}', 'active')`,
+    ).run(policy);
+    raw.prepare("UPDATE projects SET active_policy_digest = ? WHERE id = 'proj_acme'").run(policy);
+
+    const response = await routes(ACME).request(
+      `/v1/queue/${VICTIM_REPO}/readiness?ref=${encodeURIComponent(REF)}`,
+      {},
+      e,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      projectId: "proj_acme",
+      repositoryId: VICTIM_REPO,
+      baseRef: REF,
+      projectEnabled: true,
+      activePolicyDigest: `sha256:${"a".repeat(64)}`,
+      queueConfigured: true,
+      queueEnabled: true,
+      activationState: "enforced",
+      setupComplete: false,
+    });
+  });
+
+  it("reports a disabled current project without changing it", async () => {
+    const e = env();
+    seed();
+    raw.prepare("UPDATE projects SET enabled = 0 WHERE id = 'proj_acme'").run();
+
+    const response = await routes(ACME).request(
+      `/v1/queue/${VICTIM_REPO}/readiness?ref=${encodeURIComponent(REF)}`,
+      {},
+      e,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ projectId: "proj_acme", projectEnabled: false });
+    expect(raw.prepare("SELECT enabled FROM projects WHERE id = 'proj_acme'").get()).toEqual({ enabled: 0 });
+  });
+});
+
 /**
  * Every route that names a repository, and what it takes to reach it.
  *
@@ -299,6 +347,11 @@ const MEMBER_ROUTES = [
     name: "explain the queue",
     method: "GET",
     path: (id: string) => `/v1/queue/${id}/explain?ref=${encodeURIComponent(REF)}`,
+  },
+  {
+    name: "read queue readiness",
+    method: "GET",
+    path: (id: string) => `/v1/queue/${id}/readiness?ref=${encodeURIComponent(REF)}`,
   },
   {
     name: "join the queue",

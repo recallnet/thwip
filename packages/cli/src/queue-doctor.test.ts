@@ -2,257 +2,292 @@ import { describe, expect, it } from "vitest";
 import { EXIT } from "./queue-exit.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
 
-/**
- * `thwip queue doctor` used to be one request to an operator-only endpoint, so
- * the only people it answered for were the people who never needed to ask. It
- * now reads what a member may read, and says plainly which part it could not.
- */
-
 const REPO = "acme/widgets";
 const REF = "refs/heads/main";
+const POLICY = `sha256:${"a".repeat(64)}`;
 
 function observation(over: Partial<DoctorObservation> & Pick<DoctorObservation, "section">): DoctorObservation {
   return { status: 200, body: {}, ...over };
 }
 
-const installed = observation({ section: "repository", body: { repositoryId: "12345" } });
-const running = observation({
-  section: "queue",
-  body: { snapshot: { paused: false, pauseReason: null, activeAttemptId: null, entries: [] }, why: [] },
+const installed = observation({
+  section: "repository",
+  body: { ownerId: "7", repositoryId: "12345", projectId: "project_current" },
 });
+const ready = observation({
+  section: "queue",
+  body: {
+    projectId: "project_current",
+    repositoryId: "12345",
+    baseRef: REF,
+    projectEnabled: true,
+    activePolicyDigest: POLICY,
+    queueConfigured: true,
+    queueEnabled: true,
+    activationState: "enforced",
+    setupComplete: true,
+  },
+});
+const healthyApp = observation({
+  section: "app",
+  body: {
+    missingPermissions: {},
+    canPublishMergeCheck: true,
+    canMerge: true,
+    canComment: true,
+    receivesEveryHandledEvent: true,
+    rulesetHealth: {
+      healthy: true,
+      expectedNames: ["Thwip Queue Ownership", "Thwip Repository Policy"],
+      missing: [],
+      duplicate: [],
+      drifted: [],
+      bypassActorsKnown: true,
+    },
+    workflowHealth: {
+      healthy: true,
+      expectedPaths: [".github/workflows/thwip-required.yml", ".github/workflows/thwip-queue-verify.yml"],
+      missing: [],
+      drifted: [],
+      actionRef: `recallnet/thwip@${"a".repeat(40)}`,
+      actionAccessible: true,
+    },
+  },
+});
+
+function report(
+  observations: DoctorObservation[],
+  allowUnread = false,
+) {
+  return reportDoctor(observations, { repo: REPO, ref: REF, allowUnread });
+}
 
 describe("what doctor asks for", () => {
-  it("asks a member endpoint first, and only then the one that needs admin", () => {
+  it("reads exact durable readiness instead of inferring setup from an empty queue document", () => {
     const probes = doctorProbes({ repo: REPO, ref: REF, events: 5 });
-    expect(probes.map((p) => p.section)).toEqual(["repository", "queue", "app"]);
-    expect(probes.filter((p) => !p.requiresAdmin).map((p) => p.section)).toEqual(["repository", "queue"]);
-  });
-
-  it("reads the queue through the route any member of the repository may call", () => {
-    const [, queue] = doctorProbes({ repo: REPO, ref: REF, events: 5 });
-    expect(queue?.path).toContain("/v1/queue/{repositoryId}/explain");
-    expect(queue?.path).not.toContain("/admin/");
-    expect(queue?.requiresAdmin).toBe(false);
+    expect(probes.map((probe) => probe.section)).toEqual(["repository", "queue", "app"]);
+    expect(probes[1]?.path).toBe(`/v1/queue/{repositoryId}/readiness?ref=${encodeURIComponent(REF)}`);
+    expect(probes[1]?.path).not.toContain("/explain");
+    expect(probes[1]?.requiresAdmin).toBe(false);
   });
 });
 
-describe("what doctor reports", () => {
-  it("runs to a clean finish for a member who cannot read App permissions", () => {
-    const report = reportDoctor(
-      [installed, running, observation({ section: "app", status: 403, body: { error: "repository admin required" } })],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.exitCode).toBe(EXIT.ok);
-    expect(report.unread).toEqual(["app"]);
-    expect(report.lines.join("\n")).toContain("repository admin");
-  });
-
-  it("still reports everything a member could see when the admin part is refused", () => {
-    const report = reportDoctor(
-      [
-        installed,
-        observation({
-          section: "queue",
-          body: {
-            snapshot: { paused: true, pauseReason: "waiting on the release", activeAttemptId: null, entries: [] },
-            why: [],
-          },
-        }),
-        observation({ section: "app", status: 403, body: {} }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    const said = report.lines.join("\n");
-    expect(said).toContain("paused");
-    expect(said).toContain("waiting on the release");
-  });
-
-  it("names each entry and what is holding it", () => {
-    const report = reportDoctor(
-      [
-        installed,
-        observation({
-          section: "queue",
-          body: {
-            snapshot: {
-              paused: false,
-              pauseReason: null,
-              activeAttemptId: null,
-              entries: [{ pullRequestNumber: 12, state: "Ready" }],
-            },
-            why: [{ pullRequestNumber: 12, state: "Ready", blockedBy: "REVIEW_REQUIRED" }],
-          },
-        }),
-        observation({ section: "app", status: 403, body: {} }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.lines.join("\n")).toContain("#12");
-    expect(report.lines.join("\n")).toContain("Ask for a review");
-  });
-
-  it("counts what is still in the queue, not what the document remembers", () => {
-    // The queue keeps merged and cancelled entries, and counting them reported
-    // twenty-two pull requests waiting on a queue with one live entry.
-    const report = reportDoctor(
-      [
-        installed,
-        observation({
-          section: "queue",
-          body: {
-            snapshot: {
-              paused: false,
-              pauseReason: null,
-              activeAttemptId: null,
-              entries: [
-                { pullRequestNumber: 1, state: "Merged" },
-                { pullRequestNumber: 2, state: "Cancelled" },
-                { pullRequestNumber: 3, state: "Ready" },
-              ],
-            },
-            why: [{ pullRequestNumber: 3, state: "Ready", blockedBy: "another entry holds the lane" }],
-          },
-        }),
-        observation({ section: "app", status: 403, body: {} }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    const said = report.lines.join("\n");
-    expect(said).toContain("1 waiting");
-    expect(said).toContain("#3");
-    expect(said).not.toContain("#1");
-    expect(said).not.toContain("#2");
-  });
-
-  it("fails when thwip is not installed, because nothing below it can be read", () => {
-    const report = reportDoctor([observation({ section: "repository", status: 404, body: {} })], {
-      repo: REPO,
-      ref: REF,
-      allowUnread: true,
+describe("queue readiness", () => {
+  it("passes only the current enabled, enforced, fully set-up project incarnation", () => {
+    const result = report([installed, ready, healthyApp]);
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.sections.every((section) => section.status === "pass")).toBe(true);
+    expect(result.sections.find((section) => section.section === "queue")?.facts).toMatchObject({
+      projectId: "project_current",
+      projectEnabled: true,
+      queueEnabled: true,
+      activationState: "enforced",
+      setupComplete: true,
     });
-    expect(report.exitCode).toBe(EXIT.setupInvalid);
-    expect(report.lines.join("\n")).toContain(REPO);
   });
 
-  it("fails when the App cannot publish the check the branch requires", () => {
-    const report = reportDoctor(
-      [
-        installed,
-        running,
-        observation({
-          section: "app",
-          body: { missingPermissions: { checks: "write" }, canPublishMergeCheck: false, rulesets: [] },
-        }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.exitCode).toBe(EXIT.setupInvalid);
-    expect(report.lines.join("\n")).toContain("checks");
+  it("fails a disabled project even if an old queue-shaped response says enabled", () => {
+    const disabled = observation({
+      ...ready,
+      section: "queue",
+      body: { ...ready.body, projectId: "project_fresh", projectEnabled: false },
+    });
+    const fresh = observation({
+      section: "repository",
+      body: { ...installed.body, projectId: "project_fresh" },
+    });
+    const result = report([fresh, disabled, healthyApp]);
+    expect(result.sections.find((section) => section.section === "queue")?.reasonCode).toBe("PROJECT_DISABLED");
+    expect(result.exitCode).toBe(EXIT.setupInvalid);
   });
 
-  /**
-   * An installation from before `issues: write` existed goes on merging and
-   * stops writing the status comment. Reading a scope name alone, an operator
-   * has to guess which of those it lost.
-   */
-  it("says what is lost when the App cannot write the status comment", () => {
-    const report = reportDoctor(
-      [
-        installed,
-        running,
-        observation({
-          section: "app",
-          body: {
-            missingPermissions: { pull_requests: "write" },
-            canPublishMergeCheck: true,
-            canComment: false,
-            rulesets: [],
-          },
-        }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.lines.join("\n")).toContain("status comment");
-    expect(report.lines.join("\n")).not.toContain("nothing will ever merge");
+  it.each([
+    [{ queueConfigured: false, queueEnabled: false, activationState: null, setupComplete: false }, "missing"],
+    [{ queueEnabled: false }, "disabled"],
+    [{ activationState: "observe" }, "not enforced"],
+    [{ setupComplete: false }, "incomplete"],
+  ])("fails a %s queue", (change) => {
+    const inactive = observation({ section: "queue", body: { ...ready.body, ...change } });
+    const result = report([installed, inactive, healthyApp]);
+    expect(result.sections.find((section) => section.section === "queue")?.reasonCode).toBe("QUEUE_NOT_CONFIGURED");
+    expect(result.exitCode).not.toBe(EXIT.ok);
   });
 
-  it("fails on a section it could not read, and passes only when asked to allow that", () => {
-    const refused: DoctorObservation[] = [installed, running, observation({ section: "app", status: 403, body: {} })];
-    expect(reportDoctor(refused, { repo: REPO, ref: REF, allowUnread: false }).exitCode).toBe(EXIT.permission);
-    expect(reportDoctor(refused, { repo: REPO, ref: REF, allowUnread: true }).exitCode).toBe(EXIT.ok);
+  it("fails a project with no active remote policy", () => {
+    const noPolicy = observation({ section: "queue", body: { ...ready.body, activePolicyDigest: null } });
+    const result = report([installed, noPolicy, healthyApp]);
+    expect(result.sections.find((section) => section.section === "queue")?.reasonCode).toBe("POLICY_CHANGED");
+    expect(result.exitCode).not.toBe(EXIT.ok);
   });
 
-  it("reports a refused queue as unread rather than as a queue with nothing wrong", () => {
-    const report = reportDoctor(
-      [installed, observation({ section: "queue", status: 403, body: {} }), observation({ section: "app", status: 403, body: {} })],
-      { repo: REPO, ref: REF, allowUnread: false },
-    );
-    expect(report.exitCode).toBe(EXIT.permission);
-    expect(report.unread).toEqual(["queue", "app"]);
+  it("does not pass a malformed 200 response", () => {
+    const result = report([installed, observation({ section: "queue", body: {} }), healthyApp]);
+    expect(result.sections.find((section) => section.section === "queue")).toMatchObject({
+      status: "unread",
+      reasonCode: "INVARIANT_FAILURE",
+    });
+    expect(result.exitCode).not.toBe(EXIT.ok);
   });
 
-  it("carries a status for every section, so nothing unread is filed as a pass", () => {
-    const report = reportDoctor(
-      [installed, running, observation({ section: "app", status: 403, body: {} })],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.sections.map((s) => [s.section, s.status])).toEqual([
-      ["repository", "pass"],
-      ["queue", "pass"],
-      ["app", "unread"],
+  it("does not mix another incarnation, repository, or branch into a healthy report", () => {
+    for (const change of [
+      { projectId: "project_old" },
+      { repositoryId: "999" },
+      { baseRef: "refs/heads/release" },
+    ]) {
+      const result = report([installed, observation({ section: "queue", body: { ...ready.body, ...change } }), healthyApp]);
+      expect(result.sections.find((section) => section.section === "queue")?.reasonCode).toBe("INVARIANT_FAILURE");
+      expect(result.exitCode).not.toBe(EXIT.ok);
+    }
+  });
+});
+
+describe("App and ruleset readiness", () => {
+  it("fails missing App permissions and names the lost capability", () => {
+    const app = observation({
+      section: "app",
+      body: {
+        ...healthyApp.body,
+        missingPermissions: { checks: "write" },
+        canPublishMergeCheck: false,
+      },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("APP_PERMISSION_DRIFT");
+    expect(result.lines.join("\n")).toContain("nothing will ever merge");
+  });
+
+  it("fails a missing managed ruleset", () => {
+    const app = observation({
+      section: "app",
+      body: {
+        ...healthyApp.body,
+        rulesetHealth: {
+          ...((healthyApp.body?.["rulesetHealth"] ?? {}) as Record<string, unknown>),
+          healthy: false,
+          missing: ["Thwip Queue Ownership"],
+        },
+      },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("RULESET_DRIFT");
+    expect(result.lines.join("\n")).toContain("missing Thwip Queue Ownership");
+  });
+
+  it.each(["wrong shape", "disabled enforcement"])("fails a ruleset with %s", () => {
+    const app = observation({
+      section: "app",
+      body: {
+        ...healthyApp.body,
+        rulesetHealth: {
+          ...((healthyApp.body?.["rulesetHealth"] ?? {}) as Record<string, unknown>),
+          healthy: false,
+          drifted: ["Thwip Repository Policy"],
+        },
+      },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("RULESET_DRIFT");
+    expect(result.exitCode).toBe(EXIT.setupInvalid);
+  });
+
+  it("does not pass rulesets whose bypass actors GitHub hid", () => {
+    const app = observation({
+      section: "app",
+      body: {
+        ...healthyApp.body,
+        rulesetHealth: {
+          ...((healthyApp.body?.["rulesetHealth"] ?? {}) as Record<string, unknown>),
+          healthy: false,
+          bypassActorsKnown: false,
+        },
+      },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")).toMatchObject({
+      status: "unread",
+      reasonCode: "OWNER_UNAUTHORIZED",
+    });
+    expect(result.exitCode).toBe(EXIT.permission);
+    expect(report([installed, ready, app], true).exitCode).toBe(EXIT.ok);
+  });
+
+  it.each([
+    [{ missing: [".github/workflows/thwip-required.yml"] }, "missing .github/workflows/thwip-required.yml"],
+    [{ drifted: [".github/workflows/thwip-queue-verify.yml"] }, "drifted .github/workflows/thwip-queue-verify.yml"],
+    [{ actionAccessible: false }, "pinned verifier action is inaccessible"],
+  ])("fails live workflow readiness: %s", (change, message) => {
+    const app = observation({
+      section: "app",
+      body: {
+        ...healthyApp.body,
+        workflowHealth: {
+          ...((healthyApp.body?.["workflowHealth"] ?? {}) as Record<string, unknown>),
+          healthy: false,
+          ...change,
+        },
+      },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("NO_PINNED_VERIFIER");
+    expect(result.lines.join("\n")).toContain(message);
+    expect(result.exitCode).not.toBe(EXIT.ok);
+  });
+
+  it("fails when webhook subscriptions do not reach every handler", () => {
+    const app = observation({
+      section: "app",
+      body: { ...healthyApp.body, receivesEveryHandledEvent: false },
+    });
+    const result = report([installed, ready, app]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("APP_PERMISSION_DRIFT");
+  });
+
+  it("does not pass a 200 body that omits the computed ruleset health", () => {
+    const result = report([
+      installed,
+      ready,
+      observation({ section: "app", body: { missingPermissions: {}, canPublishMergeCheck: true } }),
     ]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("INVARIANT_FAILURE");
+    expect(result.exitCode).not.toBe(EXIT.ok);
+  });
+});
+
+describe("HTTP and unread branches", () => {
+  it("fails when thwip is not installed", () => {
+    const result = report([observation({ section: "repository", status: 404, body: {} })]);
+    expect(result.sections).toHaveLength(1);
+    expect(result.sections[0]?.reasonCode).toBe("APP_UNINSTALLED");
   });
 
-  it("marks a section fail rather than unread when the answer was read and was bad", () => {
-    const report = reportDoctor(
-      [
-        installed,
-        running,
-        observation({
-          section: "app",
-          body: { missingPermissions: { checks: "write" }, canPublishMergeCheck: false, rulesets: [] },
-        }),
-      ],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.sections.find((s) => s.section === "app")?.status).toBe("fail");
+  it("does not turn omitted probes after a successful repository lookup into passes", () => {
+    const result = report([installed]);
+    expect(result.unread).toEqual(["queue", "app"]);
+    expect(result.exitCode).toBe(EXIT.unavailable);
   });
 
-  it("does not let allow-unread forgive a control plane that never answered", () => {
-    // Not being an admin is the caller's standing, which is what the opt-out is
-    // for. A service that is down is not, and answering zero there would be the
-    // same lie one layer along.
-    const report = reportDoctor(
-      [installed, observation({ section: "queue", status: 0, body: null }), observation({ section: "app", status: 0, body: null })],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.exitCode).toBe(EXIT.unavailable);
+  it("classifies a GitHub API 502 as unavailable", () => {
+    const result = report([installed, ready, observation({ section: "app", status: 502, body: { code: "GITHUB_RULESETS_UNAVAILABLE" } })]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("SERVICE_UNAVAILABLE");
+    expect(result.exitCode).toBe(EXIT.unavailable);
   });
 
-  it("does not let allow-unread forgive an unauthenticated session", () => {
-    const report = reportDoctor(
-      [installed, observation({ section: "queue", status: 401, body: {} }), observation({ section: "app", status: 401, body: {} })],
-      { repo: REPO, ref: REF, allowUnread: true },
-    );
-    expect(report.exitCode).toBe(EXIT.authRequired);
+  it("classifies a missing installation after repository resolution as a setup failure", () => {
+    const result = report([installed, ready, observation({ section: "app", status: 404, body: {} })]);
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("APP_UNINSTALLED");
+    expect(result.exitCode).toBe(EXIT.setupInvalid);
   });
 
-  it("says the control plane was unreachable rather than reporting a healthy queue", () => {
-    const report = reportDoctor([observation({ section: "repository", status: 0, body: null })], {
-      repo: REPO,
-      ref: REF,
-      allowUnread: true,
-    });
-    expect(report.exitCode).toBe(EXIT.unavailable);
-  });
+  it("allows only repository-admin standing to be waived", () => {
+    const refused = [installed, ready, observation({ section: "app", status: 403, body: {} })];
+    expect(report(refused).exitCode).toBe(EXIT.permission);
+    expect(report(refused, true).exitCode).toBe(EXIT.ok);
 
-  it("tells an unauthenticated caller to sign in rather than guessing at permissions", () => {
-    const report = reportDoctor([observation({ section: "repository", status: 401, body: {} })], {
-      repo: REPO,
-      ref: REF,
-      allowUnread: true,
-    });
-    expect(report.exitCode).toBe(EXIT.authRequired);
-    expect(report.lines.join("\n")).toContain("thwip login");
+    const unavailable = [installed, observation({ section: "queue", status: 0, body: null }), healthyApp];
+    expect(report(unavailable, true).exitCode).toBe(EXIT.unavailable);
+
+    const signedOut = [installed, observation({ section: "queue", status: 401, body: {} }), healthyApp];
+    expect(report(signedOut, true).exitCode).toBe(EXIT.authRequired);
   });
 });
