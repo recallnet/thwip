@@ -1,5 +1,10 @@
 import { GithubApiError } from "../github-error.js";
 import { pinCandidate, type CommitFacts, type PullRequestFacts } from "./candidate.js";
+import {
+  changedPathsBetweenTrees,
+  type CandidatePathChanges,
+  type GitTreeEntry,
+} from "./exclusive-paths.js";
 
 /**
  * The shared GitHub HTTP boundary for queue reads and bootstrap writes.
@@ -39,6 +44,116 @@ export interface RepoRef {
   readonly repo: string;
   readonly repositoryId: string;
   readonly baseRef: string;
+}
+
+/**
+ * A small isolate-local cache for immutable Git trees. Candidate verification
+ * is polled, so without this one waiting entry would download both unchanged
+ * trees on every poll. Failed, incomplete, or oversized reads are never
+ * cached. The path budget bounds retained strings even when GitHub returns a
+ * very large complete tree.
+ */
+export class CandidatePathCache {
+  private readonly entries = new Map<
+    string,
+    { readonly pending: Promise<CandidatePathChanges>; weight: number }
+  >();
+  private totalWeight = 0;
+
+  constructor(
+    private readonly maximumEntries = 32,
+    private readonly maximumPathBytes = 1_048_576,
+  ) {}
+
+  private remove(key: string): void {
+    const removed = this.entries.get(key);
+    if (removed === undefined) return;
+    this.entries.delete(key);
+    this.totalWeight -= removed.weight;
+  }
+
+  private trim(): void {
+    while (this.entries.size > this.maximumEntries || this.totalWeight > this.maximumPathBytes) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) return;
+      this.remove(oldest);
+    }
+  }
+
+  async read(key: string, load: () => Promise<CandidatePathChanges>): Promise<CandidatePathChanges> {
+    const existing = this.entries.get(key);
+    if (existing !== undefined) {
+      this.entries.delete(key);
+      this.entries.set(key, existing);
+      return existing.pending;
+    }
+    const pending = load();
+    const record = { pending, weight: 0 };
+    this.entries.set(key, record);
+    this.trim();
+    try {
+      const result = await pending;
+      if (this.entries.get(key) !== record) return result;
+      if (result.status !== "exact") {
+        this.remove(key);
+        return result;
+      }
+      // Three bytes per UTF-16 code unit is a conservative UTF-8 bound. The
+      // fixed allowance covers the array slot and string/object bookkeeping.
+      record.weight = result.paths.reduce((total, path) => total + path.length * 3 + 64, 64);
+      this.totalWeight += record.weight;
+      this.trim();
+      return result;
+    } catch (error) {
+      if (this.entries.get(key) === record) this.remove(key);
+      throw error;
+    }
+  }
+}
+
+/**
+ * Read complete recursive trees instead of the compare endpoint's bounded file
+ * list. GitHub explicitly marks an oversized recursive tree as truncated; that
+ * is unknown, not a partial answer, so the policy gate fails closed.
+ */
+export async function changedCandidatePaths(
+  http: GitHubHttp,
+  repo: Pick<RepoRef, "owner" | "repo">,
+  input: { readonly baseTreeOid: string; readonly candidateTreeOid: string },
+  cache?: CandidatePathCache,
+): Promise<CandidatePathChanges> {
+  const key = `${repo.owner}/${repo.repo}:${input.baseTreeOid}:${input.candidateTreeOid}`;
+  const load = async (): Promise<CandidatePathChanges> => {
+    const read = (treeOid: string) =>
+      http.json<unknown>(
+        `/repos/${repo.owner}/${repo.repo}/git/trees/${encodeURIComponent(treeOid)}?recursive=1`,
+      );
+    const [base, candidate] = await Promise.all([read(input.baseTreeOid), read(input.candidateTreeOid)]);
+    const completeTree = (response: unknown): readonly GitTreeEntry[] | null => {
+      if (
+        typeof response !== "object" ||
+        response === null ||
+        Array.isArray(response) ||
+        !("truncated" in response) ||
+        response.truncated !== false ||
+        !("tree" in response) ||
+        !Array.isArray(response.tree)
+      ) {
+        return null;
+      }
+      return response.tree as GitTreeEntry[];
+    };
+    const baseTree = completeTree(base);
+    const candidateTree = completeTree(candidate);
+    if (baseTree === null || candidateTree === null) {
+      return {
+        status: "unreadable",
+        detail: "GitHub did not confirm a complete recursive repository tree",
+      };
+    }
+    return changedPathsBetweenTrees(baseTree, candidateTree);
+  };
+  return cache === undefined ? load() : cache.read(key, load);
 }
 
 interface PullResponse {

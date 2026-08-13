@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { githubHttp, resolveCandidate, type RepoRef } from "./github-port.js";
+import {
+  CandidatePathCache,
+  changedCandidatePaths,
+  githubHttp,
+  resolveCandidate,
+  type RepoRef,
+} from "./github-port.js";
 
 const REPO: RepoRef = {
   owner: "recallnet",
@@ -67,6 +73,122 @@ describe("githubHttp.json", () => {
       status: 404,
       path: "/x",
     });
+  });
+});
+
+describe("changedCandidatePaths", () => {
+  const BASE_TREE = "6".repeat(40);
+  const CANDIDATE_TREE = "7".repeat(40);
+  const path = (tree: string) => `/repos/recallnet/thwip/git/trees/${tree}?recursive=1`;
+  const entry = (file: string, sha: string) => ({ path: file, mode: "100644", type: "blob", sha });
+
+  it("reads the two complete trees and compares their combined state", async () => {
+    const { impl, calls } = fakeFetch({
+      [path(BASE_TREE)]: () => json({ truncated: false, tree: [entry("migrations/0032.sql", "a".repeat(40))] }),
+      [path(CANDIDATE_TREE)]: () =>
+        json({
+          truncated: false,
+          tree: [
+            entry("migrations/0032.sql", "a".repeat(40)),
+            entry("migrations/0033.sql", "b".repeat(40)),
+          ],
+        }),
+    });
+    await expect(
+      changedCandidatePaths(githubHttp("t", impl), REPO, {
+        baseTreeOid: BASE_TREE,
+        candidateTreeOid: CANDIDATE_TREE,
+      }),
+    ).resolves.toEqual({ status: "exact", paths: ["migrations/0033.sql"] });
+    expect(calls.map((call) => call.path).sort()).toEqual([path(BASE_TREE), path(CANDIDATE_TREE)].sort());
+  });
+
+  it("fails closed instead of trusting a truncated large tree", async () => {
+    const { impl } = fakeFetch({
+      [path(BASE_TREE)]: () => json({ truncated: false, tree: [] }),
+      [path(CANDIDATE_TREE)]: () => json({ truncated: true, tree: [] }),
+    });
+    await expect(
+      changedCandidatePaths(githubHttp("t", impl), REPO, {
+        baseTreeOid: BASE_TREE,
+        candidateTreeOid: CANDIDATE_TREE,
+      }),
+    ).resolves.toMatchObject({ status: "unreadable", detail: expect.stringContaining("complete") });
+  });
+
+  it("fails closed unless GitHub explicitly marks both recursive trees complete", async () => {
+    const { impl } = fakeFetch({
+      [path(BASE_TREE)]: () => json({ tree: [] }),
+      [path(CANDIDATE_TREE)]: () => json({ truncated: false, tree: [] }),
+    });
+    await expect(
+      changedCandidatePaths(githubHttp("t", impl), REPO, {
+        baseTreeOid: BASE_TREE,
+        candidateTreeOid: CANDIDATE_TREE,
+      }),
+    ).resolves.toMatchObject({ status: "unreadable", detail: expect.stringContaining("complete") });
+  });
+
+  it("caches an exact immutable pair while a candidate verdict is polled", async () => {
+    const { impl, calls } = fakeFetch({
+      [path(BASE_TREE)]: () => json({ truncated: false, tree: [] }),
+      [path(CANDIDATE_TREE)]: () => json({ truncated: false, tree: [entry("migrations/0033.sql", "b".repeat(40))] }),
+    });
+    const cache = new CandidatePathCache();
+    for (let poll = 0; poll < 3; poll += 1) {
+      await changedCandidatePaths(
+        githubHttp("t", impl),
+        REPO,
+        { baseTreeOid: BASE_TREE, candidateTreeOid: CANDIDATE_TREE },
+        cache,
+      );
+    }
+    expect(calls.filter((call) => call.path.includes("/git/trees/"))).toHaveLength(2);
+  });
+
+  it("does not cache a partial answer, so a later complete tree can recover", async () => {
+    let candidateReads = 0;
+    const { impl } = fakeFetch({
+      [path(BASE_TREE)]: () => json({ truncated: false, tree: [] }),
+      [path(CANDIDATE_TREE)]: () => {
+        candidateReads += 1;
+        return json(
+          candidateReads === 1
+            ? { truncated: true, tree: [] }
+            : { truncated: false, tree: [entry("migrations/0033.sql", "b".repeat(40))] },
+        );
+      },
+    });
+    const cache = new CandidatePathCache();
+    await expect(
+      changedCandidatePaths(
+        githubHttp("t", impl),
+        REPO,
+        { baseTreeOid: BASE_TREE, candidateTreeOid: CANDIDATE_TREE },
+        cache,
+      ),
+    ).resolves.toMatchObject({ status: "unreadable" });
+    await expect(
+      changedCandidatePaths(
+        githubHttp("t", impl),
+        REPO,
+        { baseTreeOid: BASE_TREE, candidateTreeOid: CANDIDATE_TREE },
+        cache,
+      ),
+    ).resolves.toEqual({ status: "exact", paths: ["migrations/0033.sql"] });
+  });
+
+  it("does not retain an exact result larger than its path-memory budget", async () => {
+    const cache = new CandidatePathCache(8, 100);
+    let loads = 0;
+    const read = () =>
+      cache.read("large", async () => {
+        loads += 1;
+        return { status: "exact", paths: ["migrations/" + "x".repeat(100)] };
+      });
+    await read();
+    await read();
+    expect(loads).toBe(2);
   });
 });
 
