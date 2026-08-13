@@ -332,6 +332,7 @@
 .mq-row--upstream .mq-row__body {
   border-left: 1px solid var(--rule);
   padding-left: 36px;
+  padding-bottom: 0;
 }
 .mq-row--upstream .mq-row__body::after { left: -4px; }
 
@@ -510,7 +511,7 @@
   align-items: baseline;
   gap: 6px 16px;
   margin-top: 22px;
-  padding-top: 15px;
+  padding: 15px 0;
   border-top: 2px solid var(--ink);
   font-family: var(--mono);
 }
@@ -630,6 +631,7 @@
   .mq-row--open .mq-row__body,
   .mq-row--upstream .mq-row__body { padding: 12px 0 40px; border-left: 0; }
   .mq-row--open .mq-row__body { padding-top: 8px; }
+  .mq-row--upstream .mq-row__body { padding-bottom: 0; }
   .mq-row--open .mq-row__body::before,
   .mq-row--open .mq-row__body::after,
   .mq-row--upstream .mq-row__body::after { content: none; }
