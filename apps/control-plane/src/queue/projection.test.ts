@@ -1,7 +1,15 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrationStatements } from "../../test/d1.js";
-import { projectQueueState, readProjectedQueue, type D1Like, type ProjectionMessage } from "./projection.js";
+import {
+  projectQueueState,
+  projectTerminalEntryHistory,
+  readProjectedQueue,
+  terminalEntryHistoryFromRecentEvents,
+  trackedTerminalEntries,
+  type D1Like,
+  type ProjectionMessage,
+} from "./projection.js";
 
 /**
  * The projection is fed by an at-least-once queue with no ordering guarantee, so
@@ -241,6 +249,117 @@ describe("projectQueueState", () => {
     expect(await projectQueueState(db, message())).toEqual({ applied: false, reason: "PROJECT_REMOVED", seen: 0 });
     expect((await rows(db, "queue_entries_index")).results).toEqual([]);
     expect((await rows(db, "queue_projection_marks")).results).toEqual([]);
+  });
+});
+
+describe("compacted terminal history", () => {
+  it("stores a final row below the live generation without putting it back in the queue", async () => {
+    const db = d1();
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await projectTerminalEntryHistory(db, message().repositoryId, message().baseRef, [
+      { ...readyEntry("Cancelled"), generation: 5 },
+    ]);
+
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({ entry_id: "e1", state: "Cancelled", generation: 5 }),
+    ]);
+    expect((await readProjectedQueue(db, message().repositoryId, message().baseRef))?.["entries"]).toEqual([]);
+  });
+
+  it("never lets old terminal history overwrite a reopened admission", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        generation: 7,
+        entries: [{ ...readyEntry("Ready"), fairnessOrdinal: "2" }],
+      }),
+    );
+    await projectTerminalEntryHistory(db, message().repositoryId, message().baseRef, [
+      { ...readyEntry("Cancelled"), fairnessOrdinal: "1", generation: 6 },
+    ]);
+
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({ entry_id: "e1", state: "Ready", fairness_ordinal: "2", generation: 7 }),
+    ]);
+  });
+
+  it("does not retire an old terminal comment when the same pull request is currently admitted", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        generation: 8,
+        entries: [{ ...readyEntry("Ready"), entryId: "reopened", fairnessOrdinal: "2" }],
+      }),
+    );
+    await projectTerminalEntryHistory(db, message().repositoryId, message().baseRef, [
+      { ...readyEntry("Cancelled"), entryId: "old-admission", fairnessOrdinal: "1", generation: 7 },
+    ]);
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'old', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+
+    expect(await trackedTerminalEntries(db, message().repositoryId, message().baseRef)).toEqual([]);
+  });
+
+  it("recovers more than 98 recent endings without exceeding D1's 100-bind limit", async () => {
+    const inner = d1();
+    let largestBind = 0;
+    const bounded: D1Like = {
+      prepare(query: string) {
+        const prepared = inner.prepare(query);
+        return {
+          bind(...values: unknown[]) {
+            largestBind = Math.max(largestBind, values.length);
+            if (values.length > 100) throw new Error(`D1 bind limit exceeded: ${values.length}`);
+            return prepared.bind(...values);
+          },
+        };
+      },
+      batch: (statements) => inner.batch(statements),
+    } as D1Like;
+    const entries = Array.from({ length: 150 }, (_, index) => ({
+      entryId: `e${index + 1}`,
+      pullRequestNumber: 1_000 + index,
+      sponsorPrincipalId: "alice",
+      state: "Blocked",
+      primaryReason: "REVIEW_REQUIRED",
+      fairnessOrdinal: String(index + 1),
+      schedulerEligible: false,
+      cooldownUntil: null,
+      lastAttemptId: null,
+      headSha: (index + 1).toString(16).padStart(40, "0"),
+    }));
+    await projectQueueState(bounded, message({ generation: 5, entries }));
+    await projectQueueState(bounded, message({ generation: 6, entries: [] }));
+    for (const entry of entries) {
+      await bounded
+        .prepare(
+          "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, ?, ?, 'blocked', '2026-08-12T12:00:00Z')",
+        )
+        .bind(message().repositoryId, message().baseRef, entry.pullRequestNumber, entry.pullRequestNumber)
+        .run();
+    }
+
+    const recovered = await terminalEntryHistoryFromRecentEvents(
+      bounded,
+      message().repositoryId,
+      message().baseRef,
+      [],
+      entries.map((entry, index) => ({
+        sequence: index + 1,
+        type: "EntryCancelled",
+        body: { entryId: entry.entryId },
+      })),
+    );
+
+    expect(recovered).toHaveLength(150);
+    expect(recovered.every((entry) => entry.state === "Cancelled")).toBe(true);
+    expect(largestBind).toBeLessThanOrEqual(100);
   });
 });
 

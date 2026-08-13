@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1, type TestD1 } from "../../test/d1.js";
+import type { QueueSnapshot } from "./queue-operations.js";
+import { projectQueueState, projectTerminalEntryHistory } from "./projection.js";
 import { COMMENT_MARKER, type CommentView } from "./status-comment.js";
-import { writeStatusComment, type CommentApi, type CommentWriteOutcome } from "./status-comment-write.js";
+import {
+  writeStatusComment,
+  writeStatusCommentsForSnapshot,
+  type CommentApi,
+  type CommentWriteOutcome,
+} from "./status-comment-write.js";
 
 /**
  * The half of the feature that touches GitHub.
@@ -77,6 +84,27 @@ function github(existing: Array<{ id: number; body: string }> = []) {
 
 const WHERE = { repositoryId: REPO, baseRef: REF };
 const NOW = "2026-08-04T21:14:02.000Z";
+
+function emptySnapshot(over: Partial<QueueSnapshot> = {}): QueueSnapshot {
+  return {
+    generation: 2,
+    attemptRevision: 0,
+    queueEpoch: 0,
+    turnSequence: 0,
+    paused: false,
+    pauseReason: null,
+    rebaselineRequired: false,
+    baseSha: null,
+    activeAttemptId: null,
+    activeEntryId: null,
+    activeCandidate: null,
+    activeDecisionDigest: null,
+    chainHead: null,
+    transitions: [],
+    entries: [],
+    ...over,
+  };
+}
 
 describe("one comment per pull request", () => {
   it("does not touch GitHub after the repository removal marker lands", async () => {
@@ -197,6 +225,141 @@ describe("a comment that cannot be written", () => {
 
     expect(await writeStatusComment(t.db, refusing, WHERE, view(), NOW)).toBe("forbidden");
     expect(logged.mock.calls.flat().join(" ")).toContain("issues: write");
+  });
+});
+
+describe("comments for entries compacted out of authority", () => {
+  async function seedTerminal(
+    t: TestD1,
+    state: "Merged" | "Cancelled",
+  ): Promise<QueueSnapshot> {
+    const transition = {
+      transitionSequence: 42,
+      kind: "verified-merge",
+      digest: `sha256:${"c".repeat(64)}`,
+      priorDigest: null,
+      baseSha: "b".repeat(40),
+      attemptId: "att-184",
+      witnessCount: 1,
+      observedAt: "2026-08-04T21:13:00.000Z",
+    };
+    await projectQueueState(t.db, {
+      repositoryId: REPO,
+      baseRef: REF,
+      queueEpoch: 0,
+      generation: 2,
+      activeAttemptId: null,
+      paused: false,
+      pauseReason: null,
+      rebaselineRequired: false,
+      baseSha: null,
+      entries: [],
+      transitions: state === "Merged" ? [transition] : [],
+    });
+    await projectTerminalEntryHistory(t.db, REPO, REF, [
+      {
+        generation: 1,
+        entryId: "e1",
+        pullRequestNumber: 184,
+        sponsorPrincipalId: "alice",
+        state,
+        primaryReason: state === "Cancelled" ? "PR_CLOSED" : null,
+        fairnessOrdinal: "1",
+        schedulerEligible: false,
+        cooldownUntil: null,
+        lastAttemptId: state === "Merged" ? "att-184" : null,
+        headSha: "a".repeat(40),
+      },
+    ]);
+    return emptySnapshot({ transitions: state === "Merged" ? [transition] : [] });
+  }
+
+  it("retries a merged comment from durable history after GitHub fails and the next snapshot is empty", async () => {
+    const t = db();
+    const gh = github();
+    await writeStatusComment(t.db, gh.api, WHERE, view({ state: "blocked", reason: "REVIEW_REQUIRED" }), NOW);
+    const snapshot = await seedTerminal(t, "Merged");
+    gh.calls.length = 0;
+    let fail = true;
+    const flaky: CommentApi = {
+      ...gh.api,
+      update: async (commentId, body) => {
+        if (fail) throw new Error("GitHub unavailable");
+        return gh.api.update(commentId, body);
+      },
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, flaky, WHERE, snapshot, { observing: false, now: NOW }),
+    ).toEqual(["failed"]);
+    expect(gh.comments[0]!.body).toContain("blocked");
+    fail = false;
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, flaky, WHERE, emptySnapshot(), {
+        observing: false,
+        now: "2026-08-04T21:19:02.000Z",
+      }),
+    ).toEqual(["updated"]);
+    expect(gh.comments[0]!.body).toContain("merged as record 42");
+
+    gh.calls.length = 0;
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, flaky, WHERE, emptySnapshot(), {
+        observing: false,
+        now: "2026-08-04T21:24:02.000Z",
+      }),
+    ).toEqual([]);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("retires a closed-unmerged comment as cancelled and repeats without a GitHub call", async () => {
+    const t = db();
+    const gh = github();
+    await writeStatusComment(t.db, gh.api, WHERE, view({ state: "blocked", reason: "REVIEW_REQUIRED" }), NOW);
+    const snapshot = await seedTerminal(t, "Cancelled");
+    gh.calls.length = 0;
+
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, gh.api, WHERE, snapshot, { observing: false, now: NOW }),
+    ).toEqual(["updated"]);
+    expect(gh.comments[0]!.body).toContain("cancelled · this entry left the queue");
+    gh.calls.length = 0;
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, gh.api, WHERE, emptySnapshot(), { observing: false, now: NOW }),
+    ).toEqual([]);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("uses the live reopened admission when its D1 projection still shows the older ending", async () => {
+    const t = db();
+    const gh = github();
+    await writeStatusComment(t.db, gh.api, WHERE, view({ state: "blocked", reason: "REVIEW_REQUIRED" }), NOW);
+    await seedTerminal(t, "Cancelled");
+    gh.calls.length = 0;
+    const reopened = emptySnapshot({
+      generation: 3,
+      entries: [
+        {
+          entryId: "reopened",
+          pullRequestNumber: 184,
+          sponsorPrincipalId: "alice",
+          state: "Ready",
+          primaryReason: null,
+          schedulerEligible: true,
+          fairnessOrdinal: "2",
+          cooldownUntil: null,
+          lastAttemptId: null,
+          headSha: "d".repeat(40),
+        },
+      ],
+    });
+
+    expect(
+      await writeStatusCommentsForSnapshot(t.db, gh.api, WHERE, reopened, { observing: false, now: NOW }),
+    ).toEqual(["updated"]);
+    expect(gh.comments[0]!.body).toContain("position 1 of 1");
+    expect(gh.comments[0]!.body).not.toContain("cancelled");
   });
 });
 
