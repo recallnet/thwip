@@ -59,7 +59,14 @@ import { atLeast, isOrgAdmin, repositoryAccess } from "./queue/repository-access
 import { bootstrapRouteResponse, bootstrapStatusResponse } from "./queue/bootstrap-route.js";
 import { managedRulesetHealth, type StoredDoctorRuleset } from "./queue/doctor-rulesets.js";
 import { managedWorkflowHealth } from "./queue/doctor-workflows.js";
-import { QUEUE_ACTION_REF, setupPullRequestFiles } from "./queue/bootstrap-workflows.js";
+import { QUEUE_ACTION_REF, setupPullRequestFiles, verifierWorkflowFile } from "./queue/bootstrap-workflows.js";
+import { VERIFIER_WORKFLOW_PATH } from "./queue/bootstrap.js";
+import {
+  claimCandidateDispatchV2,
+  claimCandidateDispatchV3,
+  legacyVerifierProtocol,
+} from "./queue/candidate-store.js";
+import { exactDefaultBranchRef } from "./queue/verifier-identity.js";
 import { OWNERSHIP_RULESET_NAME, POLICY_RULESET_NAME, type Ruleset } from "./queue/rulesets.js";
 import {
   deriveReadiness,
@@ -89,6 +96,8 @@ import type { QueueSnapshot } from "./queue/queue-operations.js";
 import { CandidatePathCache, changedCandidatePaths, githubHttp, resolveCandidate } from "./queue/github-port.js";
 import { integratedCandidateFrom } from "./queue/candidate.js";
 import { tickAllQueues, type TickPorts } from "./queue/scheduled-tick.js";
+import { finalizeCandidateReports } from "./queue/candidate-finalizer.js";
+import type { PendingCandidateFinalization } from "./queue/candidate-store.js";
 import {
   claimTick,
   failTick,
@@ -153,6 +162,11 @@ function randomId(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   return `${prefix}_${hex}`;
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", te.encode(value));
+  return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 async function reconcileProofsForGithubUser(env: Env, githubUserId: string): Promise<void> {
@@ -2743,7 +2757,7 @@ const queueDeps = {
   },
   async queueProject(env: Env, repositoryId: string, baseRef: string) {
     const row = await env.DB.prepare(
-      `SELECT q.activation_state, q.project_id, q.verifier_workflow_version
+      `SELECT q.activation_state, q.project_id, q.verifier_protocol
          FROM queue_projects q
          JOIN projects p ON p.id = q.project_id AND p.github_repository_id = q.github_repository_id
          JOIN organizations o ON o.id = p.organization_id
@@ -2752,12 +2766,12 @@ const queueDeps = {
           AND NOT EXISTS (SELECT 1 FROM project_release_jobs j WHERE j.github_repository_id = q.github_repository_id)`,
     )
       .bind(repositoryId, baseRef)
-      .first<{ activation_state: string; project_id: string; verifier_workflow_version: number }>();
+      .first<{ activation_state: string; project_id: string; verifier_protocol: number }>();
     if (row === null) return null;
     return {
       activationState: row.activation_state,
       projectId: row.project_id,
-      verifierWorkflowVersion: row.verifier_workflow_version === 1 ? 1 as const : 2 as const,
+      verifierProtocol: row.verifier_protocol === 3 ? 3 as const : row.verifier_protocol === 1 ? 1 as const : 2 as const,
     };
   },
   async principalFor(env: Env, repositoryId: string, githubUserId: string) {
@@ -2850,11 +2864,12 @@ const queueDeps = {
       parentShas: (commit.parents ?? []).map((p) => p.sha).filter((v): v is string => typeof v === "string"),
     };
   },
-  async pinnedVerifier(env: Env, repositoryId: string) {
+  async pinnedVerifier(env: Env, repositoryId: string, baseRef: string) {
     const row = await env.DB.prepare(
-      "SELECT verifier_json FROM queue_projects WHERE github_repository_id = ? AND enabled = 1",
+      `SELECT verifier_json FROM queue_projects
+        WHERE github_repository_id = ? AND base_ref = ? AND enabled = 1`,
     )
-      .bind(repositoryId)
+      .bind(repositoryId, baseRef)
       .first<{ verifier_json: string }>();
     return row === null ? null : (JSON.parse(row.verifier_json) as never);
   },
@@ -2864,8 +2879,8 @@ const queueDeps = {
    * Read from the policy bundle rather than from anything the caller sends, so
    * the suite list a verdict is judged against is the one the project activated.
    */
-  async activePolicy(env: Env, repositoryId: string) {
-    return readActivePolicy(env.DB as unknown as D1Like, repositoryId);
+  async activePolicy(env: Env, repositoryId: string, baseRef?: string) {
+    return readActivePolicy(env.DB as unknown as D1Like, repositoryId, baseRef);
   },
   /**
    * The App's proof check that verified this head.
@@ -3533,36 +3548,130 @@ const queueDeps = {
       baseSha: string;
       candidateSha: string;
       candidateTreeOid: string;
+      policyDigest: string;
       requiredSuites: readonly string[];
     },
   ) {
     const project = await env.DB.prepare(
-      `SELECT p.github_name, o.installation_id FROM projects p
-        JOIN organizations o ON o.id = p.organization_id
-       WHERE p.github_repository_id = ? AND p.id = ?`,
+      `SELECT p.github_name, p.default_branch, o.installation_id,
+              q.verifier_protocol, q.verifier_workflow_version
+         FROM projects p
+         JOIN organizations o ON o.id = p.organization_id
+         JOIN queue_projects q ON q.project_id = p.id
+          AND q.github_repository_id = p.github_repository_id AND q.base_ref = ?
+        WHERE p.github_repository_id = ? AND p.id = ? AND q.enabled = 1
+          AND o.status = 'active'`,
     )
-      .bind(repositoryId, payload.projectId)
-      .first<{ github_name: string; installation_id: string | null }>();
+      .bind(payload.baseRef, repositoryId, payload.projectId)
+      .first<{
+        github_name: string;
+        default_branch: string;
+        installation_id: string | null;
+        verifier_protocol: number;
+        verifier_workflow_version: number;
+      }>();
     if (project === null || project.installation_id === null) {
-      return { ok: false as const, status: 0, detail: "no installation for this repository" };
+      return { ok: false as const, status: 409, detail: "verifier protocol v3 is not active" };
     }
     const token = await installationToken(env, project.installation_id, undefined, repositoryId);
+    if (project.verifier_protocol !== 3) {
+      const claimed = await claimCandidateDispatchV2(
+        env.DB as unknown as D1Like,
+        repositoryId,
+        payload.baseRef,
+        payload.projectId,
+        payload.attemptId,
+        legacyVerifierProtocol(project.verifier_workflow_version),
+        payload.candidateTreeOid,
+        nowIso(),
+        15 * 60_000,
+      );
+      if (!claimed) return { ok: true as const };
+      if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, payload.projectId))) {
+        return { ok: false as const, status: 409, detail: "repository project was released before dispatch" };
+      }
+      const legacy = await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "thwip-control-plane",
+        },
+        body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
+      });
+      if (legacy.status === 204) return { ok: true as const };
+      return {
+        ok: false as const,
+        status: legacy.status,
+        detail: (await legacy.text().catch(() => "")).slice(0, 300),
+      };
+    }
+    const defaultBranchRef = exactDefaultBranchRef(payload.baseRef, project.default_branch);
+    if (defaultBranchRef === null) {
+      return {
+        ok: false as const,
+        status: 409,
+        detail: "the queue base is no longer the repository default branch; run setup again",
+      };
+    }
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "thwip-control-plane",
+    };
+    const ref = await fetch(
+      `https://api.github.com/repos/${project.github_name}/git/ref/heads/${encodeURIComponent(project.default_branch)}`,
+      { headers },
+    );
+    if (!ref.ok) return { ok: false as const, status: ref.status, detail: "default branch is unreadable" };
+    const workflowCommitSha = ((await ref.json()) as { object?: { sha?: string } }).object?.sha;
+    if (typeof workflowCommitSha !== "string" || !/^[0-9a-f]{40}$/.test(workflowCommitSha)) {
+      return { ok: false as const, status: 502, detail: "default branch named no commit" };
+    }
+    const file = await fetch(
+      `https://api.github.com/repos/${project.github_name}/contents/${VERIFIER_WORKFLOW_PATH}?ref=${workflowCommitSha}`,
+      { headers },
+    );
+    if (!file.ok) return { ok: false as const, status: file.status, detail: "verifier workflow is unreadable" };
+    const stored = (await file.json()) as { sha?: string; content?: string; encoding?: string };
+    if (stored.encoding !== "base64" || typeof stored.sha !== "string" || typeof stored.content !== "string") {
+      return { ok: false as const, status: 502, detail: "verifier workflow has an unsupported GitHub shape" };
+    }
+    const content = atob(stored.content.replaceAll("\n", ""));
+    const expected = verifierWorkflowFile({ endpoint: env.PUBLIC_ORIGIN, actionRef: QUEUE_ACTION_REF }).content;
+    if (content !== expected) {
+      return { ok: false as const, status: 409, detail: "verifier workflow does not match protocol v3" };
+    }
+    const dispatchNonce = randomId("verifier");
+    const claimed = await claimCandidateDispatchV3(
+      env.DB as unknown as D1Like,
+      {
+        repositoryId,
+        ...payload,
+        dispatchNonce,
+        workflowCommitSha,
+        workflowBlobSha: stored.sha,
+        workflowContentDigest: await sha256Text(content),
+      },
+      nowIso(),
+      15 * 60_000,
+    );
+    if (!claimed) return { ok: true as const };
+
+    // Last possible fence before the external event. The exact v3 claim above
+    // also checks the project incarnation; this second read closes release races
+    // during the GitHub file reads.
     if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, payload.projectId))) {
       return { ok: false as const, status: 409, detail: "repository project was released before dispatch" };
     }
-    // repository_dispatch runs the default branch's copy of the workflow. That is
-    // the whole reason the candidate verifier is dispatched rather than triggered
-    // by the pull request: a pull request can edit its own workflow file, and a
-    // verifier a contributor can edit verifies nothing.
     const res = await fetch(`https://api.github.com/repos/${project.github_name}/dispatches`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
-        "user-agent": "thwip-control-plane",
-      },
-      body: JSON.stringify({ event_type: "thwip-queue-verify", client_payload: payload }),
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        event_type: "thwip-queue-verify",
+        client_payload: { ...payload, dispatchNonce, workflowCommitSha },
+      }),
     });
     if (res.status === 204) return { ok: true as const };
     const detail = (await res.text().catch(() => "")).slice(0, 300);
@@ -3667,6 +3776,52 @@ export default {
     if (await projectLifecycleMaintenanceMode(env.DB as unknown as D1Like)) return;
     await drainProjectLifecycleBackfill(env.DB as unknown as D1Like);
     await drainGithubSyncSnapshots(env);
+    if (controller.cron === "*/5 * * * *") {
+      const finalized = await finalizeCandidateReports(
+        env as unknown as QueueRouteEnv,
+        {
+          async activeAttempt(repositoryId, baseRef) {
+            return (await loadQueueState(env.DB as unknown as D1Like, repositoryId, baseRef)).store.state()
+              .activeAttemptId;
+          },
+          async publish(
+            pending: PendingCandidateFinalization,
+            verdict: { accepted: boolean; suites: readonly { name: string; outcome: string; durationMs: number }[] },
+          ) {
+            const state = (await loadQueueState(
+              env.DB as unknown as D1Like,
+              pending.repositoryId,
+              pending.baseRef,
+            )).store.state();
+            const head = [...state.entries.values()].find(
+              (entry) => entry.pullRequestNumber === pending.pullRequestNumber,
+            )?.headSha;
+            if (head == null) return;
+            const lines = verdict.suites
+              .map((suite) => `- \`${suite.name}\`: ${suite.outcome} in ${Math.round(suite.durationMs / 100) / 10}s`)
+              .join("\n");
+            await queueDeps.publishCandidateCheck(env, pending.repositoryId, {
+              projectId: pending.projectId,
+              headSha: head,
+              accepted: verdict.accepted,
+              summary:
+                `Ran against merge tree \`${pending.candidateTreeOid}\`, not the pull request head.\n\n${lines}`,
+            });
+          },
+          async drive(repositoryId, baseRef) {
+            await driveQueue(env, queueDeps as never, queueOnQueue, {
+              repositoryId,
+              baseRef,
+            });
+          },
+        },
+      );
+      if (finalized.finalized > 0 || finalized.terminal > 0) {
+        console.log(
+          `[candidate finalizer] finalized=${finalized.finalized} terminal=${finalized.terminal} retried=${finalized.retried}`,
+        );
+      }
+    }
     let privateFeedbackRetentionError: unknown;
     if (controller.cron === "*/5 * * * *") {
       try {

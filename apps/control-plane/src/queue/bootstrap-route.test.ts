@@ -9,6 +9,7 @@ import type {
   StoredRuleset,
 } from "./bootstrap.js";
 import { POLICY_RULESET_NAME, type Ruleset } from "./rulesets.js";
+import { QUEUE_ACTION_REF, verifierWorkflowFile } from "./bootstrap-workflows.js";
 
 /**
  * The route, because the route is what was missing.
@@ -64,6 +65,10 @@ class FakeGitHub implements BootstrapGitHub {
   upgradePull: SetupPullRequestState | null = null;
   openedFiles: string[] = [];
   private nextId = 100;
+  verifierContent = verifierWorkflowFile({
+    endpoint: "https://thwip.example.test",
+    actionRef: QUEUE_ACTION_REF,
+  }).content;
 
   async baseSha(): Promise<string> {
     return "b".repeat(40);
@@ -73,14 +78,24 @@ class FakeGitHub implements BootstrapGitHub {
     return this.pull;
   }
 
-  async openSetupPullRequest(input: { files: ReadonlyArray<{ path: string }> }): Promise<SetupPullRequestState> {
+  async openSetupPullRequest(input: { files: ReadonlyArray<{ path: string; content?: string }> }): Promise<SetupPullRequestState> {
     this.openedFiles = input.files.map((file) => file.path);
+    this.verifierContent = input.files.find((file) => file.path === ".github/workflows/thwip-queue-verify.yml")?.content
+      ?? this.verifierContent;
     this.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
     return this.pull;
   }
 
   async verifierUpgradePullRequest(): Promise<SetupPullRequestState | null> {
     return this.upgradePull;
+  }
+
+  async verifierWorkflowAtBase() {
+    return { commitSha: "b".repeat(40), blobSha: "f".repeat(40), content: this.verifierContent };
+  }
+
+  async installationPermissions() {
+    return { actions: "read" };
   }
 
   async openVerifierUpgradePullRequest(input: { files: ReadonlyArray<{ path: string }> }): Promise<SetupPullRequestState> {

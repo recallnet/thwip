@@ -32,11 +32,13 @@ interface ReadinessRow {
   readonly activation_state: string | null;
   readonly bootstrap_progress_json: string | null;
   readonly verifier_workflow_version: number | null;
+  readonly verifier_protocol: number | null;
 }
 
 function setupComplete(row: ReadinessRow): boolean {
   if (row.queue_id === null || row.bootstrap_progress_json === null) return false;
   if (row.verifier_workflow_version !== 2) return false;
+  if (row.verifier_protocol !== 3) return false;
   try {
     const parsed: unknown = JSON.parse(row.bootstrap_progress_json);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
@@ -65,7 +67,8 @@ export async function readQueueDoctorReadiness(
               q.enabled AS queue_enabled,
               q.activation_state,
               q.bootstrap_progress_json,
-              q.verifier_workflow_version
+              q.verifier_workflow_version,
+              q.verifier_protocol
          FROM projects p
          JOIN organizations o
            ON o.id = p.organization_id

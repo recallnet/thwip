@@ -87,7 +87,7 @@ export interface ActivePolicy {
  * happens to remember.
  */
 export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
-  activePolicy(env: TEnv, repositoryId: string): Promise<ActivePolicy | null>;
+  activePolicy(env: TEnv, repositoryId: string, baseRef?: string): Promise<ActivePolicy | null>;
   proofCheckRunId(env: TEnv, repositoryId: string, headSha: string): Promise<string | null>;
   /**
    * Whether the base branch already contains a commit, from git ancestry.
@@ -393,7 +393,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
   // document. Its presence is what makes this a verified merge: an assignment
   // this queue issued and a receipt the device signed for the tree that landed.
   const localRun = await acceptedReceiptFor(db, input.attemptId);
-  const activePolicy = await deps.activePolicy(env, input.repositoryId);
+  const activePolicy = await deps.activePolicy(env, input.repositoryId, input.baseRef);
   const evidence =
     localRun === null || activePolicy === null
       ? await reuseEvidenceFor(

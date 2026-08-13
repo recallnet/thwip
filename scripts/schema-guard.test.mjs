@@ -38,6 +38,7 @@ describe("what every migration says about deploy order", () => {
     expect(orders.get("0018_one_record_per_merge.sql")).toBe("after-worker");
     expect(orders.get("0020_queue_runners.sql")).toBe("before-worker");
     expect(orders.get("0021_local_run_assignments.sql")).toBe("before-worker");
+    expect(orders.get("0033_verifier_protocol_v3.sql")).toBe("before-worker");
   });
 
   it("reads the order out of the header and nothing else", () => {

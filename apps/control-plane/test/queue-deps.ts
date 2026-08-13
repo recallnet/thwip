@@ -91,7 +91,11 @@ export function queueRouteDeps(
     proofCheckRunId: async () => "778899",
     signRecordBytes: async (_e: unknown, bytes: Uint8Array) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced", projectId: pins.projectId ?? "proj_1" }),
+    queueProject: async () => ({
+      activationState: "enforced",
+      projectId: pins.projectId ?? "proj_1",
+      verifierProtocol: 3,
+    }),
     principalFor: async (_e: unknown, _repositoryId: string, userId: string) => `principal_${userId}`,
     pullRequestPlacement: async (_e: unknown, _r: string, pullRequestNumber: number) => ({
       authorGithubUserId: githubUserId,
