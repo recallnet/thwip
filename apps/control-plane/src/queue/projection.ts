@@ -13,6 +13,7 @@
  * next change.
  */
 import type { QueueSnapshot } from "./queue-operations.js";
+import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
 
 export interface ProjectionEntry {
   readonly entryId: string;
@@ -30,12 +31,15 @@ export interface ProjectionEntry {
 /** Final state of an entry compacted out of the live queue snapshot. */
 export interface TerminalProjectionEntry extends ProjectionEntry {
   readonly generation: number;
+  /** This ending repairs a missed GitHub terminal event and publishes first. */
+  readonly terminalCommentPriority?: boolean;
 }
 
 /** A terminal history row whose existing status comment still needs closing. */
 export type TrackedTerminalEntry = QueueSnapshot["entries"][number] & {
   /** Generation at which authority last carried this admission. */
   readonly generation: number;
+  readonly terminalCommentPriority: boolean;
   readonly transition: ProjectionTransition | null;
 };
 
@@ -159,14 +163,16 @@ function entryProjectionStatement(
   baseRef: string,
   generation: number,
   entry: ProjectionEntry,
+  terminalCommentPriority = false,
 ): unknown {
   return db
     .prepare(
       `INSERT INTO queue_entries_index (
          id, github_repository_id, base_ref, entry_id, pull_request_number,
          sponsor_principal_id, state, primary_reason, fairness_ordinal,
-         scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         scheduler_eligible, cooldown_until, last_attempt_id, head_sha, generation,
+         terminal_comment_priority, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
        ON CONFLICT (github_repository_id, base_ref, entry_id) DO UPDATE SET
          state = excluded.state,
          primary_reason = excluded.primary_reason,
@@ -176,6 +182,17 @@ function entryProjectionStatement(
          cooldown_until = excluded.cooldown_until,
          last_attempt_id = excluded.last_attempt_id,
          head_sha = excluded.head_sha,
+         terminal_comment_priority = CASE
+           -- A projection replay cannot erase an unacknowledged repair. A
+           -- reopened nonterminal admission may clear it, and an explicit
+           -- comment acknowledgement below is the other clearing path.
+           WHEN excluded.state IN ('Merged', 'Cancelled')
+            AND queue_entries_index.terminal_comment_priority IN (1, 2)
+            AND excluded.terminal_comment_priority = 0
+            AND excluded.fairness_ordinal = queue_entries_index.fairness_ordinal
+             THEN queue_entries_index.terminal_comment_priority
+           ELSE excluded.terminal_comment_priority
+         END,
          -- Which message last saw this entry in the queue. A row left at an
          -- older generation is one the authority no longer carries, and that
          -- is the only thing anybody can say about it without guessing.
@@ -198,6 +215,7 @@ function entryProjectionStatement(
       entry.lastAttemptId,
       entry.headSha,
       generation,
+      terminalCommentPriority ? 1 : 0,
     );
 }
 
@@ -215,7 +233,18 @@ export async function projectTerminalEntryHistory(
   entries: readonly TerminalProjectionEntry[],
 ): Promise<void> {
   if (entries.length === 0) return;
-  await db.batch(entries.map((entry) => entryProjectionStatement(db, repositoryId, baseRef, entry.generation, entry)));
+  await db.batch(
+    entries.map((entry) =>
+      entryProjectionStatement(
+        db,
+        repositoryId,
+        baseRef,
+        entry.generation,
+        entry,
+        entry.terminalCommentPriority === true,
+      ),
+    ),
+  );
 }
 
 /**
@@ -234,15 +263,59 @@ export async function terminalEntryHistoryFromRecentEvents(
   currentEntries: readonly ProjectionEntry[],
   events: readonly { sequence: number; type: string; body: unknown }[],
 ): Promise<TerminalProjectionEntry[]> {
+  const newestFirst = [...events].sort((left, right) => right.sequence - left.sequence);
+  const attemptEntryIds = new Map<string, string>();
+  for (const event of newestFirst) {
+    if (event.type !== "TurnOffered") continue;
+    const body = event.body as { attemptId?: unknown; entryId?: unknown };
+    if (typeof body.attemptId === "string" && typeof body.entryId === "string") {
+      attemptEntryIds.set(body.attemptId, body.entryId);
+    }
+  }
   const terminalEvents = new Map<
     string,
     { sequence: number; state: "Merged" | "Cancelled"; attemptId: string | null }
   >();
-  for (const event of events) {
+  const settledAdmissions = new Set<string>();
+  for (const event of newestFirst) {
+    if (event.type === "MergeConfirmed") {
+      const body = event.body as { attemptId?: unknown };
+      if (typeof body.attemptId === "string") {
+        const entryId = attemptEntryIds.get(body.attemptId);
+        if (entryId !== undefined) settledAdmissions.add(entryId);
+      }
+      continue;
+    }
+    if (event.type === "QueueRequested") {
+      const body = event.body as { entryId?: unknown; resetOrdinal?: unknown };
+      if (body.resetOrdinal === true && typeof body.entryId === "string") {
+        // One entry id is stable across close/reopen admissions. A newer
+        // re-request is an admission boundary, so no older repair may describe
+        // the row now projected for the new fairness ordinal.
+        settledAdmissions.add(body.entryId);
+      }
+      continue;
+    }
     if (event.type !== "EntryMergeReconciled" && event.type !== "EntryCancelled") continue;
-    const body = event.body as { entryId?: unknown; attemptId?: unknown };
-    if (typeof body.entryId !== "string" || terminalEvents.has(body.entryId)) continue;
+    const body = event.body as {
+      entryId?: unknown;
+      attemptId?: unknown;
+      actorPrincipalId?: unknown;
+      reason?: unknown;
+    };
+    if (typeof body.entryId !== "string" || settledAdmissions.has(body.entryId)) continue;
+    // The newest terminal event wins even when it is ordinary and therefore
+    // earns no repair priority. Recording the admission before qualification
+    // prevents an older repair of the same stable entry id leaking forward.
+    settledAdmissions.add(body.entryId);
     if (event.type === "EntryMergeReconciled" && typeof body.attemptId !== "string") continue;
+    if (
+      event.type === "EntryCancelled" &&
+      (body.actorPrincipalId !== "github" ||
+        body.reason !== TERMINAL_RECONCILIATION_CANCEL_REASON)
+    ) {
+      continue;
+    }
     terminalEvents.set(body.entryId, {
       sequence: event.sequence,
       state: event.type === "EntryMergeReconciled" ? "Merged" : "Cancelled",
@@ -263,6 +336,7 @@ export async function terminalEntryHistoryFromRecentEvents(
     last_attempt_id: string | null;
     head_sha: string | null;
     generation: number;
+    terminal_comment_priority: number;
   };
   const rows: LegacyTerminalRow[] = [];
   // D1 accepts at most 100 bound parameters in one statement. Repository and
@@ -273,7 +347,8 @@ export async function terminalEntryHistoryFromRecentEvents(
       .prepare(
         `SELECT e.entry_id, e.pull_request_number, e.sponsor_principal_id,
                 e.primary_reason, e.fairness_ordinal, e.scheduler_eligible,
-                e.cooldown_until, e.last_attempt_id, e.head_sha, e.generation
+                e.cooldown_until, e.last_attempt_id, e.head_sha, e.generation,
+                e.terminal_comment_priority
            FROM queue_entries_index e
            JOIN queue_status_comments c
              ON c.github_repository_id = e.github_repository_id
@@ -284,7 +359,6 @@ export async function terminalEntryHistoryFromRecentEvents(
             AND m.base_ref = e.base_ref
           WHERE e.github_repository_id = ? AND e.base_ref = ?
             AND e.generation < m.generation
-            AND e.state NOT IN ('Merged', 'Cancelled')
             AND e.entry_id IN (${entryIds.map(() => "?").join(", ")})`,
       )
       .bind(repositoryId, baseRef, ...entryIds)
@@ -299,7 +373,8 @@ export async function terminalEntryHistoryFromRecentEvents(
       event === undefined ||
       row.head_sha === null ||
       liveEntryIds.has(row.entry_id) ||
-      livePullRequests.has(row.pull_request_number)
+      livePullRequests.has(row.pull_request_number) ||
+      row.terminal_comment_priority === 2
     ) {
       return [];
     }
@@ -316,6 +391,7 @@ export async function terminalEntryHistoryFromRecentEvents(
         cooldownUntil: row.cooldown_until,
         lastAttemptId: event.attemptId ?? row.last_attempt_id,
         headSha: row.head_sha,
+        terminalCommentPriority: true,
       },
     ];
   });
@@ -341,6 +417,8 @@ export async function pruneTerminalEntryHistory(
                AND base_ref = terminal.base_ref
           )
           AND (
+            terminal.terminal_comment_priority = 2
+            OR
             NOT EXISTS (
               SELECT 1 FROM queue_status_comments c
                WHERE c.github_repository_id = terminal.github_repository_id
@@ -364,8 +442,48 @@ export async function pruneTerminalEntryHistory(
     .run();
 }
 
-/** A terminal comment is current, so its temporary handoff row can retire. */
+/** A terminal comment is current, so history retires and retained priority clears. */
 export async function acknowledgeTerminalEntryStatus(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  entryId: string,
+  fairnessOrdinal: string,
+): Promise<void> {
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM queue_entries_index
+        WHERE github_repository_id = ? AND base_ref = ?
+          AND entry_id = ? AND fairness_ordinal = ?
+          AND state IN ('Merged', 'Cancelled')
+          AND generation < (
+            SELECT generation FROM queue_projection_marks
+             WHERE github_repository_id = ? AND base_ref = ?
+          )`,
+      )
+      .bind(repositoryId, baseRef, entryId, fairnessOrdinal, repositoryId, baseRef),
+    db
+      .prepare(
+        `UPDATE queue_entries_index
+            SET terminal_comment_priority = 0
+          WHERE github_repository_id = ? AND base_ref = ?
+            AND entry_id = ? AND fairness_ordinal = ?
+            AND state IN ('Merged', 'Cancelled')`,
+      )
+      .bind(repositoryId, baseRef, entryId, fairnessOrdinal),
+  ]);
+}
+
+/**
+ * A permission refusal acknowledges repair priority without discarding retry.
+ *
+ * GitHub will keep refusing until an installation administrator accepts the
+ * permission, so retrying this row would starve later terminal history. State
+ * 2 is not priority; it is a durable no-op acknowledgement that prevents both
+ * publication retry and deploy-window recovery from marking the row again.
+ */
+export async function acknowledgeTerminalEntryStatusForbidden(
   db: D1Like,
   repositoryId: string,
   baseRef: string,
@@ -374,17 +492,55 @@ export async function acknowledgeTerminalEntryStatus(
 ): Promise<void> {
   await db
     .prepare(
-      `DELETE FROM queue_entries_index
+      `UPDATE queue_entries_index
+          SET terminal_comment_priority = 2
         WHERE github_repository_id = ? AND base_ref = ?
           AND entry_id = ? AND fairness_ordinal = ?
-          AND state IN ('Merged', 'Cancelled')
-          AND generation < (
-            SELECT generation FROM queue_projection_marks
-             WHERE github_repository_id = ? AND base_ref = ?
+          AND state IN ('Merged', 'Cancelled')`,
+    )
+    .bind(repositoryId, baseRef, entryId, fairnessOrdinal)
+    .run();
+}
+
+/** Repaired terminal admissions, including rows still in live authority. */
+export async function terminalCommentRepairState(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+): Promise<{ priority: Set<string>; acknowledged: Set<string> }> {
+  const rows = await db
+    .prepare(
+      `SELECT e.entry_id, e.terminal_comment_priority
+         FROM queue_entries_index e
+         JOIN queue_status_comments c
+           ON c.github_repository_id = e.github_repository_id
+          AND c.base_ref = e.base_ref
+          AND c.pull_request_number = e.pull_request_number
+        WHERE e.github_repository_id = ? AND e.base_ref = ?
+          AND e.state IN ('Merged', 'Cancelled')
+          AND e.terminal_comment_priority IN (1, 2)
+          AND NOT EXISTS (
+            SELECT 1 FROM queue_entries_index current
+             JOIN queue_projection_marks m
+               ON m.github_repository_id = current.github_repository_id
+              AND m.base_ref = current.base_ref
+             WHERE current.github_repository_id = e.github_repository_id
+               AND current.base_ref = e.base_ref
+               AND current.pull_request_number = e.pull_request_number
+               AND current.generation = m.generation
+               AND current.state NOT IN ('Merged', 'Cancelled')
           )`,
     )
-    .bind(repositoryId, baseRef, entryId, fairnessOrdinal, repositoryId, baseRef)
-    .run();
+    .bind(repositoryId, baseRef)
+    .all<{ entry_id: string; terminal_comment_priority: number }>();
+  return {
+    priority: new Set(
+      rows.results.filter((row) => row.terminal_comment_priority === 1).map((row) => row.entry_id),
+    ),
+    acknowledged: new Set(
+      rows.results.filter((row) => row.terminal_comment_priority === 2).map((row) => row.entry_id),
+    ),
+  };
 }
 
 /**
@@ -403,6 +559,7 @@ export async function trackedTerminalEntries(
       `SELECT e.entry_id, e.pull_request_number, e.sponsor_principal_id, e.state,
               e.primary_reason, e.fairness_ordinal, e.scheduler_eligible,
               e.cooldown_until, e.last_attempt_id, e.head_sha, e.generation,
+              e.terminal_comment_priority,
               t.transition_sequence, t.kind AS transition_kind, t.digest,
               t.prior_digest, t.base_sha AS transition_base_sha,
               t.witness_count, t.observed_at
@@ -421,6 +578,7 @@ export async function trackedTerminalEntries(
           AND t.attempt_id = e.last_attempt_id
         WHERE e.github_repository_id = ? AND e.base_ref = ?
           AND e.state IN ('Merged', 'Cancelled')
+          AND e.terminal_comment_priority <> 2
           AND e.generation < m.generation
           AND NOT EXISTS (
             SELECT 1 FROM queue_entries_index current
@@ -445,6 +603,7 @@ export async function trackedTerminalEntries(
       last_attempt_id: string | null;
       head_sha: string | null;
       generation: number;
+      terminal_comment_priority: number;
       transition_sequence: number | null;
       transition_kind: string | null;
       digest: string | null;
@@ -465,6 +624,7 @@ export async function trackedTerminalEntries(
     lastAttemptId: row.last_attempt_id,
     headSha: row.head_sha,
     generation: row.generation,
+    terminalCommentPriority: row.terminal_comment_priority === 1,
     transition:
       row.transition_sequence === null ||
       row.transition_kind === null ||

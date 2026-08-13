@@ -427,9 +427,12 @@ describe("bounded terminal queue reconciliation", () => {
     expect((await snapshot(e)).entries.some((entry) => entry.pullRequestNumber === pr)).toBe(false);
     expect(
       await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) =>
-        store.pendingTerminalEntryProjections().map((row) => row.pullRequestNumber),
+        store.pendingTerminalEntryProjections().map((row) => ({
+          pullRequestNumber: row.pullRequestNumber,
+          terminalCommentPriority: row.terminalCommentPriority,
+        })),
       ),
-    ).toEqual([pr]);
+    ).toEqual([{ pullRequestNumber: pr, terminalCommentPriority: true }]);
 
     const noRead: TerminalPullRequestReads = {
       pullRequestState: async () => {
