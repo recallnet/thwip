@@ -1295,10 +1295,11 @@ export function bootstrapGitHub(
         `${base}/contents/.github/workflows/thwip-queue-verify.yml?ref=${encodeURIComponent(commitSha)}`,
       );
       if (file.encoding !== "base64") throw new Error("GitHub returned an unsupported verifier encoding");
+      const bytes = Uint8Array.from(atob(file.content.replaceAll("\n", "")), (byte) => byte.charCodeAt(0));
       return {
         commitSha,
         blobSha: file.sha,
-        content: atob(file.content.replaceAll("\\n", "")),
+        content: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
       };
     },
 
