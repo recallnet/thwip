@@ -243,6 +243,7 @@ describe("comments for entries compacted out of authority", () => {
       pullRequestNumber: number;
       fairnessOrdinal: string;
       generation: number;
+      terminalCommentPriority?: boolean;
     }>,
     currentGeneration = 1_000,
   ) {
@@ -272,6 +273,7 @@ describe("comments for entries compacted out of authority", () => {
         cooldownUntil: null,
         lastAttemptId: null,
         headSha: entry.pullRequestNumber.toString(16).padStart(40, "0"),
+        terminalCommentPriority: entry.terminalCommentPriority,
       })),
     );
     for (const entry of entries) {
@@ -335,6 +337,55 @@ describe("comments for entries compacted out of authority", () => {
       },
     ]);
     return emptySnapshot({ transitions: state === "Merged" ? [transition] : [] });
+  }
+
+  async function addRetainedRepair(
+    t: TestD1,
+    gh: ReturnType<typeof github>,
+    state: "Merged" | "Cancelled",
+    generation = 1_000,
+  ) {
+    const retained = {
+      entryId: "repair-retained",
+      pullRequestNumber: 237,
+      sponsorPrincipalId: "alice",
+      state,
+      primaryReason: null,
+      schedulerEligible: false,
+      fairnessOrdinal: "172",
+      cooldownUntil: null,
+      lastAttemptId: null,
+      headSha: "a".repeat(40),
+    };
+    await projectTerminalEntryHistory(t.db, REPO, REF, [
+      { ...retained, generation, terminalCommentPriority: true },
+    ]);
+    await projectQueueState(t.db, {
+      repositoryId: REPO,
+      baseRef: REF,
+      queueEpoch: 0,
+      generation,
+      activeAttemptId: null,
+      paused: false,
+      pauseReason: null,
+      rebaselineRequired: false,
+      baseSha: null,
+      entries: [retained],
+      transitions: [],
+    });
+    t.raw
+      .prepare(
+        "INSERT INTO queue_status_comments " +
+          "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+          "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+      )
+      .run(REPO, REF, retained.pullRequestNumber, 10_000 + retained.pullRequestNumber);
+    gh.comments.push({
+      id: 10_000 + retained.pullRequestNumber,
+      body: blockedBody,
+      pullRequestNumber: retained.pullRequestNumber,
+    });
+    return retained;
   }
 
   it("retries a merged comment from durable history after GitHub fails and the next snapshot is empty", async () => {
@@ -434,11 +485,38 @@ describe("comments for entries compacted out of authority", () => {
       generation: 1,
     }));
     const repaired = [
-      { entryId: "entry-237", pullRequestNumber: 237, fairnessOrdinal: "172", generation: 999 },
-      { entryId: "entry-238", pullRequestNumber: 238, fairnessOrdinal: "174", generation: 999 },
-      { entryId: "entry-219", pullRequestNumber: 219, fairnessOrdinal: "184", generation: 999 },
+      {
+        entryId: "entry-237",
+        pullRequestNumber: 237,
+        fairnessOrdinal: "172",
+        generation: 998,
+        terminalCommentPriority: true,
+      },
+      {
+        entryId: "entry-238",
+        pullRequestNumber: 238,
+        fairnessOrdinal: "174",
+        generation: 998,
+        terminalCommentPriority: true,
+      },
+      {
+        entryId: "entry-219",
+        pullRequestNumber: 219,
+        fairnessOrdinal: "184",
+        generation: 998,
+        terminalCommentPriority: true,
+      },
     ];
-    const gh = await seedTerminalBacklog(t, [...ancient, ...repaired]);
+    // This ordinary ending is newer than every repair. It reproduces the live
+    // interleaving where PR #376 compacted during the repair pass and displaced
+    // #219 when recency, rather than authority, supplied the priority.
+    const ordinaryNewCompaction = {
+      entryId: "ordinary-376",
+      pullRequestNumber: 376,
+      fairnessOrdinal: "200",
+      generation: 999,
+    };
+    const gh = await seedTerminalBacklog(t, [...ancient, ...repaired, ordinaryNewCompaction]);
     const retained = Array.from({ length: 20 }, (_, index) => ({
       entryId: `retained-${index}`,
       pullRequestNumber: 3_000 + index,
@@ -496,6 +574,7 @@ describe("comments for entries compacted out of authority", () => {
         "**thwip** · merged",
       );
     }
+    expect(gh.updates).not.toContain(376);
     expect(
       t.raw
         .prepare("SELECT COUNT(*) AS count FROM queue_entries_index WHERE pull_request_number IN (219, 237, 238)")
@@ -513,6 +592,106 @@ describe("comments for entries compacted out of authority", () => {
     for (const pullRequestNumber of [237, 238, 219]) {
       expect(gh.updates.filter((updated) => updated === pullRequestNumber)).toHaveLength(1);
     }
+  });
+
+  it("retries a retained repair ahead of 121 old rows after failure and projection replay", async () => {
+    const t = db();
+    const ancient = Array.from({ length: 121 }, (_, index) => ({
+      entryId: `ancient-${index + 1}`,
+      pullRequestNumber: 1_000 + index,
+      fairnessOrdinal: String(index + 1),
+      generation: 1,
+    }));
+    const gh = await seedTerminalBacklog(t, ancient, 999);
+    const retained = await addRetainedRepair(t, gh, "Merged");
+
+    let failing = true;
+    const flaky: CommentApi = {
+      ...gh.api,
+      update: async (commentId, body) => {
+        const comment = gh.comments.find((candidate) => candidate.id === commentId);
+        if (failing && comment?.pullRequestNumber === 237) throw new Error("GitHub unavailable");
+        await gh.api.update(commentId, body);
+      },
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      flaky,
+      WHERE,
+      emptySnapshot({ generation: 1_000, entries: [retained] }),
+      { observing: false, now: NOW },
+      { remaining: 1 },
+    );
+    expect(gh.updates).toEqual([]);
+    expect(
+      t.raw
+        .prepare("SELECT state, terminal_comment_priority FROM queue_entries_index WHERE entry_id = ?")
+        .get(retained.entryId),
+    ).toEqual({ state: "Merged", terminal_comment_priority: 1 });
+
+    await projectQueueState(t.db, {
+      repositoryId: REPO,
+      baseRef: REF,
+      queueEpoch: 0,
+      generation: 1_001,
+      activeAttemptId: null,
+      paused: false,
+      pauseReason: null,
+      rebaselineRequired: false,
+      baseSha: null,
+      entries: [retained],
+      transitions: [],
+    });
+    failing = false;
+    await writeStatusCommentsForSnapshot(
+      t.db,
+      flaky,
+      WHERE,
+      emptySnapshot({ generation: 1_001, entries: [retained] }),
+      { observing: false, now: NOW },
+      { remaining: 1 },
+    );
+
+    expect(gh.updates).toEqual([237]);
+    expect(
+      t.raw
+        .prepare("SELECT state, terminal_comment_priority FROM queue_entries_index WHERE entry_id = ?")
+        .get(retained.entryId),
+    ).toEqual({ state: "Merged", terminal_comment_priority: 0 });
+  });
+
+  it("drains more than one budget of repairs while giving one oldest row each pass", async () => {
+    const t = db();
+    const priority = Array.from({ length: 7 }, (_, index) => ({
+      entryId: `repair-${index + 1}`,
+      pullRequestNumber: 200 + index,
+      fairnessOrdinal: String(100 + index),
+      generation: 900 + index,
+      terminalCommentPriority: true,
+    }));
+    const ordinary = Array.from({ length: 3 }, (_, index) => ({
+      entryId: `ordinary-${index + 1}`,
+      pullRequestNumber: 1_000 + index,
+      fairnessOrdinal: String(index + 1),
+      generation: 1,
+    }));
+    const gh = await seedTerminalBacklog(t, [...ordinary, ...priority]);
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        gh.api,
+        WHERE,
+        emptySnapshot({ generation: 1_000 }),
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      );
+    }
+
+    expect(gh.updates).toEqual([200, 201, 202, 1_000, 203, 204, 205, 1_001, 206, 1_002]);
+    expect(t.raw.prepare("SELECT COUNT(*) AS count FROM queue_entries_index").get()).toEqual({ count: 0 });
   });
 
   it("advances the oldest history while three newer repairs arrive on every pass", async () => {
@@ -541,6 +720,7 @@ describe("comments for entries compacted out of authority", () => {
         cooldownUntil: null,
         lastAttemptId: null,
         headSha: entry.pullRequestNumber.toString(16).padStart(40, "0"),
+        terminalCommentPriority: true,
       })));
       for (const entry of recent) {
         t.raw
@@ -579,9 +759,27 @@ describe("comments for entries compacted out of authority", () => {
   it("keeps a failed recent repair durable and retries it before later history", async () => {
     const t = db();
     const entries = [
-      { entryId: "recent-fails", pullRequestNumber: 237, fairnessOrdinal: "172", generation: 999 },
-      { entryId: "recent-2", pullRequestNumber: 238, fairnessOrdinal: "174", generation: 999 },
-      { entryId: "recent-3", pullRequestNumber: 219, fairnessOrdinal: "184", generation: 999 },
+      {
+        entryId: "recent-fails",
+        pullRequestNumber: 237,
+        fairnessOrdinal: "172",
+        generation: 999,
+        terminalCommentPriority: true,
+      },
+      {
+        entryId: "recent-2",
+        pullRequestNumber: 238,
+        fairnessOrdinal: "174",
+        generation: 999,
+        terminalCommentPriority: true,
+      },
+      {
+        entryId: "recent-3",
+        pullRequestNumber: 219,
+        fairnessOrdinal: "184",
+        generation: 999,
+        terminalCommentPriority: true,
+      },
       { entryId: "ancient", pullRequestNumber: 1_000, fairnessOrdinal: "1", generation: 1 },
     ];
     const gh = await seedTerminalBacklog(t, entries);
@@ -605,8 +803,10 @@ describe("comments for entries compacted out of authority", () => {
       { remaining: 4 },
     );
     expect(
-      t.raw.prepare("SELECT state FROM queue_entries_index WHERE pull_request_number = 237").get(),
-    ).toEqual({ state: "Merged" });
+      t.raw
+        .prepare("SELECT state, terminal_comment_priority FROM queue_entries_index WHERE pull_request_number = 237")
+        .get(),
+    ).toEqual({ state: "Merged", terminal_comment_priority: 1 });
     expect(gh.updates).toEqual([238, 219, 1_000]);
 
     failing = false;
@@ -624,6 +824,100 @@ describe("comments for entries compacted out of authority", () => {
     ).toBeUndefined();
   });
 
+  it("acknowledges a permission refusal without starving later terminal history", async () => {
+    const t = db();
+    const repair = {
+      entryId: "repair-forbidden",
+      pullRequestNumber: 237,
+      fairnessOrdinal: "172",
+      generation: 999,
+      terminalCommentPriority: true,
+    };
+    const ancient = {
+      entryId: "ancient-after-forbidden",
+      pullRequestNumber: 1_000,
+      fairnessOrdinal: "1",
+      generation: 1,
+    };
+    const gh = await seedTerminalBacklog(t, [ancient, repair]);
+    const refusing: CommentApi = {
+      ...gh.api,
+      update: async (commentId, body) => {
+        const comment = gh.comments.find((candidate) => candidate.id === commentId);
+        if (comment?.pullRequestNumber === 237) {
+          throw Object.assign(new Error("Resource not accessible"), { status: 403 });
+        }
+        await gh.api.update(commentId, body);
+      },
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        refusing,
+        WHERE,
+        emptySnapshot({ generation: 1_000 }),
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      ),
+    ).toEqual(["forbidden", "updated"]);
+    expect(gh.updates).toEqual([1_000]);
+    expect(
+      t.raw
+        .prepare("SELECT state, terminal_comment_priority FROM queue_entries_index WHERE pull_request_number = 237")
+        .get(),
+    ).toEqual({ state: "Merged", terminal_comment_priority: 2 });
+
+    gh.calls.length = 0;
+    expect(
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        gh.api,
+        WHERE,
+        emptySnapshot({ generation: 1_000 }),
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      ),
+    ).toEqual([]);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("does not retry a forbidden repaired ending still retained in authority", async () => {
+    const t = db();
+    const gh = github();
+    const retained = await addRetainedRepair(t, gh, "Cancelled");
+    const refusing: CommentApi = {
+      ...gh.api,
+      update: async () => Promise.reject(Object.assign(new Error("Resource not accessible"), { status: 403 })),
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const snapshot = emptySnapshot({ generation: 1_000, entries: [retained] });
+
+    expect(
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        refusing,
+        WHERE,
+        snapshot,
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      ),
+    ).toEqual(["forbidden"]);
+    gh.calls.length = 0;
+    expect(
+      await writeStatusCommentsForSnapshot(
+        t.db,
+        gh.api,
+        WHERE,
+        snapshot,
+        { observing: false, now: NOW },
+        { remaining: 4 },
+      ),
+    ).toEqual([]);
+    expect(gh.calls).toEqual([]);
+  });
+
   it("publishes a reopened live admission before terminal backlog and never restores its old ending", async () => {
     const t = db();
     const oldAdmission = {
@@ -631,6 +925,7 @@ describe("comments for entries compacted out of authority", () => {
       pullRequestNumber: 184,
       fairnessOrdinal: "1",
       generation: 999,
+      terminalCommentPriority: true,
     };
     const legacy = Array.from({ length: 121 }, (_, index) => ({
       entryId: `legacy-${index}`,

@@ -4,6 +4,7 @@ import { migrationStatements } from "../../test/d1.js";
 import {
   projectQueueState,
   projectTerminalEntryHistory,
+  pruneTerminalEntryHistory,
   readProjectedQueue,
   terminalEntryHistoryFromRecentEvents,
   trackedTerminalEntries,
@@ -306,6 +307,307 @@ describe("compacted terminal history", () => {
     expect(await trackedTerminalEntries(db, message().repositoryId, message().baseRef)).toEqual([]);
   });
 
+  it("upgrades an existing stale terminal row when recent authority proves a repair", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({ generation: 5, entries: [{ ...readyEntry("Merged"), headSha: "a".repeat(40) }] }),
+    );
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+
+    const recovered = await terminalEntryHistoryFromRecentEvents(
+      db,
+      message().repositoryId,
+      message().baseRef,
+      [],
+      [
+        {
+          sequence: 12,
+          type: "EntryMergeReconciled",
+          body: { entryId: "e1", attemptId: "att-repaired" },
+        },
+      ],
+    );
+    await projectTerminalEntryHistory(db, message().repositoryId, message().baseRef, recovered);
+
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({
+        entry_id: "e1",
+        state: "Merged",
+        last_attempt_id: "att-repaired",
+        terminal_comment_priority: 1,
+      }),
+    ]);
+  });
+
+  it("does not give compatibility priority to an ordinary webhook cancellation", async () => {
+    const db = d1();
+    await projectQueueState(db, message({ generation: 5, entries: [readyEntry("Blocked")] }));
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+
+    expect(
+      await terminalEntryHistoryFromRecentEvents(
+        db,
+        message().repositoryId,
+        message().baseRef,
+        [],
+        [
+          {
+            sequence: 12,
+            type: "EntryCancelled",
+            body: {
+              entryId: "e1",
+              actorPrincipalId: "github",
+              reason: "the pull request was closed",
+            },
+          },
+        ],
+      ),
+    ).toEqual([]);
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({ entry_id: "e1", state: "Blocked", terminal_comment_priority: 0 }),
+    ]);
+  });
+
+  it("does not carry an old repair marker across a reopened ordinary ending", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        generation: 5,
+        entries: [
+          {
+            ...readyEntry("Cancelled"),
+            fairnessOrdinal: "2",
+            headSha: "b".repeat(40),
+          },
+        ],
+      }),
+    );
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+
+    const recovered = await terminalEntryHistoryFromRecentEvents(
+      db,
+      message().repositoryId,
+      message().baseRef,
+      [],
+      [
+        {
+          sequence: 40,
+          type: "EntryCancelled",
+          body: {
+            entryId: "e1",
+            actorPrincipalId: "github",
+            reason: "the pull request was closed",
+          },
+        },
+        {
+          sequence: 20,
+          type: "QueueRequested",
+          body: { entryId: "e1", resetOrdinal: true },
+        },
+        {
+          sequence: 10,
+          type: "EntryMergeReconciled",
+          body: { entryId: "e1", attemptId: "att-old-repair" },
+        },
+      ],
+    );
+    await projectTerminalEntryHistory(db, message().repositoryId, message().baseRef, recovered);
+
+    expect(recovered).toEqual([]);
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({
+        entry_id: "e1",
+        fairness_ordinal: "2",
+        state: "Cancelled",
+        terminal_comment_priority: 0,
+      }),
+    ]);
+  });
+
+  it("does not carry an old repair marker across a reopened normal merge", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({
+        generation: 5,
+        entries: [
+          {
+            ...readyEntry("Merged"),
+            fairnessOrdinal: "2",
+            lastAttemptId: "att-new",
+            headSha: "b".repeat(40),
+          },
+        ],
+      }),
+    );
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+
+    expect(
+      await terminalEntryHistoryFromRecentEvents(
+        db,
+        message().repositoryId,
+        message().baseRef,
+        [],
+        [
+          { sequence: 50, type: "MergeConfirmed", body: { attemptId: "att-new" } },
+          {
+            sequence: 30,
+            type: "TurnOffered",
+            body: { entryId: "e1", attemptId: "att-new" },
+          },
+          {
+            sequence: 20,
+            type: "QueueRequested",
+            body: { entryId: "e1", resetOrdinal: true },
+          },
+          {
+            sequence: 10,
+            type: "EntryMergeReconciled",
+            body: { entryId: "e1", attemptId: "att-old-repair" },
+          },
+        ],
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([1, 2])(
+    "does not inherit old admission marker %s when every reopened nonterminal projection was missed",
+    async (oldMarker) => {
+      const db = d1();
+      await projectQueueState(
+        db,
+        message({
+          generation: 5,
+          entries: [
+            {
+              ...readyEntry("Merged"),
+              fairnessOrdinal: "1",
+              headSha: "a".repeat(40),
+            },
+          ],
+        }),
+      );
+      await db
+        .prepare("UPDATE queue_entries_index SET terminal_comment_priority = ? WHERE entry_id = 'e1'")
+        .bind(oldMarker)
+        .run();
+
+      // Generations 6-8 contained the reopened nonterminal admission, but all
+      // of those best-effort projections failed. The first successful replay is
+      // its ordinary terminal ending at a new fairness ordinal.
+      await projectQueueState(
+        db,
+        message({
+          generation: 9,
+          entries: [
+            {
+              ...readyEntry("Cancelled"),
+              fairnessOrdinal: "2",
+              headSha: "b".repeat(40),
+            },
+          ],
+        }),
+      );
+
+      expect((await rows(db, "queue_entries_index")).results).toEqual([
+        expect.objectContaining({
+          entry_id: "e1",
+          fairness_ordinal: "2",
+          state: "Cancelled",
+          terminal_comment_priority: 0,
+        }),
+      ]);
+    },
+  );
+
+  it.each([1, 2])("preserves same-admission marker %s across terminal projection replay", async (marker) => {
+    const db = d1();
+    const ending = {
+      ...readyEntry("Merged"),
+      fairnessOrdinal: "1",
+      headSha: "a".repeat(40),
+    };
+    await projectQueueState(db, message({ generation: 5, entries: [ending] }));
+    await db
+      .prepare("UPDATE queue_entries_index SET terminal_comment_priority = ? WHERE entry_id = 'e1'")
+      .bind(marker)
+      .run();
+
+    await projectQueueState(db, message({ generation: 6, entries: [ending] }));
+
+    expect((await rows(db, "queue_entries_index")).results).toEqual([
+      expect.objectContaining({
+        entry_id: "e1",
+        fairness_ordinal: "1",
+        state: "Merged",
+        terminal_comment_priority: marker,
+      }),
+    ]);
+  });
+
+  it("does not restore priority after a forbidden repair acknowledgement", async () => {
+    const db = d1();
+    await projectQueueState(
+      db,
+      message({ generation: 5, entries: [{ ...readyEntry("Merged"), headSha: "a".repeat(40) }] }),
+    );
+    await projectQueueState(db, message({ generation: 6, entries: [] }));
+    await db
+      .prepare(
+        "INSERT INTO queue_status_comments (github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) VALUES (?, ?, 42, 99, 'blocked', '2026-08-12T12:00:00Z')",
+      )
+      .bind(message().repositoryId, message().baseRef)
+      .run();
+    await db
+      .prepare("UPDATE queue_entries_index SET terminal_comment_priority = 2 WHERE entry_id = 'e1'")
+      .bind()
+      .run();
+
+    expect(
+      await terminalEntryHistoryFromRecentEvents(
+        db,
+        message().repositoryId,
+        message().baseRef,
+        [],
+        [
+          {
+            sequence: 12,
+            type: "EntryMergeReconciled",
+            body: { entryId: "e1", attemptId: "att-repaired" },
+          },
+        ],
+      ),
+    ).toEqual([]);
+    await pruneTerminalEntryHistory(db, message().repositoryId, message().baseRef);
+    expect((await rows(db, "queue_entries_index")).results).toEqual([]);
+  });
+
   it("recovers more than 98 recent endings without exceeding D1's 100-bind limit", async () => {
     const inner = d1();
     let largestBind = 0;
@@ -353,12 +655,17 @@ describe("compacted terminal history", () => {
       entries.map((entry, index) => ({
         sequence: index + 1,
         type: "EntryCancelled",
-        body: { entryId: entry.entryId },
+        body: {
+          entryId: entry.entryId,
+          actorPrincipalId: "github",
+          reason: "GitHub reports the pull request closed without merge",
+        },
       })),
     );
 
     expect(recovered).toHaveLength(150);
     expect(recovered.every((entry) => entry.state === "Cancelled")).toBe(true);
+    expect(recovered.every((entry) => entry.terminalCommentPriority === true)).toBe(true);
     expect(largestBind).toBeLessThanOrEqual(100);
   });
 });
