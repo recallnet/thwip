@@ -58,14 +58,14 @@ function seed() {
     .run("org_1", "1", "acme", "9001");
   raw
     .prepare(
-      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
-    )
-    .run("qp_1", "org_1", REPO, REF);
-  raw
-    .prepare(
       "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
     .run("proj_1", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id) VALUES (?, ?, ?, ?, 1, 'enforced', ?)",
+    )
+    .run("qp_1", "org_1", REPO, REF, "proj_1");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -166,5 +166,32 @@ describe("the check that says whose turn it is", () => {
 
     expect(afterFirst).not.toBeNull();
     expect(published).toEqual(afterFirst);
+  });
+
+  it("does not publish a bot-sponsor check after repository removal is requested", async () => {
+    const e = env();
+    seed();
+    let writes = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/check-runs") && init?.method === undefined) {
+          raw.prepare(
+            `INSERT OR IGNORE INTO project_release_requests
+               (github_repository_id, project_id, organization_id, github_name, default_branch)
+             VALUES (?, 'proj_1', 'org_1', 'acme/repo', 'main')`,
+          ).run(REPO);
+          return Response.json({ check_runs: [] });
+        }
+        if (init?.method === "POST" || init?.method === "PATCH") writes += 1;
+        return Response.json({});
+      }),
+    );
+    const payload = openedPayload(121, "9".repeat(40));
+    payload.pull_request.user = { id: 99, login: "renovate[bot]", type: "Bot" };
+
+    await expect(queueFromPullRequest(e as unknown as Env, payload)).resolves.toMatchObject({ handled: false });
+    expect(writes).toBe(0);
   });
 });

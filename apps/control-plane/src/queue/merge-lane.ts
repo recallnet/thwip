@@ -20,10 +20,20 @@ import { mergeCommitText } from "./merge-commit.js";
 import type { MergeIntent, MergeWriteOutcome } from "./merge-write.js";
 import { requiredSuitesDigest, type Sha256, type TransitionRecordKind } from "@thwip/queue-protocol";
 import { transitionKindOf, type TransitionKind } from "@thwip/queue-domain";
-import { putEvidence, type R2Like } from "./evidence-store.js";
+import {
+  beginR2WriteIntent,
+  putEvidence,
+  type R2Like,
+  type R2WriteIntentLease,
+} from "./evidence-store.js";
 import { acceptedReceiptFor } from "./assignment-store.js";
 import { withTransitionSigningLease } from "./transition-signing-lease.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
+import {
+  acquireProjectWriteLease,
+  repositoryAllowsExternalWrite,
+  type ProjectWriteLease,
+} from "../project-lifecycle.js";
 
 /** How a caller runs commands against one queue document. */
 export type OnQueue<TEnv> = <T>(
@@ -31,6 +41,7 @@ export type OnQueue<TEnv> = <T>(
   repositoryId: string,
   baseRef: string,
   decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T | Promise<T>,
+  lease?: ProjectWriteLease,
 ) => Promise<{ result: T; snapshot: QueueSnapshot }>;
 
 /**
@@ -41,6 +52,7 @@ export type OnQueue<TEnv> = <T>(
  * writes it down, so the two can never disagree about what the merge rested on.
  */
 export interface ActivePolicy {
+  projectId: string;
   policyDigest: string;
   /**
    * The pipeline the proof had to satisfy, which a reuse record binds. Null
@@ -91,7 +103,18 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
   /**
    * Perform the merge the queue just authorized, from the Worker.
    */
-  mergeWrite(env: TEnv, repositoryId: string, intent: MergeIntent): Promise<MergeWriteOutcome>;
+  mergeWrite(
+    env: TEnv,
+    repositoryId: string,
+    intent: MergeIntent,
+    lease?: ProjectWriteLease,
+  ): Promise<MergeWriteOutcome>;
+  /** Hold the project incarnation across the GitHub write and its signed record. */
+  projectWriteLease?(
+    env: TEnv,
+    repositoryId: string,
+    projectId?: string,
+  ): Promise<{ projectId: string; renew(): Promise<void>; release(): Promise<void> } | null>;
   /** The backoff between reads that have to outlast GitHub's own lag. */
   sleep?(ms: number): Promise<void>;
 }
@@ -136,15 +159,62 @@ async function baseContainsAfterOurOwnWrite(
  */
 export async function storeEvidence(
   env: QueueRouteEnv,
-  input: Parameters<typeof putEvidence>[1],
+  input: Parameters<typeof putEvidence>[1] & {
+    readonly projectId: string;
+    readonly writeLease?: ProjectWriteLease;
+  },
 ): Promise<string> {
   if (env.EVIDENCE === undefined) return "no-bucket";
+  const borrowed = input.writeLease !== undefined;
+  const lease = input.writeLease ?? await acquireProjectWriteLease(
+      env.DB as unknown as D1Like,
+      input.repositoryId,
+      input.projectId,
+    );
+  if (lease === null) return "project-unavailable";
+  if (lease.projectId !== input.projectId) return "project-unavailable";
+  const intentState: { lease: R2WriteIntentLease | null } = { lease: null };
   try {
-    const result = await putEvidence(env.EVIDENCE as unknown as R2Like, input);
-    if (result.stored) return result.deduplicated ? "already-stored" : "stored";
+    await lease.renew();
+    const result = await putEvidence(env.EVIDENCE as unknown as R2Like, input, {
+      beforePut: async (key) => {
+        intentState.lease = await beginR2WriteIntent(env.DB as unknown as D1Like, {
+          key,
+          projectId: input.projectId,
+          organizationId: input.organizationId,
+          repositoryId: input.repositoryId,
+        });
+        if (intentState.lease === null) throw new Error("project became unavailable before R2");
+      },
+    });
+    if (result.stored) {
+      const current = await repositoryAllowsExternalWrite(
+        env.DB as unknown as D1Like,
+        input.repositoryId,
+        input.projectId,
+      );
+      if (!current) {
+        if (intentState.lease !== null) {
+          await intentState.lease.compensate(env.EVIDENCE as unknown as R2Like);
+          intentState.lease = null;
+        } else await (env.EVIDENCE as unknown as R2Like).delete(result.key);
+        return "project-unavailable";
+      }
+      await intentState.lease?.complete();
+      intentState.lease = null;
+      return result.deduplicated ? "already-stored" : "stored";
+    }
     return result.reason;
   } catch (error) {
+    if (intentState.lease !== null) {
+      await intentState.lease.markCleanup().catch(() => {
+        // The durable row remains for the global cleanup drainer. If ownership
+        // was lost, its lease supplies the retry boundary.
+      });
+    }
     return `failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`;
+  } finally {
+    if (!borrowed) await lease.release();
   }
 }
 
@@ -186,6 +256,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     baseRef: string;
     attemptId: string;
     mergeSha: string;
+    projectId?: string;
     mergeTree: string;
     parentShas: readonly string[];
     attempt: {
@@ -200,12 +271,8 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     turnSequence: number;
     pullRequestNumber: number | null;
     witnessPrincipalIds: readonly string[];
-    onQueue: <T>(
-      env: TEnv,
-      repositoryId: string,
-      baseRef: string,
-      decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
-    ) => Promise<{ result: T; snapshot: QueueSnapshot }>;
+    onQueue: OnQueue<TEnv>;
+    writeLease?: ProjectWriteLease;
   },
 ): Promise<{
   status: string;
@@ -249,7 +316,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     },
     async (claim) => {
 
-  await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef);
+  await projectAuthoritativeQueue(db, input.repositoryId, input.baseRef, input.writeLease);
   if (!(await claim.fence())) {
     return skip("a later signed transition writer replaced this callback while it restored queue authority");
   }
@@ -260,6 +327,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       baseRef: input.baseRef,
       pullRequestNumber: input.pullRequestNumber,
       mergeSha: input.mergeSha,
+      projectId: input.writeLease?.projectId,
     });
     if (exact?.status === "linked") {
       return {
@@ -285,6 +353,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     baseRef: input.baseRef,
     attemptId: input.attemptId,
     mergeSha: input.mergeSha,
+    projectId: input.writeLease?.projectId,
   });
   if (existingLink !== null) {
     const placed = await placeAttestationInChain(db, {
@@ -293,6 +362,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       baseRef: input.baseRef,
       attemptId: input.attemptId,
       transitionSequence: existingLink.transitionSequence,
+      projectId: input.writeLease?.projectId,
     });
     return placed
       ? {
@@ -307,7 +377,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     // Old builds stored a positioned row before asking the queue for the link.
     // The full durable transition index says no link exists, so that position
     // is a stale claim, not a successful replay.
-    await clearAttestationChainPosition(db, existingDigest);
+    await clearAttestationChainPosition(db, existingDigest, input.writeLease?.projectId);
   }
 
   const attempt = input.attempt;
@@ -349,6 +419,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
           rerun: null,
         });
   if ("missing" in evidence) return skip(evidence.missing);
+  if (activePolicy === null) return skip("no active project policy owns this merge record");
   const verifiedMerge = "assignmentDigest" in evidence;
 
   // The tree the branch had before this merge. A transition that is not the
@@ -398,6 +469,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     baseRef: input.baseRef,
     pullRequestNumber: input.pullRequestNumber,
     mergeSha: input.mergeSha,
+    projectId: input.writeLease?.projectId,
     staged: {
       pullRequestNumber: input.pullRequestNumber,
       mergeTree: input.mergeTree,
@@ -442,19 +514,22 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
       digest: signed.digest,
       kind: recordKind,
       repositoryId: input.repositoryId,
+      projectId: input.writeLease?.projectId ?? activePolicy.projectId,
       baseRef: input.baseRef,
       transitionSequence: null,
       attemptId: input.attemptId,
       bytes: signed.bytes,
       jws: signed.jws,
       organizationId: evidence.organizationId,
-      mirror: (input) =>
+      mirror: (mirrored) =>
         storeEvidence(env, {
-          organizationId: input.organizationId,
-          repositoryId: input.repositoryId,
-          kind: input.kind,
-          digest: input.digest as `sha256:${string}`,
-          bytes: input.bytes,
+          projectId: activePolicy.projectId,
+          ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
+          organizationId: mirrored.organizationId,
+          repositoryId: mirrored.repositoryId,
+          kind: mirrored.kind,
+          digest: mirrored.digest as `sha256:${string}`,
+          bytes: mirrored.bytes,
         }).then(() => undefined),
     });
   }
@@ -482,12 +557,13 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
         witnessPrincipalIds: input.witnessPrincipalIds,
       }),
     };
-  });
+  }, input.writeLease);
   const linked = await recoverExactMergeRecord(db, {
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     pullRequestNumber: input.pullRequestNumber,
     mergeSha: input.mergeSha,
+    projectId: input.writeLease?.projectId,
   });
   if (linked?.status !== "linked") {
     return skip(
@@ -505,6 +581,7 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
     snapshot,
   };
     },
+    input.writeLease,
   );
   return signing.acquired
     ? signing.result
@@ -537,6 +614,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       operationId: string;
       mergeSha: string;
       witnessPrincipalIds: readonly string[];
+      writeLease?: ProjectWriteLease;
     },
   ): Promise<
     | { readonly ok: false; readonly code: "MERGE_UNREADABLE" | "RESULT_NOT_AUTHORIZED"; readonly detail: string }
@@ -569,6 +647,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         mergeTree: landed.treeOid,
         parentShas: landed.parentShas,
       }),
+    input.writeLease,
   );
 
   if (confirmation.confirmed.status === "rejected") {
@@ -592,6 +671,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       afterConfirm.entries.find((e) => e.entryId === confirmation.attempt?.entryId)?.pullRequestNumber ?? null,
     witnessPrincipalIds: [...input.witnessPrincipalIds],
     onQueue,
+    ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
   });
 
   return {
@@ -650,18 +730,36 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       operationId: string;
       pullRequestNumber: number;
       merge: { baseSha: string; headSha: string; treeOid: string; parentShas: string[] };
+      projectId?: string;
     },
   ): Promise<Record<string, unknown>> => {
+    const lease = deps.projectWriteLease === undefined
+      ? { projectId: input.projectId ?? "", renew: async () => {}, release: async () => {} }
+      : await deps.projectWriteLease(env, input.repositoryId, input.projectId);
+    if (lease === null) {
+      return { merged: false, recorded: false, reason: "PROJECT_UNAVAILABLE" };
+    }
+    try {
     const markUnrecorded = async (detail: string): Promise<void> => {
+      await lease.renew();
       const now = new Date().toISOString();
       await onQueue(env, input.repositoryId, input.baseRef, ({ store }) =>
         store.refuseMergeOperation(input.operationId, detail, now, () => now),
+        lease,
       );
       console.error(
         `[queue merge] ${input.operationId} landed without a signed transition: ${detail}`,
       );
     };
 
+    await lease.renew();
+    if (!(await repositoryAllowsExternalWrite(
+      env.DB as unknown as D1Like,
+      input.repositoryId,
+      lease.projectId,
+    ))) {
+      return { merged: false, recorded: false, reason: "PROJECT_RELEASE_REQUESTED" };
+    }
     const outcome = await deps.mergeWrite(env, input.repositoryId, {
       baseRef: input.baseRef,
       pullRequestNumber: input.pullRequestNumber,
@@ -670,11 +768,12 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       treeOid: input.merge.treeOid,
       parentShas: input.merge.parentShas,
       message: mergeCommitText(input.pullRequestNumber, input.operationId),
-    });
+    }, lease);
 
     if (outcome.kind === "merged" && outcome.mergeSha !== null) {
       let recorded: Awaited<ReturnType<typeof recordLandedMerge>>;
       try {
+        await lease.renew();
         recorded = await recordLandedMerge(env, {
           repositoryId: input.repositoryId,
           baseRef: input.baseRef,
@@ -682,6 +781,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
           operationId: input.operationId,
           mergeSha: outcome.mergeSha,
           witnessPrincipalIds: [],
+          writeLease: lease,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -722,6 +822,7 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
           attemptId: input.attemptId,
           detail: "Git settled the merge but did not return a commit sha",
         }),
+        lease,
       );
       return { merged: true, recorded: false, reason: "MERGE_UNNAMED" };
     }
@@ -730,12 +831,22 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       // The queue authorized a merge that is not going to happen, so it hears
       // that here. Otherwise the lane stays held until its deadline and every
       // pull request behind this one waits on a merge nobody is going to make.
-      const freed = await resolveNotMerged(env, input);
+      const { result: resolved } = await onQueue(env, input.repositoryId, input.baseRef, async ({ commands }) => {
+        commands.mergeOutcomeUnknown({
+          idempotencyKey: `not-merged:unknown:${input.attemptId}`,
+          attemptId: input.attemptId,
+        });
+        return commands.confirmNotMerged({
+          idempotencyKey: `not-merged:${input.attemptId}`,
+          attemptId: input.attemptId,
+          operationId: input.operationId,
+        });
+      }, lease);
       return {
         merged: false,
         reason: outcome.kind === "base-moved" ? "BASE_MOVED" : "MERGE_REFUSED",
         detail: outcome.detail,
-        resolved: freed.status,
+        resolved: resolved.status,
       };
     }
 
@@ -747,8 +858,12 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
         attemptId: input.attemptId,
         detail: outcome.detail,
       }),
+      lease,
     );
-    return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };
+      return { merged: false, reason: "MERGE_OUTCOME_UNKNOWN", detail: outcome.detail };
+    } finally {
+      await lease.release();
+    }
   };
 
   return { recordLandedMerge, resolveNotMerged, performMergeFromWorker };

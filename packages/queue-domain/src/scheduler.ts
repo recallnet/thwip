@@ -31,6 +31,21 @@ export async function queueKey(decimalRepositoryId: string, exactBaseRef: string
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * Durable Object name for one project incarnation and branch.
+ *
+ * A repository can leave Thwip and later return with the same GitHub id. Its
+ * project id changes. Keeping that id in the object name ensures cleanup for
+ * the removed project cannot address the new project's object.
+ */
+export function projectQueueObjectName(
+  projectId: string,
+  decimalRepositoryId: string,
+  exactBaseRef: string,
+): string {
+  return `project/${encodeURIComponent(projectId)}/repo/${encodeURIComponent(decimalRepositoryId)}/ref/${encodeURIComponent(exactBaseRef)}`;
+}
+
 /** Comparators run in order; the first non-zero decides. */
 type Key = (entry: EligibleEntry) => bigint;
 

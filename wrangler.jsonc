@@ -41,7 +41,12 @@
       "queues": {
         "producers": [{ "binding": "SYNC_QUEUE", "queue": "thwip-sync-staging" }],
         "consumers": [
-          { "queue": "thwip-sync-staging", "dead_letter_queue": "thwip-sync-staging-dlq", "max_retries": 5 }
+          {
+            "queue": "thwip-sync-staging",
+            "dead_letter_queue": "thwip-sync-staging-dlq",
+            "max_retries": 5,
+            "max_batch_size": 1
+          }
         ]
       },
       "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },

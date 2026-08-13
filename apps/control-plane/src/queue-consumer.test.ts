@@ -13,6 +13,7 @@ async function runMessages(messages: Parameters<typeof processQueueMessage>[0][]
 import type { AppProofRequest } from "./app-proof-verification.js";
 
 const REQUEST: AppProofRequest = {
+  projectId: "project-1",
   repositoryId: "repo-1",
   repository: "acme/widgets",
   ownerId: "owner-1",
@@ -65,6 +66,26 @@ describe("queue consumer", () => {
     expect(reconciled).toEqual(["42"]);
   });
 
+  it("acknowledges delayed membership work after an authoritative uninstall", async () => {
+    const work: string[] = [];
+    await runMessages(
+      [
+        { event: "member", installationId: "42", syncInstallation: true },
+        { event: "installation_repositories", installationId: "42", syncInstallation: true },
+      ],
+      {
+        syncInstallation: async (id) => {
+          work.push(`delete:${id}`);
+          return "deleted";
+        },
+        reconcileInstallationProofChecks: async (id) => {
+          work.push(`proofs:${id}`);
+        },
+      },
+    );
+    expect(work).toEqual(["delete:42"]);
+  });
+
   it("reconciles policies and proof checks for a dashboard full-sync follow-up", async () => {
     const work: string[] = [];
     await runMessages(
@@ -79,5 +100,126 @@ describe("queue consumer", () => {
       },
     );
     expect(work).toEqual(["policies:42", "proofs:42"]);
+  });
+
+  it("runs daily policy and proof repair only after its multi-step installation sync finishes", async () => {
+    const work: string[] = [];
+    const purposes: Array<{ reconcilePolicies: boolean; reconcileProofChecks: boolean }> = [];
+    await processQueueMessage(
+      { event: "policy_reconcile", installationId: "42", syncInstallation: true },
+      new Set(),
+      {
+        syncInstallation: async (_id, purpose) => {
+          purposes.push(purpose);
+          return { continued: 1 };
+        },
+        reconcileInstallationPolicies: async (id) => { work.push(`policies:${id}`); },
+        reconcileInstallationProofChecks: async (id) => { work.push(`proofs:${id}`); },
+      },
+    );
+    expect(work).toEqual([]);
+    expect(purposes).toEqual([{ reconcilePolicies: true, reconcileProofChecks: true }]);
+
+    await processQueueMessage(
+      {
+        event: "installation_sync_continue",
+        installationId: "42",
+        syncInstallation: true,
+        postSyncPolicyReconcile: true,
+        postSyncProofReconcile: true,
+      },
+      new Set(),
+      {
+        syncInstallation: async (_id, purpose) => {
+          purposes.push(purpose);
+          return { continued: 0 };
+        },
+        reconcileInstallationPolicies: async (id) => { work.push(`policies:${id}`); },
+        reconcileInstallationProofChecks: async (id) => { work.push(`proofs:${id}`); },
+      },
+    );
+    expect(work).toEqual(["policies:42", "proofs:42"]);
+    expect(purposes).toEqual([
+      { reconcilePolicies: true, reconcileProofChecks: true },
+      { reconcilePolicies: true, reconcileProofChecks: true },
+    ]);
+  });
+
+  it("preserves membership proof repair without inventing policy work across continuation", async () => {
+    const work: string[] = [];
+    await processQueueMessage(
+      { event: "member", installationId: "42", syncInstallation: true },
+      new Set(),
+      {
+        syncInstallation: async (_id, purpose) => {
+          expect(purpose).toEqual({ reconcilePolicies: false, reconcileProofChecks: true });
+          return { continued: 1 };
+        },
+        reconcileInstallationPolicies: async (id) => { work.push(`policies:${id}`); },
+        reconcileInstallationProofChecks: async (id) => { work.push(`proofs:${id}`); },
+      },
+    );
+    expect(work).toEqual([]);
+
+    await processQueueMessage(
+      {
+        event: "installation_sync_continue",
+        installationId: "42",
+        syncInstallation: true,
+        postSyncPolicyReconcile: false,
+        postSyncProofReconcile: true,
+      },
+      new Set(),
+      {
+        syncInstallation: async (_id, purpose) => {
+          expect(purpose).toEqual({ reconcilePolicies: false, reconcileProofChecks: true });
+          return { continued: 0 };
+        },
+        reconcileInstallationPolicies: async (id) => { work.push(`policies:${id}`); },
+        reconcileInstallationProofChecks: async (id) => { work.push(`proofs:${id}`); },
+      },
+    );
+    expect(work).toEqual(["proofs:42"]);
+  });
+
+  it("confirms an uninstall against current GitHub authority", async () => {
+    const work: string[] = [];
+    await runMessages(
+      [{ event: "installation", installationId: "42", installationAction: "deleted", syncInstallation: false }],
+      {
+        syncInstallation: async (id) => { work.push(`sync:${id}`); },
+      },
+    );
+    expect(work).toEqual(["sync:42"]);
+  });
+
+  it("does not run an untagged proof reconcile against a later project incarnation", async () => {
+    const work: string[] = [];
+    await runMessages(
+      [{ event: "push", installationId: "42", reconcileProofRepositoryId: "repo-1", reconcileProofProjectId: null }],
+      { reconcileProjectProofChecks: async (repositoryId, projectId) => { work.push(`${repositoryId}:${projectId}`); } },
+    );
+    expect(work).toEqual([]);
+  });
+
+  it("does not reconsider a fresh project for an unbound old proof delivery", async () => {
+    const reconsidered: string[] = [];
+    await runMessages(
+      [
+        {
+          event: "check_run",
+          installationId: "42",
+          appProofTask: { kind: "verify", request: { ...REQUEST, projectId: undefined } },
+          syncInstallation: false,
+        },
+      ],
+      {
+        processAppProof: async () => undefined,
+        reconsiderHead: async (repositoryId) => {
+          reconsidered.push(repositoryId);
+        },
+      },
+    );
+    expect(reconsidered).toEqual([]);
   });
 });

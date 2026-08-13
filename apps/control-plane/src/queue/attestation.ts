@@ -422,6 +422,8 @@ export async function storeAttestation(
     readonly digest: string;
     readonly kind: string;
     readonly repositoryId: string;
+    /** Exact project incarnation that created these signed bytes. */
+    readonly projectId?: string | undefined;
     readonly baseRef: string;
     readonly transitionSequence: number | null;
     readonly attemptId: string;
@@ -447,14 +449,16 @@ export async function storeAttestation(
       bytes: Uint8Array;
     }) => Promise<void>;
   },
-): Promise<{ stored: true } | { stored: false; digest: string }> {
-  const result = await (async (): Promise<{ stored: true } | { stored: false; digest: string }> => {
+): Promise<{ stored: true } | { stored: false; digest: string; rejected?: true }> {
+  const result = await (async (): Promise<{ stored: true } | { stored: false; digest: string; rejected?: true }> => {
     try {
-      await db
+      const inserted = await db
         .prepare(
           `INSERT INTO queue_attestations
-             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           SELECT ?, ?, ?, p.id, ?, ?, ?, ?, ?
+             FROM projects p
+            WHERE p.github_repository_id = ? AND (? IS NULL OR p.id = ?)
            ON CONFLICT(digest) DO NOTHING`,
         )
         .bind(
@@ -466,8 +470,23 @@ export async function storeAttestation(
           row.attemptId,
           new TextDecoder().decode(row.bytes),
           row.jws,
+          row.repositoryId,
+          row.projectId ?? null,
+          row.projectId ?? null,
         )
         .run();
+      const changes = (inserted as { meta?: { changes?: number } }).meta?.changes ?? 0;
+      if (changes === 0) {
+        const existing = await db
+          .prepare(
+            `SELECT a.digest FROM queue_attestations a
+              WHERE a.digest = ? AND (? IS NULL OR a.project_id = ?)
+                AND EXISTS (SELECT 1 FROM projects p WHERE p.id = a.project_id)`,
+          )
+          .bind(row.digest, row.projectId ?? null, row.projectId ?? null)
+          .first<{ digest: string }>();
+        if (existing === null) return { stored: false, digest: row.digest, rejected: true };
+      }
       return { stored: true };
     } catch (error) {
       if (row.transitionSequence === null || !isOneRecordPerAttemptViolation(error)) throw error;
@@ -476,46 +495,13 @@ export async function storeAttestation(
       // position. When that row sits in this epoch, `transitionRecordFor`
       // finds it and this is the record that won the race.
       //
-      // An epoch bump like migration 0016's produces the other case: the
-      // attempt's old record sits exactly where it was, still holding the
-      // partial index's one slot for that attempt id, while
-      // `transitionRecordFor` now correctly stops seeing it because the
-      // chain a verifier reads starts somewhere past it. That old row's
-      // slot is freed the same way a losing race's row is freed elsewhere
-      // in this file: the position is cleared, the bytes and signature
-      // stay for anyone auditing what happened, and the insert this
-      // attempt actually asked for is retried into the now-open slot.
+      // The unique index can fire only because this attempt already has a
+      // positioned record, and `transitionRecordFor` reads every epoch. If the
+      // winner disappeared between the failed insert and this read, retrying
+      // here could cross a project-release fence and mirror bytes D1 rejected.
+      // Fail loudly and let the outer operation retry instead.
       if (winner !== null) return { stored: false, digest: winner };
-      const stale = await db
-        .prepare(
-          `SELECT digest FROM queue_attestations WHERE attempt_id = ? AND transition_sequence IS NOT NULL LIMIT 1`,
-        )
-        .bind(row.attemptId)
-        .first<{ digest: string }>();
-      if (stale === null) throw error;
-      await db
-        .prepare(`UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?`)
-        .bind(stale.digest)
-        .run();
-      await db
-        .prepare(
-          `INSERT INTO queue_attestations
-             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(digest) DO NOTHING`,
-        )
-        .bind(
-          row.digest,
-          row.kind,
-          row.repositoryId,
-          row.baseRef,
-          row.transitionSequence,
-          row.attemptId,
-          new TextDecoder().decode(row.bytes),
-          row.jws,
-        )
-        .run();
-      return { stored: true };
+      throw error;
     }
   })();
 
@@ -532,7 +518,7 @@ export async function storeAttestation(
   // chain but its bytes and signature are kept rather than deleted.
   // Destroying signed evidence to tidy up is a worse habit than keeping a
   // blob nobody references.
-  if (row.mirror !== undefined && row.organizationId !== undefined) {
+  if (!("rejected" in result) && row.mirror !== undefined && row.organizationId !== undefined) {
     try {
       await row.mirror({
         organizationId: row.organizationId,
@@ -547,8 +533,12 @@ export async function storeAttestation(
       // above was inserted under whether this call won or lost the race in
       // storeAttestation's own insert.
       await db
-        .prepare(`UPDATE queue_attestations SET mirrored_at = ? WHERE digest = ?`)
-        .bind(new Date().toISOString(), row.digest)
+        .prepare(
+          `UPDATE queue_attestations SET mirrored_at = ?
+            WHERE digest = ? AND (? IS NULL OR project_id = ?)
+              AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_attestations.project_id)`,
+        )
+        .bind(new Date().toISOString(), row.digest, row.projectId ?? null, row.projectId ?? null)
         .run();
     } catch {
       /* the record is stored; the durable copy is retried by the backfill */
@@ -575,6 +565,7 @@ export async function placeAttestationInChain(
     readonly baseRef: string;
     readonly attemptId: string;
     readonly transitionSequence: number;
+    readonly projectId?: string | undefined;
   },
 ): Promise<boolean> {
   try {
@@ -583,7 +574,9 @@ export async function placeAttestationInChain(
         `UPDATE queue_attestations
             SET transition_sequence = ?
           WHERE digest = ? AND github_repository_id = ? AND base_ref = ? AND attempt_id = ?
-            AND transition_sequence IS NULL`,
+            AND transition_sequence IS NULL
+            AND (? IS NULL OR project_id = ?)
+            AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_attestations.project_id)`,
       )
       .bind(
         input.transitionSequence,
@@ -591,6 +584,8 @@ export async function placeAttestationInChain(
         input.repositoryId,
         input.baseRef,
         input.attemptId,
+        input.projectId ?? null,
+        input.projectId ?? null,
       )
       .run();
   } catch (error) {
@@ -602,18 +597,35 @@ export async function placeAttestationInChain(
     .prepare(
       `SELECT transition_sequence AS transitionSequence
          FROM queue_attestations
-        WHERE digest = ? AND github_repository_id = ? AND base_ref = ? AND attempt_id = ?`,
+        WHERE digest = ? AND github_repository_id = ? AND base_ref = ? AND attempt_id = ?
+          AND (? IS NULL OR project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_attestations.project_id)`,
     )
-    .bind(input.digest, input.repositoryId, input.baseRef, input.attemptId)
+    .bind(
+      input.digest,
+      input.repositoryId,
+      input.baseRef,
+      input.attemptId,
+      input.projectId ?? null,
+      input.projectId ?? null,
+    )
     .first<{ transitionSequence: number | null }>();
   return placed?.transitionSequence === input.transitionSequence;
 }
 
 /** Remove a position claim after the queue refused or replaced that link. */
-export async function clearAttestationChainPosition(db: D1Like, digest: string): Promise<void> {
+export async function clearAttestationChainPosition(
+  db: D1Like,
+  digest: string,
+  projectId?: string,
+): Promise<void> {
   await db
-    .prepare("UPDATE queue_attestations SET transition_sequence = NULL WHERE digest = ?")
-    .bind(digest)
+    .prepare(
+      `UPDATE queue_attestations SET transition_sequence = NULL
+        WHERE digest = ? AND (? IS NULL OR project_id = ?)
+          AND EXISTS (SELECT 1 FROM projects p WHERE p.id = queue_attestations.project_id)`,
+    )
+    .bind(digest, projectId ?? null, projectId ?? null)
     .run();
 }
 
@@ -628,7 +640,13 @@ export async function clearAttestationChainPosition(db: D1Like, digest: string):
  */
 export async function durableTransitionForAttempt(
   db: D1Like,
-  input: { repositoryId: string; baseRef: string; attemptId: string; mergeSha: string },
+  input: {
+    repositoryId: string;
+    baseRef: string;
+    attemptId: string;
+    mergeSha: string;
+    projectId?: string | undefined;
+  },
 ): Promise<{
   digest: string;
   transitionSequence: number;
@@ -649,6 +667,7 @@ export async function durableTransitionForAttempt(
         WHERE link.github_repository_id = ? AND link.base_ref = ?
           AND record.github_repository_id = ? AND record.base_ref = ?
           AND record.attempt_id = ? AND link.base_sha = ?
+          AND (? IS NULL OR (link.project_id = ? AND record.project_id = ?))
         ORDER BY link.queue_epoch DESC, link.transition_sequence DESC
         LIMIT 1`,
     )
@@ -659,6 +678,9 @@ export async function durableTransitionForAttempt(
       input.baseRef,
       input.attemptId,
       input.mergeSha,
+      input.projectId ?? null,
+      input.projectId ?? null,
+      input.projectId ?? null,
     )
     .first<{
       digest: string;
@@ -734,7 +756,7 @@ export async function durableTransitionForAttempt(
  */
 export async function durableTransitionForAttemptId(
   db: D1Like,
-  input: { repositoryId: string; baseRef: string; attemptId: string },
+  input: { repositoryId: string; baseRef: string; attemptId: string; projectId?: string | undefined },
 ): ReturnType<typeof durableTransitionForAttempt> {
   const candidates = await db
     .prepare(
@@ -744,9 +766,19 @@ export async function durableTransitionForAttemptId(
         WHERE link.github_repository_id = ? AND link.base_ref = ?
           AND record.github_repository_id = ? AND record.base_ref = ?
           AND record.attempt_id = ?
-          AND record.transition_sequence = link.transition_sequence`,
+          AND record.transition_sequence = link.transition_sequence
+          AND (? IS NULL OR (link.project_id = ? AND record.project_id = ?))`,
     )
-    .bind(input.repositoryId, input.baseRef, input.repositoryId, input.baseRef, input.attemptId)
+    .bind(
+      input.repositoryId,
+      input.baseRef,
+      input.repositoryId,
+      input.baseRef,
+      input.attemptId,
+      input.projectId ?? null,
+      input.projectId ?? null,
+      input.projectId ?? null,
+    )
     .all<{ mergeSha: string }>();
   for (const candidate of candidates.results) {
     const durable = await durableTransitionForAttempt(db, { ...input, mergeSha: candidate.mergeSha });
@@ -785,6 +817,7 @@ export async function durableMergeRecordForCommit(
     baseRef: string;
     mergeSha: string;
     pullRequestNumber?: number;
+    projectId?: string | undefined;
   },
 ): Promise<DurableMergeRecord | null> {
   const rows = await db
@@ -801,6 +834,7 @@ export async function durableMergeRecordForCommit(
         WHERE link.github_repository_id = ? AND link.base_ref = ?
           AND record.github_repository_id = ? AND record.base_ref = ?
           AND link.base_sha = ?
+          AND (? IS NULL OR (link.project_id = ? AND record.project_id = ?))
         ORDER BY link.queue_epoch DESC, link.transition_sequence DESC`,
     )
     .bind(
@@ -809,6 +843,9 @@ export async function durableMergeRecordForCommit(
       input.repositoryId,
       input.baseRef,
       input.mergeSha,
+      input.projectId ?? null,
+      input.projectId ?? null,
+      input.projectId ?? null,
     )
     .all<{
       digest: string;
@@ -877,6 +914,7 @@ export async function durableMergeRecordForCommit(
       baseRef: input.baseRef,
       attemptId: facts.attemptId,
       transitionSequence: row.transitionSequence,
+      projectId: input.projectId,
     });
     if (placed) {
       return {
@@ -899,6 +937,7 @@ export async function durableMergeRecordForPullRequest(
     baseRef: string;
     pullRequestNumber: number;
     mergeSha: string;
+    projectId?: string | undefined;
   },
 ): Promise<DurableMergeRecord | null> {
   return durableMergeRecordForCommit(db, input);
@@ -914,7 +953,7 @@ export async function durableMergeRecordForPullRequest(
  */
 export async function durableMergeRecordForPullRequestNumber(
   db: D1Like,
-  input: { repositoryId: string; baseRef: string; pullRequestNumber: number },
+  input: { repositoryId: string; baseRef: string; pullRequestNumber: number; projectId?: string | undefined },
 ): Promise<DurableMergeRecord | null> {
   const candidates = await db
     .prepare(
@@ -924,6 +963,7 @@ export async function durableMergeRecordForPullRequestNumber(
         WHERE link.github_repository_id = ? AND link.base_ref = ?
           AND record.github_repository_id = ? AND record.base_ref = ?
           AND record.transition_sequence = link.transition_sequence
+          AND (? IS NULL OR (link.project_id = ? AND record.project_id = ?))
           AND COALESCE(
             json_extract(record.bytes, '$.verifiedMerge.pullRequestNumber'),
             json_extract(record.bytes, '$.reusedProof.pullRequestNumber'),
@@ -931,7 +971,16 @@ export async function durableMergeRecordForPullRequestNumber(
             json_extract(record.bytes, '$.override.pullRequestNumber')
           ) = ?`,
     )
-    .bind(input.repositoryId, input.baseRef, input.repositoryId, input.baseRef, input.pullRequestNumber)
+    .bind(
+      input.repositoryId,
+      input.baseRef,
+      input.repositoryId,
+      input.baseRef,
+      input.projectId ?? null,
+      input.projectId ?? null,
+      input.projectId ?? null,
+      input.pullRequestNumber,
+    )
     .all<{ mergeSha: string }>();
   for (const candidate of candidates.results) {
     const durable = await durableMergeRecordForPullRequest(db, { ...input, mergeSha: candidate.mergeSha });
@@ -972,6 +1021,7 @@ export async function stagedMergeRecordForAttempt(
     baseRef: string;
     pullRequestNumber: number;
     mergeSha: string;
+    projectId?: string | undefined;
     mergeTree: string;
     parentShas: readonly string[];
     beforeBaseSha: string;
@@ -986,12 +1036,13 @@ export async function stagedMergeRecordForAttempt(
       `SELECT digest, kind, attempt_id AS attemptId, bytes, jws
          FROM queue_attestations
         WHERE github_repository_id = ? AND base_ref = ?
+          AND (? IS NULL OR project_id = ?)
           AND transition_sequence IS NULL
           AND kind IN ('verified-merge', 'reused-proof-merge', 'candidate-verified-merge', 'override-merge')
           AND json_extract(bytes, '$.after.baseSha') = ?
         ORDER BY created_at, digest`,
     )
-    .bind(input.repositoryId, input.baseRef, input.mergeSha)
+    .bind(input.repositoryId, input.baseRef, input.projectId ?? null, input.projectId ?? null, input.mergeSha)
     .all<{ digest: string; kind: string; attemptId: string; bytes: string; jws: string }>();
 
   for (const row of rows.results) {
@@ -1059,6 +1110,7 @@ export async function recoverExactMergeRecord(
     baseRef: string;
     pullRequestNumber: number;
     mergeSha: string;
+    projectId?: string | undefined;
     staged?: Omit<Parameters<typeof stagedMergeRecordForAttempt>[1], "repositoryId" | "baseRef" | "mergeSha">;
   },
 ): Promise<
@@ -1073,6 +1125,7 @@ export async function recoverExactMergeRecord(
     repositoryId: input.repositoryId,
     baseRef: input.baseRef,
     mergeSha: input.mergeSha,
+    projectId: input.projectId,
     ...input.staged,
   });
   return staged === null ? null : { status: "staged", ...staged };

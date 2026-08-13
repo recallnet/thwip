@@ -93,6 +93,7 @@ async function fetchBundle(
       code: "POLICY_AWAITING_FIRST_MERGE";
       repository: string;
       repositoryId: string;
+      projectId: string;
       defaultBranch: string;
     }
 > {
@@ -190,7 +191,7 @@ async function main(): Promise<void> {
     summary(
       `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`,
     );
-    await recordObservation(repositoryId, commit.sha, "BOOTSTRAP_PENDING");
+    await recordObservation(repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING");
     process.exit(0);
   }
   const bundle = resolution.bundle;
@@ -254,13 +255,18 @@ async function main(): Promise<void> {
   // reads the newest observation as the project's last verification, and
   // "we have not decided yet" is not something to show there.
   if (result.code !== "VERIFICATION_PENDING") {
-    await recordObservation(repositoryId, commit.sha, result.code);
+    await recordObservation(repositoryId, bundle.projectId, commit.sha, result.code);
   }
 
   process.exit(result.code === "PASS" ? 0 : 1);
 }
 
-async function recordObservation(repositoryId: string, headSha: string, outcome: string): Promise<void> {
+async function recordObservation(
+  repositoryId: string,
+  projectId: string,
+  headSha: string,
+  outcome: string,
+): Promise<void> {
   try {
     const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
     await fetch(`${ENDPOINT}/v1/verification-observations`, {
@@ -268,6 +274,7 @@ async function recordObservation(repositoryId: string, headSha: string, outcome:
       headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
       body: JSON.stringify({
         repositoryId,
+        projectId,
         headSha,
         outcome,
         runId: process.env["GITHUB_RUN_ID"] ?? null,

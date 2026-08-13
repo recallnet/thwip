@@ -46,6 +46,11 @@ import {
 import type { BlockingReason } from "@thwip/queue-domain";
 import type { ReasonCode } from "@thwip/vocabulary";
 import { DEFAULT_TIMINGS } from "./commands.js";
+import {
+  acquireProjectWriteLease,
+  repositoryAllowsExternalWrite,
+  type ProjectWriteLease,
+} from "../project-lifecycle.js";
 
 /**
  * How long a dispatched verifier may stay silent before another is asked for. A
@@ -69,9 +74,9 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     env: TEnv,
     repositoryId: string,
     baseRef: string,
-  ): Promise<{ activationState: string } | null>;
+  ): Promise<{ activationState: string; projectId?: string; verifierWorkflowVersion?: 1 | 2 } | null>;
   /** The activated principal for a GitHub user id, or null. */
-  principalFor(env: TEnv, githubUserId: string): Promise<string | null>;
+  principalFor(env: TEnv, repositoryId: string, githubUserId: string): Promise<string | null>;
   /**
    * What GitHub says a pull request is, for a caller holding only its number.
    *
@@ -93,7 +98,12 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     headSha: string;
   } | null>;
   /** Publish whose turn it is, as a check GitHub can require. */
-  publishTurnCheck?(env: TEnv, repositoryId: string, update: TurnCheckUpdate): Promise<void>;
+  publishTurnCheck?(
+    env: TEnv,
+    repositoryId: string,
+    update: TurnCheckUpdate,
+    lifecycleLease?: ProjectWriteLease,
+  ): Promise<void>;
   /** The integrated candidate GitHub has computed for a pull request. */
   integratedCandidate?(
     env: TEnv,
@@ -106,6 +116,7 @@ export interface AuthorizeTurnDeps<TEnv extends QueueRouteEnv> extends MergeLane
     env: TEnv,
     repositoryId: string,
     payload: {
+      projectId: string;
       baseRef: string;
       pullRequestNumber: number;
       attemptId: string;
@@ -255,6 +266,15 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
     // never configured here.
     return { outcome: "not-configured" };
   }
+  if (project.projectId === undefined) return { outcome: "not-configured" };
+  const lifecycleLease = await acquireProjectWriteLease(
+    env.DB as unknown as D1Like,
+    repositoryId,
+    project.projectId,
+  );
+  if (lifecycleLease === null) return { outcome: "not-configured" };
+  try {
+    await lifecycleLease.renew();
 
   const entryId = `entry_${repositoryId}_${input.pullRequestNumber}`;
   const db = env.DB as unknown as D1Like;
@@ -274,7 +294,8 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
   // route already makes to avoid a write.
   const placed = (await loadQueueState(db, repositoryId, baseRef)).store.state().entries.get(entryId);
   const sponsorPrincipalId =
-    placed?.sponsorPrincipalId ?? (await deps.principalFor(env, String(input.authorGithubUserId ?? "")));
+    placed?.sponsorPrincipalId ??
+    (await deps.principalFor(env, repositoryId, String(input.authorGithubUserId ?? "")));
   const sponsorGithubUserId = placed?.sponsorGithubUserId ?? String(input.authorGithubUserId ?? "");
 
   // Why there is nobody, when there is nobody.
@@ -315,6 +336,7 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
           headSha: input.headSha,
           reason: unplaceableReason,
         }),
+        lifecycleLease,
       );
     } catch {
       /* the check may lag; the answer below is unaffected */
@@ -739,12 +761,21 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
             env.DB as unknown as D1Like,
             repositoryId,
             baseRef,
+            lifecycleLease.projectId,
+            attemptId,
+            project.verifierWorkflowVersion ?? 2,
             cand.candidateTreeOid,
             new Date().toISOString(),
             CANDIDATE_DISPATCH_STALE_MS,
           );
-          const dispatched = mine
-            ? await deps.dispatchCandidateVerification(env, repositoryId, {
+          let dispatched: { ok: true } | { ok: false; status: number; detail: string } = { ok: true };
+          if (mine) {
+            await lifecycleLease.renew();
+            if (!(await repositoryAllowsExternalWrite(env.DB as unknown as D1Like, repositoryId, lifecycleLease.projectId))) {
+              return { outcome: "not-configured" };
+            }
+            dispatched = await deps.dispatchCandidateVerification(env, repositoryId, {
+                projectId: policy.projectId,
                 baseRef,
                 pullRequestNumber: input.pullRequestNumber,
                 attemptId,
@@ -756,8 +787,8 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
                 // policy requires is refused as CANDIDATE_SUITES_INCOMPLETE,
                 // and the workflow has no way to know what the policy says.
                 requiredSuites: policy.requiredSuites,
-              })
-            : ({ ok: true } as const);
+              });
+          }
           if (!dispatched.ok) {
             // Nothing will arrive, so waiting is the wrong answer. Say what
             // GitHub refused so it can be fixed rather than waited out.
@@ -974,6 +1005,15 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
           entryId,
         };
       }
+      if (policy === null) {
+        return {
+          outcome: "refused",
+          activationState: project.activationState,
+          reason: "MERGE_EVIDENCE_INCOMPLETE",
+          detail: "nothing may be signed for this merge without an active project policy",
+          entryId,
+        };
+      }
       const evidenceOrganizationId = evidenceForIntent.organizationId;
 
       const intentSubject = {
@@ -1018,6 +1058,7 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         digest: signedIntent.digest,
         kind: "merge-intent",
         repositoryId,
+        projectId: lifecycleLease.projectId,
         baseRef,
         transitionSequence: null,
         attemptId,
@@ -1026,6 +1067,8 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
         organizationId: evidenceOrganizationId,
         mirror: (input) =>
           storeEvidence(env, {
+            projectId: policy.projectId,
+            writeLease: lifecycleLease,
             organizationId: input.organizationId,
             repositoryId: input.repositoryId,
             kind: input.kind,
@@ -1136,6 +1179,9 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
     operationId,
     queuePosition: snapshot.entries.filter((e) => e.state === "Ready").length,
   };
+  } finally {
+    await lifecycleLease.release();
+  }
 }
 
 /**

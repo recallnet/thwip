@@ -1,7 +1,7 @@
 import { parseMergeIntent, parseTransitionRecord, envelopeDigest } from "@thwip/queue-protocol";
 import type { GitSubject, Sha256 } from "@thwip/queue-protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import {
   readAttestation,
   readChain,
@@ -472,6 +472,7 @@ describe("keeping the signed bytes", () => {
 
   function db(): D1Like {
     const t = testD1();
+    seedActiveProject(t, { repositoryId: "1315419165" });
     open.push(t);
     return t.db as unknown as D1Like;
   }
@@ -550,8 +551,8 @@ describe("keeping the signed bytes", () => {
       store
         .prepare(
           `INSERT INTO queue_attestations
-             (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+           VALUES (?, ?, ?, 'proj_1315419165', ?, ?, ?, ?, ?)`,
         )
         .bind(D("f2"), "reused-proof-merge", "1315419165", "refs/heads/main", 9, "att-1", "{}", "j2")
         .run(),
@@ -711,6 +712,68 @@ describe("keeping the signed bytes", () => {
     });
     expect(await readAttestation(store, signed.digest)).not.toBeNull();
   });
+
+  it("does not mirror an attestation rejected by the project release fence", async () => {
+    const t = testD1();
+    open.push(t);
+    const projectId = seedActiveProject(t, { repositoryId: "1315419165" });
+    t.raw
+      .prepare(
+        `INSERT INTO project_release_requests
+           (github_repository_id, project_id, organization_id, github_name, default_branch)
+         SELECT github_repository_id, id, organization_id, github_name, default_branch
+           FROM projects WHERE id = ?`,
+      )
+      .run(projectId);
+    const signed = await record(D("f"));
+    const puts: string[] = [];
+
+    const result = await storeAttestation(t.db as unknown as D1Like, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-1",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      organizationId: "org_1",
+      mirror: async ({ digest }) => void puts.push(digest),
+    });
+
+    expect(result).toEqual({ stored: false, digest: signed.digest, rejected: true });
+    expect(puts).toEqual([]);
+    expect(await readAttestation(t.db as unknown as D1Like, signed.digest)).toBeNull();
+  });
+
+  it("does not store or mirror a delayed attestation after remove and reselect", async () => {
+    const t = testD1();
+    open.push(t);
+    seedActiveProject(t, { repositoryId: "1315419165", projectId: "project_old" });
+    t.raw.prepare("DELETE FROM projects WHERE id = 'project_old'").run();
+    seedActiveProject(t, { repositoryId: "1315419165", projectId: "project_new" });
+    const signed = await record(D("a"));
+    const puts: string[] = [];
+
+    const result = await storeAttestation(t.db as unknown as D1Like, {
+      digest: signed.digest,
+      kind: "reused-proof-merge",
+      repositoryId: "1315419165",
+      projectId: "project_old",
+      baseRef: "refs/heads/main",
+      transitionSequence: 9,
+      attemptId: "att-old-project",
+      bytes: signed.bytes,
+      jws: signed.jws,
+      organizationId: "org_1",
+      mirror: async ({ digest }) => void puts.push(digest),
+    });
+
+    expect(result).toEqual({ stored: false, digest: signed.digest, rejected: true });
+    expect(puts).toEqual([]);
+    expect(await readAttestation(t.db as unknown as D1Like, signed.digest)).toBeNull();
+  });
+
 });
 
 /**
@@ -740,15 +803,18 @@ describe("recordCoveringCommit across an epoch bump", () => {
   function seeded(): { db: D1Like; raw: import("better-sqlite3").Database } {
     const t = testD1();
     open.push(t);
-    t.raw
-      .prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES (?, ?, ?)")
-      .run("org_acme", "10", "acme");
+    const projectId = seedActiveProject(t, {
+      repositoryId: "1315419165",
+      organizationId: "org_acme",
+      projectId: "proj_acme",
+      githubName: "acme/repository",
+    });
     t.raw
       .prepare(
-        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, attested_from_sequence)
-         VALUES (?, ?, ?, ?, 1, 'enforced', 1, 1)`,
+        `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, attested_from_sequence, project_id)
+         VALUES (?, ?, ?, ?, 1, 'enforced', 1, 1, ?)`,
       )
-      .run("qp_acme", "org_acme", "1315419165", "refs/heads/main");
+      .run("qp_acme", "org_acme", "1315419165", "refs/heads/main", projectId);
     return { db: t.db as unknown as D1Like, raw: t.raw };
   }
 
@@ -758,8 +824,8 @@ describe("recordCoveringCommit across an epoch bump", () => {
     raw
       .prepare(
         `INSERT INTO queue_attestations
-           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-         VALUES (?, 'external-transition', ?, ?, 2, ?, ?, ?)`,
+           (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, 'external-transition', ?, 'proj_acme', ?, 2, ?, ?, ?)`,
       )
       .run(
         `sha256:${"m".repeat(64)}`,
@@ -785,8 +851,8 @@ describe("recordCoveringCommit across an epoch bump", () => {
     raw
       .prepare(
         `INSERT INTO queue_attestations
-           (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-         VALUES (?, 'reused-proof-merge', ?, ?, 2, ?, ?, ?)`,
+           (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+         VALUES (?, 'reused-proof-merge', ?, 'proj_acme', ?, 2, ?, ?, ?)`,
       )
       .run(
         `sha256:${"n".repeat(64)}`,

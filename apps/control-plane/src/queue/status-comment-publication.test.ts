@@ -48,14 +48,14 @@ function seed(options: { enabled?: number; activation?: string } = {}) {
     .run("org_1", "1", "acme", "9001");
   raw
     .prepare(
-      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .run("qp_1", "org_1", REPO, REF, options.enabled ?? 1, options.activation ?? "enforced");
-  raw
-    .prepare(
       "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
     .run("proj_1", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run("qp_1", "org_1", REPO, REF, options.enabled ?? 1, options.activation ?? "enforced", "proj_1");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -173,5 +173,37 @@ describe("the comment on a queued pull request", () => {
     const mine = comments.filter((c) => c.body.includes(COMMENT_MARKER));
     expect(mine).toHaveLength(1);
     expect(mine[0]!.body).toContain("observing");
+  });
+
+  it("does not create a comment after repository removal is requested", async () => {
+    const e = env();
+    seed();
+    let commentWrites = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (/\/issues\/\d+\/comments/.test(url) && (init?.method ?? "GET") === "GET") {
+          raw.prepare(
+            `INSERT OR IGNORE INTO project_release_requests
+               (github_repository_id, project_id, organization_id, github_name, default_branch)
+             VALUES (?, 'proj_1', 'org_1', 'acme/repo', 'main')`,
+          ).run(REPO);
+          return Response.json([]);
+        }
+        if (/\/issues\//.test(url) && (init?.method === "POST" || init?.method === "PATCH")) {
+          commentWrites += 1;
+        }
+        if (url.includes("/check-runs")) {
+          return (init?.method ?? "GET") === "GET" ? Response.json({ check_runs: [] }) : Response.json({ id: 1 });
+        }
+        return Response.json({});
+      }),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await queueFromPullRequest(e as unknown as Env, openedPayload(120, HEAD));
+
+    expect(commentWrites).toBe(0);
   });
 });

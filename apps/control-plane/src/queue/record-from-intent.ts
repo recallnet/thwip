@@ -33,6 +33,8 @@ import { issuedAssignmentForAttempt } from "./assignment-store.js";
 import { acceptIntegrationReceipt, integrationReceiptDigest } from "./integration-receipt.js";
 import { withTransitionSigningLease } from "./transition-signing-lease.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
+import type { ProjectWriteLease } from "../project-lifecycle.js";
+import type { TurnCheckUpdate } from "./turn-check.js";
 
 /**
  * Putting a merge back into the chain from what survives the attempt.
@@ -116,6 +118,7 @@ export interface RecordFromIntentDeps<TEnv extends QueueRouteEnv> {
     env: TEnv,
     repositoryId: string,
   ): Promise<{
+    projectId: string;
     policyDigest: string;
     pipelineDigest: string | null;
     requiredSuites: readonly string[];
@@ -126,6 +129,8 @@ export interface RecordFromIntentDeps<TEnv extends QueueRouteEnv> {
     env: TEnv,
     input: {
       readonly organizationId: string;
+      readonly projectId: string;
+      readonly writeLease?: ProjectWriteLease;
       readonly repositoryId: string;
       readonly kind: "merge-intent" | "transition-record";
       readonly digest: `sha256:${string}`;
@@ -137,6 +142,9 @@ export interface RecordFromIntentDeps<TEnv extends QueueRouteEnv> {
     repositoryId: string,
     baseRef: string,
     decide: (parts: { store: SnapshotQueueStore; commands: QueueCommands }) => T,
+    publish?: (update: TurnCheckUpdate) => Promise<void>,
+    comment?: (snapshot: QueueSnapshot) => Promise<void>,
+    lease?: ProjectWriteLease,
   ) => Promise<{ result: T; snapshot: QueueSnapshot }>;
 }
 
@@ -145,9 +153,9 @@ export async function readQueue(
   env: QueueRouteEnv,
   repositoryId: string,
   baseRef: string,
-): Promise<{ store: SnapshotQueueStore; snapshot: QueueSnapshot }> {
+): Promise<{ store: SnapshotQueueStore; snapshot: QueueSnapshot; projectId: string | null }> {
   const loaded = await loadQueueState(env.DB as unknown as D1Like, repositoryId, baseRef);
-  return { store: loaded.store, snapshot: buildSnapshot(loaded.store) };
+  return { store: loaded.store, snapshot: buildSnapshot(loaded.store), projectId: loaded.projectId };
 }
 
 /**
@@ -327,6 +335,7 @@ async function storeRepairAudit<TEnv extends QueueRouteEnv>(
     attemptId: string;
     actorPrincipalId: string;
     reason: string;
+    projectId?: string | undefined;
   },
 ): Promise<string> {
   const existing = await repairAuditForTransition(db, {
@@ -361,6 +370,7 @@ async function storeRepairAudit<TEnv extends QueueRouteEnv>(
     digest,
     kind: "transition-repair-audit",
     repositoryId: input.repositoryId,
+    projectId: input.projectId,
     baseRef: input.baseRef,
     transitionSequence: null,
     attemptId: input.attemptId,
@@ -386,9 +396,12 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     readonly repositoryId: string;
     readonly baseRef: string;
     readonly mergeSha: string;
+    /** Exact project incarnation; must match the held lease when supplied. */
+    readonly projectId?: string;
     readonly witnessPrincipalId: string;
     readonly reason: string;
     readonly attemptId?: string;
+    readonly writeLease?: ProjectWriteLease;
   },
 ): Promise<RecordFromIntentResult> {
   const { repositoryId, baseRef, mergeSha } = input;
@@ -431,7 +444,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // Recovery reads the transition projection, but queue_state is authority.
   // Replay authority before deciding that no link exists; this repairs the
   // commit-before-projection failure without creating new signed bytes.
-  await projectAuthoritativeQueue(db, repositoryId, baseRef);
+  await projectAuthoritativeQueue(db, repositoryId, baseRef, input.writeLease);
   if (!(await claim.fence())) {
     return {
       status: "refused",
@@ -446,7 +459,12 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // the pull request: the commit is the durable identity, not the callback that
   // happened to notice it. Storage or key-read failure propagates; treating it
   // as absence could sign a second record.
-  const durableCovered = await durableMergeRecordForCommit(db, { repositoryId, baseRef, mergeSha });
+  const durableCovered = await durableMergeRecordForCommit(db, {
+    repositoryId,
+    baseRef,
+    mergeSha,
+    projectId: input.writeLease?.projectId,
+  });
   if (durableCovered !== null) {
     const repairAuditDigest =
       durableCovered.queueAttemptId === null
@@ -457,6 +475,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
             attemptId: durableCovered.attemptId,
             actorPrincipalId: input.witnessPrincipalId,
             reason: input.reason,
+            projectId: input.writeLease?.projectId,
           })
         : null;
     return {
@@ -494,7 +513,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       // A legacy build gave this row a position before the queue accepted the
       // link, or its alleged signature is not authentic. The strict lookup
       // above proves it cannot settle this merge.
-      await clearAttestationChainPosition(db, covered.digest);
+      await clearAttestationChainPosition(db, covered.digest, input.writeLease?.projectId);
     } else if (await queueTransitionLinkForDigest(db, { repositoryId, baseRef, digest: covered.digest })) {
       return {
         status: "refused",
@@ -502,7 +521,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
         detail: "the queue link names a record with no durable signing identity",
       };
     } else {
-      await clearAttestationChainPosition(db, covered.digest);
+      await clearAttestationChainPosition(db, covered.digest, input.writeLease?.projectId);
     }
   }
 
@@ -542,6 +561,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     baseRef,
     pullRequestNumber: intent.pullRequestNumber,
     mergeSha,
+    projectId: input.writeLease?.projectId,
   });
   if (linked?.status === "linked") {
     const repairAuditDigest = await storeRepairAudit(env, deps, db, {
@@ -551,6 +571,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       attemptId: linked.attemptId,
       actorPrincipalId: input.witnessPrincipalId,
       reason: input.reason,
+      projectId: input.writeLease?.projectId,
     });
     return {
       status: "already",
@@ -563,7 +584,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
 
   const already = await transitionRecordFor(db, repositoryId, baseRef, attemptId);
   if (already !== null) {
-    await clearAttestationChainPosition(db, already);
+    await clearAttestationChainPosition(db, already, input.writeLease?.projectId);
   }
 
   if (snapshot.activeAttemptId === attemptId) {
@@ -641,6 +662,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     baseRef,
     pullRequestNumber: intent.pullRequestNumber,
     mergeSha,
+    projectId: input.writeLease?.projectId,
     staged: {
       pullRequestNumber: intent.pullRequestNumber,
       mergeTree: facts.treeOid,
@@ -660,6 +682,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       attemptId: reusable.attemptId,
       actorPrincipalId: input.witnessPrincipalId,
       reason: input.reason,
+      projectId: input.writeLease?.projectId,
     });
     return {
       status: "already",
@@ -718,6 +741,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       digest: signed.digest,
       kind: recordKind,
       repositoryId,
+      projectId: input.writeLease?.projectId ?? policy?.projectId,
       baseRef,
       transitionSequence: null,
       attemptId,
@@ -736,6 +760,8 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
             }) =>
               deps
                 .storeEvidence(env, {
+                  projectId: policy.projectId,
+                  ...(input.writeLease === undefined ? {} : { writeLease: input.writeLease }),
                   organizationId: mirrored.organizationId,
                   repositoryId: mirrored.repositoryId,
                   kind: mirrored.kind,
@@ -783,7 +809,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
         reason: input.reason,
       }),
     };
-  });
+  }, undefined, undefined, input.writeLease);
 
   if (result.moved) {
     const winner = await recoverExactMergeRecord(db, {
@@ -791,6 +817,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
       baseRef,
       pullRequestNumber: intent.pullRequestNumber,
       mergeSha,
+      projectId: input.writeLease?.projectId,
     });
     if (winner?.status === "linked") {
       const repairAuditDigest = await storeRepairAudit(env, deps, db, {
@@ -800,6 +827,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
           attemptId: winner.attemptId,
           actorPrincipalId: input.witnessPrincipalId,
           reason: input.reason,
+          projectId: input.writeLease?.projectId,
       });
       return {
         status: "already",
@@ -824,6 +852,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     baseRef,
     pullRequestNumber: intent.pullRequestNumber,
     mergeSha,
+    projectId: input.writeLease?.projectId,
   });
   if (winner?.status !== "linked") {
     return {
@@ -842,6 +871,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     attemptId: winner.attemptId,
     actorPrincipalId: input.witnessPrincipalId,
     reason: input.reason,
+    projectId: input.writeLease?.projectId,
   });
   if (winner.digest !== recordDigest) {
     return {
@@ -864,6 +894,7 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     repairAuditDigest,
   };
     },
+    input.writeLease,
   );
   if (!signing.acquired) {
     return {

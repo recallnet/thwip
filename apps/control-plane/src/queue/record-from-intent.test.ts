@@ -73,10 +73,10 @@ function seed(): void {
     .run("proj_acme", "org_acme", REPO, "acme/repo");
   raw
     .prepare(
-      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public)
-       VALUES (?, ?, ?, ?, 1, 'enforced', 1)`,
+      `INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, chain_public, project_id)
+       VALUES (?, ?, ?, ?, 1, 'enforced', 1, ?)`,
     )
-    .run("qp_acme", "org_acme", REPO, REF);
+    .run("qp_acme", "org_acme", REPO, REF, "proj_acme");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -117,8 +117,8 @@ async function seedIntent(merge: typeof FIRST, candidateSha = merge.mergeSha): P
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, ?)`,
+         (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws, created_at)
+       VALUES (?, 'merge-intent', ?, 'proj_acme', ?, NULL, ?, ?, ?, ?)`,
     )
     .run(
       signed.digest,
@@ -203,8 +203,8 @@ async function seedVerifiedIntent(
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, 'integration-assignment', ?, ?, NULL, ?, ?, ?)`,
+         (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+       VALUES (?, 'integration-assignment', ?, 'proj_acme', ?, NULL, ?, ?, ?)`,
     )
     .run(
       assignment.digest,
@@ -225,10 +225,10 @@ async function seedVerifiedIntent(
   raw
     .prepare(
       `INSERT INTO queue_assignments (
-         assignment_id, github_repository_id, base_ref, attempt_id, assignment_digest,
+         assignment_id, github_repository_id, project_id, base_ref, attempt_id, assignment_digest,
          candidate_sha, candidate_tree_oid, principal_id, device_key_id, required_suites,
          execution_seconds, issued_at, receipt_digest, receipt_suites, receipt_accepted_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, 'proj_acme', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       rowAssignmentId,
@@ -284,8 +284,8 @@ async function seedVerifiedIntent(
   raw
     .prepare(
       `INSERT INTO queue_attestations
-         (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws)
-       VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?)`,
+         (digest, kind, github_repository_id, project_id, base_ref, transition_sequence, attempt_id, bytes, jws)
+       VALUES (?, 'merge-intent', ?, 'proj_acme', ?, NULL, ?, ?, ?)`,
     )
     .run(signed.digest, REPO, REF, FIRST.attemptId, new TextDecoder().decode(signed.bytes), signed.jws);
   return signed.digest;
@@ -308,6 +308,7 @@ const stubDeps: RecordFromIntentDeps<QueueRouteEnv> = {
   baseContainsSha: async () => true,
   pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: FIRST.mergeSha }),
   activePolicy: async () => ({
+    projectId: "proj_acme",
     policyDigest: `sha256:${"2".repeat(64)}`,
     pipelineDigest: `sha256:${"3".repeat(64)}`,
     requiredSuites: ["unit"],

@@ -51,14 +51,14 @@ function env(): QueueRouteEnv {
     .run("org_1", "1", "acme", "9001");
   raw
     .prepare(
-      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state) VALUES (?, ?, ?, ?, 1, 'enforced')",
-    )
-    .run("qp_1", "org_1", REPO, REF);
-  raw
-    .prepare(
       "INSERT INTO projects (id, organization_id, github_repository_id, github_name, enabled) VALUES (?, ?, ?, ?, 1)",
     )
     .run("proj_1", "org_1", REPO, "acme/repo");
+  raw
+    .prepare(
+      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id) VALUES (?, ?, ?, ?, 1, 'enforced', ?)",
+    )
+    .run("qp_1", "org_1", REPO, REF, "proj_1");
   raw
     .prepare(
       "INSERT INTO principals (id, organization_id, github_user_id, github_login, activated_at) VALUES (?, ?, ?, ?, datetime('now'))",
@@ -96,8 +96,8 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
     proofCheckRunId: async () => null,
     signRecordBytes: async (_e, bytes) => `jws.${bytes.byteLength}`,
     dispatchCandidateVerification: async () => ({ ok: true }),
-    queueProject: async () => ({ activationState: "enforced" }),
-    principalFor: async (_e, githubUserId) => (githubUserId === "1" ? "alice" : null),
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
+    principalFor: async (_e, _repositoryId, githubUserId) => (githubUserId === "1" ? "alice" : null),
     pullRequestPlacement: async () => ({
       authorGithubUserId: String(BOT_USER_ID),
       baseRef: REF,
@@ -222,7 +222,7 @@ describe("a bot pull request needs a human behind it", () => {
     // joining on someone else's behalf does not take their fairness share.
     const e = env();
     const app = routes({
-      principalFor: async (_e, githubUserId) => (githubUserId === "7" ? "carol" : null),
+      principalFor: async (_e, _repositoryId, githubUserId) => (githubUserId === "7" ? "carol" : null),
       pullRequestPlacement: async () => ({ authorGithubUserId: "7", baseRef: REF, authorIsBot: false }),
     });
 

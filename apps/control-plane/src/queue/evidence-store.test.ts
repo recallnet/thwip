@@ -24,11 +24,16 @@ function bucket() {
         ? { size: bytes.byteLength }
         : { size: bytes.byteLength, customMetadata: custom };
     },
+    async delete(key) {
+      objects.delete(key);
+      meta.delete(key);
+    },
   };
   return { impl, objects, meta };
 }
 
 const ORG = "org_1";
+const PROJECT = "project_1";
 const REPO = "1315419165";
 const KIND: EvidenceKind = "transition-record";
 
@@ -43,16 +48,18 @@ const bytesOf = (text: string) => new TextEncoder().encode(text);
 describe("evidenceKey", () => {
   it("is tenant-scoped so an export or deletion can be bounded", () => {
     const key = evidenceKey({
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: KIND,
       digest: `sha256:${"a".repeat(64)}`,
     });
-    expect(key.startsWith(`org/${ORG}/repo/${REPO}/${KIND}/`)).toBe(true);
+    expect(key.startsWith(`project/${PROJECT}/org/${ORG}/repo/${REPO}/${KIND}/`)).toBe(true);
   });
 
   it("fans out on the digest so no single prefix grows without bound", () => {
     const key = evidenceKey({
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: KIND,
@@ -62,7 +69,7 @@ describe("evidenceKey", () => {
   });
 
   it("separates repositories and kinds", () => {
-    const base = { organizationId: ORG, digest: `sha256:${"a".repeat(64)}` as Sha256 };
+    const base = { projectId: PROJECT, organizationId: ORG, digest: `sha256:${"a".repeat(64)}` as Sha256 };
     const a = evidenceKey({ ...base, repositoryId: "1", kind: "merge-intent" });
     const b = evidenceKey({ ...base, repositoryId: "2", kind: "merge-intent" });
     const c = evidenceKey({ ...base, repositoryId: "1", kind: "transition-record" });
@@ -75,6 +82,7 @@ describe("putEvidence", () => {
     const { impl, objects } = bucket();
     const bytes = bytesOf('{"signed":"envelope"}');
     const result = await putEvidence(impl, {
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: KIND,
@@ -91,6 +99,7 @@ describe("putEvidence", () => {
     const { impl, objects } = bucket();
     const bytes = bytesOf("real content");
     const result = await putEvidence(impl, {
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: KIND,
@@ -105,6 +114,7 @@ describe("putEvidence", () => {
     const { impl, objects } = bucket();
     const bytes = bytesOf("same");
     const input = {
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: KIND,
@@ -120,13 +130,13 @@ describe("putEvidence", () => {
     const { impl, objects } = bucket();
     const bytes = bytesOf("the real envelope");
     const d = await digest(bytes);
-    const key = evidenceKey({ organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d });
+    const key = evidenceKey({ projectId: PROJECT, organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d });
     // Plant a different-length object at the right key, as corruption or a bug
     // elsewhere would.
     objects.set(key, bytesOf("something else entirely, longer"));
 
     expect(
-      await putEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes }),
+      await putEvidence(impl, { projectId: PROJECT, organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes }),
     ).toMatchObject({ stored: false, reason: "CONTENT_CONFLICT" });
   });
 
@@ -134,6 +144,7 @@ describe("putEvidence", () => {
     const { impl, meta } = bucket();
     const bytes = bytesOf("x");
     await putEvidence(impl, {
+      projectId: PROJECT,
       organizationId: ORG,
       repositoryId: REPO,
       kind: "merge-intent",
@@ -149,8 +160,8 @@ describe("putEvidence", () => {
     const bytes = new Uint8Array(0);
     const d = await digest(bytes);
     expect(
-      await putEvidence(impl, { organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes }),
+      await putEvidence(impl, { projectId: PROJECT, organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d, bytes }),
     ).toMatchObject({ stored: true });
-    expect(await impl.head(evidenceKey({ organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d }))).not.toBeNull();
+    expect(await impl.head(evidenceKey({ projectId: PROJECT, organizationId: ORG, repositoryId: REPO, kind: KIND, digest: d }))).not.toBeNull();
   });
 });

@@ -110,7 +110,7 @@ async function authorizeHeld(e: QueueRouteEnv): Promise<{
   const readFixtureCommit = baseDeps.commitFacts;
   const app = queueRoutes({
     ...baseDeps,
-    queueProject: async () => ({ activationState: "enforced" }),
+    queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
     activePolicy: async () => fixturePolicy(),
     signRecordBytes: sign,
     baseContainsSha: async () => true,
@@ -196,7 +196,7 @@ async function crossAttemptFixture(e: QueueRouteEnv): Promise<{
   if ("error" in signedOld) throw new Error(signedOld.error);
   raw
     .prepare(
-      "INSERT INTO queue_attestations (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws) VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?)",
+      "INSERT INTO queue_attestations (digest, kind, github_repository_id, base_ref, transition_sequence, attempt_id, bytes, jws, project_id) VALUES (?, 'merge-intent', ?, ?, NULL, ?, ?, ?, 'proj_1')",
     )
     .run(signedOld.digest, REPO, REF, oldAttempt, new TextDecoder().decode(signedOld.bytes), signedOld.jws);
   const oldMessage = mergeCommitText(PR, oldOperation).replace(/\n$/, "");

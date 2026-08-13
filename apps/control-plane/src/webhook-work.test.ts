@@ -1,10 +1,35 @@
 import { describe, expect, it } from "vitest";
 
-import { INSTALLATION_STATE_EVENTS, MEMBERSHIP_EVENTS, webhookWork } from "./webhook-work.js";
+import { bindWebhookProject, INSTALLATION_STATE_EVENTS, MEMBERSHIP_EVENTS, webhookWork } from "./webhook-work.js";
 
 const base = { delivery: "d1", installationId: "42" };
 
 describe("webhookWork", () => {
+  it("tags default-branch proof reconciliation with the producer's project incarnation", () => {
+    const work = webhookWork(
+      "push",
+      { ref: "refs/heads/main", repository: { id: 99, default_branch: "main" } },
+      base,
+    );
+    expect(work).not.toBeNull();
+    expect(bindWebhookProject(work!, "project-current").reconcileProofProjectId).toBe("project-current");
+  });
+
+  it("drops repository work when no active project incarnation can bind it", () => {
+    const work = webhookWork(
+      "push",
+      { ref: "refs/heads/main", repository: { id: 99, default_branch: "main" } },
+      base,
+    );
+    expect(work).not.toBeNull();
+    expect(bindWebhookProject(work!, null)).toMatchObject({
+      policyPush: null,
+      appProofTask: null,
+      reconcileProofRepositoryId: null,
+      reconcileProofProjectId: null,
+      syncInstallation: false,
+    });
+  });
   /**
    * The event that drained ten thousand operations in a day. The App publishes
    * six checks per commit, GitHub fires a check_run webhook for each one, and
@@ -58,6 +83,11 @@ describe("webhookWork", () => {
     for (const event of INSTALLATION_STATE_EVENTS) {
       expect(webhookWork(event, { action: "created" }, base)).not.toBeNull();
     }
+  });
+
+  it.each(["suspend", "unsuspend"])("treats %s as a hint and rereads authoritative suspended_at", (action) => {
+    const work = webhookWork("installation", { action }, base);
+    expect(work).toMatchObject({ installationAction: action, syncInstallation: true });
   });
 
   it("keeps every membership event the consumer reconciles for", () => {

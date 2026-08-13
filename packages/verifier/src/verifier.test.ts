@@ -497,6 +497,7 @@ function makeLease(claims?: Record<string, unknown>, header?: Record<string, unk
   const payload = {
     aud: "urn:thwip:ci-run:v1",
     iss: "https://thwip.ai",
+    projectId: "prj_thwip",
     repositoryId: "1315419165",
     treeOid: TREE,
     parentOids: [PARENT],
@@ -616,6 +617,12 @@ describe("run leases", () => {
 
   it("refuses a valid lease minted for another repository", async () => {
     const lease = makeLease({ repositoryId: "999" });
+    const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
+    expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
+  });
+
+  it("refuses a valid lease minted for an earlier project incarnation", async () => {
+    const lease = makeLease({ projectId: "project_old" });
     const r = await runWith({ statement: leaseStatement(lease), bundle: makeBundle(leasePolicy) }, leaseDeps);
     expect(r.code).toBe("LEASE_CONTEXT_MISMATCH");
   });

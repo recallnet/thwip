@@ -124,16 +124,21 @@ export async function writeStatusCommentsForSnapshot(
   api: CommentApi,
   where: { repositoryId: string; baseRef: string },
   snapshot: QueueSnapshot,
-  options: { observing: boolean; now: string },
+  options: { observing: boolean; now: string; projectId?: string },
   budget?: CommentBudget,
 ): Promise<CommentWriteOutcome[]> {
   const currentPullRequests = new Set(snapshot.entries.map((entry) => entry.pullRequestNumber));
-  const compactedTerminals = (
-    await trackedTerminalEntries(db, where.repositoryId, where.baseRef)
-  ).filter(
-    (entry) => !currentPullRequests.has(entry.pullRequestNumber),
+  const compactedTerminals = terminalPublicationOrder(
+    (await trackedTerminalEntries(db, where.repositoryId, where.baseRef, options.projectId)).filter(
+      (entry) => !currentPullRequests.has(entry.pullRequestNumber),
+    ),
   );
-  const repairState = await terminalCommentRepairState(db, where.repositoryId, where.baseRef);
+  const repairState = await terminalCommentRepairState(
+    db,
+    where.repositoryId,
+    where.baseRef,
+    options.projectId,
+  );
   const completeSnapshot: QueueSnapshot = {
     ...snapshot,
     entries: [...snapshot.entries, ...compactedTerminals],
@@ -191,7 +196,7 @@ export async function writeStatusCommentsForSnapshot(
 
   const outcomes: CommentWriteOutcome[] = [];
   for (const view of [...liveViews, ...terminalViews]) {
-    const outcome = await writeStatusComment(db, api, where, view, options.now, budget);
+    const outcome = await writeStatusComment(db, api, where, view, options.now, budget, options.projectId);
     outcomes.push(outcome);
     if (view.state === "merged" || view.state === "cancelled" || view.state === "withdrawn-draft") {
       const entry = terminalCandidateByEntryId.get(view.entryId);
@@ -202,6 +207,7 @@ export async function writeStatusCommentsForSnapshot(
           where.baseRef,
           entry.entryId,
           entry.fairnessOrdinal,
+          options.projectId,
         );
       } else if (entry !== undefined && outcome === "forbidden") {
         await acknowledgeTerminalEntryStatusForbidden(
@@ -210,6 +216,7 @@ export async function writeStatusCommentsForSnapshot(
           where.baseRef,
           entry.entryId,
           entry.fairnessOrdinal,
+          options.projectId,
         );
       }
     }
@@ -250,13 +257,15 @@ async function stored(
   db: D1Like,
   where: { repositoryId: string; baseRef: string },
   pullRequestNumber: number,
+  projectId?: string,
 ): Promise<StoredComment | null> {
   return db
     .prepare(
       "SELECT comment_id, fingerprint FROM queue_status_comments " +
-        "WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+        "WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ? " +
+          "AND (? IS NULL OR project_id = ?)",
     )
-    .bind(where.repositoryId, where.baseRef, pullRequestNumber)
+    .bind(where.repositoryId, where.baseRef, pullRequestNumber, projectId ?? null, projectId ?? null)
     .first<StoredComment>();
 }
 
@@ -292,14 +301,18 @@ export async function writeStatusComment(
    * where the budget matters.
    */
   budget?: CommentBudget,
+  projectId?: string,
 ): Promise<CommentWriteOutcome> {
   const removed = await db
-    .prepare("SELECT 1 AS found FROM removed_projects WHERE github_repository_id = ? LIMIT 1")
-    .bind(where.repositoryId)
+    .prepare(
+      `SELECT 1 AS found FROM project_release_requests WHERE github_repository_id = ?
+       UNION SELECT 1 FROM project_release_jobs WHERE github_repository_id = ? LIMIT 1`,
+    )
+    .bind(where.repositoryId, where.repositoryId)
     .first<{ found: number }>();
   if (removed !== null) return "unchanged";
   const fingerprint = commentFingerprint(view);
-  const record = await stored(db, where, view.pullRequestNumber);
+  const record = await stored(db, where, view.pullRequestNumber, projectId);
 
   // Nothing moved. This is the common case on a five-minute tick over a quiet
   // queue, and it has to cost nothing: no listing, no edit, no request at all.
@@ -340,16 +353,31 @@ export async function writeStatusComment(
     // After GitHub accepted it, never before. A fingerprint recorded ahead of
     // the write convinces every later attempt there is nothing to say, and
     // leaves whatever is on the page reading as current.
-    await db
+    const written = await db
       .prepare(
         "INSERT INTO queue_status_comments " +
-          "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?) " +
+          "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at, project_id) " +
+          "SELECT ?, ?, ?, ?, ?, ?, p.id FROM projects p " +
+          "WHERE p.github_repository_id = ? AND (? IS NULL OR p.id = ?) " +
           "ON CONFLICT (github_repository_id, base_ref, pull_request_number) DO UPDATE SET " +
-          "comment_id = excluded.comment_id, fingerprint = excluded.fingerprint, updated_at = excluded.updated_at",
+          "comment_id = excluded.comment_id, fingerprint = excluded.fingerprint, updated_at = excluded.updated_at " +
+          "WHERE queue_status_comments.project_id = excluded.project_id",
       )
-      .bind(where.repositoryId, where.baseRef, view.pullRequestNumber, commentId, fingerprint, asOf)
+      .bind(
+        where.repositoryId,
+        where.baseRef,
+        view.pullRequestNumber,
+        commentId,
+        fingerprint,
+        asOf,
+        where.repositoryId,
+        projectId ?? null,
+        projectId ?? null,
+      )
       .run();
+    if (((written as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+      throw new Error(`project ${projectId ?? "unknown"} is unavailable for the status comment`);
+    }
     return outcome;
   } catch (error) {
     if (refusedForPermission(error)) {

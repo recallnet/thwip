@@ -25,6 +25,10 @@ const open: TestD1[] = [];
 function db(): TestD1 {
   const t = testD1();
   open.push(t);
+  t.raw.prepare("INSERT OR IGNORE INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
+  t.raw.prepare(
+    "INSERT OR IGNORE INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project', 'org', ?, 'owner/repo')",
+  ).run(REPO);
   return t;
 }
 afterEach(() => {
@@ -114,9 +118,8 @@ function emptySnapshot(over: Partial<QueueSnapshot> = {}): QueueSnapshot {
 describe("one comment per pull request", () => {
   it("does not touch GitHub after the repository removal marker lands", async () => {
     const t = db();
-    t.raw.prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org', '1', 'owner')").run();
     t.raw.prepare(
-      "INSERT INTO removed_projects (organization_id, github_repository_id, deleted_at, deleted_by_github_user_id) VALUES ('org', ?, 'now', '7')",
+      "INSERT INTO project_release_jobs (organization_id, github_repository_id, project_id, github_name, default_branch) VALUES ('org', ?, 'project', 'owner/repo', 'main')",
     ).run(REPO);
     const gh = github();
 
@@ -249,6 +252,7 @@ describe("comments for entries compacted out of authority", () => {
   ) {
     await projectQueueState(t.db, {
       repositoryId: REPO,
+      projectId: "project",
       baseRef: REF,
       queueEpoch: 0,
       generation: currentGeneration,
@@ -280,8 +284,8 @@ describe("comments for entries compacted out of authority", () => {
       t.raw
         .prepare(
           "INSERT INTO queue_status_comments " +
-            "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
-            "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+            "(github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+            "VALUES (?, 'project', ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
         )
         .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
     }
@@ -310,6 +314,7 @@ describe("comments for entries compacted out of authority", () => {
     };
     await projectQueueState(t.db, {
       repositoryId: REPO,
+      projectId: "project",
       baseRef: REF,
       queueEpoch: 0,
       generation: 2,
@@ -376,8 +381,8 @@ describe("comments for entries compacted out of authority", () => {
     t.raw
       .prepare(
         "INSERT INTO queue_status_comments " +
-          "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
-          "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+          "(github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+          "VALUES (?, 'project', ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
       )
       .run(REPO, REF, retained.pullRequestNumber, 10_000 + retained.pullRequestNumber);
     gh.comments.push({
@@ -531,6 +536,7 @@ describe("comments for entries compacted out of authority", () => {
     }));
     await projectQueueState(t.db, {
       repositoryId: REPO,
+      projectId: "project",
       baseRef: REF,
       queueEpoch: 0,
       generation: 1_000,
@@ -546,8 +552,8 @@ describe("comments for entries compacted out of authority", () => {
       t.raw
         .prepare(
           "INSERT INTO queue_status_comments " +
-            "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
-            "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+            "(github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+            "VALUES (?, 'project', ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
         )
         .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
       gh.comments.push({
@@ -726,8 +732,8 @@ describe("comments for entries compacted out of authority", () => {
         t.raw
           .prepare(
             "INSERT INTO queue_status_comments " +
-              "(github_repository_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
-              "VALUES (?, ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
+              "(github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at) " +
+              "VALUES (?, 'project', ?, ?, ?, 'legacy', '2026-08-04T12:00:00Z')",
           )
           .run(REPO, REF, entry.pullRequestNumber, 10_000 + entry.pullRequestNumber);
         gh.comments.push({
@@ -1056,5 +1062,30 @@ describe("the budget one sweep works to", () => {
 
     await writeStatusComment(t.db, gh.api, WHERE, view(), NOW, budget);
     expect(budget.remaining).toBe(1);
+  });
+});
+
+describe("project incarnation fencing", () => {
+  it("does not let a delayed status write replace the reselected project's row", async () => {
+    const t = db();
+    t.raw.prepare("DELETE FROM projects WHERE id = 'project'").run();
+    t.raw
+      .prepare(
+        "INSERT INTO projects (id, organization_id, github_repository_id, github_name) VALUES ('project_new', 'org', ?, 'owner/repo')",
+      )
+      .run(REPO);
+    t.raw
+      .prepare(
+        `INSERT INTO queue_status_comments
+           (github_repository_id, project_id, base_ref, pull_request_number, comment_id, fingerprint, updated_at)
+         VALUES (?, 'project_new', ?, 184, 88, 'fresh', ?)`,
+      )
+      .run(REPO, REF, NOW);
+    const gh = github([{ id: 88, body: `${COMMENT_MARKER}\nfresh`, pullRequestNumber: 184 }]);
+
+    expect(await writeStatusComment(t.db, gh.api, WHERE, view(), NOW, undefined, "project")).toBe("failed");
+    expect(
+      t.raw.prepare("SELECT project_id AS projectId, fingerprint FROM queue_status_comments WHERE comment_id = 88").get(),
+    ).toEqual({ projectId: "project_new", fingerprint: "fresh" });
   });
 });

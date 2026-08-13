@@ -5,6 +5,7 @@ import { confirmMergeAbsence } from "./merge-absence.js";
 import { mergeOperationId } from "./merge-commit.js";
 import type { DecisionRecorder } from "./commands.js";
 import { queueDecisionRecorder, type R2Like } from "./evidence-store.js";
+import { repositoryAllowsExternalWrite, type ProjectWriteLease } from "../project-lifecycle.js";
 import { buildSnapshot, commandsFor, type QueueSnapshot } from "./queue-operations.js";
 import { withQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
@@ -142,7 +143,12 @@ async function githubJson<T>(env: QueueRouteEnv, repositoryId: string, path: str
   if (repository === null) return null;
   // `installationToken` takes the Worker environment; the queue routes carry the
   // same object under a narrower type.
-  const token = await installationToken(env as unknown as Env, repository.installationId);
+  const token = await installationToken(
+    env as unknown as Env,
+    repository.installationId,
+    undefined,
+    repositoryId,
+  );
   const response = await fetch(`https://api.github.com/repos/${repository.name}${path}`, {
     headers: {
       authorization: `Bearer ${token}`,
@@ -246,6 +252,7 @@ export async function settleReconciliation(
   baseRef: string,
   overdue: OverdueReconciliation,
   reads: ReconciliationReads = GITHUB_READS,
+  lifecycleLease?: ProjectWriteLease,
 ): Promise<SettledReconciliation> {
   const db = env.DB as unknown as D1Like;
   // Built once for the whole settlement: every path below can free the lane, and
@@ -254,7 +261,19 @@ export async function settleReconciliation(
     db,
     bucket: env.EVIDENCE as unknown as R2Like | undefined,
     repositoryId,
+    ...(lifecycleLease === undefined
+      ? {}
+      : {
+          projectId: lifecycleLease.projectId,
+          beforeWrite: async () => {
+            await lifecycleLease.renew();
+            return repositoryAllowsExternalWrite(db, repositoryId, lifecycleLease.projectId);
+          },
+        }),
   });
+  const writeOptions = lifecycleLease === undefined
+    ? undefined
+    : { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease };
   const { attemptId, pullRequestNumber, headSha } = overdue;
   const verdict =
     headSha === null
@@ -289,7 +308,7 @@ export async function settleReconciliation(
         });
         await settle(store, commands);
         return { status: confirmed.status, snapshot: buildSnapshot(store) };
-      });
+      }, writeOptions);
       if (applied.status !== "rejected") {
         return { outcome: { settled: "merged", attemptId, mergeSha }, snapshot: applied.snapshot };
       }
@@ -297,11 +316,11 @@ export async function settleReconciliation(
     // A merge that cannot be named, or a commit that is not the candidate the
     // queue authorized. Neither is a merge this may write down, and neither is a
     // reason to keep holding the lane.
-    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the merge could not be read back from its commit");
+    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the merge could not be read back from its commit", writeOptions);
   }
 
   if (verdict.kind === "unknown") {
-    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, verdict.reason);
+    return giveUp(db, recordDecision, repositoryId, baseRef, attemptId, verdict.reason, writeOptions);
   }
 
   const resolved = await withQueueState(db, repositoryId, baseRef, async (store) => {
@@ -313,9 +332,9 @@ export async function settleReconciliation(
     });
     await settle(store, commands);
     return { status: confirmed.status, snapshot: buildSnapshot(store) };
-  });
+  }, writeOptions);
   return resolved.status === "rejected"
-    ? giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the refusal could not be recorded")
+    ? giveUp(db, recordDecision, repositoryId, baseRef, attemptId, "the refusal could not be recorded", writeOptions)
     : { outcome: { settled: "not-merged", attemptId, reason: verdict.reason }, snapshot: resolved.snapshot };
 }
 
@@ -334,6 +353,7 @@ async function giveUp(
   baseRef: string,
   attemptId: string,
   reason: string,
+  writeOptions?: { readonly expectedProjectId: string; readonly lease: ProjectWriteLease },
 ): Promise<SettledReconciliation> {
   const snapshot = await withQueueState(db, repositoryId, baseRef, async (store) => {
     const commands = commandsFor(store, undefined, recordDecision);
@@ -344,7 +364,7 @@ async function giveUp(
     });
     await settle(store, commands);
     return buildSnapshot(store);
-  });
+  }, writeOptions);
   return { outcome: { settled: "unknown", attemptId, reason }, snapshot };
 }
 

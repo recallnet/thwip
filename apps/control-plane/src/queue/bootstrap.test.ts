@@ -3,17 +3,20 @@ import { testD1, type TestD1 } from "../../test/d1.js";
 import {
   advanceBootstrap,
   bootstrapStatus,
-  enrollQueueProject,
+  enrollQueueProject as enrollBoundQueueProject,
   handleBootstrapRequest,
   readQueueProject,
   runBootstrap,
+  bootstrapGitHub,
   type BootstrapGitHub,
   type BootstrapRun,
+  type EnrollmentRequest,
   type ManualRulesetChange,
   type SetupPullRequestState,
   type StoredRuleset,
 } from "./bootstrap.js";
 import {
+  BOOTSTRAP_STEPS,
   GITHUB_ACTIONS_INTEGRATION_ID,
   OWNERSHIP_RULESET_NAME,
   POLICY_RULESET_NAME,
@@ -25,8 +28,60 @@ const REPOSITORY_ID = "987654321";
 const BASE_REF = "refs/heads/main";
 const APP_INTEGRATION_ID = 4419870;
 const BASE_SHA = "b".repeat(40);
+const PROJECT_BINDING = { expectedProjectId: "proj_1", expectedOrganizationId: "org_1" } as const;
 
 let d1: TestD1;
+
+function enrollQueueProject(
+  db: Parameters<typeof enrollBoundQueueProject>[0],
+  request: Omit<EnrollmentRequest, "expectedProjectId" | "expectedOrganizationId">,
+) {
+  return enrollBoundQueueProject(db, { ...request, ...PROJECT_BINDING });
+}
+
+describe("production setup GitHub writes", () => {
+  it("rechecks lifecycle authority before every blob, tree, commit, ref, and pull-request mutation", async () => {
+    const writes: string[] = [];
+    let checks = 0;
+    const github = bootstrapGitHub(
+      {
+        async json<T>(path: string, init?: RequestInit): Promise<T> {
+          if (init?.method === "POST") writes.push(path);
+          if (path.endsWith("/git/blobs")) return { sha: `blob-${writes.length}` } as T;
+          if (path.endsWith("/git/trees")) return { sha: "tree" } as T;
+          if (path.endsWith("/git/commits")) return { sha: "commit" } as T;
+          if (path.endsWith("/git/refs")) return {} as T;
+          if (path.endsWith("/pulls")) return { number: 7, head: { sha: "commit" } } as T;
+          throw new Error(`unexpected ${path}`);
+        },
+      },
+      { owner: "acme", repo: "widgets", baseRef: BASE_REF },
+      { branch: "thwip/setup", title: "Set up", body: "Set up" },
+      async () => {
+        checks += 1;
+        if (checks === 4) throw new Error("release requested");
+      },
+    );
+
+    await expect(
+      github.openSetupPullRequest({
+        baseSha: BASE_SHA,
+        files: [
+          { path: "a.yml", content: "a" },
+          { path: "b.yml", content: "b" },
+        ],
+      }),
+    ).rejects.toThrow("release requested");
+    expect(writes).toEqual([
+      "/repos/acme/widgets/git/blobs",
+      "/repos/acme/widgets/git/blobs",
+      "/repos/acme/widgets/git/trees",
+    ]);
+    expect(writes.some((path) => path.endsWith("/git/commits"))).toBe(false);
+    expect(writes.some((path) => path.endsWith("/git/refs"))).toBe(false);
+    expect(writes.some((path) => path.endsWith("/pulls"))).toBe(false);
+  });
+});
 
 function seedInstalledRepository(): void {
   d1.raw
@@ -51,6 +106,7 @@ function enforceAppProofCheck(): void {
 class FakeGitHub implements BootstrapGitHub {
   rulesets = new Map<string, StoredRuleset>();
   pull: SetupPullRequestState | null = null;
+  upgradePull: SetupPullRequestState | null = null;
   openedFiles: string[] = [];
   publishedChecks: Array<{ name: string; headSha: string; conclusion: string }> = [];
   appId = APP_INTEGRATION_ID;
@@ -79,6 +135,19 @@ class FakeGitHub implements BootstrapGitHub {
       headSha: "c".repeat(40),
     };
     return this.pull;
+  }
+
+  async verifierUpgradePullRequest(): Promise<SetupPullRequestState | null> {
+    return this.upgradePull;
+  }
+
+  async openVerifierUpgradePullRequest(input: {
+    files: ReadonlyArray<{ path: string; content: string }>;
+    baseSha: string;
+  }): Promise<SetupPullRequestState> {
+    this.openedFiles = input.files.map((f) => f.path);
+    this.upgradePull = { number: 8, merged: false, headSha: "d".repeat(40) };
+    return this.upgradePull;
   }
 
   async rulesetNamed(name: string): Promise<StoredRuleset | null> {
@@ -142,6 +211,7 @@ function deps(
     integrationId: APP_INTEGRATION_ID,
     endpoint: "https://thwip.example.test",
     actionRef: "recallnet/thwip@v1",
+    ...PROJECT_BINDING,
     ...(confirmQueueEnforcement ? { confirmQueueEnforcement: true } : {}),
     ...(confirmRulesetBypassActors ? { confirmRulesetBypassActors: true } : {}),
   };
@@ -392,6 +462,35 @@ describe("runBootstrap", () => {
     expect(run.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-setup-pr" });
     expect(run.enabled).toBe(false);
     expect(github.rulesets.size).toBe(0);
+  });
+
+  it("opens a reviewed verifier-only upgrade for a completed protocol 1 repository", async () => {
+    const github = new FakeGitHub();
+    await enrolled();
+    const progress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    d1.raw
+      .prepare(
+        "UPDATE queue_projects SET bootstrap_progress_json = ?, verifier_workflow_version = 1, enabled = 1 WHERE project_id = 'proj_1'",
+      )
+      .run(JSON.stringify(progress));
+    const legacy = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    if (legacy === null) throw new Error("legacy queue project missing");
+
+    const waiting = await runBootstrap(deps(github), legacy);
+
+    expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v2-pr" });
+    expect(github.openedFiles).toEqual([".github/workflows/thwip-queue-verify.yml"]);
+    expect(waiting.status).toMatchObject({ complete: false, enabled: true, nextStep: "merge-verifier-v2-pr" });
+
+    github.upgradePull = { ...github.upgradePull!, merged: true };
+    const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+    const completed = await runBootstrap(deps(github), current!);
+
+    expect(completed.outcomes).toContainEqual(expect.objectContaining({ kind: "advanced", step: "merge-verifier-v2-pr" }));
+    expect(completed.status).toMatchObject({ complete: true, nextStep: null });
+    expect(
+      d1.raw.prepare("SELECT verifier_workflow_version AS version FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ version: 2 });
   });
 
   it("enrols a repository end to end once the setup pull request has merged", async () => {
@@ -817,6 +916,37 @@ describe("bootstrapStatus", () => {
 });
 
 describe("handleBootstrapRequest", () => {
+  it.each(["same organization", "another organization"] as const)(
+    "does not let a paused old binding mutate a reselected project in %s",
+    async (owner) => {
+      const github = new FakeGitHub();
+      d1.raw.prepare("DELETE FROM projects WHERE id = 'proj_1'").run();
+      const organizationId = owner === "same organization" ? "org_1" : "org_2";
+      if (organizationId === "org_2") {
+        d1.raw
+          .prepare("INSERT INTO organizations (id, github_org_id, github_login) VALUES ('org_2', '84', 'other')")
+          .run();
+      }
+      d1.raw
+        .prepare(
+          "INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch) VALUES ('proj_2', ?, ?, 'other/widgets', 'main')",
+        )
+        .run(organizationId, REPOSITORY_ID);
+
+      const response = await handleBootstrapRequest({
+        ...deps(github),
+        repositoryId: REPOSITORY_ID,
+        baseRef: BASE_REF,
+      });
+
+      expect(response.status).toBe(404);
+      expect(github.pull).toBeNull();
+      expect(github.publishedChecks).toEqual([]);
+      expect(github.rulesets.size).toBe(0);
+      expect(d1.raw.prepare("SELECT COUNT(*) AS n FROM queue_projects").get()).toEqual({ n: 0 });
+    },
+  );
+
   it("enrols and bootstraps in one call", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     enforceAppProofCheck();

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { applyMigrations, formatMixedPhaseRefusal, migrationPlan } from "./migrate.mjs";
+import { applyMigrations, migrationPlan, selectedMigrationConfig } from "./migrate.mjs";
 
 const migrations = [
   { name: "0022_before.sql", order: "before-worker" },
@@ -31,12 +31,18 @@ function dependencies(applied, health = null) {
   };
 }
 
+const lifecycleMigrations = [
+  { name: "0030_github_repository_lifecycle.sql", order: "before-worker" },
+  { name: "0031_finish_github_repository_lifecycle.sql", order: "after-worker" },
+];
+
 describe("planning migration application", () => {
   it("preserves complete filenames even when migration number prefixes collide", () => {
     expect(migrationPlan(migrations, ["0022_before.sql", "0023_after.sql"])).toEqual({
-      kind: "mixed",
-      before: ["0024_before.sql"],
       after: ["0023_second_after.sql"],
+      before: [],
+      deferred: ["0024_before.sql"],
+      kind: "after-worker",
     });
   });
 
@@ -44,18 +50,33 @@ describe("planning migration application", () => {
     expect(migrationPlan(migrations, migrations.map((migration) => migration.name)).kind).toBe("current");
   });
 
-  it("lists both phases and the safe staged order in a mixed-set refusal", () => {
-    const message = formatMixedPhaseRefusal(
-      { before: ["0024_before.sql"], after: ["0023_after.sql"] },
+  it("selects only the first contiguous phase from a mixed pending tree", () => {
+    expect(migrationPlan(migrations, ["0022_before.sql"])).toEqual({
+      kind: "after-worker",
+      before: [],
+      after: ["0023_after.sql", "0023_second_after.sql"],
+      deferred: ["0024_before.sql"],
+    });
+  });
+});
+
+describe("the phase-only Wrangler configuration", () => {
+  it("preserves the exact remote database while changing only the visible migration directory", () => {
+    const config = selectedMigrationConfig(
+      JSON.stringify({
+        compatibility_date: "2026-07-01",
+        env: {
+          staging: {
+            d1_databases: [{ binding: "DB", database_name: "thwip-staging-wnam", database_id: "db-id", migrations_dir: "all" }],
+          },
+        },
+      }),
       "staging",
+      "thwip-staging-wnam",
     );
-    expect(message).toContain("0024_before.sql");
-    expect(message).toContain("0023_after.sql");
-    expect(message.indexOf("0023_after.sql")).toBeLessThan(message.indexOf("0024_before.sql"));
-    expect(message).toContain("after-worker");
-    expect(message).toContain("before-worker");
-    expect(message).toContain("migrate, then deploy");
-    expect(message).toContain("deploy that commit, then migrate");
+    expect(config.env.staging.d1_databases).toEqual([
+      { binding: "DB", database_name: "thwip-staging-wnam", database_id: "db-id", migrations_dir: "migrations" },
+    ]);
   });
 });
 
@@ -69,11 +90,7 @@ describe("applying a migration plan", () => {
   it("applies a before-worker-only pending set before the deploy", async () => {
     const deps = dependencies(["0022_before.sql", "0023_after.sql", "0023_second_after.sql"]);
     await expect(applyMigrations(deps)).resolves.toMatchObject({ kind: "before-worker" });
-    expect(deps.run).toHaveBeenCalledWith(
-      "wrangler",
-      ["d1", "migrations", "apply", "thwip-staging-wnam", "--env", "staging", "--remote"],
-      { env: { CLOUDFLARE_API_TOKEN: "migration-token" } },
-    );
+    expect(deps.run).toHaveBeenCalledWith(["0024_before.sql"]);
     expect(deps.fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -96,10 +113,70 @@ describe("applying a migration plan", () => {
     expect(deps.run).not.toHaveBeenCalled();
   });
 
-  it("refuses a mixed pending set without touching D1", async () => {
-    const deps = dependencies(["0022_before.sql"]);
-    await expect(applyMigrations(deps)).rejects.toThrow(/both sides of a Worker deploy/);
+  it("refuses the lifecycle finishing migration until remote capabilities are explicitly retired", async () => {
+    const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
+      buildSha: "abc123def456",
+        projectLifecycle: {
+        maintenanceMode: false,
+        workerActivatedAt: "2026-08-12T10:00:00.000Z",
+        remoteCapabilitiesRetiredAt: null,
+        remoteCapabilityEvidenceComplete: false,
+        destructiveSchemaReadyAt: null,
+        cleanupReady: false,
+      },
+    });
+    deps.migrations = lifecycleMigrations;
+    await expect(applyMigrations(deps)).rejects.toThrow(/remote capability cutover has not been recorded/);
     expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("applies the lifecycle finishing migration after the exact Worker and capability cutover are confirmed", async () => {
+    const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
+      buildSha: "abc123def456",
+      projectLifecycle: {
+        maintenanceMode: true,
+        workerActivatedAt: "2026-08-12T10:00:00.000Z",
+        remoteCapabilitiesRetiredAt: "2026-08-12T11:00:00.000Z",
+        remoteCapabilityEvidenceComplete: true,
+        backfillReady: true,
+        destructiveSchemaReadyAt: null,
+        cleanupReady: false,
+      },
+    });
+    deps.migrations = lifecycleMigrations;
+    await expect(applyMigrations(deps)).resolves.toMatchObject({
+      kind: "after-worker",
+      after: ["0031_finish_github_repository_lifecycle.sql"],
+    });
+    expect(deps.run).toHaveBeenCalledWith(["0031_finish_github_repository_lifecycle.sql"]);
+  });
+
+  it("refuses the finishing migration while the new D1 generation is not fenced", async () => {
+    const deps = dependencies(["0030_github_repository_lifecycle.sql"], {
+      buildSha: "abc123def456",
+      projectLifecycle: {
+        maintenanceMode: false,
+        workerActivatedAt: "2026-08-12T10:00:00.000Z",
+        remoteCapabilitiesRetiredAt: "2026-08-12T11:00:00.000Z",
+        remoteCapabilityEvidenceComplete: true,
+        backfillReady: true,
+        destructiveSchemaReadyAt: null,
+        cleanupReady: false,
+      },
+    });
+    deps.migrations = lifecycleMigrations;
+    await expect(applyMigrations(deps)).rejects.toThrow(/maintenanceMode=true/);
+    expect(deps.run).not.toHaveBeenCalled();
+  });
+
+  it("applies only the first phase of a mixed pending set", async () => {
+    const deps = dependencies(["0022_before.sql"]);
+    await expect(applyMigrations(deps)).resolves.toMatchObject({
+      kind: "after-worker",
+      after: ["0023_after.sql", "0023_second_after.sql"],
+      deferred: ["0024_before.sql"],
+    });
+    expect(deps.run).toHaveBeenCalledWith(["0023_after.sql", "0023_second_after.sql"]);
   });
 
   it("refuses an unreadable or malformed live schema without touching D1", async () => {

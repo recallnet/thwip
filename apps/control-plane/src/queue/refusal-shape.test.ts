@@ -48,10 +48,10 @@ function env(): QueueRouteEnv {
     .run("alice", "org_1", "1", "alice");
   raw
     .prepare(
-      `INSERT OR IGNORE INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state)
-       VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced')`,
+      `INSERT OR IGNORE INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id)
+       VALUES ('qp_1', 'org_1', ?, ?, 1, 'enforced', ?)`,
     )
-    .run(REPO, REF);
+    .run(REPO, REF, "proj_1");
   return { DB: t.db, PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;
 }
 

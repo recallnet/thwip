@@ -91,7 +91,11 @@ export async function projectsInReach(db: D1Like, reach: ProjectReach): Promise<
               ON mine.project_id = p.id AND mine.github_user_id = ? AND mine.active = 1
       WHERE (p.organization_id = ? OR mine.permission IS NOT NULL)
         AND NOT EXISTS (
-          SELECT 1 FROM removed_projects r
+          SELECT 1 FROM project_release_requests r
+           WHERE r.github_repository_id = p.github_repository_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM project_release_jobs r
            WHERE r.organization_id = p.organization_id
              AND r.github_repository_id = p.github_repository_id
         )

@@ -44,8 +44,9 @@ export async function dashboardCounts(
     db
       .prepare(
         `SELECT COUNT(*) n FROM projects p WHERE p.organization_id = ?
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
-            SELECT 1 FROM removed_projects r
+            SELECT 1 FROM project_release_jobs r
              WHERE r.organization_id = p.organization_id
                AND r.github_repository_id = p.github_repository_id
           )`,
@@ -55,17 +56,23 @@ export async function dashboardCounts(
     db
       .prepare(
         `SELECT COUNT(*) n FROM projects p WHERE p.organization_id = ? AND p.enabled = 1
+          AND NOT EXISTS (SELECT 1 FROM project_release_requests r WHERE r.github_repository_id = p.github_repository_id)
           AND NOT EXISTS (
-            SELECT 1 FROM removed_projects r
+            SELECT 1 FROM project_release_jobs r
              WHERE r.organization_id = p.organization_id
                AND r.github_repository_id = p.github_repository_id
           )`,
       )
       .bind(who.organizationId)
       .first<{ n: number }>(),
-    db.prepare("SELECT COUNT(*) n FROM principals WHERE organization_id = ?").bind(who.organizationId).first<{ n: number }>(),
     db
-      .prepare("SELECT COUNT(*) n FROM principals WHERE organization_id = ? AND activated_at IS NOT NULL")
+      .prepare("SELECT COUNT(*) n FROM principals WHERE organization_id = ? AND (github_org_role IS NULL OR github_org_role != 'removed')")
+      .bind(who.organizationId)
+      .first<{ n: number }>(),
+    db
+      .prepare(
+        "SELECT COUNT(*) n FROM principals WHERE organization_id = ? AND (github_org_role IS NULL OR github_org_role != 'removed') AND activated_at IS NOT NULL",
+      )
       .bind(who.organizationId)
       .first<{ n: number }>(),
     db.prepare("SELECT COUNT(*) n FROM github_teams WHERE organization_id = ?").bind(who.organizationId).first<{ n: number }>(),
@@ -74,7 +81,8 @@ export async function dashboardCounts(
         `SELECT COUNT(*) n FROM device_keys k
           WHERE k.revoked_at IS NULL
             AND EXISTS (SELECT 1 FROM principals p
-                         WHERE p.github_user_id = k.github_user_id AND p.organization_id = ?)`,
+                         WHERE p.github_user_id = k.github_user_id AND p.organization_id = ?
+                           AND (p.github_org_role IS NULL OR p.github_org_role != 'removed'))`,
       )
       .bind(who.organizationId)
       .first<{ n: number }>(),

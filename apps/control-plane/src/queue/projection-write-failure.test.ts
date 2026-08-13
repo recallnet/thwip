@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { queueRouteDeps } from "../../test/queue-deps.js";
-import { testD1 } from "../../test/d1.js";
+import { seedActiveProject, testD1 } from "../../test/d1.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./routes.js";
 import type { D1Like } from "./projection.js";
 
@@ -51,6 +51,7 @@ function brokenProjectionDb(db: D1Like): D1Like {
 /** A queue environment whose projection write always fails; the rest of the schema works. */
 function env(): QueueRouteEnv {
   const t = testD1();
+  seedActiveProject(t, { repositoryId: REPO, organizationId: "org_1", projectId: "proj_1" });
   open.push(t);
   raw = t.raw;
   return { DB: brokenProjectionDb(t.db), PUBLIC_ORIGIN: "https://thwip.test" } as unknown as QueueRouteEnv;

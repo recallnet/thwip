@@ -102,6 +102,18 @@ describe("the projects a viewer reaches", () => {
     expect(await names({ organizationId: null, githubUserId: "31" })).toEqual([]);
   });
 
+  it("hides a project as soon as GitHub removal requests its release", async () => {
+    database();
+    seed();
+    raw.prepare(
+      `INSERT INTO project_release_requests
+         (github_repository_id, project_id, organization_id, github_name, default_branch)
+       VALUES ('111', 'proj_acme', 'org_acme', 'acme/repo', 'main')`,
+    ).run();
+
+    expect(await names({ organizationId: "org_acme", githubUserId: "11" })).toEqual(["acme/other"]);
+  });
+
   /** The row says how it was reached, so the dashboard can say so too. */
   it("says how each project was reached, and on what permission", async () => {
     database();
@@ -130,10 +142,17 @@ describe("the projects a viewer reaches", () => {
     raw
       .prepare(
         `INSERT INTO queue_projects
-           (id, organization_id, github_repository_id, base_ref, bootstrap_progress_json)
-         VALUES (?, ?, ?, ?, ?)`,
+           (id, organization_id, github_repository_id, base_ref, bootstrap_progress_json, project_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run("queue_acme", "org_acme", "111", "refs/heads/main", JSON.stringify({ [BOOTSTRAP_STEPS[0]]: true }));
+      .run(
+        "queue_acme",
+        "org_acme",
+        "111",
+        "refs/heads/main",
+        JSON.stringify({ [BOOTSTRAP_STEPS[0]]: true }),
+        "proj_acme",
+      );
 
     const incomplete = await projectsInReach(db, { organizationId: "org_acme", githubUserId: "11" });
     expect(incomplete.find((project) => project.github_repository_id === "111")?.queue_setup_complete).toBe(false);

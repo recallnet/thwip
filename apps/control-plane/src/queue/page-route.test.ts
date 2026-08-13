@@ -26,22 +26,22 @@ describe("GET /v1/queue/:repositoryId paging", () => {
     raw.prepare(
       `INSERT INTO queue_projection_marks
          (github_repository_id, base_ref, generation, projected_at, active_attempt_id, paused,
-          pause_reason, rebaseline_required, base_sha, queue_epoch)
-       VALUES (?, ?, 7, datetime('now'), NULL, 0, NULL, 0, ?, 0)`,
+          pause_reason, rebaseline_required, base_sha, queue_epoch, project_id)
+       VALUES (?, ?, 7, datetime('now'), NULL, 0, NULL, 0, ?, 0, 'project')`,
     ).run(REPO, REF, "a".repeat(40));
 
     const insertEntry = raw.prepare(
       `INSERT INTO queue_entries_index
          (id, github_repository_id, base_ref, entry_id, pull_request_number, sponsor_principal_id,
           state, primary_reason, fairness_ordinal, scheduler_eligible, cooldown_until, last_attempt_id,
-          head_sha, generation)
-       VALUES (?, ?, ?, ?, ?, 'alice', 'Ready', NULL, ?, 1, NULL, ?, ?, 7)`,
+          head_sha, generation, project_id)
+       VALUES (?, ?, ?, ?, ?, 'alice', 'Ready', NULL, ?, 1, NULL, ?, ?, 7, 'project')`,
     );
     const insertTransition = raw.prepare(
       `INSERT INTO queue_transitions_index
          (id, github_repository_id, base_ref, queue_epoch, transition_sequence, kind, digest,
-          prior_digest, base_sha, attempt_id, witness_count, observed_at)
-       VALUES (?, ?, ?, 0, ?, 'verified', ?, ?, ?, ?, 1, NULL)`,
+          prior_digest, base_sha, attempt_id, witness_count, observed_at, project_id)
+       VALUES (?, ?, ?, 0, ?, 'verified', ?, ?, ?, ?, 1, NULL, 'project')`,
     );
     for (let sequence = 1; sequence <= 45; sequence += 1) {
       const attempt = `att-${sequence}`;
