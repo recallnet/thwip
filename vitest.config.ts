@@ -51,6 +51,6 @@ export default defineConfig({
     // The workerd chaos suite imports cloudflare:test and needs the Workers pool.
     // It runs under `pnpm test:workers`, not here.
     exclude: ["**/node_modules/**", "**/*.workers.test.ts"],
-    poolOptions: { threads: { maxThreads: 2 } },
+    maxWorkers: 2,
   },
 });
