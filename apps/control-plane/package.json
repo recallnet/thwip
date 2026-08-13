@@ -31,13 +31,13 @@
     "@thwip/verifier": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250712.0",
+    "@cloudflare/workers-types": "^5.20260804.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "better-sqlite3": "^13.0.1",
     "vite": "^8.1.5",
-    "wrangler": "^4.0.0"
+    "wrangler": "4.121.0"
   }
 }
