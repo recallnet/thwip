@@ -63,15 +63,34 @@ async function jsonResponse(fetchImpl, url, init, description) {
   return { response, body };
 }
 
-async function activeToken(fetchImpl, token) {
-  const checked = await jsonResponse(
-    fetchImpl,
-    `${API}/user/tokens/verify`,
-    { headers: { authorization: `Bearer ${token}` } },
-    "the API token",
-  );
-  const result = checked.body?.result;
-  if (!checked.response.ok || checked.body?.success !== true || result?.status !== "active") {
+async function tokenVerification(fetchImpl, token, accountId) {
+  const urls = [`${API}/accounts/${accountId}/tokens/verify`, `${API}/user/tokens/verify`];
+  const refusals = [];
+  for (const url of urls) {
+    const checked = await jsonResponse(
+      fetchImpl,
+      url,
+      { headers: { authorization: `Bearer ${token}` } },
+      "the API token",
+    );
+    const result = checked.body?.result;
+    if (checked.response.ok && checked.body?.success === true && typeof result?.status === "string") {
+      return { result, rejected: false };
+    }
+    refusals.push({ status: checked.response.status, success: checked.body?.success });
+  }
+  return {
+    result: null,
+    rejected: refusals.every(
+      (refusal) =>
+        (refusal.status === 400 || refusal.status === 401) && refusal.success === false,
+    ),
+  };
+}
+
+async function activeToken(fetchImpl, token, accountId) {
+  const { result } = await tokenVerification(fetchImpl, token, accountId);
+  if (result?.status !== "active") {
     throw new Error("Refusing: Cloudflare did not confirm that the explicit API token is active.");
   }
   return result;
@@ -86,7 +105,7 @@ function queryUrl(accountId, databaseId) {
  * A successful D1 read is a refusal: deploy authority must not include it.
  */
 export async function preflightDeployCredential({ fetchImpl, token, accountId, target }) {
-  await activeToken(fetchImpl, token);
+  await activeToken(fetchImpl, token, accountId);
   const probed = await jsonResponse(
     fetchImpl,
     queryUrl(accountId, target.databaseId),
@@ -120,7 +139,7 @@ export async function preflightD1Credential({
   now = Date.now(),
   maxRemainingMs = MAX_D1_TOKEN_REMAINING_MS,
 }) {
-  const token = await activeToken(fetchImpl, credential.token);
+  const token = await activeToken(fetchImpl, credential.token, credential.accountId);
   const expiresAt = Date.parse(token.expires_on ?? "");
   const remaining = expiresAt - now;
   if (!Number.isFinite(expiresAt) || remaining <= 0 || remaining > maxRemainingMs) {
@@ -185,23 +204,10 @@ export function wranglerEnvironment(baseEnv, credential) {
 }
 
 /** Check whether Cloudflare still accepts a token after the operator deletes it. */
-export async function tokenAcceptance({ fetchImpl, token }) {
-  const checked = await jsonResponse(
-    fetchImpl,
-    `${API}/user/tokens/verify`,
-    { headers: { authorization: `Bearer ${token}` } },
-    "whether the D1 token was revoked",
-  );
-  if (checked.response.ok && checked.body?.success === true) {
-    const status = checked.body?.result?.status;
-    return { accepted: status === "active", status: typeof status === "string" ? status : "unknown" };
-  }
-  if (
-    (checked.response.status === 400 || checked.response.status === 401) &&
-    checked.body?.success === false
-  ) {
-    return { accepted: false, status: "rejected" };
-  }
+export async function tokenAcceptance({ fetchImpl, token, accountId }) {
+  const { result, rejected } = await tokenVerification(fetchImpl, token, accountId);
+  if (result !== null) return { accepted: result.status === "active", status: result.status };
+  if (rejected) return { accepted: false, status: "rejected" };
   throw new Error(
     "Could not prove that Cloudflare revoked the D1 token. Check the token in Cloudflare, then try again.",
   );
@@ -225,7 +231,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     } else if (action === "verify-revoked") {
       const selected = d1CredentialFromEnv(process.env, kind);
       if (selected.refusal !== null) throw new Error(selected.refusal);
-      const status = await tokenAcceptance({ fetchImpl: fetch, token: selected.credential.token });
+      const status = await tokenAcceptance({
+        fetchImpl: fetch,
+        token: selected.credential.token,
+        accountId: selected.credential.accountId,
+      });
       if (status.accepted) throw new Error("Refusing: Cloudflare still accepts this D1 token. Delete it, then check again.");
       console.log("Cloudflare no longer accepts the D1 token. Clear it from this shell now.");
     } else {
