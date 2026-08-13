@@ -44,9 +44,9 @@ function request(s: SnapshotQueueStore, entryId: string, ordinal: number): void 
 }
 
 describe("what the document keeps", () => {
-  it("hands a compacted terminal entry to projection until its exact row is acknowledged", () => {
+  it("hands compacted terminal entries to projection with only proven repairs marked", () => {
     const s = store();
-    for (let i = 1; i <= 21; i += 1) {
+    for (let i = 1; i <= 22; i += 1) {
       request(s, `e${i}`, i);
       s.append(
         {
@@ -55,7 +55,10 @@ describe("what the document keeps", () => {
           type: "EntryCancelled",
           entryId: `e${i}`,
           actorPrincipalId: "github",
-          reason: "closed on GitHub",
+          reason:
+            i === 1
+              ? "GitHub reports the pull request closed without merge"
+              : "closed on GitHub",
         } as unknown as SubmittedEvent,
       );
     }
@@ -67,12 +70,18 @@ describe("what the document keeps", () => {
         pullRequestNumber: 1,
         state: "Cancelled",
         fairnessOrdinal: "1",
+        terminalCommentPriority: true,
+      }),
+      expect.objectContaining({
+        entryId: "e2",
+        pullRequestNumber: 2,
+        terminalCommentPriority: false,
       }),
     ]);
     s.acknowledgeTerminalEntryProjections(["not-the-row"]);
-    expect(s.pendingTerminalEntryProjections()).toHaveLength(1);
-    s.acknowledgeTerminalEntryProjections([pending[0]!.projectionId]);
-    s.acknowledgeTerminalEntryProjections([pending[0]!.projectionId]);
+    expect(s.pendingTerminalEntryProjections()).toHaveLength(2);
+    s.acknowledgeTerminalEntryProjections(pending.map((row) => row.projectionId));
+    s.acknowledgeTerminalEntryProjections(pending.map((row) => row.projectionId));
     expect(s.pendingTerminalEntryProjections()).toEqual([]);
   });
 
