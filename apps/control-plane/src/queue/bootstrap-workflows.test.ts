@@ -205,14 +205,13 @@ describe("drift against this repository's own workflows", () => {
     expect(generated.jobs["thwip"]?.name).toBe(live.jobs["thwip"]?.name);
   });
 
-  it("keeps this repository on v2 until the explicit production cutover", () => {
+  it("keeps this repository on the exact reviewed v3 workflow after cutover", () => {
     const live = readFileSync(join(repoRoot, ".github/workflows/thwip-queue-verify.yml"), "utf8");
     const upgrade = setupPullRequestFiles({
       endpoint: PRODUCTION_ENDPOINT,
       actionRef: "recallnet/thwip@v1",
     }).find((f) => f.path === ".github/workflows/thwip-queue-verify.yml")?.content;
-    expect(live).toContain("Thwip verifier callback protocol: 2");
-    expect(live).not.toBe(upgrade);
-    expect(upgrade).toContain("Thwip verifier callback protocol: 3");
+    expect(live).toContain("Thwip verifier callback protocol: 3");
+    expect(live).toBe(upgrade);
   });
 });
