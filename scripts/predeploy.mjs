@@ -36,7 +36,8 @@ import { fileURLToPath } from "node:url";
 
 import { breakGlassRefusal, excuses, parseBreakGlass } from "./break-glass.mjs";
 import { deployCheckout } from "./deploy-checkout.mjs";
-import { deployIdentity, liveSchemaUrl } from "./deploy-identity.mjs";
+import { deployIdentity, liveD1Target, liveSchemaUrl } from "./deploy-identity.mjs";
+import { preflightDeployCredential } from "./d1-identity.mjs";
 import {
   blockingMigrations,
   formatSchemaRefusal,
@@ -64,6 +65,8 @@ try {
 
 const checkout = deployCheckout({ gitBranch, headSha, remoteMainSha, dirty }, process.env);
 const branch = checkout.branch;
+const envArgIndex = process.argv.indexOf("--env");
+const targetEnv = envArgIndex === -1 ? "staging" : (process.argv[envArgIndex + 1] ?? "staging");
 console.log(`deploying ${branch}@${head}${dirty ? " (uncommitted changes)" : ""}, ${behind} commit(s) behind origin/main`);
 if (checkout.note !== null) console.log(checkout.note);
 if (checkout.refusal !== null) {
@@ -75,6 +78,18 @@ const identity = deployIdentity(process.env);
 console.log(identity.note);
 if (identity.refusal !== null) {
   console.error(`\n${identity.refusal}`);
+  process.exit(1);
+}
+try {
+  await preflightDeployCredential({
+    fetchImpl: fetch,
+    token: process.env.CLOUDFLARE_API_TOKEN,
+    accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+    target: liveD1Target(targetEnv),
+  });
+  console.log("deploy identity: active, and refused by the live D1 database");
+} catch (error) {
+  console.error(`\n${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }
 
@@ -137,8 +152,6 @@ if (branch !== "main") {
 
 // --- The database the code is about to run against -------------------------
 
-const envArgIndex = process.argv.indexOf("--env");
-const targetEnv = envArgIndex === -1 ? "staging" : (process.argv[envArgIndex + 1] ?? "staging");
 const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
 const migrations = readMigrations(migrationsDir);
 

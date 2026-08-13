@@ -3,10 +3,10 @@
 `thwip.ai` runs one Worker against one D1 database, and that database is
 live. There is no staging copy to practise on. Everything below assumes that.
 
-This page says how to deploy, how to diagnose, and how to change something,
-under the smallest authority each of those needs. The short version: diagnosing
-needs a login, deploying needs a token that can edit one Worker, and only
-applying a migration needs a credential that can touch the database.
+This page says how to deploy, diagnose, and change something under the smallest
+authority each task needs. Most diagnosis needs only a Thwip login. Deployment
+needs a token that cannot read D1. A rare direct database read gets a short-lived
+read token. A migration gets a different short-lived edit token.
 
 ## Diagnosing, with no Cloudflare credential at all
 
@@ -37,27 +37,69 @@ landed unrecorded on 2 August were found by pulling merge operations out of
 
 ## Reading a row that has no route yet
 
-For whoever does hold a D1 credential, and only for reads the table above cannot
-answer:
+Create a direct-read token only when the routes above cannot answer the question.
+This is not an ordinary development credential. Link the request to a private
+incident or maintenance record and get another operator's approval before
+creating it.
 
+1. Open **Cloudflare → My Profile → API Tokens → Create Token → Create Custom
+   Token**.
+2. Name it `thwip-d1-read-YYYYMMDD-HHMM`.
+3. Give it only **Account → D1 → Read**, scoped to the Recall account.
+4. Add an expiry within the next 24 hours. Restrict it to your current IP when
+   practical.
+5. Export it under the read-only name. Do not put it in
+   `CLOUDFLARE_API_TOKEN`:
+
+```sh
+export THWIP_D1_ACCOUNT_ID=<recall-account-id>
+export THWIP_D1_READ_API_TOKEN=<short-lived-token>
 ```
-node scripts/d1.mjs "SELECT * FROM queue_attestations WHERE attempt_id = 'att_...' LIMIT 5"
+
+Then run the read with both the Cloudflare environment name and the live host:
+
+```sh
+node scripts/d1.mjs --env staging --confirm-live thwip.ai \
+  "SELECT COUNT(*) AS count FROM queue_attestations"
 ```
 
 It takes one statement, it has to open as `SELECT`, `WITH` or `EXPLAIN`, and it
 refuses anything containing a word that changes the database. It prints the
-wrangler command it is about to run before it runs it, so what was read is in
-the transcript. It fails closed: a `SELECT` whose text happens to contain
-`delete` is refused, and widening the quoting is the reader's problem rather
-than the parser's.
+database, live host and a SHA-256 digest of the statement. It does not echo SQL
+literals, the token or result rows into diagnostic text. The query result still
+appears in the current terminal. Treat it as live data and do not paste it into
+an issue. A `SELECT` whose text happens to contain `delete` is refused; widening
+the quoting is the reader's problem rather than the parser's.
+
+Before the read, the script confirms that Cloudflare accepts the explicit token,
+that it expires within 24 hours and that `SELECT 1` succeeds against the exact DB
+binding in `wrangler.jsonc` without a write. Wrangler receives that token only.
+It cannot fall back to `CLOUDFLARE_API_TOKEN`, an API key or the stored Wrangler
+OAuth session.
+
+Delete the token immediately after the read, then prove that it is gone:
+
+```sh
+node scripts/d1-identity.mjs verify-revoked --kind read
+unset THWIP_D1_READ_API_TOKEN THWIP_D1_ACCOUNT_ID
+node scripts/d1-identity.mjs verify-cleared --kind read
+```
+
+`verify-revoked` must say that Cloudflare rejects the token. If it says the token
+is active or the result is uncertain, delete it in Cloudflare and repeat the
+check. `verify-cleared` must say that no role-specific D1 credential remains in
+the shell. It does not inspect an unrelated deploy token or Wrangler's stored
+login. Record the UTC time, token name, statement digest, outcome and both
+successful checks in the approving record. Do not copy the result rows there.
 
 `wrangler d1 execute` is no longer the documented way to look at production.
 Reaching for it means the statement was not a read, and a statement that is not
 a read belongs in the section below.
 
-## Changing something
+## Changing application state
 
 Every mutation goes through a route that writes a record naming who asked.
+Schema migrations are the separate, reviewed operation described below.
 
 | Change | Call |
 | --- | --- |
@@ -106,8 +148,11 @@ export CLOUDFLARE_API_TOKEN=...
 export CLOUDFLARE_ACCOUNT_ID=...
 ```
 
-Without them it falls back to the interactive wrangler session, says so, and
-names the token to create. The session works, and it carries the whole account.
+Without both variables, deployment refuses. It never falls back to the
+interactive Wrangler session. Before deployment, the gate confirms that the
+token is active and that Cloudflare returns a permission refusal when that token
+tries the non-mutating live-D1 probe. A token that can query live D1 cannot
+deploy.
 
 ### Automatic deploys from canonical main
 
@@ -151,19 +196,56 @@ Create it at **My Profile → API Tokens → Create Token → Create Custom Toke
 - Zone / Workers Routes:Edit, scoped to `thwip.ai`
 
 Give it **no D1 permission**. The database binding travels in `wrangler.jsonc`
-as an id, and the id is not a secret. A deploy that fails asking for D1 is worth
-reporting rather than working around, because it would mean deploy authority and
-database administration cannot be separated on Cloudflare as configured.
+as an id, and the id is not a secret. The gate tests the real boundary before
+every deploy. A deploy that fails this check should be reported, not worked
+around.
 
 ## Applying a migration
 
+Create a new credential for one reviewed migration window. The approving record
+must name the migration files, their reviewed commit, the operator and the
+rollback owner. Do not put SQL, customer rows or credential values in it.
+
+1. Open **Cloudflare → My Profile → API Tokens → Create Token → Create Custom
+   Token**.
+2. Name it `thwip-d1-migration-YYYYMMDD-HHMM`.
+3. Give it only **Account → D1 → Edit**, scoped to the Recall account. Add no
+   Worker, R2, KV, Queue, Zone, user or token-management permission.
+4. Add an expiry within the next 24 hours. Restrict it to your current IP when
+   practical.
+5. Export it under the migration-only name:
+
+```sh
+export THWIP_D1_ACCOUNT_ID=<recall-account-id>
+export THWIP_D1_MIGRATION_API_TOKEN=<short-lived-token>
 ```
-pnpm --filter @thwip/control-plane run migrate:staging
+
+Then run:
+
+```sh
+pnpm --filter @thwip/control-plane run migrate:staging -- \
+  --confirm-live thwip.ai
 ```
 
 This is the one command that administers the database, and it is deliberately
-not part of a deploy. It needs its own token, holding **Account / D1:Edit** and
-nothing else, exported the same way.
+not part of a deploy. `staging` is the historical Cloudflare environment name;
+the required `thwip.ai` confirmation states that this is the live database, not
+a practice copy.
+
+The command confirms that the explicit token is active, expires within 24 hours
+and can run a non-mutating `SELECT 1` against the configured database. Cloudflare
+does not let a token read its own full policy unless it also receives API-token
+management access. That broader permission would defeat least privilege, so the
+operator must confirm the D1-only policy in the creation screen. A read-only D1
+token passes the safe probe but the migration itself fails before applying
+anything; use D1 Edit for this command.
+
+Wrangler creates a backup before applying a migration. Before starting, identify
+the backup or Time Travel point that will be used if verification fails. After
+the command, record the UTC start and finish time, migration filenames, reviewed
+commit, result and token name in the approving record. Cloudflare Audit Logs
+retain the API actor and token details; they do not replace this operation
+record. Never paste query results or the token secret into it.
 
 The command is a repository guard around Wrangler, not an alias for it. Wrangler
 applies every pending migration it can see and has no phase selector. The guard
@@ -192,6 +274,21 @@ Each migration declares which side of the deploy it belongs on, in its header:
 The deploy gate refuses while a `before-worker` migration it needs is missing,
 and names it. 0020 and 0021 sat unapplied under a Worker that read their tables
 for four deploys, and every `/authorize` under `fresh` answered 500.
+
+As soon as the migration finishes, delete the token from Cloudflare while it is
+still present in the shell. Then verify Cloudflare rejects it and clear the
+shell:
+
+```sh
+node scripts/d1-identity.mjs verify-revoked --kind migration
+unset THWIP_D1_MIGRATION_API_TOKEN THWIP_D1_ACCOUNT_ID
+node scripts/d1-identity.mjs verify-cleared --kind migration
+```
+
+Do not log out the ordinary Wrangler session as part of this run. These commands
+never used it. The two verification lines prove that the temporary role token is
+revoked and no longer present in the shell. Add both successful checks to the
+operation record, without the credential value.
 
 ## Deploying past the gate
 
@@ -232,7 +329,8 @@ reads"`, and the check works from then on.
 
 ## Rotation and revocation
 
-Both tokens are revoked at **My Profile → API Tokens → Roll / Delete**. A
-contributor leaving means deleting their deploy token; nothing else has to
-change, because the deploy token is the whole of what they held. Roll both on
-any suspicion, and after any laptop leaves the team.
+The deploy token is revoked at **My Profile → API Tokens → Roll / Delete**. A
+contributor leaving means deleting their deploy token. Roll it on any suspicion
+and after any laptop leaves the team. Direct D1 read and migration tokens are
+not rotated or kept: create one for a named operation, delete it immediately,
+and run the revocation checks above.
