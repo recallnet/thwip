@@ -86,8 +86,12 @@ import {
   unplaceableUpdate,
   type TurnCheckUpdate,
 } from "./queue/turn-check.js";
-import { commentViews } from "./queue/status-comment.js";
-import { writeStatusComment, type CommentApi, type CommentBudget } from "./queue/status-comment-write.js";
+import {
+  writeStatusComment,
+  writeStatusCommentsForSnapshot,
+  type CommentApi,
+  type CommentBudget,
+} from "./queue/status-comment-write.js";
 import { externalPushFromWebhook, pushedQueueBranch } from "./queue/external-push.js";
 import { queueExternalMove } from "./queue/external-move.js";
 import { parseThwipYaml, type ThwipYaml } from "@thwip/policy";
@@ -2177,9 +2181,14 @@ async function publishStatusCommentsFor(
   const api = await commentApi(env, project);
 
   const now = new Date().toISOString();
-  for (const view of commentViews(snapshot, { observing: project.observing, now })) {
-    await writeStatusComment(env.DB as unknown as D1Like, api, { repositoryId, baseRef }, view, now, budget);
-  }
+  await writeStatusCommentsForSnapshot(
+    env.DB as unknown as D1Like,
+    api,
+    { repositoryId, baseRef },
+    snapshot,
+    { observing: project.observing, now },
+    budget,
+  );
 }
 
 /**
