@@ -33,6 +33,11 @@ describe("what the App asks for against what it needs", () => {
     expect(REQUIRED_APP_PERMISSIONS["workflows"]).toBe("write");
   });
 
+  it("gives only the App, not candidate jobs, the Actions read used by the trusted finalizer", () => {
+    expect(REQUIRED_APP_PERMISSIONS["actions"]).toBe("read");
+    expect(source("queue/bootstrap-workflows.ts")).not.toMatch(/verify:[\s\S]{0,500}actions:\s*read/);
+  });
+
   /**
    * Demonstrated on recallnet/thwip on 4 August. The App holds no `issues`
    * scope of any kind, and it wrote a status comment on pull request 180. So

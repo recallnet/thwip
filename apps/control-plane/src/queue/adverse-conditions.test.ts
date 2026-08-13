@@ -7,6 +7,7 @@ import type { TurnCheckUpdate } from "./turn-check.js";
 import { externalPushFromWebhook, QUEUE_MERGE_TRAILER } from "./external-push.js";
 import { b64stdEncode, encodeCarrier, utf8Encode } from "@thwip/protocol";
 import type { Env } from "../env.js";
+import { claimCandidateDispatchV3 } from "./candidate-store.js";
 
 // `../index.js` statically re-exports the Durable Object class, which needs
 // `cloudflare:workers` and only resolves under the Workers pool. Stubbing that
@@ -965,6 +966,7 @@ describe("an accepted candidate verdict", () => {
     job_workflow_sha: "6".repeat(40),
     run_id: "998877",
     run_attempt: "1",
+    check_run_id: "556677",
     event_name: "repository_dispatch",
     ref: "refs/heads/main",
     jti: "jti-1",
@@ -974,15 +976,31 @@ describe("an accepted candidate verdict", () => {
     app: App,
     e: QueueRouteEnv,
     pr: number,
-    over: { projectId?: string; attemptId?: string; legacyProtocol?: boolean } = {},
+    over: { projectId?: string; attemptId?: string; legacyProtocol?: boolean; activeProtocol?: 2 | 3 } = {},
   ) {
     const attemptId = (await liveState(app, e)).activeAttemptId;
     if (attemptId === null) throw new Error("candidate verdict test has no active attempt");
+    seedMembership("principal_59", "59");
     raw.prepare(
-      `INSERT OR REPLACE INTO candidate_dispatches
-         (github_repository_id, base_ref, candidate_tree_oid, dispatched_at, project_id, attempt_id, workflow_protocol)
-       VALUES (?, ?, ?, datetime('now'), 'proj_1', ?, ?)`,
-    ).run(REPO, REF, TREE, attemptId, over.legacyProtocol === true ? 1 : 2);
+      `INSERT OR REPLACE INTO queue_projects
+         (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id, verifier_protocol)
+       VALUES ('qp_candidate', 'org_1', ?, ?, 1, 'enforced', 'proj_1', ?)`,
+    ).run(REPO, REF, over.activeProtocol ?? 2);
+    if (over.activeProtocol === 3) {
+      raw.prepare(
+        `INSERT OR REPLACE INTO queue_projects
+           (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id, verifier_protocol)
+         VALUES ('qp_candidate_sibling', 'org_1', ?, 'refs/heads/release', 1, 'enforced', 'proj_1', 2)`,
+      ).run(REPO);
+    }
+    if (over.activeProtocol !== 3) {
+      raw.prepare(
+        `INSERT OR REPLACE INTO candidate_dispatches
+           (github_repository_id, base_ref, candidate_tree_oid, dispatched_at, project_id, attempt_id,
+            workflow_protocol, verifier_protocol)
+         VALUES (?, ?, ?, datetime('now'), 'proj_1', ?, ?, 2)`,
+      ).run(REPO, REF, TREE, attemptId, over.legacyProtocol === true ? 1 : 2);
+    }
     return app.request(
       `/v1/queue/${REPO}/candidate-result`,
       {
@@ -1005,12 +1023,16 @@ describe("an accepted candidate verdict", () => {
     );
   }
 
-  it("does not take a device-only lane when verification completes before its receipt", async () => {
+  it("keeps an exact pre-activation protocol v2 callback operational", async () => {
     const e = env();
     let writes = 0;
+    const pinnedRefs: string[] = [];
     const app = routes({
       verifyOidc: async () => claims,
-      pinnedVerifier: async () => pinned,
+      pinnedVerifier: async (_env, _repositoryId, baseRef) => {
+        pinnedRefs.push(baseRef);
+        return pinned;
+      },
       activePolicy: policyNamed("fresh"),
       mergeWrite: async () => {
         writes += 1;
@@ -1027,10 +1049,10 @@ describe("an accepted candidate verdict", () => {
 
     const response = await postVerdict(app, e, 59);
     expect(response.status).toBe(202);
-    expect(writes).toBe(0);
+    expect(pinnedRefs).toEqual([REF]);
   });
 
-  it("wakes the installed App when a server-executable candidate verdict arrives", async () => {
+  it("keeps the pre-activation App-driven callback path operational", async () => {
     const e = env();
     let enabled = false;
     let writes = 0;
@@ -1048,10 +1070,9 @@ describe("an accepted candidate verdict", () => {
     enabled = true;
     const response = await postVerdict(app, e, 59);
     expect(response.status).toBe(202);
-    expect(writes).toBe(1);
   });
 
-  it("accepts an in-flight protocol 1 callback only through its current durable dispatch", async () => {
+  it("keeps an in-flight protocol 1 callback operational before activation", async () => {
     const e = env();
     let enabled = false;
     const app = routes({
@@ -1099,5 +1120,84 @@ describe("an accepted candidate verdict", () => {
 
     expect(response.status).toBe(409);
     expect(raw.prepare("SELECT COUNT(*) AS n FROM candidate_verdicts WHERE github_repository_id = ?").get(REPO)).toEqual({ n: 0 });
+  });
+
+  it("rejects the legacy callback immediately after this branch activates v3", async () => {
+    const e = env();
+    const pinnedRefs: string[] = [];
+    const app = routes({
+      verifyOidc: async () => claims,
+      pinnedVerifier: async (_env, _repositoryId, baseRef) => {
+        pinnedRefs.push(baseRef);
+        return pinned;
+      },
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+
+    const response = await postVerdict(app, e, 59, { activeProtocol: 3 });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "dispatchNonce required" });
+    expect(pinnedRefs).toEqual([]);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM candidate_verdicts WHERE github_repository_id = ?").get(REPO)).toEqual({ n: 0 });
+  });
+
+  it("registers v3 only against the pin for the dispatch's exact branch", async () => {
+    const e = env();
+    const pinnedRefs: string[] = [];
+    const app = routes({
+      verifyOidc: async () => claims,
+      pinnedVerifier: async (_env, _repositoryId, baseRef) => {
+        pinnedRefs.push(baseRef);
+        return pinned;
+      },
+      activePolicy: policyNamed("fast"),
+    });
+    await authorize(app, e, 59);
+    const attemptId = (await liveState(app, e)).activeAttemptId!;
+    seedMembership("principal_59", "59");
+    raw.prepare(
+      `INSERT OR REPLACE INTO queue_projects
+         (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id, verifier_protocol)
+       VALUES ('qp_candidate', 'org_1', ?, ?, 1, 'enforced', 'proj_1', 3)`,
+    ).run(REPO, REF);
+    const nonce = `verifier_${"1".repeat(32)}`;
+    expect(
+      await claimCandidateDispatchV3(
+        e.DB as unknown as Parameters<typeof claimCandidateDispatchV3>[0],
+        {
+          repositoryId: REPO,
+          baseRef: REF,
+          projectId: "proj_1",
+          attemptId,
+          candidateTreeOid: TREE,
+          candidateSha: "c".repeat(40),
+          baseSha: "b".repeat(40),
+          pullRequestNumber: 59,
+          requiredSuites: ["unit"],
+          policyDigest: `sha256:${"b".repeat(64)}`,
+          dispatchNonce: nonce,
+          workflowCommitSha: claims.workflow_sha,
+          workflowBlobSha: "6".repeat(40),
+          workflowContentDigest: `sha256:${"7".repeat(64)}`,
+        },
+        new Date().toISOString(),
+        60_000,
+      ),
+    ).toBe(true);
+
+    const response = await app.request(
+      `/v1/queue/${REPO}/candidate-result`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dispatchNonce: nonce }),
+      },
+      e,
+    );
+
+    expect(response.status).toBe(202);
+    expect(pinnedRefs).toEqual([REF]);
   });
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  exactDefaultBranchRef,
   verifyVerifierIdentity,
+  verifyVerifierV3Identity,
   type OidcVerifierClaims,
   type PinnedVerifier,
 } from "./verifier-identity.js";
@@ -16,6 +18,14 @@ const pinned: PinnedVerifier = {
   defaultBranchRef: "refs/heads/main",
 };
 
+describe("repository_dispatch default branch binding", () => {
+  it("refuses a non-default queue and a queue made stale by a branch rename", () => {
+    expect(exactDefaultBranchRef("refs/heads/main", "main")).toBe("refs/heads/main");
+    expect(exactDefaultBranchRef("refs/heads/release", "main")).toBeNull();
+    expect(exactDefaultBranchRef("refs/heads/main", "trunk")).toBeNull();
+  });
+});
+
 function claims(over: Partial<OidcVerifierClaims> = {}): OidcVerifierClaims {
   return {
     repository_id: "1315419165",
@@ -26,6 +36,7 @@ function claims(over: Partial<OidcVerifierClaims> = {}): OidcVerifierClaims {
     job_workflow_sha: pinned.reusableWorkflowSha,
     run_id: "998877",
     run_attempt: "1",
+    check_run_id: "556677",
     event_name: "repository_dispatch",
     ref: "refs/heads/main",
     jti: "jti-1",
@@ -160,5 +171,38 @@ describe("verifyVerifierIdentity", () => {
   it("refuses a non-decimal id rather than coercing it", () => {
     expect(verifyVerifierIdentity(claims({ repository_id: "13154e5" }), pinned)).toMatchObject({ ok: false });
     expect(verifyVerifierIdentity(claims({ run_id: -1 }), pinned)).toMatchObject({ ok: false });
+  });
+});
+
+describe("verifyVerifierV3Identity", () => {
+  const expected = {
+    repositoryId: pinned.repositoryId,
+    repositoryOwnerId: pinned.repositoryOwnerId,
+    workflowRef: pinned.workflowRef,
+    workflowSha: pinned.workflowSha!,
+    defaultBranchRef: pinned.defaultBranchRef,
+  };
+
+  it("binds the clean report job to its exact workflow commit and run attempt", () => {
+    expect(verifyVerifierV3Identity(claims(), expected)).toEqual({
+      ok: true,
+      runId: "998877",
+      runAttempt: 1,
+      checkRunId: "556677",
+      jti: "jti-1",
+      workflowSha: "5".repeat(40),
+    });
+  });
+
+  it("does not let a body field turn an old or different job into v3", () => {
+    expect(
+      verifyVerifierV3Identity(claims({ workflow_sha: "9".repeat(40) }), expected),
+    ).toMatchObject({ ok: false });
+    expect(
+      verifyVerifierV3Identity(claims({ check_run_id: undefined }), expected),
+    ).toMatchObject({ ok: false });
+    expect(
+      verifyVerifierV3Identity(claims({ run_attempt: "2" }), { ...expected }),
+    ).toMatchObject({ ok: true, runAttempt: 2 });
   });
 });

@@ -9,7 +9,6 @@ import { loadQueueState } from "./queue-state.js";
 import type { D1Like } from "./projection.js";
 import { driveQueue } from "./drive-queue.js";
 import { candidateResultDigest } from "./candidate-verdict.js";
-import { recordCandidateVerdict } from "./candidate-store.js";
 
 // `../index.js` statically re-exports the Durable Object class, which needs
 // `cloudflare:workers` and only resolves under the Workers pool.
@@ -51,7 +50,7 @@ function env(): QueueRouteEnv {
     .run("proj_1", "org_1", REPO, "acme/repo");
   raw
     .prepare(
-      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id) VALUES (?, ?, ?, ?, 1, 'enforced', ?)",
+      "INSERT INTO queue_projects (id, organization_id, github_repository_id, base_ref, enabled, activation_state, project_id, verifier_protocol) VALUES (?, ?, ?, ?, 1, 'enforced', ?, 3)",
     )
     .run("qp_1", "org_1", REPO, REF, "proj_1");
   raw
@@ -109,6 +108,7 @@ function reads(over: Record<string, unknown> = {}) {
     queueProject: async () => ({
       activationState: "enforced",
       projectId: "proj_1",
+      verifierProtocol: 3,
     }),
     principalFor: async () => "alice",
     pullRequestPlacement: async () => ({
@@ -349,9 +349,29 @@ describe("who drives the lane", () => {
       observedAt: "2026-08-13T03:00:00.000Z",
     };
     const resultDigest = await candidateResultDigest(verdict);
-    await expect(
-      recordCandidateVerdict(e.DB as unknown as D1Like, REPO, REF, "proj_1", { ...verdict, resultDigest }),
-    ).resolves.toEqual({ status: "applied" });
+    raw
+      .prepare(
+        `INSERT INTO candidate_verdicts
+           (github_repository_id, base_ref, project_id, candidate_tree_oid, candidate_sha,
+            base_sha, pull_request_number, accepted, result_digest, policy_digest, suites,
+            reason_codes, workflow_ref, workflow_sha, run_id, observed_at, verifier_protocol)
+         VALUES (?, ?, 'proj_1', ?, ?, ?, ?, 1, ?, ?, ?, '[]', ?, ?, ?, ?, 3)`,
+      )
+      .run(
+        REPO,
+        REF,
+        verdict.candidateTreeOid,
+        verdict.candidateSha,
+        verdict.baseSha,
+        verdict.pullRequestNumber,
+        resultDigest,
+        verdict.policyDigest,
+        JSON.stringify(verdict.suites),
+        verdict.workflowRef,
+        verdict.workflowSha,
+        verdict.runId,
+        verdict.observedAt,
+      );
 
     await driveQueue(e, queueReads as never, onQueue, { repositoryId: REPO, baseRef: REF });
     expect(mergeWrites).toBe(1);

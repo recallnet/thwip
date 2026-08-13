@@ -45,8 +45,8 @@ function seedQueue(t: ReturnType<typeof testD1>, projectId: string, input: { ena
     .prepare(
       `INSERT INTO queue_projects
          (id, organization_id, github_repository_id, base_ref, enabled, activation_state,
-          bootstrap_progress_json, verifier_workflow_version, project_id)
-       VALUES (?, 'org_1', ?, ?, ?, ?, ?, 2, ?)`,
+          bootstrap_progress_json, verifier_workflow_version, verifier_protocol, project_id)
+       VALUES (?, 'org_1', ?, ?, ?, ?, ?, 2, 3, ?)`,
     )
     .run(`queue_${projectId}`, REPOSITORY_ID, BASE_REF, input.enabled, input.state, JSON.stringify(progress), projectId);
 }
