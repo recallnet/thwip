@@ -12,7 +12,6 @@ import {
   b64stdDecode,
   type PolicyBundleV1,
 } from "@thwip/protocol";
-import { verifySshSignature } from "@thwip/sshsig";
 import {
   amendMessage,
   currentTree,
@@ -1384,4 +1383,3 @@ process.on("unhandledRejection", (error) => {
 });
 
 void main();
-export { verifySshSignature };

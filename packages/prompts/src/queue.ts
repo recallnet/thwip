@@ -1,4 +1,4 @@
-import { SITE } from "./index.js";
+import { SITE } from "./site.js";
 
 /**
  * Generated repository instructions and the bounded pointer.
