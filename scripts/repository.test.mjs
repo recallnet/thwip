@@ -352,3 +352,26 @@ describe("workspace build order", () => {
     expect(vite).toContain("developerSetupPrompt()");
   });
 });
+
+describe("independent control-plane configuration", () => {
+  const path = "wrangler.self-host.example.jsonc";
+  const source = read(path);
+  const config = json(path);
+
+  it("starts fresh databases from the public baseline without hosted identifiers", () => {
+    expect(config.d1_databases).toHaveLength(1);
+    expect(config.d1_databases[0].migrations_dir).toBe("migrations-baseline");
+    expect(config.vars.BILLING_MODE).toBe("disabled");
+    expect(config.vars.STRIPE_PRICE_MONTHLY).toBeUndefined();
+    expect(config.vars.STRIPE_PRICE_ANNUAL).toBeUndefined();
+    expect(source).not.toMatch(/recallnet|thwip\.ai|thwip-staging|647114a5|price_[A-Za-z0-9]+/i);
+    expect(read("wrangler.jsonc")).toContain('"BILLING_MODE": "stripe"');
+  });
+
+  it("declares every Worker storage and queue binding", () => {
+    expect(config.durable_objects.bindings).toContainEqual({ name: "BRANCH_QUEUE", class_name: "BranchQueue" });
+    expect(config.r2_buckets[0].binding).toBe("EVIDENCE");
+    expect(config.queues.producers[0].binding).toBe("SYNC_QUEUE");
+    expect(config.assets.binding).toBe("ASSETS");
+  });
+});

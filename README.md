@@ -20,6 +20,10 @@ it.
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security reports: [SECURITY.md](SECURITY.md)
 
+Most teams should use the managed service at [thwip.ai](https://thwip.ai).
+For teams that need independent operation, the source retains a manual
+[control-plane setup path](docs/self-hosting.md); it does not require Stripe.
+
 ## Develop this repository
 
 Use Node.js 22 or newer and pnpm. Install the locked dependencies, then run the

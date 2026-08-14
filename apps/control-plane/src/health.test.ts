@@ -65,6 +65,7 @@ describe("the public health signal", () => {
       service: "thwip",
       env: "test",
       buildSha: "health-test-build",
+      billing: { mode: "disabled" },
       projectLifecycle: {
         maintenanceMode: false,
         workerActivatedAt: expect.any(String),

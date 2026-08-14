@@ -1975,6 +1975,7 @@ export function GitHubSync({ canSync }: { canSync: boolean }) {
 
 function Billing() {
   const { data, error, reload } = useFetch<{
+    billingEnabled: boolean;
     plan: string;
     limits: { projects: number; users: number };
     betterAuthOrgId: string | null;
@@ -2058,7 +2059,9 @@ function Billing() {
         )}
       </dl>
       {note && <p className="thwip-error">{note}</p>}
-      {data.isOwner ? (
+      {!data.billingEnabled ? (
+        <p className="gp-panel__meta">Billing is disabled for this deployment.</p>
+      ) : data.isOwner ? (
         data.plan === "free" ? (
           <div className="thwip-actions">
             <button className="gp-btn" disabled={working} onClick={() => void upgrade(false)}>
