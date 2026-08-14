@@ -192,4 +192,25 @@ describe("entry points", () => {
     expect(entries).toContain("apps/blog/src/pages/rss.xml.ts");
     expect(entries).toContain("apps/blog/src/pages/blog/[...slug].md.ts");
   });
+
+  /**
+   * An Astro component keeps its imports in the frontmatter fence. The check
+   * read only .ts and .tsx, so a helper the blog imported from a .astro page
+   * looked like nothing imported it, and the only way to quiet that would have
+   * been the allowlist this check refuses to have.
+   */
+  it("counts a name a .astro file imports", () => {
+    const dir = fixture({
+      "src/lib/a.ts": "export function used() {}\nexport function orphan() {}\n",
+      "src/pages/p.astro": '---\nimport { used } from "../lib/a.js";\nconst x = used;\n---\n<p>{x}</p>\n',
+    });
+    expect(found(dir)).toEqual(["src/lib/a.ts#orphan"]);
+  });
+
+  /** Astro routes the pages directory by path, so a page's exports are entries. */
+  it("counts an Astro page component as an entry", () => {
+    const entries = entryPoints(root);
+    expect(entries).toContain("apps/blog/src/pages/blog/index.astro");
+    expect(entries).toContain("apps/blog/src/pages/blog/authors/[login].astro");
+  });
 });
