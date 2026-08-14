@@ -162,14 +162,14 @@ describe("GitHub-owned project lifecycle", () => {
     appSlug: "thwip",
   };
 
-  it("uses GitHub selection alone and states the full cleanup and ruleset prerequisite", () => {
+  it("links to GitHub without repeating repository lifecycle details", () => {
     const html = renderToStaticMarkup(createElement(ManageRepositories, { me: me as never }));
-    expect(html).toContain("policies, proofs, queue, signed chain, access grants, and measured history");
-    expect(html).toContain("disable its two Thwip rulesets");
-    expect(html).toContain("Newly selected repositories arrive disabled");
-    expect(html).toContain("one-hour safety period");
     expect(html).toContain("Manage repositories on GitHub");
     expect(html).toContain("settings/installations/44");
+    expect(html).not.toContain("policies, proofs, queue, signed chain, access grants, and measured history");
+    expect(html).not.toContain("disable its two Thwip rulesets");
+    expect(html).not.toContain("Newly selected repositories arrive disabled");
+    expect(html).not.toContain("one-hour safety period");
     expect(html).not.toContain("Add project");
     expect(html).not.toContain("Restore");
   });
