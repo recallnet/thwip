@@ -8,7 +8,8 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "lint": "node scripts/lint.mjs",
-    "test:workers": "pnpm --filter @thwip/control-plane run test:workers"
+    "test:workers": "pnpm --filter @thwip/control-plane run test:workers",
+    "thwip": "node packages/cli/dist/main.js"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.1",
@@ -18,8 +19,5 @@
     "typescript": "^5.7.0",
     "vitest": "^4.1.0",
     "yaml": "^2.9.0"
-  },
-  "dependencies": {
-    "@thwip/cli": "workspace:*"
   }
 }

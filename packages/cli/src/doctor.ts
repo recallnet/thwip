@@ -82,12 +82,12 @@ function cliCheck(local: LocalReads): DoctorCheck {
   };
   if (cli.version === "unknown" || cli.commit === "unknown") {
     return check("cli", "fail", "LOCAL_FAILURE", facts, [
-      `CLI: ${cli.path} has no valid build stamp. Rebuild and reinstall thwip from this checkout.`,
+      `CLI: ${cli.path} has no valid build stamp. Rebuild, then run it with pnpm -w thwip from this checkout.`,
     ]);
   }
   if (!cli.checkoutMatch) {
     return check("cli", "fail", "LOCAL_FAILURE", facts, [
-      `CLI: ${cli.path} belongs to another checkout. Reinstall thwip from ${cli.checkoutRoot ?? "this checkout"}.`,
+      `CLI: ${cli.path} belongs to another checkout. Run pnpm -w thwip from ${cli.checkoutRoot ?? "this checkout"}.`,
     ]);
   }
   return check("cli", "pass", "PASS", facts, [

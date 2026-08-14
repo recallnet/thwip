@@ -1338,8 +1338,8 @@ async function runningBuild(): Promise<BuildIdentity> {
 /**
  * Stop when the build that is running did not come from the checkout it is
  * standing in. Continuing after a warning still lets an agent prove and ship
- * with code from another worktree. The repair installs the checkout-aware
- * resolver; deliberate low-level Git remains untouched.
+ * with code from another worktree. The failure names the checkout-local root
+ * command; deliberate low-level Git remains untouched.
  */
 async function rejectForeignBuild(): Promise<boolean> {
   const { existsSync } = await import("node:fs");
