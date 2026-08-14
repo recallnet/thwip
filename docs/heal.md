@@ -4,7 +4,7 @@ The queue verifies its own chain on every tick and reports what it finds. This
 page says what each finding means, what thwip does about it, and what is left
 for a person. You should never need to read `mergeOperations` or open D1;
 `GET /v1/queue/:repositoryId/explain` reports the merge writes, and
-`docs/production-access.md` covers the rest.
+the private production runbook covers the rare direct-storage path.
 
 ## Where to click
 
@@ -39,8 +39,8 @@ need repository admin.
 
 You do not supply a tree, a parent list or a commit sha. Those come from GitHub.
 An operator who could name a commit could name the throwaway merge GitHub
-computes for an open pull request, and record 54 is what recording one of those
-produces.
+computes for an open pull request. The endpoint therefore resolves the commit
+from GitHub instead of trusting caller-supplied data.
 
 ## What thwip does with a finding
 
@@ -62,10 +62,6 @@ record names no pull request, no attempt and no policy, because none of those
 are true of it. It is weaker than a merge record on purpose, and the step's
 sentence carries the tree and the parents no intent pinned, so you can check the
 comparison yourself.
-
-The four merges stranded on 2 August 2026 are all of this shape. Each intent
-pinned a base that had already moved, GitHub merged the head onto the real tip,
-and the tree it produced is one the queue never pinned.
 
 **Two attempts pin it.** Nothing is written and both attempts are named. thwip
 will not choose, because choosing would be a guess wearing a signature. Work out

@@ -26,12 +26,11 @@ fetch explicit paths.
 
 ## Search Console
 
-After the first production deploy that includes `/blog`:
+For each material blog release:
 
-1. Verify `thwip.ai` in Google Search Console if not already.
-2. Submit or refresh the sitemap (`/sitemap-index.xml`).
-3. Use the Generative AI performance report later to see AI Overview / AI Mode
-   visibility for blog URLs.
+1. Confirm `thwip.ai` remains verified in Google Search Console.
+2. Confirm the sitemap index (`/sitemap-index.xml`) is submitted and readable.
+3. Review crawl errors and search visibility for the changed URLs.
 
 ## Authoring
 
