@@ -38,20 +38,14 @@ You only need to run checks your change can affect. See
 
 ## Use the CLI from this checkout
 
-Inside this repository, use the CLI built by the checkout you are editing. This
-prevents one worktree from running another worktree's code.
-
-After `pnpm build`, install the resolver:
+After `pnpm build`, run the CLI through the root package command:
 
 ```sh
-node scripts/install-thwip.mjs
+pnpm -w thwip version
+pnpm -w thwip --help
 ```
 
-It places `thwip` in `~/.local/bin` and selects the current checkout's
-`packages/cli/dist` build. Pass `--write-path` if you want the installer to add
-that directory to your shell configuration. The resolver does not reach the
-network when it selects a checkout build.
-
-Until the resolver is on your `PATH`, run the checkout directly with
-`node packages/cli/dist/main.js`. Run `thwip version` to see the commit and file
-that are executing.
+`pnpm -w thwip <command>` always runs `packages/cli/dist/main.js` from this
+checkout, even from a nested workspace directory. It does not install anything
+or change your `PATH`. The `version`
+command shows the commit and file that are executing.

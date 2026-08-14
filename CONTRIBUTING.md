@@ -52,7 +52,7 @@ Thwip identity is active for this repository, build the workspace, commit the
 change, and run:
 
 ```sh
-thwip ship --wait
+pnpm -w thwip ship --wait
 ```
 
 This runs the configured suites, signs proof for the exact commit, pushes the

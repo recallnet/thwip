@@ -193,13 +193,9 @@ for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
 // An undeclared import is the interesting half. It resolves through pnpm's store on
 // the machine that wrote it and fails on a clean install somewhere else.
 //
-// Two entries in `ignoreDependencies` are there because knip reads imports and
-// these are not imported. `cloudflare` is the Workers built-in module scheme,
-// `cloudflare:workers`, and not a package at all. `@thwip/cli` is a root
-// dependency that puts this checkout's `thwip` on `pnpm exec`; no file imports
-// it and none should. It was a `link:` for a while, and pnpm links no binary for
-// one, so the comment claiming it put `thwip` on the path was false the whole
-// time and `pnpm exec thwip` silently ran whatever the machine had installed.
+// `cloudflare` is ignored because knip reads it as a package name, but
+// `cloudflare:workers` is a Workers built-in module scheme. The release workflow
+// runs the `thwip` binary from a packed test installation, not a root dependency.
 {
   const knip = spawnSync("npx", ["knip", "--reporter", "symbols"], {
     cwd: root,
