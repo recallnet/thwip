@@ -1,5 +1,24 @@
 import { parse } from "yaml";
 
+import {
+  QUEUE_ACTION_REF,
+  setupPullRequestFiles,
+} from "../apps/control-plane/src/queue/bootstrap-workflows.ts";
+
+/** Where the deployed control plane answers. Same value as wrangler.jsonc. */
+export const PRODUCTION_ENDPOINT = "https://thwip.ai";
+
+/** Every workflow the setup pull request emits in production. */
+export function generatedWorkflows() {
+  const files = setupPullRequestFiles({
+    endpoint: PRODUCTION_ENDPOINT,
+    actionRef: QUEUE_ACTION_REF,
+  });
+  return Object.fromEntries(
+    files.filter((file) => file.path.startsWith(".github/workflows/")).map((file) => [file.path, file.content]),
+  );
+}
+
 /** Parse a workflow and require the top-level trigger GitHub expects. */
 export function validateWorkflow(filename, source) {
   let workflow;
