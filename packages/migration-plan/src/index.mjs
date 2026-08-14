@@ -8,9 +8,10 @@
  * Worker bundle and the local Node safety commands evaluate the same rules.
  */
 
-export const MIGRATION_PLAN_VERSION = 1;
+export const MIGRATION_PLAN_VERSION = 2;
 
-export const MIGRATION_RELEASES = Object.freeze([
+/** The immutable release history used by existing hosted databases. */
+export const LEGACY_MIGRATION_RELEASES = Object.freeze([
   { name: "0001_init.sql", phase: "before-worker" },
   { name: "0002_better_auth.sql", phase: "before-worker" },
   { name: "0003_github_projection.sql", phase: "before-worker" },
@@ -55,6 +56,37 @@ export const MIGRATION_RELEASES = Object.freeze([
     phase: "after-worker",
     barrier: "project-lifecycle-reopen",
   },
+]);
+
+/** A fresh self-hosted database starts here instead of replaying private history. */
+export const BASELINE_MIGRATION_RELEASE = Object.freeze({
+  name: "1000_current_schema.sql",
+  phase: "before-worker",
+});
+
+/**
+ * Add every migration after the public baseline here, starting at 1001.
+ * The exact same files and release declarations follow both starting tracks.
+ */
+export const FUTURE_MIGRATION_RELEASES = Object.freeze([]);
+
+/** The active model for databases that retain the historic production ledger. */
+export const MIGRATION_RELEASES = Object.freeze([
+  ...LEGACY_MIGRATION_RELEASES,
+  ...FUTURE_MIGRATION_RELEASES,
+]);
+
+/** The active model for databases created from the public baseline. */
+export const BASELINE_MIGRATION_RELEASES = Object.freeze([
+  BASELINE_MIGRATION_RELEASE,
+  ...FUTURE_MIGRATION_RELEASES,
+]);
+
+/** Every filename the repository can legitimately carry. */
+export const ALL_MIGRATION_RELEASES = Object.freeze([
+  ...LEGACY_MIGRATION_RELEASES,
+  BASELINE_MIGRATION_RELEASE,
+  ...FUTURE_MIGRATION_RELEASES,
 ]);
 
 export const SCHEMA_CAPABILITY_MIGRATIONS = Object.freeze({
@@ -126,12 +158,40 @@ export function evaluateMigrationReleases(model, applied) {
 
 /** Evaluate the repository's canonical release model. */
 export function migrationReleaseState(applied) {
-  return evaluateMigrationReleases(MIGRATION_RELEASES, applied);
+  const track = migrationTrack(applied);
+  const model = track === "legacy" ? MIGRATION_RELEASES : BASELINE_MIGRATION_RELEASES;
+  const release = evaluateMigrationReleases(model, applied);
+  if (track !== "mixed") return release;
+
+  // A baseline ledger must never also claim the private history. Make the
+  // existing out-of-order safety signal fail closed for that impossible mix.
+  const historic = new Set(LEGACY_MIGRATION_RELEASES.map((migration) => migration.name));
+  return {
+    ...release,
+    outOfOrderApplied: [...new Set([
+      ...release.outOfOrderApplied,
+      ...applied.filter((name) => historic.has(name)),
+    ])],
+  };
+}
+
+/** Which supported starting track the durable ledger describes. */
+export function migrationTrack(applied) {
+  const have = new Set(applied);
+  const baseline = have.has(BASELINE_MIGRATION_RELEASE.name);
+  const legacy = LEGACY_MIGRATION_RELEASES.some((migration) => have.has(migration.name));
+  if (baseline && legacy) return "mixed";
+  return baseline ? "baseline" : "legacy";
 }
 
 /** Capabilities are derived from the same ordered migration record as release state. */
 export function schemaCapabilities(applied) {
   const have = new Set(applied);
+  if (have.has(BASELINE_MIGRATION_RELEASE.name)) {
+    return Object.fromEntries(
+      Object.keys(SCHEMA_CAPABILITY_MIGRATIONS).map((capability) => [capability, true]),
+    );
+  }
   return Object.fromEntries(
     Object.entries(SCHEMA_CAPABILITY_MIGRATIONS).map(([capability, migration]) => [capability, have.has(migration)]),
   );
@@ -142,6 +202,7 @@ export function publicMigrationState(applied) {
   const release = migrationReleaseState(applied);
   return {
     version: release.version,
+    track: migrationTrack(applied),
     phase: release.kind,
     selected: release.selected,
     deployBlockers: release.deployBlockers,

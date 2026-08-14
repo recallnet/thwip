@@ -15,6 +15,7 @@ it.
 - Product: https://thwip.ai
 - CLI guide: [packages/cli/README.md](packages/cli/README.md)
 - Queue setup: [docs/queue-onboarding.md](docs/queue-onboarding.md)
+- D1 self-hosting baseline: [docs/d1-baseline.md](docs/d1-baseline.md)
 - Reused CI measurements: [docs/reused-ci-metrics.md](docs/reused-ci-metrics.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security reports: [SECURITY.md](SECURITY.md)

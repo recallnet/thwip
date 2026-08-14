@@ -21,16 +21,27 @@
 import { readdirSync } from "node:fs";
 
 import {
+  ALL_MIGRATION_RELEASES,
+  BASELINE_MIGRATION_RELEASE,
+  BASELINE_MIGRATION_RELEASES,
+  LEGACY_MIGRATION_RELEASES,
   MIGRATION_RELEASES,
   evaluateMigrationReleases,
 } from "../packages/migration-plan/src/index.mjs";
 
 export function readMigrations(dir) {
-  const modeled = new Map(MIGRATION_RELEASES.map((migration) => [migration.name, migration]));
-  return readdirSync(dir)
+  const modeled = new Map(ALL_MIGRATION_RELEASES.map((migration) => [migration.name, migration]));
+  const names = readdirSync(dir)
     .filter((name) => name.endsWith(".sql"))
-    .sort()
-    .map((name) => modeled.get(name) ?? { name, phase: null });
+    .sort();
+  const baseline = names.includes(BASELINE_MIGRATION_RELEASE.name);
+  const legacy = names.some((name) => LEGACY_MIGRATION_RELEASES.some((migration) => migration.name === name));
+  return names.map((name) => {
+    // A directory may expose one starting track, never both. Mark the baseline
+    // undeclared in a mixed directory so every existing caller fails closed.
+    if (baseline && legacy && name === BASELINE_MIGRATION_RELEASE.name) return { name, phase: null };
+    return modeled.get(name) ?? { name, phase: null };
+  });
 }
 
 /** SQL files absent from the shared release model. */
@@ -41,7 +52,10 @@ export function undeclaredMigrations(migrations) {
 /** Modeled releases whose SQL file is absent from the checkout. */
 export function missingMigrationFiles(migrations) {
   const files = new Set(migrations.map((migration) => migration.name));
-  return MIGRATION_RELEASES.filter((migration) => !files.has(migration.name)).map((migration) => migration.name);
+  const model = files.has(BASELINE_MIGRATION_RELEASE.name)
+    ? BASELINE_MIGRATION_RELEASES
+    : MIGRATION_RELEASES;
+  return model.filter((migration) => !files.has(migration.name)).map((migration) => migration.name);
 }
 
 /** Unapplied migrations the code being deployed needs already in place. */

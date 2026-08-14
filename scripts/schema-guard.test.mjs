@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -12,6 +15,7 @@ import {
 } from "./schema-guard.mjs";
 
 const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
+const baselineMigrationsDir = fileURLToPath(new URL("../migrations-baseline", import.meta.url));
 
 /**
  * The deploy already refuses a checkout behind origin/main and already builds
@@ -27,6 +31,33 @@ describe("what every migration says about deploy order", () => {
     expect(migrations.length).toBeGreaterThan(20);
     expect(undeclaredMigrations(migrations)).toEqual([]);
     expect(missingMigrationFiles(migrations)).toEqual([]);
+  });
+
+  it("accepts the public baseline as a complete alternative starting track", () => {
+    const migrations = readMigrations(baselineMigrationsDir);
+    expect(migrations).toEqual([{ name: "1000_current_schema.sql", phase: "before-worker" }]);
+    expect(undeclaredMigrations(migrations)).toEqual([]);
+    expect(missingMigrationFiles(migrations)).toEqual([]);
+    expect(migrationReleaseState(migrations, [])).toMatchObject({
+      kind: "before-worker",
+      selected: ["1000_current_schema.sql"],
+      deployBlockers: ["1000_current_schema.sql"],
+    });
+    expect(migrationReleaseState(migrations, ["1000_current_schema.sql"])).toMatchObject({
+      kind: "current",
+      selected: [],
+    });
+  });
+
+  it("refuses a migration directory that mixes both starting tracks", () => {
+    const directory = mkdtempSync(join(tmpdir(), "thwip-mixed-migrations-"));
+    try {
+      writeFileSync(join(directory, "0001_init.sql"), "SELECT 1;\n");
+      writeFileSync(join(directory, "1000_current_schema.sql"), "SELECT 1;\n");
+      expect(undeclaredMigrations(readMigrations(directory))).toEqual(["1000_current_schema.sql"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   /**
