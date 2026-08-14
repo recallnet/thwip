@@ -14,9 +14,10 @@ draft: false
 
 In July 2026, one experiment on this organization spent 9,478 macOS Actions
 minutes across 1,219 runs. Those runs accumulated 82 hours between trigger and
-completion, and cost $587.64 gross. Nearly all of the suites they ran had
-already passed on the machine that opened the pull request, minutes earlier,
-against the same tree.
+completion, and cost $587.64 gross. The billing report does not show which
+minutes repeated local work. The earlier analysis estimated that as many as
+9,378 of those minutes could have been replaced when the same suites had
+already passed locally against the same tree.
 
 You are the coding agent that opened those pull requests, or one very like it.
 So the interesting part here is not the money. It is that you had the result
@@ -134,7 +135,7 @@ names the first one that failed.
    `SUITE_DUPLICATE`, `SUITE_NOT_PASSED`
 9. Remote suites, where the policy declares them, proven by GitHub's own
    checks → `SUITE_NOT_PASSED`, `VERIFICATION_PENDING`
-10. Run window sanity and proof age → `PROOF_EXPIRED`
+10. Run window sanity and proof age → `PROOF_MALFORMED`, `PROOF_EXPIRED`
 11. Run lease, when the policy requires one → `LEASE_REQUIRED`,
     `LEASE_INVALID`, `LEASE_EXPIRED`, `LEASE_CONTEXT_MISMATCH`
 
@@ -201,15 +202,17 @@ Then, from a branch with a clean working tree:
 thwip ship --wait
 ```
 
-Unless `HEAD` already carries a valid proof for its exact tree, that runs the
-required suites against the committed tree — acquiring a lease before the run
-and re-reading the tree afterward to confirm it did not move during execution
-— then builds and signs the statement, amends the trailer onto `HEAD`, pushes,
-and opens or updates the pull request. From there it joins the queue, waits for
-its turn, executes the turn, and waits for the merge. Under `fresh` and
-`audited`, executing the turn means this machine runs the required suites again
-against the integrated candidate and signs a receipt for it; under `fast` and
-`remote` the queue handles the turn server-side.
+Unless `HEAD` already carries a parseable proof that names its exact tree, that
+runs the required suites against the committed tree — acquiring a lease before
+the run when the profile requires one and re-reading the tree afterward to
+confirm it did not move during execution — then builds and signs the statement,
+amends the trailer onto `HEAD`, pushes, and opens or updates the pull request.
+The remote check still validates the proof's signature, policy, suites, age,
+signer, and lease before merge. From there it joins the queue, waits for its
+turn, executes the turn, and waits for the merge. Under `fresh` and `audited`,
+executing the turn means this machine runs the required suites again against
+the integrated candidate and signs a receipt for it; under `fast` and `remote`
+the queue handles the turn server-side.
 
 If you only want the proof and not the shipping, `thwip run` stops after the
 trailer is attached.
@@ -272,9 +275,10 @@ for a given repository, `audited` runs the same suites again in Actions and
 withholds the merge until both agree.
 
 `run.networkMode`, `run.cacheMode` and `git.baseRef` are signed but not
-currently compared by the verifier. The head commit SHA is not compared either;
-the binding is tree plus ordered parents, which pins everything about the
-commit except its message and authorship metadata.
+currently compared by the verifier. The head commit SHA is not compared either.
+The binding covers the tree and ordered parents, not commit metadata such as
+the message, author, committer, timestamps, or commit signature. Rebasing
+changes the parents, so a proof cannot float across a rebase.
 
 And the App holds an installation token that can write repository contents.
 That is the trust cost of having it write the merge, it is stated plainly in
@@ -290,10 +294,11 @@ The same ten days, one month apart, on the experiment above:
 | July 1–10 | 5,008 |
 | August 1–10 | 13 |
 
-The 13 remaining minutes are TestFlight, which genuinely needs a Mac. The
-other 4,995 were checks that had already passed on the machine that wrote the
-code. Roughly 9,378 of July's 9,478 minutes fall into that category, or
-$581.44 gross at GitHub's documented $0.062 per macOS minute.
+The 13 August minutes are TestFlight, which genuinely needs a Mac. The
+comparison leaves 4,995 fewer macOS minutes across the two periods. That is an
+observed difference, not proof that every minute repeated local work. Using the
+broader July analysis, as many as 9,378 of July's 9,478 minutes may have been
+replaceable, or $581.44 gross at GitHub's documented $0.062 per macOS minute.
 
 Thwip does not estimate the hours back. It reports the signed run window from
 the proof a merge actually reused, and its public metrics endpoint returns
@@ -305,14 +310,15 @@ An estimate would be a nicer number and a worse one.
 No account, no dashboard:
 
 ```bash
-thwip verify --commit <sha>   # parse and check the trailer binds that tree
-thwip verify-chain --repo <owner>/<name>   # walk the branch's signed merge chain
+thwip verify --commit COMMIT_SHA   # parse and check the trailer binds that tree
+thwip verify-chain --repo OWNER/REPO   # walk the branch's signed merge chain
 ```
 
-`verify-chain` fetches the records from the public chain endpoint and the
-publishing keys from `/.well-known/thwip-keys`, then checks each signature.
-Both are public and unauthenticated on purpose: a record is only evidence if
-somebody who does not run the service can check it.
+For a repository whose chain is published, `verify-chain` fetches the records
+from the public chain endpoint and the publishing keys from
+`/.well-known/thwip-keys`, then checks each signature. The signing-key endpoint
+is public, and a published chain is public and unauthenticated on purpose: a
+record is only evidence if somebody who does not run the service can check it.
 
 {% cta-row %}
 {% cta href="/install" label="Sign your first proof" /%}
