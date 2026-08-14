@@ -173,12 +173,9 @@ describe("setupPullRequestFiles", () => {
  * that emits YAML, so lint does not see it. Apply the same workflow validation
  * to the generated setup files.
  */
-const { validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint.mjs"))) as {
-  validateWorkflow: (filename: string, source: string) => void;
-};
-
-const { PRODUCTION_ENDPOINT } = (await import(join(repoRoot, "scripts/generate-workflows.mjs"))) as {
+const { PRODUCTION_ENDPOINT, validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint.mjs"))) as {
   PRODUCTION_ENDPOINT: string;
+  validateWorkflow: (filename: string, source: string) => void;
 };
 
 describe("the generated workflows under the workflow lint", () => {

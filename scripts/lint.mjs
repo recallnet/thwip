@@ -13,7 +13,7 @@ import { describe as renderDead, uncalledExports } from "./uncalled-exports.mjs"
 import { describe as renderUnrendered, unrenderedClassesInRepo } from "./unrendered-classes.mjs";
 import { describe as renderStale, staleCitations } from "./stale-citations.mjs";
 import { describe as renderUnwritten, unwrittenFields } from "./unwritten-fields.mjs";
-import { validateWorkflow } from "./workflow-lint.mjs";
+import { generatedWorkflows, validateWorkflow } from "./workflow-lint.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -86,16 +86,11 @@ for (const finding of readMigrationNumberCollisions(`${root}/migrations`)) {
 // they are workflows and the rules above are theirs. Reading only checked-in
 // `.github/workflows` would leave setup templates unvalidated.
 {
-  const { generatedWorkflows, RENDERED_HERE } = await import("./generate-workflows.mjs");
   for (const [path, content] of Object.entries(generatedWorkflows())) {
     try {
       validateWorkflow(`bootstrap-workflows.ts -> ${path}`, content);
     } catch (e) {
       console.error(`lint: ${e.message}`);
-      failures++;
-    }
-    if (RENDERED_HERE.includes(path) && readFileSync(path, "utf8") !== content) {
-      console.error(`lint: ${path} is not what the template renders; run node scripts/generate-workflows.mjs`);
       failures++;
     }
   }
