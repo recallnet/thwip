@@ -1,5 +1,6 @@
 import rss from "@astrojs/rss";
 import type { APIContext } from "astro";
+import { authorFor } from "../lib/authors";
 import { publishedPosts } from "../lib/posts";
 
 export async function GET(context: APIContext) {
@@ -13,6 +14,8 @@ export async function GET(context: APIContext) {
       description: post.data.description,
       pubDate: post.data.pubDate,
       link: `/blog/${post.id}/`,
+      customData: `<dc:creator>${authorFor(post.data.author).displayName}</dc:creator>`,
     })),
+    xmlns: { dc: "http://purl.org/dc/elements/1.1/" },
   });
 }

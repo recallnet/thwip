@@ -1,0 +1,105 @@
+---
+import BlogLayout from "../../../layouts/BlogLayout.astro";
+import { authorPath, personFor, personJsonLd, personKeys } from "../../../lib/authors";
+import { publishedPosts, type BlogPost } from "../../../lib/posts";
+
+export async function getStaticPaths() {
+  const posts = await publishedPosts();
+  return personKeys().map((login) => ({
+    params: { login },
+    props: {
+      login,
+      // Reviewing a post is a form of ownership, so it belongs on the page too.
+      posts: posts.filter((p) => p.data.author === login || p.data.reviewedBy === login),
+    },
+  }));
+}
+
+const { login, posts } = Astro.props as { login: string; posts: BlogPost[] };
+const person = personFor(login);
+const path = authorPath(login);
+const site = Astro.site ?? new URL("https://thwip.ai");
+const entity = personJsonLd(login, site);
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "ProfilePage",
+    mainEntity: entity,
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site.href },
+      { "@type": "ListItem", position: 2, name: "Blog", item: new URL("/blog/", site).href },
+      { "@type": "ListItem", position: 3, name: person.displayName, item: new URL(path, site).href },
+    ],
+  },
+];
+const links = entity.sameAs as string[];
+function linkLabel(href: string): string {
+  const host = new URL(href).hostname.replace(/^www\./, "");
+  return host === "github.com" ? "GitHub" : host === "x.com" ? "X" : host;
+}
+---
+<BlogLayout
+  title={`${person.displayName} · thwip`}
+  description={person.bio}
+  canonicalPath={path}
+  jsonLd={jsonLd}
+>
+  <article class="eb-profile">
+    <header class="eb-profile__header">
+      <img
+        class="eb-profile__avatar"
+        src={person.github.avatarUrl}
+        alt={`${person.displayName}`}
+        width="120"
+        height="120"
+        decoding="async"
+      />
+      <div>
+        <h1>{person.displayName}</h1>
+        <p class="eb-profile__title">
+          {person.jobTitle} · {person.organization}
+        </p>
+        <p class="eb-profile__links">
+          {
+            links.map((href, i) => (
+              <>
+                {i > 0 && " · "}
+                <a href={href} rel="me noopener">
+                  {linkLabel(href)}
+                </a>
+              </>
+            ))
+          }
+        </p>
+      </div>
+    </header>
+    <p class="eb-lede">{person.bio}</p>
+    <h2 class="eb-profile__heading">Posts</h2>
+    {
+      posts.length === 0 ? (
+        <p>No published posts yet.</p>
+      ) : (
+        <ul class="eb-profile__posts">
+          {posts.map((post) => (
+            <li>
+              <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+              <time datetime={post.data.pubDate.toISOString()}>
+                {post.data.pubDate.toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                  timeZone: "UTC",
+                })}
+              </time>
+              {post.data.author !== login && <span class="eb-profile__role">reviewed</span>}
+            </li>
+          ))}
+        </ul>
+      )
+    }
+  </article>
+</BlogLayout>

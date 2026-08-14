@@ -47,7 +47,10 @@ import ts from "typescript";
 
 /** Sources the check reads. Everything tracked, nothing built. */
 export function sourceFiles(root) {
-  return execFileSync("git", ["ls-files", "*.ts", "*.tsx"], { cwd: root, encoding: "utf8" })
+  return execFileSync("git", ["ls-files", "*.ts", "*.tsx", "*.astro"], {
+    cwd: root,
+    encoding: "utf8",
+  })
     .trim()
     .split("\n")
     .filter(
@@ -113,21 +116,35 @@ export function entryPoints(root) {
   // modules; Astro loads them by path from the package root, the same way
   // wrangler names the Worker main. A pages/*.ts export of GET or
   // getStaticPaths is the route entry, not dead code.
-  for (const f of execFileSync("git", ["ls-files", "*.ts", "*.tsx"], { cwd: root, encoding: "utf8" })
+  for (const f of execFileSync("git", ["ls-files", "*.ts", "*.tsx", "*.astro"], {
+    cwd: root,
+    encoding: "utf8",
+  })
     .trim()
     .split("\n")
     .filter((f) => f.length > 0 && !f.includes("node_modules/"))) {
     if (/^apps\/[^/]+\/src\/content\.config\.ts$/.test(f)) add(f);
-    if (/^apps\/[^/]+\/src\/pages\/.+\.tsx?$/.test(f)) add(f);
+    if (/^apps\/[^/]+\/src\/pages\/.+\.(tsx?|astro)$/.test(f)) add(f);
   }
 
   return found;
 }
 
+/**
+ * An Astro component keeps its script in a leading `---` fence and its markup
+ * after it. Only the fence is TypeScript, and it is where every import lives.
+ */
+function frontmatter(text) {
+  if (!text.startsWith("---")) return "";
+  const end = text.indexOf("\n---", 3);
+  return end === -1 ? "" : text.slice(text.indexOf("\n", 3) + 1, end);
+}
+
 function parse(root, file) {
+  const text = readFileSync(join(root, file), "utf8");
   return ts.createSourceFile(
     file,
-    readFileSync(join(root, file), "utf8"),
+    file.endsWith(".astro") ? frontmatter(text) : text,
     ts.ScriptTarget.ESNext,
     true,
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
