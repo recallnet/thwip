@@ -1,4 +1,5 @@
 ---
+import Byline from "../../components/Byline.astro";
 import BlogLayout from "../../layouts/BlogLayout.astro";
 import { publishedPosts } from "../../lib/posts";
 
@@ -45,18 +46,13 @@ const jsonLd = {
               </div>
             )}
             <div class="eb-card__body">
-              <p class="eb-card__meta">
-                <time datetime={post.data.pubDate.toISOString()}>
-                  {post.data.pubDate.toLocaleDateString("en-US", {
-                    year: "numeric",
-                    month: "long",
-                    day: "numeric",
-                    timeZone: "UTC",
-                  })}
-                </time>
-                {" · "}
-                {post.data.author}
-              </p>
+              <Byline
+                class="eb-card__meta"
+                author={post.data.author}
+                reviewedBy={post.data.reviewedBy}
+                pubDate={post.data.pubDate}
+                linked={false}
+              />
               <h2 class="eb-card__title">{post.data.title}</h2>
               <p class="eb-card__desc">{post.data.description}</p>
               {post.data.tags.length > 0 && (
