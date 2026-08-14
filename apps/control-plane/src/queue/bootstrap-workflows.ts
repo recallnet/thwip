@@ -411,7 +411,7 @@ export function setupPullRequestFiles(input: SetupPullRequestInput): readonly Se
   ];
 }
 
-export function requiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
+function requiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
   return { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) };
 }
 

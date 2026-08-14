@@ -13,7 +13,7 @@ export const PUSH_WARNING_MARKER = "# managed by thwip push warning";
  * stdin, so this checks what is actually being pushed rather than assuming it
  * is HEAD.
  */
-export function pushWarningHook(): string {
+function pushWarningHook(): string {
   return `#!/bin/sh
 ${PUSH_WARNING_MARKER}
 set -u

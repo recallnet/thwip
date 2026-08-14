@@ -36,8 +36,8 @@ export type AbsenceVerdict =
   | { readonly kind: "unknown"; readonly reason: string };
 
 /** Three reads over seven seconds, which is an order of magnitude past the lag seen. */
-export const ABSENCE_ATTEMPTS = 3;
-export const ABSENCE_DELAYS_MS = [1000, 2000, 4000] as const;
+const ABSENCE_ATTEMPTS = 3;
+const ABSENCE_DELAYS_MS = [1000, 2000, 4000] as const;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 

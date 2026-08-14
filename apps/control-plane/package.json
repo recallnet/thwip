@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node ../../scripts/generate-prompt-docs.mjs && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
+    "build": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "deploy:staging": "pnpm -w -r build && node ../../scripts/predeploy.mjs --env staging && BUILD_SHA=\"$(node ../../scripts/build-sha.mjs)\" && DEPLOYMENT_ID=\"$(node ../../scripts/deployment-id.mjs)\" && DEPLOY_EXCEPTION=\"$(node ../../scripts/deploy-exception.mjs)\" && wrangler deploy --env staging --var BUILD_SHA:\"$BUILD_SHA\" --var DEPLOYMENT_ID:\"$DEPLOYMENT_ID\" --var DEPLOY_EXCEPTION:\"$DEPLOY_EXCEPTION\" && node ../../scripts/confirm-deploy.mjs --env staging --sha \"$BUILD_SHA\" --deployment-id \"$DEPLOYMENT_ID\"",
-    "migrate:staging": "node ../../scripts/migrate.mjs --env staging --database thwip-staging-wnam",
+    "deploy:staging": "node ../../scripts/control-plane.mjs deploy --env staging",
+    "migrate:staging": "node ../../scripts/control-plane.mjs migrate --env staging --database thwip-staging-wnam",
     "dev": "wrangler dev --env staging",
     "test:workers": "vitest run --config vitest.workers.config.ts"
   },

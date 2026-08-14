@@ -199,7 +199,7 @@ const REPOSITORY_RECONCILE_LEASE_GC_PREDICATE = `
   )`;
 
 /** Serialize one repository's transfer/import authority across installations. */
-export async function acquireRepositoryAuthorityLease(
+async function acquireRepositoryAuthorityLease(
   db: D1Like,
   repositoryId: string,
   installationId: string,
@@ -1184,7 +1184,7 @@ function cleanupStatements(
  * refuses work while it exists. External cleanup is idempotent, and the job is
  * deleted only in the final D1 batch with every project-scoped row.
  */
-export async function releaseProject(
+async function releaseProject(
   env: Pick<Env, "DB" | "BRANCH_QUEUE" | "EVIDENCE">,
   project: ProjectLifecycleRow,
   dependencies: ProjectReleaseDependencies = {},

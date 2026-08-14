@@ -266,7 +266,7 @@ async function releaseSyncLease(env: Env, installationId: string, owner: string)
     .run();
 }
 
-export async function suspendInstallation(env: Env, installationId: string): Promise<void> {
+async function suspendInstallation(env: Env, installationId: string): Promise<void> {
   await env.DB.prepare("UPDATE organizations SET status = 'suspended' WHERE installation_id = ?")
     .bind(installationId)
     .run();

@@ -1,5 +1,13 @@
+import { appendFileSync } from "node:fs";
 import { createLocalJWKSet, compactVerify, type JSONWebKeySet } from "jose";
-import { verifyChain, type ChainCorrection, type ChainFinding, type ChainLink } from "@thwip/queue-protocol";
+import {
+  parseTransitionRecord,
+  verifyChain,
+  type ChainCorrection,
+  type ChainFinding,
+  type ChainLink,
+  type TransitionRecordV1,
+} from "@thwip/queue-protocol";
 import { flag } from "./cli-flags.js";
 import { DEFAULT_ENDPOINT } from "./endpoint.js";
 import { EXIT } from "./queue-exit.js";
@@ -235,7 +243,7 @@ export async function resolveRepositoryIdFromGithub(repo: string): Promise<strin
  * is no answer. GitHub serves this for any public repository with no
  * credentials, which is exactly the position an outside auditor is in.
  */
-export async function resolveBranchHeadFromGithub(repo: string, branch: string): Promise<string | null> {
+async function resolveBranchHeadFromGithub(repo: string, branch: string): Promise<string | null> {
   const res = await fetch(`https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, {
     headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
   });
@@ -243,6 +251,83 @@ export async function resolveBranchHeadFromGithub(repo: string, branch: string):
   const body = (await res.json().catch(() => null)) as { commit?: { sha?: unknown } } | null;
   const sha = body?.commit?.sha;
   return typeof sha === "string" && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+}
+
+export interface PublishedRecord {
+  readonly digest: string;
+  readonly sequence: number;
+  readonly record: TransitionRecordV1;
+}
+
+function recordsFromChain(chain: ChainResponse): PublishedRecord[] {
+  const records: PublishedRecord[] = [];
+  for (const link of chain.links) {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(link.record);
+    } catch {
+      continue;
+    }
+    const parsed = parseTransitionRecord(decoded);
+    if (parsed.ok) records.push({ digest: link.digest, sequence: link.sequence, record: parsed.value });
+  }
+  return records;
+}
+
+/** Require one signed, non-override merge record for the exact deploy SHA. */
+export function evaluateDeployEvidence(
+  report: {
+    readonly findings: readonly ChainFinding[];
+    readonly signaturesChecked: number;
+    readonly records: readonly PublishedRecord[];
+    readonly epochStartsAt: number;
+  },
+  expectedSha: string,
+): { readonly ok: false; readonly reason: string } | {
+  readonly ok: true;
+  readonly evidence: {
+    readonly digest: string;
+    readonly sequence: number;
+    readonly kind: string;
+    readonly pullRequestNumber: number;
+    readonly sha: string;
+  };
+} {
+  const problems = report.findings.filter((finding) => finding.code !== "PRE_ATTESTATION");
+  if (problems.length > 0) {
+    return { ok: false, reason: problems.map((finding) => `${finding.code}: ${finding.detail}`).join("; ") };
+  }
+  if (report.signaturesChecked === 0) return { ok: false, reason: "no signatures were verified" };
+  const matches = report.records.filter(({ record }) => record.after.baseSha === expectedSha);
+  if (matches.length !== 1) {
+    return { ok: false, reason: `the published chain has ${matches.length} records for ${expectedSha}` };
+  }
+  const match = matches[0]!;
+  if (!Number.isSafeInteger(match.sequence) || match.sequence < report.epochStartsAt) {
+    return { ok: false, reason: `record ${match.sequence} is outside the signed range` };
+  }
+  if (
+    match.record.kind !== "verified-merge" &&
+    match.record.kind !== "reused-proof-merge" &&
+    match.record.kind !== "candidate-verified-merge"
+  ) {
+    return { ok: false, reason: `record ${match.sequence} is ${match.record.kind}, not a verified merge` };
+  }
+  const facts = match.record.kind === "verified-merge"
+    ? match.record.verifiedMerge
+    : match.record.kind === "reused-proof-merge"
+      ? match.record.reusedProof
+      : match.record.candidateVerified;
+  return {
+    ok: true,
+    evidence: {
+      digest: match.digest,
+      sequence: match.sequence,
+      kind: match.record.kind,
+      pullRequestNumber: facts.pullRequestNumber,
+      sha: expectedSha,
+    },
+  };
 }
 
 /**
@@ -260,12 +345,17 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
   if (repositoryIdFlag === undefined && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
     process.stderr.write(
       "usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH]\n" +
-        "       thwip verify-chain --repository-id ID [--branch BRANCH]\n",
+        "       thwip verify-chain --repository-id ID [--branch BRANCH] [--expected-sha SHA]\n",
     );
     return EXIT.usage;
   }
   const branch = flag(argv, "--branch") ?? "main";
   const baseRef = `refs/heads/${branch}`;
+  const expectedSha = flag(argv, "--expected-sha");
+  if (expectedSha !== undefined && !/^[0-9a-f]{40,64}$/.test(expectedSha)) {
+    process.stderr.write("--expected-sha must be a full Git object id\n");
+    return EXIT.usage;
+  }
 
   // Pins the epoch a caller does not trust the server to report honestly. The
   // server's own claim decides where signature checking starts, and a server
@@ -335,11 +425,15 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
   // Only when the repository was named as owner/name: a run given a bare
   // --repository-id has nothing to ask GitHub about. Printed either way, so a
   // run that could not compare the head does not read as one that did.
-  const head = /^[\w.-]+\/[\w.-]+$/.test(repo) ? await resolveBranchHeadFromGithub(repo, branch).catch(() => null) : null;
+  const head = expectedSha ?? (
+    /^[\w.-]+\/[\w.-]+$/.test(repo)
+      ? await resolveBranchHeadFromGithub(repo, branch).catch(() => null)
+      : null
+  );
   process.stdout.write(
     head === null
       ? "head: not checked; a merge landing after the last record would not be visible\n"
-      : `head: ${head} (from github)\n`,
+      : `head: ${head} (${expectedSha === undefined ? "from github" : "expected"})\n`,
   );
 
   const { totalLinks, signaturesChecked, findings, corrections } = await verifyPublishedChain(
@@ -361,5 +455,30 @@ export async function cmdVerifyChain(argv: string[]): Promise<number> {
   // "nothing has merged" and "every merge was withheld" look identical from
   // out here, and neither one is a verification.
   if (signaturesChecked === 0) return EXIT.evidenceRejected;
+  if (expectedSha !== undefined) {
+    const decision = evaluateDeployEvidence({
+      findings,
+      signaturesChecked,
+      records: recordsFromChain(chain),
+      epochStartsAt,
+    }, expectedSha);
+    if (!decision.ok) {
+      process.stderr.write(`deploy evidence refused: ${decision.reason}\n`);
+      return EXIT.evidenceRejected;
+    }
+    const evidence = decision.evidence;
+    process.stdout.write(
+      `verified deploy evidence: record ${evidence.sequence} (${evidence.kind}) binds PR #${evidence.pullRequestNumber} to ${evidence.sha}\n`,
+    );
+    if (process.env["GITHUB_OUTPUT"]) {
+      appendFileSync(process.env["GITHUB_OUTPUT"], [
+        `record_digest=${evidence.digest}`,
+        `record_sequence=${evidence.sequence}`,
+        `merge_kind=${evidence.kind}`,
+        `pull_request=${evidence.pullRequestNumber}`,
+        `verified_sha=${evidence.sha}`,
+      ].join("\n") + "\n");
+    }
+  }
   return EXIT.ok;
 }

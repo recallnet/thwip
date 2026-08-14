@@ -26,7 +26,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-export async function fingerprintOf(publicKeyPath: string): Promise<string> {
+async function fingerprintOf(publicKeyPath: string): Promise<string> {
   const { stdout } = await execFileP("ssh-keygen", ["-lf", publicKeyPath]);
   const fp = stdout.trim().split(/\s+/)[1];
   if (!fp?.startsWith("SHA256:")) throw new Error(`cannot read fingerprint of ${publicKeyPath}`);

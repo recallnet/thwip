@@ -7,12 +7,7 @@ import {
 } from "@thwip/policy";
 import { git, gitBytes } from "./git.js";
 
-export {
-  DEFAULT_DAGGER_VERSION,
-  parseThwipYaml,
-  type ProjectConfig,
-  type ThwipYaml,
-} from "@thwip/policy";
+export type { ProjectConfig, ThwipYaml } from "@thwip/policy";
 
 /**
  * thwip.yaml names which checks are required and where each may run. It does
@@ -58,7 +53,7 @@ class GitRefSnapshot implements RepositorySnapshot {
 }
 
 /** Resolve the GitHub numeric ids for origin, caching in local git config. */
-export async function resolveRepositoryIds(
+async function resolveRepositoryIds(
   cwd: string,
   endpoint: string,
   authHeader: string | null,
