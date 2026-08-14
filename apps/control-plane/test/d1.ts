@@ -93,6 +93,8 @@ function statements(sql: string): string[] {
 }
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+const baselineMigrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations-baseline");
+export const BASELINE_MIGRATION_FILE = "1000_current_schema.sql";
 
 function migrationFiles(): string[] {
   return readdirSync(migrationsDir)
@@ -106,8 +108,8 @@ export function migrationStatements(): string[] {
   return all;
 }
 
-function runMigrationFile(raw: Database.Database, file: string): void {
-  for (const statement of statements(readFileSync(join(migrationsDir, file), "utf8"))) {
+function runMigrationFile(raw: Database.Database, file: string, directory = migrationsDir): void {
+  for (const statement of statements(readFileSync(join(directory, file), "utf8"))) {
     try {
       raw.exec(statement);
     } catch (error) {
@@ -147,41 +149,57 @@ function recordMigration(raw: Database.Database, file: string): void {
   ).run(file);
 }
 
-export function testD1(options: { upTo?: string; rollout?: "steady" | "as-migrated" } = {}): TestD1 {
+export function testD1(options: {
+  upTo?: string;
+  rollout?: "steady" | "as-migrated";
+  track?: "legacy" | "baseline";
+} = {}): TestD1 {
   const raw = new Database(":memory:");
   raw.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)");
-  for (const file of migrationFiles()) {
-    if (options.upTo !== undefined && file >= options.upTo) break;
-    // The finishing migration is allowed only after the lifecycle-aware Worker
-    // has served for the compatibility window and the bounded backfill is
-    // complete. Most tests model that ready state before applying 0031.
-    if (file === "0031_finish_github_repository_lifecycle.sql") {
-      raw.prepare(
-        `UPDATE project_lifecycle_rollout
-            SET maintenance_mode = 0,
-                worker_activated_at = '2000-01-01T00:00:00.000Z',
-                worker_build_sha = 'test-worker-build',
-                worker_deployment_id = '00000000-0000-4000-8000-000000000001',
-                destructive_schema_ready_at = NULL
-          WHERE id = 1`,
-      ).run();
+  if (options.track === "baseline") {
+    runMigrationFile(raw, BASELINE_MIGRATION_FILE, baselineMigrationsDir);
+    recordMigration(raw, BASELINE_MIGRATION_FILE);
+    // Later shared migrations live in the ordinary migration directory so the
+    // hosted legacy track and the public baseline track execute the same file.
+    for (const file of migrationFiles().filter((name) => name >= "1001_")) {
+      runMigrationFile(raw, file);
+      recordMigration(raw, file);
     }
-    runMigrationFile(raw, file);
-    recordMigration(raw, file);
-    if (file === "0033_verifier_protocol_v3.sql" && options.rollout !== "as-migrated") {
-      // Most tests build the fully reopened steady state. Model the required
-      // post-0033 deployment before the loader reaches 0034.
-      raw.prepare(
-        `UPDATE project_lifecycle_rollout
-            SET worker_deployment_id = '00000000-0000-4000-8000-000000000099'
-          WHERE id = 1`,
-      ).run();
+  } else {
+    for (const file of migrationFiles()) {
+      if (options.upTo !== undefined && file >= options.upTo) break;
+      // The finishing migration is allowed only after the lifecycle-aware Worker
+      // has served for the compatibility window and the bounded backfill is
+      // complete. Most tests model that ready state before applying 0031.
+      if (file === "0031_finish_github_repository_lifecycle.sql") {
+        raw.prepare(
+          `UPDATE project_lifecycle_rollout
+              SET maintenance_mode = 0,
+                  worker_activated_at = '2000-01-01T00:00:00.000Z',
+                  worker_build_sha = 'test-worker-build',
+                  worker_deployment_id = '00000000-0000-4000-8000-000000000001',
+                  destructive_schema_ready_at = NULL
+            WHERE id = 1`,
+        ).run();
+      }
+      runMigrationFile(raw, file);
+      recordMigration(raw, file);
+      if (file === "0033_verifier_protocol_v3.sql" && options.rollout !== "as-migrated") {
+        // Most tests build the fully reopened steady state. Model the required
+        // post-0033 deployment before the loader reaches 0034.
+        raw.prepare(
+          `UPDATE project_lifecycle_rollout
+              SET worker_deployment_id = '00000000-0000-4000-8000-000000000099'
+            WHERE id = 1`,
+        ).run();
+      }
     }
   }
 
   // Most tests model steady state after the in-place finishing schema. Rollout
   // tests clear these fields themselves.
   if (
+    options.track !== "baseline" &&
     options.rollout !== "as-migrated" &&
     raw
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_lifecycle_rollout'")
