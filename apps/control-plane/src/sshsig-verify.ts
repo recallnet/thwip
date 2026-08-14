@@ -4,5 +4,5 @@
  * which owns the same check for proofs, so the Worker and the checker cannot
  * drift apart on what a valid signature is.
  */
-export { ed25519RawFromAuthorizedKey, sha256Fingerprint } from "@thwip/verifier";
+export { sha256Fingerprint } from "@thwip/verifier";
 export { verifySshSignature as verifySshSigEd25519 } from "@thwip/verifier";
