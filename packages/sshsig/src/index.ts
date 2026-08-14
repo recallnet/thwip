@@ -10,13 +10,13 @@ const ARMOR_BEGIN = "-----BEGIN SSH SIGNATURE-----";
 const ARMOR_END = "-----END SSH SIGNATURE-----";
 
 /** Convert ssh-keygen ASCII armor output to standard base64 of the binary SSHSIG blob. */
-export function armorToBase64(armored: string): string {
+function armorToBase64(armored: string): string {
   const body = armored.replace(ARMOR_BEGIN, "").replace(ARMOR_END, "").replace(/\s+/g, "");
   if (body.length === 0) throw new Error("empty SSH signature armor");
   return body;
 }
 
-export function base64ToArmor(b64: string): string {
+function base64ToArmor(b64: string): string {
   const lines = b64.match(/.{1,70}/g) ?? [];
   return `${ARMOR_BEGIN}\n${lines.join("\n")}\n${ARMOR_END}\n`;
 }
