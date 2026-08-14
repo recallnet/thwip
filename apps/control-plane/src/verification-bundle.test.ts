@@ -1,5 +1,5 @@
 import { exportJWK, generateKeyPair } from "jose";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testD1 } from "../test/d1.js";
 import { resolveVerificationBundle, VerificationBundleError } from "./verification-bundle.js";
 import type { Env } from "./env.js";
@@ -47,6 +47,7 @@ async function env(policy: Record<string, unknown>): Promise<Env> {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (open.length > 0) open.pop()!.close();
 });
 
@@ -93,5 +94,54 @@ describe("the keys a bundle offers for checking a lease", () => {
     await expect(
       resolveVerificationBundle(current, { repositoryId: REPO, expectedProjectId: "prj_removed" }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("the current grant a proof needs", () => {
+  it("does not fail a signer's bundle when an unrelated stale grant cannot be refreshed", async () => {
+    const current = await env(policyFor({ required: false, maxAgeSeconds: 1800 }));
+    (current as { GITHUB_SYNC_TOKEN: string }).GITHUB_SYNC_TOKEN = "github-token";
+    raw
+      .prepare(
+        `INSERT INTO repository_grants
+           (project_id, github_user_id, github_login, permission, active, synced_at)
+         VALUES ('prj_1', 'signer', 'alice', 'write', 1, '2000-01-01T00:00:00.000Z'),
+                ('prj_1', 'unrelated', 'bob', 'write', 1, '2000-01-01T00:00:00.000Z')`,
+      )
+      .run();
+
+    let unrelatedRefreshes = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/collaborators/alice/permission")) {
+        return Response.json({ permission: "write", role_name: "write" });
+      }
+      if (url.endsWith("/collaborators/bob/permission")) {
+        unrelatedRefreshes += 1;
+        return new Response("unavailable", { status: 503 });
+      }
+      if (url.includes("/users/alice/ssh_signing_keys")) {
+        return Response.json([
+          {
+            id: 1,
+            title: "alice laptop",
+            key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB0000000000000000000000000000000000000000",
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const resolution = await resolveVerificationBundle(current, {
+      repositoryId: REPO,
+      signerGithubUserId: "signer",
+    });
+
+    if (resolution.kind !== "active") throw new Error("expected an active policy");
+    expect(resolution.bundle.grants.find((grant) => grant.githubUserId === "signer")).toMatchObject({
+      permission: "write",
+      active: true,
+    });
+    expect(unrelatedRefreshes).toBe(0);
   });
 });

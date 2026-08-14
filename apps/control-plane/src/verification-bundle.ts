@@ -135,7 +135,14 @@ export async function resolveVerificationBundle(
   const refreshed: SignerGrant[] = [];
   for (const grant of grants.results) {
     const synced = grant.synced_at.endsWith("Z") ? grant.synced_at : `${grant.synced_at}Z`;
-    const stale = Date.now() - Date.parse(synced) > 60_000;
+    // This bundle carries keys for one signer, and the verifier can therefore
+    // select only that signer's grant. Refreshing every collaborator made an
+    // unrelated stale grant part of this proof's availability: one failed
+    // GitHub lookup returned GRANT_REFRESH_FAILED for a signer whose own grant
+    // was current and valid. It also multiplied one proof check by the number
+    // of people who can reach the repository.
+    const stale =
+      grant.github_user_id === input.signerGithubUserId && Date.now() - Date.parse(synced) > 60_000;
     if (stale) {
       try {
         const currentToken = await accessToken();
