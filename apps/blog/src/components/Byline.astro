@@ -1,0 +1,54 @@
+---
+import { authorFor, authorPath } from "../lib/authors";
+
+interface Props {
+  author: string;
+  reviewedBy?: string;
+  pubDate: Date;
+  class?: string;
+  /** The index wraps each card in an anchor, and an anchor cannot nest. */
+  linked?: boolean;
+}
+const {
+  author,
+  reviewedBy,
+  pubDate,
+  class: className = "eb-meta",
+  linked = true,
+} = Astro.props;
+const written = authorFor(author);
+const reviewer = reviewedBy ? authorFor(reviewedBy) : undefined;
+const date = pubDate.toLocaleDateString("en-US", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  timeZone: "UTC",
+});
+---
+<p class={className}>
+  <time datetime={pubDate.toISOString()}>{date}</time>
+  {" · "}
+  {
+    written.kind === "person" && linked ? (
+      <a rel="author" href={authorPath(author)}>
+        {written.displayName}
+      </a>
+    ) : (
+      <span>{written.displayName}</span>
+    )
+  }
+  {
+    reviewer && reviewedBy && (
+      <>
+        {" · reviewed by "}
+        {linked ? (
+          <a rel="author" href={authorPath(reviewedBy)}>
+            {reviewer.displayName}
+          </a>
+        ) : (
+          <span>{reviewer.displayName}</span>
+        )}
+      </>
+    )
+  }
+</p>
