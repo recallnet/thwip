@@ -87,6 +87,58 @@ describe("the public health signal", () => {
     });
   });
 
+  it("reports a fresh baseline database as current and ready", async () => {
+    opened = testD1({ track: "baseline" });
+    const now = new Date().toISOString();
+    opened.raw
+      .prepare("UPDATE queue_clock SET started_at = ?, finished_at = ?, source = 'cron' WHERE id = 'tick'")
+      .run(now, now);
+    const pair = await generateKeyPair("ES256", { extractable: true });
+    const privateJwk = {
+      ...(await exportJWK(pair.privateKey)),
+      kid: `baseline-health-${crypto.randomUUID()}`,
+      alg: "ES256",
+    };
+    const env = {
+      DB: opened.db,
+      THWIP_ENV: "self-hosted-test",
+      BUILD_SHA: "baseline-health-build",
+      DEPLOYMENT_ID: "00000000-0000-4000-8000-000000000001",
+      THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(privateJwk),
+    } as unknown as Env;
+    const pending: Promise<unknown>[] = [];
+    const execution = {
+      waitUntil(promise: Promise<unknown>) { pending.push(promise); },
+      passThroughOnException() {},
+    } as ExecutionContext;
+
+    const response = await worker.fetch(new Request("https://self-hosted.test/health"), env, execution);
+    await Promise.all(pending);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      projectLifecycle: {
+        maintenanceMode: false,
+        backfillReady: true,
+        cleanupReady: true,
+      },
+      schema: {
+        track: "baseline",
+        phase: "current",
+        selected: [],
+        deployBlockers: [],
+        outOfOrderApplied: [],
+        capabilities: {
+          projectLifecycle: true,
+          lifecycleFinished: true,
+          privateAgentFeedback: true,
+          verifierProtocolV3: true,
+          lifecycleReopened: true,
+        },
+      },
+    });
+  });
+
   it("re-enqueues an installation sync at GitHub's primary rate-limit reset", async () => {
     opened = testD1();
     const pair = await generateKeyPair("RS256", { extractable: true });

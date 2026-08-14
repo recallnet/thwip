@@ -1,4 +1,5 @@
 export type MigrationPhase = "before-worker" | "after-worker";
+export type MigrationTrack = "legacy" | "baseline" | "mixed";
 
 export interface MigrationRelease {
   readonly name: string;
@@ -30,6 +31,7 @@ export interface SchemaCapabilities {
 
 export interface PublicMigrationState {
   readonly version: number;
+  readonly track: MigrationTrack;
   readonly phase: MigrationReleaseState["kind"];
   readonly selected: readonly string[];
   readonly deployBlockers: readonly string[];
@@ -40,12 +42,18 @@ export interface PublicMigrationState {
 }
 
 export const MIGRATION_PLAN_VERSION: number;
+export const LEGACY_MIGRATION_RELEASES: readonly MigrationRelease[];
+export const BASELINE_MIGRATION_RELEASE: MigrationRelease;
+export const FUTURE_MIGRATION_RELEASES: readonly MigrationRelease[];
 export const MIGRATION_RELEASES: readonly MigrationRelease[];
+export const BASELINE_MIGRATION_RELEASES: readonly MigrationRelease[];
+export const ALL_MIGRATION_RELEASES: readonly MigrationRelease[];
 export const SCHEMA_CAPABILITY_MIGRATIONS: Readonly<Record<keyof SchemaCapabilities, string>>;
 export function evaluateMigrationReleases(
   model: readonly MigrationRelease[],
   applied: readonly string[],
 ): MigrationReleaseState;
 export function migrationReleaseState(applied: readonly string[]): MigrationReleaseState;
+export function migrationTrack(applied: readonly string[]): MigrationTrack;
 export function schemaCapabilities(applied: readonly string[]): SchemaCapabilities;
 export function publicMigrationState(applied: readonly string[]): PublicMigrationState;
