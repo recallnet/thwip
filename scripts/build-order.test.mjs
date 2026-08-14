@@ -34,3 +34,11 @@ describe("workspace build order", () => {
     expect(controlPlane.scripts.build).not.toContain("@thwip/blog");
   });
 });
+
+describe("checkout-local CLI", () => {
+  it("runs the build from this checkout without a workspace bin link", () => {
+    const rootPackage = read("package.json");
+    expect(rootPackage.scripts.thwip).toBe("node packages/cli/dist/main.js");
+    expect(rootPackage.dependencies?.["@thwip/cli"]).toBeUndefined();
+  });
+});

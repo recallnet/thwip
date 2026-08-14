@@ -17,7 +17,7 @@ This repository uses Thwip for approved local CI and Queue-controlled merging of
 Run:
 
 ```sh
-thwip ship --wait --json-events
+pnpm -w thwip ship --wait --json-events
 ```
 
 Thwip runs the required suites, attaches a signed work receipt, pushes or updates
@@ -33,15 +33,15 @@ candidate when the turn arrives, and asks GitHub to merge it.
   tests the integrated candidate for you.
 - Once a turn is assigned, use only the exact candidate Thwip supplies.
 - Do not amend or force-push a queued head without rerunning
-  `thwip ship --wait --json-events`.
+  `pnpm -w thwip ship --wait --json-events`.
   The candidate someone is testing is the head you replaced.
 - Ctrl-C detaches safely. It does not erase the queue request or lose your place.
 - If review is required, stop and report the pull request URL and the required
   action. Do not attempt to satisfy a human requirement yourself.
 - If integrated CI fails, inspect the preserved worktree, fix the feature branch,
-  and rerun `thwip ship --wait --json-events`.
+  and rerun `pnpm -w thwip ship --wait --json-events`.
 - If Thwip reports a conflict, rebase the feature branch yourself and rerun
-  `thwip ship --wait --json-events`. A rebase moves the tree out from under
+  `pnpm -w thwip ship --wait --json-events`. A rebase moves the tree out from under
   the proof, so it has to be signed again; `ship` notices and does it.
 - Treat any invariant, signature, ruleset, or permission failure as blocking and
   report it. These are not conditions to retry around.
@@ -51,9 +51,9 @@ candidate when the turn arrives, and asks GitHub to merge it.
 ## Reading the queue
 
 ```sh
-thwip queue status --pr <number>      # where this pull request stands
-thwip queue list                      # projected order for main
-thwip queue explain                   # what the queue is doing and why
+pnpm -w thwip queue status --pr <number> # where this pull request stands
+pnpm -w thwip queue list                 # projected order for main
+pnpm -w thwip queue explain              # what the queue is doing and why
 ```
 
 Projected order changes after every review and check. There is no permanent

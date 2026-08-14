@@ -104,7 +104,7 @@ Schema migrations are the separate, reviewed operation described below.
 | Change | Call |
 | --- | --- |
 | Answer a chain finding | `POST /v1/queue/:repositoryId/heal` with `{ finding, code, reason }` |
-| Record a merge the queue authorized | `thwip queue repair --repo OWNER/NAME --merge-sha OID --reason TEXT [--attempt-id ID]` |
+| Record a merge the queue authorized | `pnpm -w thwip queue repair --repo OWNER/NAME --merge-sha OID --reason TEXT [--attempt-id ID]` |
 | Revoke a device key | `POST /v1/devices/:keyId/revoke` |
 | Enrol an organization, project and policy | Install the GitHub App, then `POST /admin/sync` |
 | Pause or resume a lane | `POST /v1/queue/:repositoryId/pause` \| `/resume` |

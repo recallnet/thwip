@@ -4,8 +4,8 @@
   "include": ["files", "dependencies", "unlisted", "binaries", "unresolved"],
   "exclude": ["exports", "types", "nsExports", "nsTypes", "enumMembers", "duplicates"],
 
-  "ignoreDependencies": ["cloudflare", "@thwip/cli"],
-  "ignoreBinaries": ["wrangler"],
+  "ignoreDependencies": ["cloudflare"],
+  "ignoreBinaries": ["thwip", "wrangler"],
 
   "workspaces": {
     ".": {
