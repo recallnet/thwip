@@ -281,9 +281,8 @@ the message, author, committer, timestamps, or commit signature. Rebasing
 changes the parents, so a proof cannot float across a rebase.
 
 And the App holds an installation token that can write repository contents.
-That is the trust cost of having it write the merge, it is stated plainly in
-[ADR 0001](https://github.com/recallnet/thwip/blob/main/docs/adr/0001-app-native-proof-checks.md),
-and revocation means suspending or uninstalling the App.
+That is the explicit trust cost of having it write the merge. Revocation means
+suspending or uninstalling the App.
 
 ## The numbers again
 

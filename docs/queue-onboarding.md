@@ -1,8 +1,7 @@
-# Queue onboarding and steady state
+# Queue setup and removal
 
-This is the operator runbook for the App-native Queue described in
-[ADR 0001](adr/0001-app-native-proof-checks.md). Every new repository follows
-one supported setup path.
+Every repository follows one supported setup path. This guide explains the
+required GitHub state, the staged handoff, and safe removal.
 
 Setup is deliberately human-guided. Repository rulesets are sensitive
 administrative state, and the runtime App does not hold `Administration: write`.
@@ -15,7 +14,7 @@ A correctly enrolled repository has all of these properties:
 
 | Area | Required state |
 | --- | --- |
-| GitHub App permissions | Checks, Contents, Pull requests, Commit statuses, and Workflows: write; Metadata: read |
+| GitHub App permissions | Actions and Metadata: read; Checks, Contents, Pull requests, Commit statuses, and Workflows: write |
 | GitHub App events | `check_run`, `check_suite`, `member`, `membership`, `organization`, `pull_request`, `push`, `repository`, and `team` |
 | Queue writer | The installed Thwip App, using `Contents: write` and `Workflows: write` for CI-definition changes |
 | Merge shape | A merge commit whose first parent is the base the queue verified |
@@ -38,8 +37,9 @@ audit compatibility, not an available setup or runtime option.
 
 1. Install the Thwip GitHub App on the repository.
 2. Approve any pending permission upgrade. Installing the App in the past is
-   not enough when the registration has since gained `Contents: write`,
-   `Pull requests: write`, `Commit statuses: write`, or `Workflows: write`.
+   not enough when the registration has since gained `Actions: read`,
+   `Contents: write`, `Pull requests: write`, `Commit statuses: write`, or
+   `Workflows: write`.
    Workflows write is narrower than Administration and exists so the sole App
    writer can merge reviewed changes to `.github/workflows` without a bypass.
 3. Confirm the live App registration subscribes to every event in the table
