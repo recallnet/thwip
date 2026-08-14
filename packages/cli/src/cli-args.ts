@@ -80,7 +80,7 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `Parse the proof on HEAD, or on one exact commit, and check it binds that tree.\n`,
   "verify-chain":
     `Usage: thwip verify-chain --repo OWNER/NAME [--branch BRANCH] [--epoch N]\n` +
-    `       thwip verify-chain --repository-id ID [--branch BRANCH] [--epoch N]\n\n` +
+    `       thwip verify-chain --repository-id ID [--branch BRANCH] [--epoch N] [--expected-sha SHA]\n\n` +
     `Fetch a branch's merge chain and thwip's published keys, then verify it.\n` +
     `No thwip account is required for a repository whose chain is published.\n` +
     `A chain that is not published returns 401 and cannot be read this way,\n` +
@@ -317,7 +317,9 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
     case "verify":
       return simpleCommand("verify", rest, { boolean: ["--json"], value: ["--commit"] });
     case "verify-chain":
-      return simpleCommand("verify-chain", rest, { value: ["--repo", "--branch", "--repository-id", "--epoch"] });
+      return simpleCommand("verify-chain", rest, {
+        value: ["--repo", "--branch", "--repository-id", "--epoch", "--expected-sha"],
+      });
     case "keys": {
       if (rest.length === 0) return command("keys-status");
       if (wantsHelp(rest)) return { kind: "help", text: SIMPLE_HELP["keys-status"] };

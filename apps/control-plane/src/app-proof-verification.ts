@@ -430,7 +430,7 @@ function verificationId(): string {
  * never published as a conclusion, because a check GitHub has not finished and a
  * read GitHub would not answer are both silence, not refusal.
  */
-export const PENDING_OUTCOME = "VERIFICATION_PENDING";
+const PENDING_OUTCOME = "VERIFICATION_PENDING";
 export const MERGED_OUTCOME = "PULL_REQUEST_ALREADY_MERGED";
 
 /** Same backoff as the merge path's `confirmMergeAbsence`, for the same reason. */

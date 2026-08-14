@@ -37,8 +37,8 @@ export type SuiteSettlement =
   | { readonly kind: "unsettled"; readonly reason: string };
 
 /** Three reads over seven seconds, matching the merge path. */
-export const SETTLEMENT_ATTEMPTS = 3;
-export const SETTLEMENT_DELAYS_MS = [1000, 2000, 4000] as const;
+const SETTLEMENT_ATTEMPTS = 3;
+const SETTLEMENT_DELAYS_MS = [1000, 2000, 4000] as const;
 
 /** States GitHub reports for a run it has not concluded. */
 const NOT_CONCLUDED = new Set(["pending", "queued", "in_progress", "waiting", "requested", "none", ""]);

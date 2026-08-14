@@ -475,9 +475,9 @@ app.get("/health", async (c) => {
 /**
  * Which migrations this deployment's database has.
  *
- * `scripts/predeploy.mjs` refuses a deploy whose code needs a migration the
- * database does not have, and it established that by running
- * `wrangler d1 migrations list --remote`. That made shipping the Worker and
+ * `scripts/control-plane.mjs deploy` refuses code that needs a migration the
+ * database does not have by reading this endpoint. The older gate ran
+ * `wrangler d1 migrations list --remote`, making shipping the Worker and
  * rewriting its tables one authority, so a second contributor could not be
  * given the first without the second.
  *

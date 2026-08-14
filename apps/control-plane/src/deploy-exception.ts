@@ -1,7 +1,7 @@
 /**
  * What the worker says about how it was deployed.
  *
- * `scripts/break-glass.mjs` writes this stamp at deploy time and this reads it
+ * `scripts/control-plane-core.mjs` writes this stamp at deploy time and this reads it
  * back at runtime. The two live on opposite sides of a bundle boundary — the
  * deploy scripts are plain modules run by node, this is Worker source — so the
  * format is held together by `deploy-exception.test.ts`, which writes with one

@@ -16,7 +16,7 @@ import { acquireProjectWriteLease, type ProjectWriteLease } from "../project-lif
  * document makes the bound a page rather than a permanent preference for the
  * first three entries.
  */
-export const TERMINAL_RECONCILIATION_PAGE_SIZE = 3;
+const TERMINAL_RECONCILIATION_PAGE_SIZE = 3;
 /** Shorter than the five-minute cron, so a crashed claim cannot skip a tick. */
 const TERMINAL_RECONCILIATION_LEASE_MS = 4 * 60 * 1_000;
 

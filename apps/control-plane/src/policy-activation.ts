@@ -44,7 +44,7 @@ function repositoryPath(repository: string): string {
  * A content-addressed view of one GitHub commit. Blob reads are by tree SHA,
  * never by a moving branch name.
  */
-export class GitHubRepositorySnapshot implements RepositorySnapshot {
+class GitHubRepositorySnapshot implements RepositorySnapshot {
   private readonly blobs = new Map<string, string>();
   private readonly content = new Map<string, Promise<Uint8Array>>();
 

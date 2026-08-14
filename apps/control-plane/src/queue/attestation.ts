@@ -930,7 +930,7 @@ export async function durableMergeRecordForCommit(
 }
 
 /** The authentic durable merge record for one pull request and exact commit. */
-export async function durableMergeRecordForPullRequest(
+async function durableMergeRecordForPullRequest(
   db: D1Like,
   input: {
     repositoryId: string;

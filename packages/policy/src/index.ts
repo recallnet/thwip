@@ -59,7 +59,7 @@ export const MAX_EXCLUSIVE_PATHS = 256;
 export const MAX_EXCLUSIVE_PATH_LENGTH = 1024;
 
 /** Pinned unless a project names its own. */
-export const DEFAULT_DAGGER_VERSION = "0.21.8";
+const DEFAULT_DAGGER_VERSION = "0.21.8";
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

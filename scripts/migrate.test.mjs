@@ -1,8 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { applyMigrations, migrationPlan, selectedMigrationConfig } from "./migrate.mjs";
+import {
+  applyMigrations,
+  applySelectedMigrationFiles,
+  migrationPlan,
+  selectedMigrationConfig,
+} from "./control-plane.mjs";
+import {
+  blockingMigrations,
+  formatSchemaRefusal,
+  liveMigrationState,
+  migrationFileTrack,
+  migrationTrackRefusal,
+  missingMigrationFiles,
+  readMigrations,
+  unappliedAgainst,
+  undeclaredMigrations,
+} from "./migration-core.mjs";
+import { MIGRATION_RELEASES } from "../packages/migration-plan/src/index.mjs";
 
 const SHA = "a".repeat(40);
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const migrations = [
   { name: "0022_before.sql", phase: "before-worker" },
@@ -15,9 +38,9 @@ function response(body, { ok = true, status = 200, statusText = "OK" } = {}) {
   return { ok, status, statusText, json: async () => body };
 }
 
-function dependencies(applied, health = null) {
+function dependencies(applied, health = null, track = "legacy") {
   const fetchImpl = vi.fn(async (url) => {
-    if (url.endsWith("/v1/schema")) return response({ applied });
+    if (url.endsWith("/v1/schema")) return response({ applied, schema: { track } });
     if (url.endsWith("/health")) return response(health ?? { buildSha: SHA });
     throw new Error(`unexpected URL ${url}`);
   });
@@ -112,6 +135,55 @@ describe("the phase-only Wrangler configuration", () => {
     expect(config.env.staging.d1_databases).toEqual([
       { binding: "DB", database_name: "thwip-staging-wnam", database_id: "db-id", migrations_dir: "migrations" },
     ]);
+  });
+
+  it("resolves the pinned Wrangler binary while the migration config is in a temporary directory", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "thwip-migration-command-"));
+    try {
+      const migrationsDir = join(fixture, "source");
+      mkdirSync(migrationsDir);
+      writeFileSync(join(migrationsDir, "0001_fixture.sql"), "SELECT 1;\n");
+      const configPath = join(fixture, "wrangler.jsonc");
+      writeFileSync(configPath, JSON.stringify({
+        compatibility_date: "2026-07-01",
+        env: {
+          staging: {
+            d1_databases: [{
+              binding: "DB",
+              database_name: "thwip-staging-wnam",
+              database_id: "db-id",
+            }],
+          },
+        },
+      }));
+
+      let invoked = false;
+      applySelectedMigrationFiles({
+        names: ["0001_fixture.sql"],
+        env: "staging",
+        database: "thwip-staging-wnam",
+        migrationsDir,
+        configPath,
+        wranglerEnv: process.env,
+        workspaceRoot: ROOT,
+        execute: (program, args, options) => {
+          invoked = true;
+          expect(program).toBe("pnpm");
+          expect(existsSync(join(options.cwd, "package.json"))).toBe(false);
+          expect(args.slice(0, 4)).toEqual(["--dir", ROOT, "--filter", "@thwip/control-plane"]);
+          const config = args[args.indexOf("--config") + 1];
+          expect(existsSync(config)).toBe(true);
+          const wrangler = args.indexOf("wrangler");
+          expect(execFileSync(program, [...args.slice(0, wrangler + 1), "--version"], {
+            cwd: options.cwd,
+            encoding: "utf8",
+          })).toMatch(/^\d+\.\d+\.\d+\s*$/);
+        },
+      });
+      expect(invoked).toBe(true);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 });
 
@@ -278,6 +350,34 @@ describe("applying a migration plan", () => {
     expect(deps.run).not.toHaveBeenCalled();
   });
 
+  it("refuses a missing or different durable starting track before running Wrangler", async () => {
+    const missing = dependencies([]);
+    missing.fetchImpl = vi.fn(async () => response({ applied: [] }));
+    await expect(applyMigrations(missing)).rejects.toThrow(/supported migration track/);
+    expect(missing.run).not.toHaveBeenCalled();
+
+    const baseline = [{ name: "1000_current_schema.sql", phase: "before-worker" }];
+    expect(migrationFileTrack(baseline)).toBe("baseline");
+    expect(migrationTrackRefusal(baseline, "legacy")).toMatch(/legacy.*baseline/);
+    const legacyDatabase = dependencies([], null, "legacy");
+    legacyDatabase.migrations = baseline;
+    await expect(applyMigrations(legacyDatabase)).rejects.toThrow(/legacy migration track.*baseline track/);
+    expect(legacyDatabase.run).not.toHaveBeenCalled();
+
+    const baselineDatabase = dependencies([], null, "baseline");
+    await expect(applyMigrations(baselineDatabase)).rejects.toThrow(/baseline migration track.*legacy track/);
+    expect(baselineDatabase.run).not.toHaveBeenCalled();
+  });
+
+  it("reads the track from the Worker's real public schema envelope", () => {
+    expect(liveMigrationState({
+      applied: ["1000_current_schema.sql"],
+      schema: { track: "baseline", phase: "current" },
+      buildSha: SHA,
+    })).toEqual({ applied: ["1000_current_schema.sql"], track: "baseline" });
+    expect(liveMigrationState({ schema: { track: "legacy" } })).toBeNull();
+  });
+
   it("refuses an HTTP schema failure without touching D1", async () => {
     const deps = dependencies([]);
     deps.fetchImpl = vi.fn(async () => response({}, { ok: false, status: 503, statusText: "Unavailable" }));
@@ -299,5 +399,100 @@ describe("applying a migration plan", () => {
     await expect(applyMigrations(deps)).rejects.toThrow(/no explicit D1 migration identity/);
     expect(deps.fetchImpl).not.toHaveBeenCalled();
     expect(deps.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("the shared migration release model", () => {
+  const directory = fileURLToPath(new URL("../migrations", import.meta.url));
+  const baselineDirectory = fileURLToPath(new URL("../migrations-baseline", import.meta.url));
+  const real = readMigrations(directory);
+  const namesThrough = (last) => MIGRATION_RELEASES
+    .map(({ name }) => name)
+    .filter((name) => name <= last);
+
+  it("declares every SQL file and preserves the exceptional deploy phases", () => {
+    expect(real.length).toBeGreaterThan(20);
+    expect(undeclaredMigrations(real)).toEqual([]);
+    expect(missingMigrationFiles(real)).toEqual([]);
+    const phases = new Map(real.map(({ name, phase }) => [name, phase]));
+    expect(phases.get("0018_one_record_per_merge.sql")).toBe("after-worker");
+    expect(phases.get("0020_queue_runners.sql")).toBe("before-worker");
+    expect(phases.get("0033_verifier_protocol_v3.sql")).toBe("before-worker");
+  });
+
+  it("accepts the public baseline as a complete alternative starting track", () => {
+    const baseline = readMigrations(baselineDirectory);
+    expect(baseline).toEqual([{ name: "1000_current_schema.sql", phase: "before-worker" }]);
+    expect(undeclaredMigrations(baseline)).toEqual([]);
+    expect(missingMigrationFiles(baseline)).toEqual([]);
+    expect(migrationPlan(baseline, [])).toMatchObject({
+      kind: "before-worker",
+      selected: ["1000_current_schema.sql"],
+      deployBlockers: ["1000_current_schema.sql"],
+    });
+    expect(migrationPlan(baseline, ["1000_current_schema.sql"])).toMatchObject({
+      kind: "current",
+      selected: [],
+    });
+  });
+
+  it("refuses a migration directory that mixes both starting tracks", () => {
+    const directory = mkdtempSync(join(tmpdir(), "thwip-mixed-migrations-"));
+    try {
+      writeFileSync(join(directory, "0001_init.sql"), "SELECT 1;\n");
+      writeFileSync(join(directory, "1000_current_schema.sql"), "SELECT 1;\n");
+      expect(undeclaredMigrations(readMigrations(directory))).toEqual(["1000_current_schema.sql"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("allows only the two applied historical migration-number collisions", () => {
+    const groups = new Map();
+    for (const { name } of real) {
+      const number = /^\d+/.exec(name)?.[0];
+      const names = groups.get(number) ?? [];
+      names.push(name);
+      groups.set(number, names);
+    }
+    expect([...groups.entries()].filter(([, names]) => names.length > 1)).toEqual([
+      ["0008", ["0008_policy_activation_source.sql", "0008_queue_projection_serves_reads.sql"]],
+      ["0023", ["0023_remove_queue_runtime_selectors.sql", "0023_status_comment_per_pull_request.sql"]],
+    ]);
+  });
+
+  it.each([
+    ["0028_project_removal.sql", "before-worker", ["0029_terminal_comment_priority.sql", "0030_github_repository_lifecycle.sql"]],
+    ["0030_github_repository_lifecycle.sql", "after-worker", ["0031_finish_github_repository_lifecycle.sql"]],
+    ["0031_finish_github_repository_lifecycle.sql", "before-worker", ["0032_private_agent_feedback_foundation.sql", "0033_verifier_protocol_v3.sql"]],
+    ["0033_verifier_protocol_v3.sql", "after-worker", ["0034_reopen_after_project_lifecycle.sql"]],
+    ["0034_reopen_after_project_lifecycle.sql", "current", []],
+  ])("moves safely from %s", (last, kind, selected) => {
+    expect(migrationPlan(MIGRATION_RELEASES, namesThrough(last))).toMatchObject({ kind, selected });
+  });
+
+  it("refuses a ledger that skipped a known barrier", () => {
+    const applied = namesThrough("0030_github_repository_lifecycle.sql").concat(
+      "0032_private_agent_feedback_foundation.sql",
+      "0033_verifier_protocol_v3.sql",
+    );
+    expect(migrationPlan(MIGRATION_RELEASES, applied).outOfOrderApplied).toEqual([
+      "0032_private_agent_feedback_foundation.sql",
+      "0033_verifier_protocol_v3.sql",
+    ]);
+  });
+
+  it("blocks only migrations that the current Worker needs", () => {
+    const sample = [
+      { name: "0001.sql", phase: "before-worker" },
+      { name: "0002.sql", phase: "after-worker", barrier: "second" },
+      { name: "0003.sql", phase: "before-worker" },
+    ];
+    expect(blockingMigrations(sample, ["0003.sql"])).toEqual(["0003.sql"]);
+    expect(blockingMigrations(sample, ["0002.sql"])).toEqual([]);
+    expect(unappliedAgainst(sample, ["0001.sql", "0099.sql"])).toEqual(["0002.sql", "0003.sql"]);
+    const refusal = formatSchemaRefusal(["0003.sql"], "staging", "thwip.ai");
+    expect(refusal).toContain("run migrate:staging -- --confirm-live thwip.ai");
+    expect(refusal).not.toContain("wrangler d1");
   });
 });

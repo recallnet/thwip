@@ -17,7 +17,7 @@ export interface SqlLike {
  * exists so a cold object can answer a read without replaying everything, and
  * so the alarm can find the earliest deadline without loading state.
  */
-export const SCHEMA: readonly string[] = [
+const SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS queue_meta (
      id INTEGER PRIMARY KEY CHECK (id = 1),
      queue_key TEXT NOT NULL,

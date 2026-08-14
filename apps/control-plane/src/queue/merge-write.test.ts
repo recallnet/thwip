@@ -89,7 +89,7 @@ describe("performMergeWrite", () => {
    * ancestor of this commit is the base it was composed on. A base that moved
    * makes GitHub answer 422 and the merge does not happen at all.
    *
-   * `scripts/workflow-lint.mjs` holds the workflow to this by regex. This holds
+   * The repository workflow test holds the workflow to this. This holds
    * the Worker to it in code.
    */
   it("moves the branch without force", async () => {

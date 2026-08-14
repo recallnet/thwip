@@ -280,7 +280,7 @@ export const VERIFIER_WORKFLOW_PATH = ".github/workflows/thwip-queue-verify.yml"
  * every verdict. The path on the default branch is what carries the weight, and
  * only a merge can change it.
  */
-export function pinnedVerifierFor(input: {
+function pinnedVerifierFor(input: {
   repositoryId: string;
   ownerId: string;
   repository: string;
@@ -438,7 +438,7 @@ export async function enrollQueueProject(db: D1Like, request: EnrollmentRequest)
  * Read-modify-write on one row for one repository, which is the same shape the
  * hand enrolment used and is safe because nothing else writes this column.
  */
-export async function recordBootstrapStep(
+async function recordBootstrapStep(
   db: D1Like,
   project: QueueProject,
   step: BootstrapStep,
@@ -494,7 +494,7 @@ async function guardedProjectUpdate(
 }
 
 /** The queue starts observing under the repository's existing controls. */
-export async function observeQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
+async function observeQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
   return guardedProjectUpdate(db, project, "enabled = 1, activation_state = 'observe'");
 }
 
@@ -504,7 +504,7 @@ export async function observeQueueProject(db: D1Like, project: QueueProject): Pr
  * advance the branch during the manual ruleset handoff instead of being locked
  * out between the ownership write and the next setup request.
  */
-export async function beginQueueEnforcement(db: D1Like, project: QueueProject): Promise<boolean> {
+async function beginQueueEnforcement(db: D1Like, project: QueueProject): Promise<boolean> {
   await guardedProjectUpdate(
     db,
     project,
@@ -518,7 +518,7 @@ export async function beginQueueEnforcement(db: D1Like, project: QueueProject): 
 }
 
 /** The durable state follows only after ownership and policy were read back. */
-export async function enforceQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
+async function enforceQueueProject(db: D1Like, project: QueueProject): Promise<boolean> {
   await guardedProjectUpdate(
     db,
     project,
