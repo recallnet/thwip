@@ -38,4 +38,4 @@ Restore a database with the migration track recorded in its own backup:
 
 Never replace one track's ledger with the other. After the restore, apply only later shared migrations that are not already recorded. Run the foreign-key check in D1. Run the SQLite integrity check against an exported local copy before returning the Worker to service; Wrangler's local D1 shell may refuse that pragma.
 
-The full Cloudflare and GitHub self-hosting setup is tracked in issue #442.
+The manual Cloudflare and GitHub setup is described in [self-hosting.md](self-hosting.md).

@@ -60,6 +60,7 @@
         // Overridden once per deploy. 0034 uses it to prove the serving Worker
         // generation was published after 0033, even when the commit SHA did not change.
         "DEPLOYMENT_ID": "unstamped",
+        "BILLING_MODE": "stripe",
         "STRIPE_PRICE_MONTHLY": "price_1U3NLBLWdKonGktlKwYad0kS",
         "STRIPE_PRICE_ANNUAL": "price_1U3NLBLWdKonGktlmlPmFlyC",
         "GITHUB_APP_ID": "4419870",
