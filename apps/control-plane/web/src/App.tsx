@@ -1913,19 +1913,6 @@ export function ManageRepositories({ me }: { me: Me }) {
     : null;
   return (
     <Panel title="Repositories" meta="managed by the Thwip GitHub App">
-      <p>
-        GitHub repository selection controls which projects exist in Thwip. Newly selected repositories arrive
-        disabled. Removing access deletes their Thwip policies, proofs, queue, signed chain, access grants, and
-        measured history.
-      </p>
-      <p>
-        Before removing an enforced Queue project, disable its two Thwip rulesets in GitHub. The App cannot change
-        repository rules after you remove its access.
-      </p>
-      <p>
-        Selecting a removed repository again starts a clean import after a one-hour safety period. During that hour,
-        Thwip shows the selection as pending and does not accept old GitHub App tokens or project work.
-      </p>
       {organization?.pending_reimports && (
         <p role="status">
           {organization.pending_reimports.count} repository{organization.pending_reimports.count === 1 ? " is" : "s are"}{" "}
