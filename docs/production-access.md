@@ -271,33 +271,6 @@ Every non-empty migration phase also requires a clean checkout whose full HEAD
 SHA equals freshly fetched `origin/main`; an operator cannot apply even an
 additive batch from a stale or unmerged tree.
 
-For the #398 in-place lifecycle migration, the supported order is exact:
-
-1. Apply `0029` and `0030`.
-2. Deploy the current canonical `main` Worker. Its v2 paths are compatible with
-   schema through `0030`; do not deploy an older SHA.
-3. Wait for the bounded project-ID backfill and the one-hour compatibility
-   window reported by `/health`. No database, bucket, or GitHub App key is
-   replaced.
-4. Run the migration command to apply only `0031`. It enters maintenance,
-   rebuilds the lifecycle tables in the existing D1 database, and leaves
-   maintenance on.
-5. Run it again to apply `0032` and `0033` while all traffic stays fenced.
-6. Deploy the exact current canonical `main` Worker again. Confirm `/health`
-   reports that build, maintenance mode, the `0032`/`0033` capabilities, and a
-   new `workerDeploymentId`. Migration `0033` snapshots the deployment ID that
-   served before its barrier; `0034` refuses until a different deployment ID is
-   serving, even when canonical `main` still has the same commit SHA. Migration
-   `0033` rejects the `unstamped` configuration before changing the v3 schema,
-   so a correctly stamped deployment can repair and retry safely.
-7. Run it once more to apply `0034`. Only `0034` reopens traffic.
-
-Each invocation re-reads public schema and health first. `0031` refuses until
-the lifecycle-aware Worker has served for one hour and the backfill is complete.
-`0034` independently refuses unless the exact Worker build, all three preceding
-migrations, complete backfill, and maintenance fence are present. A break-glass
-deploy or direct migration is not part of this sequence.
-
 Never work around a refusal with raw `wrangler d1 migrations apply`. For a mixed
 tree, run the guarded command, deploy when the next phase is `after-worker`, then
 run the guarded command again. Repeat until the current tree is level.
@@ -311,9 +284,8 @@ Each migration declares which side of the deploy it belongs on, in its header:
 - `-- DEPLOY ORDER: after-worker` for a migration that needs the new Worker
   already live. Deploy, then apply.
 
-The deploy gate refuses while a `before-worker` migration it needs is missing,
-and names it. 0020 and 0021 sat unapplied under a Worker that read their tables
-for four deploys, and every `/authorize` under `fresh` answered 500.
+The deploy gate refuses while a `before-worker` migration it needs is missing
+and names it.
 
 As soon as the migration finishes, delete the token from Cloudflare while it is
 still present in the shell. Then verify Cloudflare rejects it and clear the
