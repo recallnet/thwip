@@ -6,7 +6,9 @@
  *   projectSetupPrompt   — put one repository on thwip
  */
 
-export const SITE = "https://thwip.ai";
+import { SITE } from "./site.js";
+
+export { SITE } from "./site.js";
 
 /**
  * Preparing a developer machine. Written so the agent never touches the

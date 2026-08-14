@@ -18,8 +18,7 @@ import { settleRemoteSuites } from "./remote-suite-settlement.js";
 import { verifyLeaseSignature as defaultLeaseSignatureCheck } from "./lease-signature.js";
 import { verifySshSignature as defaultSshSignatureCheck } from "./ssh-signature.js";
 
-export { verifyLeaseSignature } from "./lease-signature.js";
-export { ed25519RawFromAuthorizedKey, sha256Fingerprint, verifySshSignature } from "./ssh-signature.js";
+export { sha256Fingerprint, verifySshSignature } from "./ssh-signature.js";
 
 /** Facts the Action derives independently from GitHub. Never taken from the proof. */
 export interface GithubFacts {
