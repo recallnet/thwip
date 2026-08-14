@@ -10,7 +10,7 @@ import { runDashboardSync } from "./dashboard-sync.js";
 import { publicReusedCiMetrics, reusedCiMetrics } from "./reused-ci-metrics.js";
 import { queueSummaries } from "./queue-summaries.js";
 import { isMembership, selectPrincipal } from "./viewer-scope.js";
-import { createAuth } from "./auth.js";
+import { createAuth, stripeBillingConfiguration } from "./auth.js";
 import {
   drainGithubSyncSnapshots,
   deleteInstallation,
@@ -305,6 +305,9 @@ async function resolveViewer(env: Env, req: Request): Promise<Viewer | null> {
 }
 
 async function orgPlan(env: Env, organizationId: string): Promise<string> {
+  // A self-hosted deployment has no commercial entitlement boundary. Reuse
+  // the existing pro limits without pretending it has a Stripe subscription.
+  if (stripeBillingConfiguration(env) === null) return "pro";
   const org = await env.DB.prepare(
     "SELECT plan, better_auth_org_id FROM organizations WHERE id = ?",
   )
@@ -443,6 +446,7 @@ app.get("/health", async (c) => {
     service: "thwip",
     env: c.env.THWIP_ENV,
     buildSha: c.env.BUILD_SHA,
+    billing: { mode: stripeBillingConfiguration(c.env) === null ? "disabled" : "stripe" },
     now,
     projectLifecycle,
     schema: schema.release,
@@ -585,6 +589,9 @@ app.get("/v1/me", async (c) => {
 // Owner-run: create/link the Better Auth organization used as the Stripe
 // billing reference. GitHub org owners only.
 app.post("/v1/organizations/link-billing", async (c) => {
+  if (stripeBillingConfiguration(c.env) === null) {
+    return c.json({ error: "billing is disabled for this deployment" }, 404);
+  }
   const viewer = await resolveViewer(c.env, c.req.raw);
   if (!viewer?.organizationId) return c.json({ error: "unauthenticated" }, 401);
   if (viewer.githubOrgRole !== "owner") return c.json({ error: "github org owner required" }, 403);
@@ -1125,6 +1132,7 @@ app.get("/v1/dashboard/billing", async (c) => {
     .bind(viewer.organizationId)
     .first<{ better_auth_org_id: string | null }>();
   const plan = await orgPlan(c.env, viewer.organizationId);
+  const billingEnabled = stripeBillingConfiguration(c.env) !== null;
   let subscription: unknown = null;
   if (org?.better_auth_org_id) {
     subscription = await c.env.DB.prepare(
@@ -1134,11 +1142,12 @@ app.get("/v1/dashboard/billing", async (c) => {
       .first();
   }
   return c.json({
+    billingEnabled,
     plan,
     limits: PLAN_LIMITS[plan],
     betterAuthOrgId: org?.better_auth_org_id ?? null,
     subscription,
-    prices: { monthly: "$5", annual: "$50" },
+    prices: billingEnabled ? { monthly: "$5", annual: "$50" } : null,
     isOwner: viewer.githubOrgRole === "owner",
   });
 });

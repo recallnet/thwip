@@ -1,0 +1,54 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thwip-self-hosted",
+  "main": "apps/control-plane/src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "apps/control-plane/dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/v1/*", "/admin/*", "/health", "/.well-known/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "BRANCH_QUEUE", "class_name": "BranchQueue" }]
+  },
+  "migrations": [
+    { "tag": "v1-branch-queue", "new_sqlite_classes": ["BranchQueue"] }
+  ],
+  "r2_buckets": [
+    { "binding": "EVIDENCE", "bucket_name": "thwip-self-hosted-evidence" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "thwip-self-hosted",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations-baseline"
+    }
+  ],
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "thwip-self-hosted-sync" }],
+    "consumers": [
+      {
+        "queue": "thwip-self-hosted-sync",
+        "dead_letter_queue": "thwip-self-hosted-sync-dlq",
+        "max_retries": 5,
+        "max_batch_size": 1
+      }
+    ]
+  },
+  "triggers": { "crons": ["17 3 * * *", "*/5 * * * *"] },
+  "vars": {
+    "THWIP_ENV": "self-hosted",
+    "PUBLIC_ORIGIN": "https://thwip-self-hosted.example.com",
+    "BUILD_SHA": "unstamped",
+    "DEPLOYMENT_ID": "unstamped",
+    "BILLING_MODE": "disabled",
+    "GITHUB_APP_ID": "0",
+    "GITHUB_APP_SLUG": "replace-me",
+    "GITHUB_APP_CLIENT_ID": "replace-me"
+  }
+}
