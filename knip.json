@@ -1,15 +1,15 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
 
-  "include": ["files", "dependencies", "unlisted", "binaries", "unresolved"],
-  "exclude": ["exports", "types", "nsExports", "nsTypes", "enumMembers", "duplicates"],
+  "include": ["files", "dependencies", "unlisted", "binaries", "unresolved", "exports"],
+  "exclude": ["types", "nsExports", "nsTypes", "enumMembers", "duplicates"],
 
   "ignoreDependencies": ["cloudflare"],
-  "ignoreBinaries": ["thwip", "wrangler"],
+  "ignoreBinaries": ["thwip"],
 
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.mjs"],
+      "entry": ["scripts/control-plane.mjs"],
       "project": ["scripts/**/*.mjs"]
     },
     "apps/control-plane": {
@@ -24,13 +24,15 @@
     },
     "apps/blog": {
       "entry": [
-        "astro.config.mjs",
-        "markdoc.config.mjs",
-        "src/content.config.ts",
-        "src/pages/**/*.{ts,astro}",
-        "scripts/*.mjs"
+        "src/pages/**/*.{ts,astro}"
       ],
-      "project": ["src/**/*.{ts,astro,css}", "*.mjs", "scripts/**/*.mjs"]
+      "project": ["src/**/*.{ts,astro}", "*.mjs"]
+    },
+    "packages/migration-plan": {
+      "project": ["src/**/*.{mjs,mts}"]
+    },
+    "packages/protocol": {
+      "project": ["src/**/*.ts"]
     },
     "packages/*": {
       "entry": ["src/**/*.test.ts"],

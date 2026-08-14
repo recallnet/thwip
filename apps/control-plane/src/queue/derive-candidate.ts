@@ -276,7 +276,7 @@ export async function resolveOrDeriveCandidate(
  * how to retry, so a failed derivation is indistinguishable from never having
  * tried.
  */
-export async function deriveCandidate(
+async function deriveCandidate(
   http: GitHubHttp,
   repo: RepoRef,
   pullRequestNumber: number,

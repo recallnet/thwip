@@ -10,7 +10,7 @@ import { parseMergeIntent } from "@thwip/queue-protocol";
 import { acquireProjectWriteLease } from "../project-lifecycle.js";
 
 /** The states in which an entry is the one the lane belongs to. */
-export const HOLDING = ["Offered", "Active", "Verifying", "MergeGuard", "Merging"];
+const HOLDING = ["Offered", "Active", "Verifying", "MergeGuard", "Merging"];
 
 /**
  * Take whoever holds the lane as far as the App can take them.

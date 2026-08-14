@@ -169,14 +169,18 @@ describe("setupPullRequestFiles", () => {
 /**
  * The template is a workflow, so the rules workflows are held to apply to it.
  *
- * `scripts/lint.mjs` reads `.github/workflows`, and the template is TypeScript
- * that emits YAML, so lint does not see it. Apply the same workflow validation
- * to the generated setup files.
+ * The template is TypeScript that emits YAML, so parse the generated result.
  */
-const { PRODUCTION_ENDPOINT, validateWorkflow } = (await import(join(repoRoot, "scripts/workflow-lint.mjs"))) as {
-  PRODUCTION_ENDPOINT: string;
-  validateWorkflow: (filename: string, source: string) => void;
-};
+const PRODUCTION_ENDPOINT = "https://thwip.ai";
+function validateWorkflow(filename: string, source: string): void {
+  const workflow = parse(source) as { on?: { schedule?: unknown } } | null;
+  if (workflow === null || typeof workflow !== "object" || Array.isArray(workflow) || !("on" in workflow)) {
+    throw new Error(`${filename}: no trigger`);
+  }
+  if (workflow.on?.schedule !== undefined && source.includes("rerun-failed-jobs")) {
+    throw new Error(`${filename}: scheduled workflows must retry current state, not failed runs`);
+  }
+}
 
 describe("the generated workflows under the workflow lint", () => {
   for (const generated of files.filter((f) => f.path.startsWith(".github/workflows/"))) {

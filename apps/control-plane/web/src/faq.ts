@@ -24,7 +24,7 @@ export interface FaqEntry {
 }
 
 /** A question as a fragment: lower case, words joined by dashes. */
-export function faqSlug(question: string): string {
+function faqSlug(question: string): string {
   return question
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")

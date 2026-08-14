@@ -7,7 +7,7 @@
     "thwip": "dist/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ../../scripts/stamp-build.mjs dist",
+    "build": "tsc -p tsconfig.json && node ../../scripts/release.mjs stamp dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

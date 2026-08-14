@@ -120,7 +120,7 @@ export function namesNoDecision(digest: string): boolean {
  * principal heads it weighed and their order are `runRound`'s own output, so the
  * record cannot name a selection the queue did not make.
  */
-export function planQueueDecision(store: QueueStateStore, now: string): QueueDecisionV1 | null {
+function planQueueDecision(store: QueueStateStore, now: string): QueueDecisionV1 | null {
   const state = store.state();
   // The same two refusals `nextTurn` makes: a paused queue offers nothing, and
   // an occupied lane is not the scheduler's to hand out.
@@ -178,7 +178,7 @@ export function planQueueDecision(store: QueueStateStore, now: string): QueueDec
 export type DecisionRecorder = (decision: QueueDecisionV1) => Promise<Sha256>;
 
 /** Digest without archiving, for a deployment that has no evidence bucket. */
-export const digestDecisionOnly: DecisionRecorder = (decision) => recordDigest(decision);
+const digestDecisionOnly: DecisionRecorder = (decision) => recordDigest(decision);
 
 export class QueueCommands {
   constructor(

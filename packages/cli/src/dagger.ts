@@ -17,7 +17,7 @@ const RELEASES = "https://dl.dagger.io/dagger/releases";
  * and the download is checked against the published checksum before it is
  * ever executed.
  */
-export function daggerCacheDir(version: string): string {
+function daggerCacheDir(version: string): string {
   const base = process.env["XDG_CACHE_HOME"] ?? join(homedir(), ".cache");
   return join(base, "thwip", "dagger", version);
 }
