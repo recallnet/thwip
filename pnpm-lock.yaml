@@ -10,10 +10,6 @@ overrides:
 importers:
 
   .:
-    dependencies:
-      '@thwip/cli':
-        specifier: workspace:*
-        version: link:packages/cli
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 0.21.1

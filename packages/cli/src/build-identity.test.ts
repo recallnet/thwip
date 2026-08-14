@@ -46,7 +46,7 @@ describe("buildMismatchFailure", () => {
     expect(warning).toContain("36b6338a1b2c");
     expect(warning).toContain("Stop");
     // It has to be actionable, and it has to be one line.
-    expect(warning).toContain('node "$(git rev-parse --show-toplevel)/scripts/install-thwip.mjs" --write-path');
+    expect(warning).toContain("pnpm -w thwip <command>");
     expect(warning!.split("\n")).toHaveLength(1);
   });
 

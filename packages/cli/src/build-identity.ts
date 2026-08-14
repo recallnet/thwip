@@ -9,8 +9,8 @@
  * the code anybody was reading.
  *
  * A symlink on somebody's machine is not this repository's to move. A build
- * standing in another checkout now stops with the exact resolver repair. A
- * warning still let an agent ship with code from the wrong worktree, which is
+ * standing in another checkout now stops and names the checkout-local command.
+ * A warning still let an agent ship with code from the wrong worktree, which is
  * the failure this check exists to prevent.
  */
 
@@ -47,7 +47,7 @@ export function findCliCheckout(startDir: string, exists: (path: string) => bool
 }
 
 /**
- * One line naming the mismatch and its exact repair, or nothing when the
+ * One line naming the mismatch and the safe command, or nothing when the
  * checkout selected its own build.
  */
 export function buildMismatchFailure(input: {
@@ -66,8 +66,7 @@ export function buildMismatchFailure(input: {
   return (
     `[thwip] running ${runningMainPath} (${identity.version}, ${identity.commit}) ` +
     `while standing in ${checkoutRoot}, which builds its own thwip. ` +
-    "Stop and repair the bare command with " +
-    '`node "$(git rev-parse --show-toplevel)/scripts/install-thwip.mjs" --write-path`, then retry.'
+    "Stop and run the checkout build with `pnpm -w thwip <command>` instead."
   );
 }
 
