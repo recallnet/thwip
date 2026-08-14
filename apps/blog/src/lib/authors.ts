@@ -64,7 +64,7 @@ function sameAs(person: PersonAuthor): string[] {
   return links;
 }
 
-export function personId(key: string, site: URL): string {
+function personId(key: string, site: URL): string {
   return `${new URL(authorPath(key), site).href}#person`;
 }
 

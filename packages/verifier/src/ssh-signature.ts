@@ -64,7 +64,7 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 
 /** Extract the raw Ed25519 public key (32 bytes) from an authorized_keys line. */
-export function ed25519RawFromAuthorizedKey(publicKey: string): Uint8Array {
+function ed25519RawFromAuthorizedKey(publicKey: string): Uint8Array {
   const parts = publicKey.trim().split(/\s+/);
   if (parts[0] !== "ssh-ed25519" || !parts[1]) throw new Error("not an ssh-ed25519 key");
   const blob = b64decode(parts[1]);

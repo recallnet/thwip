@@ -51,7 +51,7 @@ export const TICK_STALE_SECONDS = 900;
  * thirty minutes every request through the door was refused the work it existed
  * to pick up. A healthy tick on this queue finishes in under a minute.
  */
-export const TICK_RUN_TIMEOUT_SECONDS = 240;
+const TICK_RUN_TIMEOUT_SECONDS = 240;
 
 export function secondsBefore(now: string, seconds: number): string {
   return new Date(Date.parse(now) - seconds * 1000).toISOString();

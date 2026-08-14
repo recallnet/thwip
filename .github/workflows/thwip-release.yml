@@ -37,8 +37,7 @@ on:
       - "packages/queue-domain/**"
       - "packages/queue-protocol/**"
       - "packages/vocabulary/**"
-      - "scripts/build-npm.mjs"
-      - "scripts/plan-cli-release.mjs"
+      - "scripts/release.mjs"
       - ".github/workflows/thwip-release.yml"
   workflow_dispatch:
     inputs:
@@ -50,7 +49,6 @@ on:
 permissions:
   contents: write
   id-token: write
-  packages: write
 
 concurrency:
   group: thwip-release
@@ -72,22 +70,10 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
 
-      - name: Configure the release registries
-        id: github-packages
-        env:
-          GH_PACKAGES_TOKEN: ${{ github.token }}
+      - name: Configure npm reads
+        id: npm
         run: |
           set -euo pipefail
-          config="$RUNNER_TEMP/thwip-github-packages.npmrc"
-          {
-            echo "registry=https://registry.npmjs.org"
-            echo "@recallnet:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=$GH_PACKAGES_TOKEN"
-            echo "always-auth=true"
-          } > "$config"
-          chmod 0600 "$config"
-          echo "path=$config" >> "$GITHUB_OUTPUT"
-
           npmjs_config="$RUNNER_TEMP/thwip-npmjs-read.npmrc"
           {
             echo "registry=https://registry.npmjs.org"
@@ -99,9 +85,8 @@ jobs:
       - name: Work out whether this is a release, and what kind
         id: decide
         env:
-          GITHUB_PACKAGES_NPMRC: ${{ steps.github-packages.outputs.path }}
-          NPMJS_NPMRC: ${{ steps.github-packages.outputs.npmjs_path }}
-        run: node scripts/plan-cli-release.mjs
+          NPMJS_NPMRC: ${{ steps.npm.outputs.npmjs_path }}
+        run: node scripts/release.mjs plan
 
       - name: Install
         if: steps.decide.outputs.release == 'true'
@@ -128,7 +113,7 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         env:
           THWIP_RELEASE_VERSION: ${{ steps.decide.outputs.version }}
-        run: node scripts/build-npm.mjs
+        run: node scripts/release.mjs package
 
       # Runs the built artifact rather than the source, so a bundle that cannot
       # start is caught here instead of by whoever installs it.
@@ -173,28 +158,10 @@ jobs:
             npm publish packages/cli/dist-npm "${args[@]}"
           fi
 
-      - name: Publish the GitHub Packages mirror
-        if: steps.decide.outputs.release == 'true'
-        env:
-          DRY: ${{ inputs.dry_run }}
-          GITHUB_PACKAGES_NPMRC: ${{ steps.github-packages.outputs.path }}
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.decide.outputs.github_exists }}" = "true" ]; then
-            echo "GitHub Packages already has this exact release; continuing the interrupted publication"
-          elif [ "${DRY:-false}" = "true" ]; then
-            npm publish packages/cli/dist-npm --access restricted \
-              --registry=https://npm.pkg.github.com --userconfig="$GITHUB_PACKAGES_NPMRC" --dry-run
-          else
-            npm publish packages/cli/dist-npm --access restricted \
-              --registry=https://npm.pkg.github.com --userconfig="$GITHUB_PACKAGES_NPMRC"
-          fi
-
-      - name: Confirm both installed releases
+      - name: Confirm the installed release
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:
-          GITHUB_PACKAGES_NPMRC: ${{ steps.github-packages.outputs.path }}
-          NPMJS_NPMRC: ${{ steps.github-packages.outputs.npmjs_path }}
+          NPMJS_NPMRC: ${{ steps.npm.outputs.npmjs_path }}
           VERSION: ${{ steps.decide.outputs.version }}
         run: |
           set -euo pipefail
@@ -223,11 +190,9 @@ jobs:
           }
 
           confirm_install "npm" "$NPMJS_NPMRC"
-          confirm_install "GitHub Packages" "$GITHUB_PACKAGES_NPMRC"
 
-      # Only once both registries have it. A tag naming a version that was never
-      # published everywhere consumers resolve it is a lie the next run has to
-      # work around.
+      # Only once npm has it. A tag naming a version that was never published is
+      # a lie the next run has to work around.
       # Only a tag. Nothing is pushed to the branch.
       #
       # This used to commit the version bump to main, which a protected branch

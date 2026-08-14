@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error -- the deploy scripts are plain modules with no declarations.
-import { exceptionStamp, parseBreakGlass } from "../../../scripts/break-glass.mjs";
+import { exceptionStamp, parseBreakGlass } from "../../../scripts/control-plane-core.mjs";
 import { readException } from "./deploy-exception.js";
 
 /**

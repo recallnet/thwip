@@ -10,7 +10,7 @@
 --
 -- A Worker deployed ahead of this file throws on every claim instead of
 -- refusing one, which is how staging spent four deploys answering 500 on the
--- `fresh` path. `scripts/schema-guard.mjs` reads the header above and the
+-- `fresh` path. `scripts/migration-core.mjs` reads the header above and the
 -- deploy refuses while this is unapplied.
 --
 -- The receipt lives in the same row as the assignment rather than in a table of

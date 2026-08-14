@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cmdVerifyChain,
+  evaluateDeployEvidence,
   exitForStatus,
   parseChainResponse,
   parseKeySet,
@@ -14,6 +15,49 @@ import { EXIT } from "./queue-exit.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+const DEPLOY_SHA = "a".repeat(40);
+const deployRecord = (kind: string = "reused-proof-merge", sequence = 228) => ({
+  digest: `sha256:${"d".repeat(64)}`,
+  sequence,
+  record: {
+    kind,
+    after: { baseSha: DEPLOY_SHA },
+    ...(kind === "verified-merge"
+      ? { verifiedMerge: { pullRequestNumber: 341 } }
+      : kind === "reused-proof-merge"
+        ? { reusedProof: { pullRequestNumber: 341 } }
+        : kind === "candidate-verified-merge"
+          ? { candidateVerified: { pullRequestNumber: 341 } }
+          : { override: { pullRequestNumber: 341 } }),
+  },
+});
+
+describe("deploy evidence from the chain verifier", () => {
+  it.each(["verified-merge", "reused-proof-merge", "candidate-verified-merge"])(
+    "accepts one signed %s record for the exact SHA",
+    (kind) => {
+      expect(evaluateDeployEvidence({
+        findings: [],
+        signaturesChecked: 60,
+        records: [deployRecord(kind) as never],
+        epochStartsAt: 169,
+      }, DEPLOY_SHA)).toMatchObject({ ok: true, evidence: { kind, pullRequestNumber: 341 } });
+    },
+  );
+
+  it("refuses overrides, unsigned results, and records outside the signed range", () => {
+    expect(evaluateDeployEvidence({
+      findings: [], signaturesChecked: 60, records: [deployRecord("override-merge") as never], epochStartsAt: 169,
+    }, DEPLOY_SHA)).toMatchObject({ ok: false, reason: expect.stringMatching(/not a verified merge/) });
+    expect(evaluateDeployEvidence({
+      findings: [], signaturesChecked: 0, records: [deployRecord() as never], epochStartsAt: 169,
+    }, DEPLOY_SHA)).toMatchObject({ ok: false, reason: expect.stringMatching(/no signatures/) });
+    expect(evaluateDeployEvidence({
+      findings: [], signaturesChecked: 60, records: [deployRecord() as never], epochStartsAt: 229,
+    }, DEPLOY_SHA)).toMatchObject({ ok: false, reason: expect.stringMatching(/outside the signed range/) });
+  });
 });
 
 /**

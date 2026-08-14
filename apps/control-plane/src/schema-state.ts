@@ -9,9 +9,9 @@ import type { D1Like } from "./queue/projection.js";
 /**
  * Which migrations this database has, from the Worker rather than from wrangler.
  *
- * `scripts/predeploy.mjs` refuses a deploy whose code needs a migration the
- * database does not have, and it used to establish that by running
- * `wrangler d1 migrations list --remote`. That made the deploy and the database
+ * `scripts/control-plane.mjs deploy` refuses code that needs a migration the
+ * database does not have by reading this endpoint. The older gate ran
+ * `wrangler d1 migrations list --remote`, making the deploy and the database
  * one authority: whoever could ship the Worker could also rewrite its tables,
  * and a second contributor could not be given one without the other.
  *

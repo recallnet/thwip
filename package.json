@@ -5,11 +5,11 @@
   "packageManager": "pnpm@11.1.2",
   "scripts": {
     "build": "pnpm -r --filter './packages/**' --filter './apps/**' --filter '!@thwip/blog' run build && pnpm --filter @thwip/blog run build",
+    "thwip": "node packages/cli/dist/main.js",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
-    "lint": "node scripts/lint.mjs",
-    "test:workers": "pnpm --filter @thwip/control-plane run test:workers",
-    "thwip": "node packages/cli/dist/main.js"
+    "lint": "pnpm exec knip --reporter symbols && pnpm exec knip --production --exclude dependencies,unlisted,binaries,unresolved --reporter symbols",
+    "test:workers": "pnpm --filter @thwip/control-plane run test:workers"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.1",

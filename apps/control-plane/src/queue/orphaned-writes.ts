@@ -68,7 +68,7 @@ export const ORPHANED_WRITE_SWEEP_LIMIT = 5;
  * not answer for an hour is a different thing from a merge nobody can name, and
  * the sweep has no way to tell them apart except by asking later.
  */
-export const ORPHANED_WRITE_REFUSAL_BACKOFF_MS = 15 * 60 * 1000;
+const ORPHANED_WRITE_REFUSAL_BACKOFF_MS = 15 * 60 * 1000;
 export const ORPHANED_WRITE_REFUSAL_BACKOFF_CAP_MS = 24 * 60 * 60 * 1000;
 
 /**

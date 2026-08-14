@@ -9,30 +9,39 @@
  * staging is the live database behind thwip.ai.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildStamp } from "./build-sha.mjs";
-import { liveD1Target, liveHealthUrl, liveSchemaUrl } from "./deploy-identity.mjs";
-import { validDeploymentId } from "./deployment-id.mjs";
 import {
+  buildStamp,
   d1CredentialFromEnv,
+  deployControlPlane,
+  liveD1Target,
+  liveHealthUrl,
+  liveSchemaUrl,
   liveTargetRefusal,
   preflightD1Credential,
+  tokenAcceptance,
+  validDeploymentId,
+  verifyD1CredentialCleared,
   wranglerEnvironment,
-} from "./d1-identity.mjs";
+} from "./control-plane-core.mjs";
 import {
+  liveMigrationState,
   migrationReleaseState,
+  migrationTrackRefusal,
   missingMigrationFiles,
   readMigrations,
   undeclaredMigrations,
-} from "./schema-guard.mjs";
+} from "./migration-core.mjs";
 
 const PROJECT_LIFECYCLE_FINISH_MIGRATION = "0031_finish_github_repository_lifecycle.sql";
 const PROJECT_LIFECYCLE_REOPEN_MIGRATION = "0034_reopen_after_project_lifecycle.sql";
 const PROJECT_LIFECYCLE_COMPATIBILITY_WINDOW_MS = 60 * 60_000;
+const REPOSITORY_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 export function migrationPlan(migrations, applied) {
   return migrationReleaseState(migrations, applied);
@@ -86,11 +95,14 @@ export async function applyMigrations({
 
   const schemaUrl = liveSchemaUrl(env);
   const schema = await readJson(fetchImpl, schemaUrl, `${env} schema`);
-  if (!Array.isArray(schema.applied) || schema.applied.some((name) => typeof name !== "string")) {
+  const live = liveMigrationState(schema);
+  if (live === null) {
     throw new Error(`Refusing: ${schemaUrl} did not return an applied migration filename list.`);
   }
+  const trackRefusal = migrationTrackRefusal(migrations, live.track);
+  if (trackRefusal !== null) throw new Error(`Refusing: ${trackRefusal}.`);
 
-  const plan = migrationPlan(migrations, schema.applied);
+  const plan = migrationPlan(migrations, live.applied);
   if (plan.outOfOrderApplied.length > 0) {
     throw new Error(
       [
@@ -221,7 +233,16 @@ export function selectedMigrationConfig(source, env, database) {
   };
 }
 
-export function applySelectedMigrationFiles({ names, env, database, migrationsDir, configPath, wranglerEnv }) {
+export function applySelectedMigrationFiles({
+  names,
+  env,
+  database,
+  migrationsDir,
+  configPath,
+  wranglerEnv,
+  workspaceRoot = REPOSITORY_ROOT,
+  execute = execFileSync,
+}) {
   const temporary = mkdtempSync(join(tmpdir(), "thwip-migration-phase-"));
   try {
     const selectedDir = join(temporary, "migrations");
@@ -231,9 +252,13 @@ export function applySelectedMigrationFiles({ names, env, database, migrationsDi
     const config = selectedMigrationConfig(readFileSync(configPath, "utf8"), env, database);
     const temporaryConfig = join(temporary, "wrangler.json");
     writeFileSync(temporaryConfig, JSON.stringify(config));
-    execFileSync(
-      "wrangler",
-      ["d1", "migrations", "apply", database, "--env", env, "--remote", "--config", temporaryConfig],
+    execute(
+      "pnpm",
+      [
+        "--dir", workspaceRoot,
+        "--filter", "@thwip/control-plane", "exec", "wrangler",
+        "d1", "migrations", "apply", database, "--env", env, "--remote", "--config", temporaryConfig,
+      ],
       { stdio: "inherit", cwd: temporary, env: wranglerEnv },
     );
   } finally {
@@ -241,65 +266,152 @@ export function applySelectedMigrationFiles({ names, env, database, migrationsDi
   }
 }
 
-function argument(name, fallback = null) {
-  const index = process.argv.indexOf(name);
-  return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
+const WRITES = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|PRAGMA|ATTACH|REPLACE|TRUNCATE|VACUUM|REINDEX|DETACH|BEGIN|COMMIT|ROLLBACK)\b/i;
+const READS = /^\s*(SELECT|WITH|EXPLAIN)\b/i;
+
+/** Why a D1 statement cannot run through the bounded read path. */
+export function refuse(statement) {
+  const sql = statement.trim();
+  if (sql.length === 0) return "Nothing to run.";
+  const body = sql.endsWith(";") ? sql.slice(0, -1) : sql;
+  if (body.includes(";")) return "Refusing: one statement at a time.";
+  const write = WRITES.exec(body);
+  if (write !== null) return `Refusing: this statement contains ${write[1].toUpperCase()}, and this path only reads.`;
+  return READS.test(body) ? null : "Refusing: a read starts with SELECT, WITH or EXPLAIN.";
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const env = argument("--env", "staging");
-  const database = argument("--database");
-  const confirmLive = argument("--confirm-live");
+export function commandFor(statement, { database, env }) {
+  return ["d1", "execute", database, "--env", env, "--remote", "--json", "--command", statement.trim()];
+}
+
+export function readDiagnostic(statement, target) {
+  const digest = createHash("sha256").update(statement.trim()).digest("hex");
+  const hostname = new URL(target.origin).hostname;
+  return `reading ${target.databaseName} (${target.env}, live at ${hostname}); statement sha256:${digest}`;
+}
+
+export function executeRead(run, argv, env) {
+  try {
+    run(
+      "pnpm",
+      ["--filter", "@thwip/control-plane", "exec", "wrangler", ...argv],
+      { stdio: ["ignore", "inherit", "inherit"], env },
+    );
+  } catch {
+    throw new Error("The live D1 read failed. Wrangler wrote any available details above; the SQL was not repeated.");
+  }
+}
+
+function argument(args, name, fallback = null) {
+  const index = args.indexOf(name);
+  return index === -1 ? fallback : (args[index + 1] ?? fallback);
+}
+
+async function migrate(args) {
+  const env = argument(args, "--env", "staging");
+  const database = argument(args, "--database");
+  const confirmLive = argument(args, "--confirm-live");
   if (database === null) {
-    console.error("Refusing: migrate.mjs requires --database <name>.");
-    process.exit(1);
+    throw new Error("Refusing: control-plane migrate requires --database <name>.");
   }
 
   const migrationsDir = fileURLToPath(new URL("../migrations", import.meta.url));
   const configPath = fileURLToPath(new URL("../wrangler.jsonc", import.meta.url));
   const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
-  try {
-    const target = liveD1Target(env);
-    if (database !== target.databaseName) {
-      throw new Error(`Refusing: --database must be ${target.databaseName}, the DB binding for --env ${env}.`);
-    }
-    const targetRefusal = liveTargetRefusal(target, confirmLive);
-    if (targetRefusal !== null) throw new Error(targetRefusal);
-    const selected = d1CredentialFromEnv(process.env, "migration");
+  const target = liveD1Target(env);
+  if (database !== target.databaseName) {
+    throw new Error(`Refusing: --database must be ${target.databaseName}, the DB binding for --env ${env}.`);
+  }
+  const targetRefusal = liveTargetRefusal(target, confirmLive);
+  if (targetRefusal !== null) throw new Error(targetRefusal);
+  const selected = d1CredentialFromEnv(process.env, "migration");
+  if (selected.refusal !== null) throw new Error(selected.refusal);
+  const credential = selected.credential;
+  const report = await preflightD1Credential({ fetchImpl: fetch, credential, target });
+  console.log(`D1 migration identity is active for ${report.target} until ${report.expiresOn}. No application rows were read.`);
+  const wranglerEnv = wranglerEnvironment(process.env, credential);
+  const migrations = readMigrations(migrationsDir);
+  const missing = missingMigrationFiles(migrations);
+  if (missing.length > 0) {
+    throw new Error(`Refusing: the shared release model names missing SQL files:\n${missing.map((name) => `  ${name}`).join("\n")}`);
+  }
+  git("fetch", "--quiet", "origin", "main");
+  await applyMigrations({
+    env,
+    database,
+    migrations,
+    fetchImpl: fetch,
+    build: () => buildStamp(git),
+    canonicalBuild: () => git("rev-parse", "origin/main"),
+    identity: { wranglerEnv },
+    run: (names) => applySelectedMigrationFiles({ names, env, database, migrationsDir, configPath, wranglerEnv }),
+  });
+}
+
+async function d1Read(args) {
+  const env = argument(args, "--env");
+  const confirmation = argument(args, "--confirm-live");
+  const statement = args.find((value, index) => !value.startsWith("--") && !["--env", "--confirm-live"].includes(args[index - 1]));
+  if (env === null || statement === undefined) {
+    throw new Error('usage: control-plane d1-read --env staging --confirm-live thwip.ai "SELECT ..."');
+  }
+  const refusal = refuse(statement);
+  if (refusal !== null) throw new Error(refusal);
+  const target = liveD1Target(env);
+  const targetRefusal = liveTargetRefusal(target, confirmation);
+  if (targetRefusal !== null) throw new Error(targetRefusal);
+  const selected = d1CredentialFromEnv(process.env, "read");
+  if (selected.refusal !== null) throw new Error(selected.refusal);
+  const credential = selected.credential;
+  const report = await preflightD1Credential({ fetchImpl: fetch, credential, target });
+  console.error(`${readDiagnostic(statement, target)}; token expires ${report.expiresOn}`);
+  executeRead(
+    execFileSync,
+    commandFor(statement, { database: target.databaseName, env }),
+    wranglerEnvironment(process.env, credential),
+  );
+}
+
+async function d1Token(args) {
+  const [action] = args;
+  const kind = argument(args, "--kind");
+  if (action === "verify-cleared") {
+    verifyD1CredentialCleared(process.env, kind);
+    console.log("No role-specific D1 credential remains in this shell.");
+    return;
+  }
+  if (action === "verify-revoked") {
+    const selected = d1CredentialFromEnv(process.env, kind);
     if (selected.refusal !== null) throw new Error(selected.refusal);
-    const credential = selected.credential;
-    const report = await preflightD1Credential({ fetchImpl: fetch, credential, target });
-    console.log(
-      `D1 migration identity is active for ${report.target} until ${report.expiresOn}. No application rows were read.`,
-    );
-    const wranglerEnv = wranglerEnvironment(process.env, credential);
-    const run = (names) => applySelectedMigrationFiles({
-      names,
-      env,
-      database,
-      migrationsDir,
-      configPath,
-      wranglerEnv,
-    });
-    const migrations = readMigrations(migrationsDir);
-    const missing = missingMigrationFiles(migrations);
-    if (missing.length > 0) {
-      throw new Error(`Refusing: the shared release model names missing SQL files:\n${missing.map((name) => `  ${name}`).join("\n")}`);
-    }
-    git("fetch", "--quiet", "origin", "main");
-    await applyMigrations({
-      env,
-      database,
-      migrations,
+    const status = await tokenAcceptance({
       fetchImpl: fetch,
-      build: () => buildStamp(git),
-      canonicalBuild: () => git("rev-parse", "origin/main"),
-      identity: { wranglerEnv },
-      run,
+      token: selected.credential.token,
+      accountId: selected.credential.accountId,
     });
-  } catch (error) {
+    if (status.accepted) throw new Error("Refusing: Cloudflare still accepts this D1 token. Delete it, then check again.");
+    console.log("Cloudflare no longer accepts the D1 token. Clear it from this shell now.");
+    return;
+  }
+  throw new Error("usage: control-plane.mjs d1-token verify-revoked|verify-cleared --kind read|migration");
+}
+
+async function main() {
+  const [command, ...args] = process.argv.slice(2);
+  if (command === "deploy") return deployControlPlane({ targetEnv: argument(args, "--env", "staging") });
+  if (command === "migrate") return migrate(args);
+  if (command === "d1-read") return d1Read(args);
+  if (command === "d1-token") return d1Token(args);
+  throw new Error("usage: control-plane.mjs deploy|migrate|d1-read|d1-token [options]");
+}
+
+export function invokedAsMain(argvPath, moduleUrl = import.meta.url) {
+  return argvPath === fileURLToPath(moduleUrl);
+}
+
+if (invokedAsMain(process.argv[1])) {
+  main().catch((error) => {
     console.error(`\n${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
-  }
+  });
 }

@@ -24,9 +24,9 @@ queue knows. None of this reaches Cloudflare.
 | Can the App publish the check the branch requires? | `GET /v1/queue/:repositoryId/doctor` (repository admin) |
 | Which migrations does the live database have? | `GET /v1/schema` (public) |
 | What build is live? | `GET /health` (public) |
-| Does the whole chain verify from outside? | `node scripts/verify-chain.mjs <owner/repo> <ref>` |
+| Does the whole chain verify from outside? | `pnpm thwip verify-chain --repo <owner/repo> --branch <branch>` |
 
-`verify-chain.mjs` needs no credential of any kind. Run `pnpm build` first; it
+`thwip verify-chain` needs no credential of any kind. Run `pnpm build` first; it
 reads `packages/queue-protocol/dist`, and a session once read its
 `MODULE_NOT_FOUND` as a clean result.
 
@@ -59,7 +59,7 @@ export THWIP_D1_READ_API_TOKEN=<short-lived-token>
 Then run the read with both the Cloudflare environment name and the live host:
 
 ```sh
-node scripts/d1.mjs --env staging --confirm-live thwip.ai \
+node scripts/control-plane.mjs d1-read --env staging --confirm-live thwip.ai \
   "SELECT COUNT(*) AS count FROM queue_attestations"
 ```
 
@@ -77,20 +77,17 @@ binding in `wrangler.jsonc` without a write. Wrangler receives that token only.
 It cannot fall back to `CLOUDFLARE_API_TOKEN`, an API key or the stored Wrangler
 OAuth session.
 
-Delete the token immediately after the read, then prove that it is gone:
+Delete the token in Cloudflare immediately after the read, prove that Cloudflare
+rejects it, then clear it from the shell:
 
 ```sh
-node scripts/d1-identity.mjs verify-revoked --kind read
+node scripts/control-plane.mjs d1-token verify-revoked --kind read
 unset THWIP_D1_READ_API_TOKEN THWIP_D1_ACCOUNT_ID
-node scripts/d1-identity.mjs verify-cleared --kind read
+node scripts/control-plane.mjs d1-token verify-cleared --kind read
 ```
 
-`verify-revoked` must say that Cloudflare rejects the token. If it says the token
-is active or the result is uncertain, delete it in Cloudflare and repeat the
-check. `verify-cleared` must say that no role-specific D1 credential remains in
-the shell. It does not inspect an unrelated deploy token or Wrangler's stored
-login. Record the UTC time, token name, statement digest, outcome and both
-successful checks in the approving record. Do not copy the result rows there.
+Record the UTC time, token name, statement digest, outcome, and both successful
+checks in the approving record. Do not copy the result rows there.
 
 `wrangler d1 execute` is no longer the documented way to look at production.
 Reaching for it means the statement was not a read, and a statement that is not
@@ -288,19 +285,16 @@ The deploy gate refuses while a `before-worker` migration it needs is missing
 and names it.
 
 As soon as the migration finishes, delete the token from Cloudflare while it is
-still present in the shell. Then verify Cloudflare rejects it and clear the
-shell:
+still present in the shell. Then prove revocation and clear the shell:
 
 ```sh
-node scripts/d1-identity.mjs verify-revoked --kind migration
+node scripts/control-plane.mjs d1-token verify-revoked --kind migration
 unset THWIP_D1_MIGRATION_API_TOKEN THWIP_D1_ACCOUNT_ID
-node scripts/d1-identity.mjs verify-cleared --kind migration
+node scripts/control-plane.mjs d1-token verify-cleared --kind migration
 ```
 
 Do not log out the ordinary Wrangler session as part of this run. These commands
-never used it. The two verification lines prove that the temporary role token is
-revoked and no longer present in the shell. Add both successful checks to the
-operation record, without the credential value.
+never used it. Record both successful checks without the credential value.
 
 ## Deploying past the gate
 
@@ -313,7 +307,8 @@ nobody was thinking about.
 An exception now names the guard it excuses and says why:
 
 ```
-THWIP_BREAK_GLASS="unmerged-tree: the queue cannot merge its own repair" pnpm deploy:staging
+THWIP_BREAK_GLASS="unmerged-tree: the queue cannot merge its own repair" \
+  pnpm --filter @thwip/control-plane run deploy:staging
 ```
 
 Every other guard still refuses. The guards that can be named are

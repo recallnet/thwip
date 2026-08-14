@@ -304,7 +304,7 @@ async function verifiedEvidenceForRepair(
 }
 
 /** First signed audit stored for a repaired transition. */
-export async function repairAuditForTransition(
+async function repairAuditForTransition(
   db: D1Like,
   input: { repositoryId: string; baseRef: string; transitionDigest: string },
 ): Promise<{ digest: string; record: unknown; jws: string } | null> {

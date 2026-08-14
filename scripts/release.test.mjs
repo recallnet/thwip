@@ -6,14 +6,38 @@ import {
   RELEASE_PATHS,
   plannedVersion,
   releaseBump,
+  releaseCheckout,
   releaseSourceCommit,
-} from "./plan-cli-release.mjs";
+} from "./release.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const registry = (version = "0.0.0", sourceCommit = null) => ({ version, sourceCommit });
+const SHA = "a".repeat(40);
 
 describe("CLI release planning", () => {
+  it("accepts only the exact clean canonical main checkout in Actions", () => {
+    const facts = (overrides = {}) => ({ headSha: SHA, remoteMainSha: SHA, dirty: false, ...overrides });
+    const action = (overrides = {}) => ({
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_REPOSITORY: "recallnet/thwip",
+      GITHUB_REPOSITORY_ID: "1315419165",
+      GITHUB_SHA: SHA,
+      GITHUB_WORKFLOW_REF: "recallnet/thwip/.github/workflows/thwip-release.yml@refs/heads/main",
+      ...overrides,
+    });
+    expect(releaseCheckout(facts(), action())).toBeNull();
+    expect(releaseCheckout(facts(), action({ GITHUB_REF: "refs/heads/feature" }))).toMatch(/refs\/heads\/main/);
+    expect(releaseCheckout(facts(), action({
+      GITHUB_WORKFLOW_REF: "recallnet/thwip/.github/workflows/thwip-release.yml@refs/heads/feature",
+    }))).toMatch(/canonical main/);
+    expect(releaseCheckout(facts({ dirty: true }), action())).toMatch(/uncommitted/);
+    expect(releaseCheckout(facts({ remoteMainSha: "b".repeat(40) }), action())).toMatch(/origin\/main/);
+  });
+
   it("publishes a patch for a plain-language merge title", () => {
     expect(releaseBump({ changed: true, subjects: "Make policy path handling linear", bodies: "" })).toBe("patch");
   });
@@ -35,19 +59,17 @@ describe("CLI release planning", () => {
     })).toBe("3e9b358a719a706defd3fc11a223536ef8dc1b4c");
   });
 
-  it("recovers the same version after only one registry accepted this exact commit", () => {
+  it("recovers the same version after npm accepted this exact commit", () => {
     expect(plannedVersion({
       bump: "patch",
       declaredVersion: "0.1.1",
       lastTagVersion: "0.16.2",
       npm: registry("0.16.3", "abc"),
-      github: registry(),
       head: "abc",
     })).toEqual({
       version: "0.16.3",
       recovering: true,
       npmExists: true,
-      githubExists: false,
     });
   });
 
@@ -57,20 +79,8 @@ describe("CLI release planning", () => {
       declaredVersion: "0.1.1",
       lastTagVersion: "0.16.2",
       npm: registry("0.16.3", "older"),
-      github: registry("0.16.3", "older"),
       head: "newer",
     }).version).toBe("0.16.4");
-  });
-
-  it("refuses conflicting bytes at the version it would recover", () => {
-    expect(() => plannedVersion({
-      bump: "patch",
-      declaredVersion: "0.1.1",
-      lastTagVersion: "0.16.2",
-      npm: registry("0.16.3", "abc"),
-      github: registry("0.16.3", "different"),
-      head: "abc",
-    })).toThrow(/GitHub Packages already contains/);
   });
 
   it("covers the complete workspace dependency closure for the CLI and Action", () => {
@@ -103,14 +113,28 @@ describe("CLI release planning", () => {
     }
     expect(workflow).toContain("run: git diff --exit-code");
     expect(workflow).toContain('confirm_install "npm"');
-    expect(workflow).toContain('confirm_install "GitHub Packages"');
     expect(workflow).toContain('echo "@recallnet:registry=https://registry.npmjs.org"');
-    expect(workflow).toContain('echo "@recallnet:registry=https://npm.pkg.github.com"');
     expect(workflow).toContain('(cd "$probe" && npm install');
     expect(workflow).toContain('--cache="$probe/.npm-cache"');
     expect(workflow).toContain('--prefer-online');
     expect(workflow).toContain('(cd "$probe" && ./node_modules/.bin/thwip version)');
     expect(workflow).toContain('max_attempts=18');
+  });
+
+  it("uses one release entry for planning, packaging, and build stamps", () => {
+    const source = readFileSync(join(root, "scripts/release.mjs"), "utf8");
+    expect(source).toContain("THWIP_RELEASE_VERSION");
+    expect(source).toContain('command === "plan"');
+    expect(source).toContain('command === "package"');
+    expect(source).toContain('command === "stamp"');
+    expect(source).not.toMatch(/^import .* from ["']esbuild["'];$/m);
+    expect(source).toContain('await import("esbuild")');
+  });
+
+  it("does not rewrite a tracked file to carry the version", () => {
+    const workflow = readFileSync(join(root, ".github/workflows/thwip-release.yml"), "utf8");
+    expect(workflow).not.toContain("packages/cli/package.json > /tmp/pkg.json");
+    expect(workflow).toContain("THWIP_RELEASE_VERSION");
   });
 
   it("ships the GitHub Action as a committed bundle, not a consumer build", () => {
