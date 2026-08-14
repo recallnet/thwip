@@ -15,8 +15,10 @@ export interface Env {
    * thing production says about itself rather than a thing one terminal knew.
    */
   DEPLOY_EXCEPTION?: string;
-  STRIPE_PRICE_MONTHLY: string;
-  STRIPE_PRICE_ANNUAL: string;
+  /** Hosted billing is optional. Self-hosted deployments normally disable it. */
+  BILLING_MODE?: "stripe" | "disabled";
+  STRIPE_PRICE_MONTHLY?: string;
+  STRIPE_PRICE_ANNUAL?: string;
   GITHUB_APP_ID: string;
   GITHUB_APP_SLUG: string;
   GITHUB_APP_CLIENT_ID: string;
@@ -26,7 +28,7 @@ export interface Env {
   GITHUB_APP_CLIENT_SECRET: string;
   GITHUB_APP_PRIVATE_KEY: string;
   GITHUB_WEBHOOK_SECRET?: string;
-  STRIPE_SECRET_KEY: string;
+  STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_BA_WEBHOOK_SECRET?: string;
   GITHUB_SYNC_TOKEN?: string;
