@@ -27,17 +27,24 @@ if (indexPath && existsSync(indexPath)) {
 }
 
 const blogDir = join(client, "blog");
+
+/** Directories under blog/ that hold a post, rather than assets or author pages. */
+function postDirNames() {
+  if (!existsSync(blogDir)) return [];
+  const skip = new Set(["_astro", "authors"]);
+  return readdirSync(blogDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !skip.has(e.name))
+    .map((e) => e.name);
+}
+
+const postDirs = postDirNames();
 if (existsSync(blogDir)) {
-  const entries = readdirSync(blogDir, { withFileTypes: true });
-  const postDirs = entries.filter((e) => e.isDirectory() && e.name !== "_astro");
   if (postDirs.length === 0) {
     failures.push("no post directories under blog/");
-  } else {
-    for (const dir of postDirs) {
-      const postIndex = join(blogDir, dir.name, "index.html");
-      if (!existsSync(postIndex)) {
-        failures.push(`missing blog/${dir.name}/index.html`);
-      }
+  }
+  for (const name of postDirs) {
+    if (!existsSync(join(blogDir, name, "index.html"))) {
+      failures.push(`missing blog/${name}/index.html`);
     }
   }
 }
@@ -79,37 +86,32 @@ function structuredData(html) {
 // reader (or a rater) needs to check who wrote this.
 const bylineAuthors = new Set();
 
-if (existsSync(blogDir)) {
-  const postDirs = readdirSync(blogDir, { withFileTypes: true }).filter(
-    (e) => e.isDirectory() && e.name !== "_astro" && e.name !== "authors",
-  );
-  for (const dir of postDirs) {
-    const postIndex = join(blogDir, dir.name, "index.html");
-    if (!existsSync(postIndex)) continue;
-    const html = readFileSync(postIndex, "utf8");
-    const posting = structuredData(html).find((b) => b["@type"] === "BlogPosting");
-    if (!posting) {
-      failures.push(`blog/${dir.name} has no BlogPosting JSON-LD`);
-      continue;
-    }
+for (const name of postDirs) {
+  const postIndex = join(blogDir, name, "index.html");
+  if (!existsSync(postIndex)) continue;
+  const html = readFileSync(postIndex, "utf8");
+  const posting = structuredData(html).find((b) => b["@type"] === "BlogPosting");
+  if (!posting) {
+    failures.push(`blog/${name} has no BlogPosting JSON-LD`);
+    continue;
+  }
 
-    const accountable = posting.author?.["@type"] === "Person" ? posting.author : posting.reviewedBy;
-    if (!accountable || accountable["@type"] !== "Person") {
-      failures.push(`blog/${dir.name} names no accountable Person as author or reviewer`);
-      continue;
+  const accountable = posting.author?.["@type"] === "Person" ? posting.author : posting.reviewedBy;
+  if (!accountable || accountable["@type"] !== "Person") {
+    failures.push(`blog/${name} names no accountable Person as author or reviewer`);
+    continue;
+  }
+  for (const property of ["@id", "name", "url", "image", "sameAs"]) {
+    if (!accountable[property]) {
+      failures.push(`blog/${name} accountable Person lacks ${property}`);
     }
-    for (const property of ["@id", "name", "url", "image", "sameAs"]) {
-      if (!accountable[property]) {
-        failures.push(`blog/${dir.name} accountable Person lacks ${property}`);
-      }
-    }
-    if (accountable.url) bylineAuthors.add(accountable.url);
+  }
+  if (accountable.url) bylineAuthors.add(accountable.url);
 
-    // The visible byline must reach the same page the schema points at, or the
-    // markup and the structured data disagree about who wrote this.
-    if (accountable.url && !html.includes(new URL(accountable.url).pathname)) {
-      failures.push(`blog/${dir.name} byline does not link to ${accountable.url}`);
-    }
+  // The visible byline must reach the same page the structured data points at,
+  // or the markup and the schema disagree about who wrote this.
+  if (accountable.url && !html.includes(new URL(accountable.url).pathname)) {
+    failures.push(`blog/${name} byline does not link to ${accountable.url}`);
   }
 }
 

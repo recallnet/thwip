@@ -1,6 +1,8 @@
 ---
 import { render } from "astro:content";
+import Byline from "../../components/Byline.astro";
 import BlogLayout from "../../layouts/BlogLayout.astro";
+import { authorFor, personRefJsonLd } from "../../lib/authors";
 import { publishedPosts, type BlogPost } from "../../lib/posts";
 
 export async function getStaticPaths() {
@@ -19,6 +21,12 @@ const { Content } = await render(post);
 const path = `/blog/${post.id}/`;
 const site = Astro.site ?? new URL("https://thwip.ai");
 const pageUrl = new URL(path, site).href;
+const publisher = { "@type": "Organization", name: "thwip", url: site.href };
+const written = authorFor(post.data.author);
+// An agent is not a Person, so a post it drafted is published under the
+// organization's name, and the reviewer carries the accountability.
+const author =
+  written.kind === "person" ? personRefJsonLd(post.data.author, site) : publisher;
 const jsonLd = [
   {
     "@context": "https://schema.org",
@@ -27,13 +35,12 @@ const jsonLd = [
     description: post.data.description,
     datePublished: post.data.pubDate.toISOString(),
     dateModified: (post.data.updatedDate ?? post.data.pubDate).toISOString(),
-    author: { "@type": "Person", name: post.data.author },
+    author,
+    ...(post.data.reviewedBy
+      ? { reviewedBy: personRefJsonLd(post.data.reviewedBy, site) }
+      : {}),
     mainEntityOfPage: { "@type": "WebPage", "@id": pageUrl },
-    publisher: {
-      "@type": "Organization",
-      name: "thwip",
-      url: site.href,
-    },
+    publisher,
   },
   {
     "@context": "https://schema.org",
@@ -70,20 +77,11 @@ const jsonLd = [
 >
   <article class="eb-article">
     <header class="eb-article__header">
-      <p class="eb-meta">
-        <time datetime={post.data.pubDate.toISOString()}>
-          {
-            post.data.pubDate.toLocaleDateString("en-US", {
-              year: "numeric",
-              month: "long",
-              day: "numeric",
-              timeZone: "UTC",
-            })
-          }
-        </time>
-        {" · "}
-        {post.data.author}
-      </p>
+      <Byline
+        author={post.data.author}
+        reviewedBy={post.data.reviewedBy}
+        pubDate={post.data.pubDate}
+      />
       <h1>{post.data.title}</h1>
       <p class="eb-lede">{post.data.description}</p>
       {

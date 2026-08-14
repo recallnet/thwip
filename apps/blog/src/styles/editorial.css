@@ -577,3 +577,94 @@
 .eb-step .astro-code {
   max-width: none;
 }
+
+/* Author profile: the page a byline resolves to. */
+.eb-profile {
+  max-width: 820px;
+  width: 100%;
+}
+
+.eb-profile__header {
+  display: flex;
+  gap: var(--s4);
+  align-items: center;
+  margin-bottom: var(--s4);
+}
+
+.eb-profile__avatar {
+  width: 120px;
+  height: 120px;
+  border: 1px solid var(--rule);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.eb-profile__header h1 {
+  font-family: var(--num);
+  font-weight: 600;
+  font-size: clamp(1.75rem, 3.5vw, 2.25rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0 0 var(--s2);
+}
+
+.eb-profile__title,
+.eb-profile__links {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--ghost);
+  margin: 0 0 var(--s2);
+}
+
+.eb-profile__links a {
+  color: var(--muted);
+}
+
+.eb-profile__heading {
+  font-family: var(--num);
+  font-weight: 600;
+  font-size: 1.125rem;
+  letter-spacing: -0.01em;
+  margin: var(--s6) 0 var(--s3);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+
+.eb-profile__posts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.eb-profile__posts li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.eb-profile__posts time {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ghost);
+  margin-left: auto;
+}
+
+.eb-profile__role {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  padding: 2px 8px;
+}
+
+@media (max-width: 640px) {
+  .eb-profile__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

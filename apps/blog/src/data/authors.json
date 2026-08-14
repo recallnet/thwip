@@ -1,0 +1,47 @@
+{
+  "andrewxhill": {
+    "kind": "person",
+    "login": "andrewxhill",
+    "displayName": "Andrew W. Hill",
+    "jobTitle": "Co-founder",
+    "organization": "Recall",
+    "bio": "Andrew W. Hill co-founded Recall, and Textile before it. He works on thwip, which attaches signed CI evidence to the commit that produced it.",
+    "knowsAbout": [
+      "continuous integration",
+      "merge queues",
+      "software supply chain security",
+      "developer tooling"
+    ],
+    "github": {
+      "htmlUrl": "https://github.com/andrewxhill",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/370259?v=4",
+      "blog": "https://tableland.xyz",
+      "twitter": "andrewxhill"
+    }
+  },
+  "carsonfarmer": {
+    "kind": "person",
+    "login": "carsonfarmer",
+    "displayName": "Carson Farmer",
+    "jobTitle": "CTO and Co-founder",
+    "organization": "Recall",
+    "bio": "Carson Farmer is CTO and a co-founder of Recall, which he started after Textile and a career in academia. He works on thwip's merge queue and on how its proofs get verified.",
+    "knowsAbout": [
+      "merge queues",
+      "distributed systems",
+      "cryptographic attestation",
+      "continuous integration"
+    ],
+    "github": {
+      "htmlUrl": "https://github.com/carsonfarmer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1220613?v=4",
+      "blog": "https://carsonfarmer.com",
+      "twitter": "carsonfarmer"
+    }
+  },
+  "product-agent": {
+    "kind": "agent",
+    "displayName": "a product agent",
+    "note": "Drafted by an agent working in this repository. A named human reviews and takes accountability; see reviewedBy on the post."
+  }
+}
