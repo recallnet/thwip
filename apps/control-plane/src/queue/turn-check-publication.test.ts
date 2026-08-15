@@ -26,11 +26,10 @@ const { queueFromPullRequest } = await import("../index.js");
  * it is the one that moves an entry from absent to waiting. `/authorize` then
  * found the entry already waiting, changed nothing, and published nothing.
  *
- * A pull request that was later offered the lane got its check on that
- * transition and looked fine. One that sat waiting never got a check at all, and
- * `thwip / turn` is required, so it could not merge and nothing on the page said
- * why. Observed live on recallnet/thwip: 116 and 118 held the lane and carry the
- * check; 114 and 120 waited and carry no check run of that name on their heads.
+ * A pull request that is later offered the lane gets its check on that
+ * transition. One that stays waiting would otherwise get no check at all. Since
+ * `thwip / turn` is required, the missing publication would block its merge
+ * without explaining why.
  */
 
 const open: Array<{ close(): void }> = [];
