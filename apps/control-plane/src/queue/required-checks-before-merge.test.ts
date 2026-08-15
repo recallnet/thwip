@@ -12,9 +12,8 @@ import { PROOF_CHECK, TURN_CHECK } from "./turn-check.js";
  * A branch ruleset requires two checks. When one of them is not on the head,
  * GitHub answers the merge PUT with 405 and the queue found that out from the
  * rejection: it had already given the entry a turn, signed a merge intent and
- * minted an operation, and the attempt sat holding the lane while everything
- * behind it stopped. That happened repeatedly on recallnet/thwip in one day, and
- * clearing it took a person each time.
+ * minted an operation, and the attempt could sit holding the lane while
+ * everything behind it stopped until a person cleared it.
  *
  * Both facts are readable first. The branch rules name the contexts and the head
  * carries the runs, so a merge that cannot succeed is refused with a sentence
