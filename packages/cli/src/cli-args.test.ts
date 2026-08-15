@@ -96,6 +96,16 @@ describe("help", () => {
     expect(parseCliArgs(["help", "run"])).toMatchObject({ kind: "help" });
     expect(parseCliArgs(["help", "queue", "bypass"])).toMatchObject({ kind: "help" });
   });
+
+  it("separates proof-only drafts from queue completion", () => {
+    const action = parseCliArgs(["ship", "--help"]);
+    expect(action.kind).toBe("help");
+    const text = action.kind === "help" ? action.text : "";
+    expect(text).toContain("existing draft");
+    expect(text).toContain("--no-queue");
+    expect(text).toContain("thwip run");
+    expect(text).toContain("gh pr create --draft");
+  });
 });
 
 describe("thwip doctor", () => {
