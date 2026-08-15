@@ -127,10 +127,8 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
  *
  * One read is not an answer here for the same reason one read is not an answer
  * in `confirmMergeAbsence`: GitHub's reads lag GitHub's own writes, and the
- * caller has just moved this branch itself. Pull request 183 merged on 4 August
- * 2026, the queue confirmed the merge from the commit, and the comparison that
- * gates the record answered that the branch did not contain it. No record was
- * written for a merge that had already landed.
+ * caller has just moved this branch itself. A stale comparison can therefore
+ * say the branch does not contain a merge that has already landed.
  *
  * Only `true` proceeds. A read that never agrees records nothing, because a
  * record written on a read nobody could complete is the failure this guard
@@ -287,10 +285,9 @@ export async function recordMergedTransition<TEnv extends QueueRouteEnv>(
 
   // The record about to be built says the base branch became this commit. That
   // is a claim about a branch, and GitHub can be asked about it, and nothing
-  // asked. Pull request 107's losing merge run reported the test merge GitHub
-  // computes for an open pull request; it has the real merge's parents and the
-  // real merge's tree, so every consistency check the queue had passed it, and
-  // chain record 54 says main became a commit that is an ancestor of nothing.
+  // asked. A losing merge run can report the temporary merge GitHub computes
+  // for an open pull request. It has the real merge's parents and tree, so local
+  // consistency checks pass even though the commit is on no branch.
   //
   // Asked before the replay lookup, so a report naming a commit that is not on
   // the branch never takes the chain position that the correct report of the

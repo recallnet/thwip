@@ -406,13 +406,9 @@ interface Edge {
 /**
  * Following the shas, because log order stopped being history order.
  *
- * Four merges landed with no record and were recorded afterwards. The chain is
- * append-only and hash-linked, so the repair could only write them at the head:
- * the merges happened between records 46 and 53, the records for them are 55 to
- * 58. Comparing each record with the one printed before it called that chain
- * broken six times over. Record 55 begins exactly where 46 ended, 47 begins
- * exactly where 56 ended, and every other seam joins up the same way, so the
- * chain was complete while the check was still accusing it.
+ * A merge recorded after later records must be appended at the head because the
+ * chain is append-only and hash-linked. Comparing each record only with the one
+ * printed before it can therefore call a complete chain broken.
  *
  * Continuity is therefore a property of the set of moves. Each record is an
  * edge from `before.baseSha` to `after.baseSha`, and a chain holds when those
@@ -420,9 +416,8 @@ interface Edge {
  * the log carries it.
  *
  * The property that matters is untouched: a base sha that no record moves away
- * from, with records still unaccounted for, is a merge nobody wrote down. Drop
- * the record for PR 105 and the walk stops dead at 7059839 with record 53
- * stranded at a1fe3e7, which is exactly the accusation it was written to make.
+ * from, with records still unaccounted for, is a merge nobody wrote down. The
+ * walk still stops at the missing edge and reports the stranded later record.
  */
 function walk(edges: readonly Edge[], unreadable: number): { findings: ChainFinding[]; endsAt: Edge | null } {
   const forks = forked(edges);

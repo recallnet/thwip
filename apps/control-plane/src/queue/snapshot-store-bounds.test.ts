@@ -10,12 +10,8 @@ import type { SubmittedEvent } from "./store.js";
  * anything in here that grows with the repository's history is a clock running
  * towards an outage.
  *
- * On 5 August 2026 it reached one. `queue_state.document` for this repository
- * was 613KB, of which the outbox was 281KB across 1053 items, every one of them
- * unacknowledged and the oldest dating from 31 July. `acknowledgeOutbox` had no
- * caller outside the tests, so nothing had ever drained one. The five minute
- * trigger began failing with `exceededResources`, Cloudflare stopped
- * dispatching it, and the queue sat still for eleven hours.
+ * An unacknowledged outbox can grow until the tick exceeds the Worker's
+ * resource budget. The document therefore needs explicit row and byte bounds.
  *
  * `events` and `dedupe` already had windows. These are the two arrays that did
  * not.
@@ -89,12 +85,9 @@ describe("what the document keeps", () => {
    * The one that took the queue down.
    *
    * The backlog is written into the cell rather than produced through the
-   * reducer, because one entry can only be offered a turn once: driving 1053
-   * real offers through a live queue is not what happened, and not what has to
-   * happen for the array to grow. What happened is that items accumulated over
-   * six days across many entries and nothing ever removed one. So a store is
-   * opened over a document that already carries a backlog, which is exactly the
-   * position every queue was in on 5 August.
+   * reducer, because one entry can only be offered a turn once. Items can
+   * accumulate across many entries when nothing removes them, so the store is
+   * opened over a document that already carries a backlog.
    */
   /** Put a backlog into whatever the cell already holds. */
   function growOutbox(cell: SnapshotCell, items: number): void {
@@ -186,8 +179,7 @@ describe("what the document keeps", () => {
    * Trimming only where an event applies means a queue that is already too
    * large and has gone quiet keeps its size forever, and being too large is
    * what makes a queue quiet: the tick stops fitting in an invocation, so no
-   * event applies, so nothing trims. Deployed on 5 August at 17:56Z, the bound
-   * left 1057 outbox items in place because the queue had nothing to apply.
+   * event applies, so nothing trims.
    *
    * Opening the document must therefore be enough to pay down the backlog. No
    * accepted, duplicate, or rejected command is needed to make the repair.
@@ -242,12 +234,9 @@ describe("what the document keeps", () => {
   /**
    * Every bound above counts rows, and the resource none of them spends is rows.
    *
-   * A Worker on the free plan gets 10ms of CPU, and what it spends that on is
-   * bytes: parsing the document, folding it, serialising it again. Six caps were
-   * chosen one outage at a time, each modest on its own, and on 9 August 2026
-   * they summed to 398KB across `mergeOperations` (89KB), `state` (89KB),
-   * `events` (80KB), `dedupe` (78KB) and `outbox` (56KB). No cap was exceeded.
-   * The tick stopped fitting anyway and the queue crawled for a day.
+   * The Worker spends CPU on bytes: parsing the document, folding it and
+   * serialising it again. Several modest row caps can still exceed the combined
+   * byte budget even when no individual cap is exceeded.
    *
    * So the document is bounded in the unit that runs out. Counting rows leaves
    * the budget to be re-divided by hand every time a field is added, and the

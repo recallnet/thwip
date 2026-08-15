@@ -28,12 +28,9 @@ import {
 /**
  * The HTTP shape of enrolment.
  *
- * `handleBootstrapRequest` and `bootstrapGitHub` were written, tested, and
- * imported by nothing, so bringing a repository into the queue still meant an
- * operator typing a `queue_projects` row into production D1, copying two
- * workflows in by hand, and building a branch ruleset with `gh api` in an order
- * GitHub will only accept one way round. This module is what a request has to
- * go through to reach them.
+ * This module joins the validated request to the GitHub setup sequence. Keeping
+ * that path explicit prevents setup from depending on manual database,
+ * workflow, or ruleset changes.
  *
  * The authorization and the port both live here rather than in `index.ts`
  * because they are what a test needs to hold: a fake `BootstrapGitHub` in place

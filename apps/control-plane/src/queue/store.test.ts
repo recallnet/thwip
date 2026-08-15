@@ -194,7 +194,7 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
   it("does not consume a sequence for an event the reducer treats as a no-op", () => {
     // A no-op that consumed a sequence would leave a recorded event ahead of
     // lastSequence, and the next append would reuse that sequence — which is
-    // exactly how this surfaced in production, as a UNIQUE constraint failure.
+    // otherwise surfaces later as a UNIQUE constraint failure.
     const store = open(backing(), IDENTITY);
     request(store, "e1", "alice", 7);
     const before = store.state().lastSequence;
@@ -528,12 +528,12 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
      * An operation nobody resolved is the failure this whole guard exists around,
      * and until now nothing could find one.
      *
-     * Four merges landed on this repository that way. The workflow authorized,
-     * GitHub answered 405 while it was still working out mergeability, the
+     * A merge can land that way when the workflow authorizes, GitHub answers 405
+     * while it is still working out mergeability, the
      * workflow exited saying it was leaving the outcome to reconciliation, and
      * the merge landed anyway. The attempt was terminated and compacted, so the
-     * only thing that ever swept these rows was gone, and the operations sit
-     * unresolved with the chain missing four links.
+     * only thing that ever swept these rows is gone, and the operation remains
+     * unresolved without a chain link.
      *
      * So the operation carries the obligation, not the attempt. Finding one is
      * the first thing the sweep needs and the reason these tests exist.
@@ -575,12 +575,12 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
         expect(store.unresolvedMergeOperations("2026-07-29T12:19:59Z")).toEqual([]);
       });
 
-      it("finds one whose attempt no longer exists, because that is the case that stranded four merges", () => {
+      it("finds one whose attempt no longer exists", () => {
         const sql = backing();
         const store = open(sql, IDENTITY);
         store.beginMergeOperation(op);
-        // Nothing here ever created the attempt, which is the state the queue was
-        // in by the time anybody looked: `state.attempts` held none of the four.
+        // Nothing here ever created the attempt, which is the state after the
+        // attempt has been compacted away.
         const reopened = open(sql, IDENTITY);
         expect(reopened.unresolvedMergeOperations("2026-07-29T12:25:00Z")).toHaveLength(1);
       });
@@ -596,8 +596,7 @@ describe.each(IMPLEMENTATIONS)("$name", ({ backing, open, legacy }) => {
       });
 
       /**
-       * The four stranded writes predate the column, so what the sweep meets in
-       * production is a row with no pull request number at all. Reporting that
+       * A write that predates the column has no pull request number. Reporting that
        * as a number sends the sweep to `GET /pulls/undefined`, which 404s on
        * every tick, which is a row that can never settle.
        */
@@ -696,8 +695,8 @@ function dump(store: AnyStore): unknown {
 /**
  * An entry that forfeited a turn is Deferred, and it used to return to Ready
  * only when a readiness evaluation arrived from a GitHub webhook. With nothing
- * calling, PR 118 sat Deferred with no cooldown beside an idle lane for forty
- * minutes and every tick answered "no eligible entry".
+ * calling, it can remain Deferred with no cooldown beside an idle lane while
+ * every tick answers "no eligible entry".
  *
  * These call `eligibleEntries()` and `nextTurn()`. The tests they replace spelled
  * the filter predicate out again inside the assertion, so they passed whatever
@@ -736,8 +735,8 @@ describe.each(IMPLEMENTATIONS)("$name: a deferred entry competes again on its ow
   it("comes back on its own when the defer left no cooldown at all", () => {
     const store = open(backing(), IDENTITY);
     request(store, "e1", "alice", 7);
-    // The shape PR 118's history has: a termination written before terminations
-    // carried a cooldown, so the entry is Deferred with `cooldownUntil` null.
+    // A termination written before terminations carried a cooldown leaves the
+    // entry Deferred with `cooldownUntil` null.
     forfeitATurn(store, "e1");
 
     const entry = store.state().entries.get("e1")!;

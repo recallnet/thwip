@@ -14,11 +14,8 @@ import { QUEUE_ACTION_REF, verifierWorkflowFile } from "./bootstrap-workflows.js
 /**
  * The route, because the route is what was missing.
  *
- * `handleBootstrapRequest` has had tests since it was written and enrolling a
- * repository still meant typing a `queue_projects` row into production D1, so a
- * suite that exercises the sequence again proves nothing. What is checked here
- * is who may ask, what a repository nobody installed the App on gets back, and
- * that a call an administrator makes leaves the row behind.
+ * This checks who may ask, what a repository without the App receives, and that
+ * an administrator's request leaves the durable setup row behind.
  */
 
 const REPOSITORY_ID = "987654321";

@@ -322,9 +322,8 @@ async function seedRecordedMerge(app: App, e: QueueRouteEnv): Promise<void> {
  *
  * The verifier finds a discontinuity by comparing one record's `after` against
  * the next record's `before`, so a chain needs a record on the far side of the
- * unrecorded merges. This writes one for a merge that landed on top of them,
- * exactly as the live chain has: record 68 sits past the four missing merges
- * and says it began at a commit no record reached.
+ * unrecorded merge. This writes one for a later merge whose `before` names a
+ * commit no record reached.
  */
 async function seedRecordPastTheGap(app: App, e: QueueRouteEnv, beganAt: string): Promise<void> {
   const past = {
@@ -412,11 +411,9 @@ describe("GET /v1/queue/:repositoryId/heal", () => {
   });
 
   /**
-   * The live case. Every one of the four merges stranded on 2 August 2026 has
-   * an intent for its pull request and its head, and none of them pins the tree
-   * GitHub produced or the parents it produced it over, because the base moved
-   * between pinning and merging. No record may claim the queue authorized what
-   * landed, so the plan offers the weaker true thing instead.
+   * When the base moves between pinning and merging, an intent may not pin the
+   * tree and parents GitHub produced. The plan must then offer the weaker true
+   * statement instead of claiming the queue authorized the merge.
    */
   it("offers a movement record where the intent pinned a base that had moved", async () => {
     const e = env();
@@ -626,7 +623,7 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
   /**
    * A commit that exists is not a commit that landed. The throwaway merge
    * GitHub computes for an open pull request has a real tree over real parents
-   * and is on no branch, and record 54 is what recording one produces. The
+   * and is on no branch. The
    * movement path asks the branch the same question the repair path asks.
    */
   it("refuses to record a movement to a commit the branch does not contain", async () => {
@@ -658,10 +655,9 @@ describe("POST /v1/queue/:repositoryId/heal", () => {
 
   /**
    * The sweep that settles stranded merge writes calls the repair path and
-   * leaves the row alone when it refuses. A commit no intent authorizes refuses
-   * forever, so the four writes stranded on 2 August 2026 would have been read
-   * from GitHub every five minutes for the rest of the account's life, and the
-   * heal that put them in the chain would have changed nothing about that.
+   * leaves the row alone when it refuses. A commit no intent authorizes can
+   * otherwise be reread from GitHub every five minutes forever, even after a
+   * separate heal has put it in the chain.
    *
    * A chain that already carries a record for the commit has nothing left to
    * put back. That is not the operator's word for it: the record is signed, it

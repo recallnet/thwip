@@ -231,8 +231,7 @@ export async function tickAllQueues(
   // A Worker invocation gets fifty subrequests and this sweep shares them with
   // every merge write it settles, every lane it drives and every installation
   // token it mints, across the whole fleet. A per-queue allowance multiplied by
-  // the fleet: eight writes each over two queues, on top of four settled
-  // writes, ran the invocation out on 4 August and failed both queues.
+  // the fleet can exhaust an invocation before either queue finishes.
   //
   // Small on purpose. A comment that has not changed costs nothing and is not
   // counted, so this only ever bounds a genuine backlog, and a backlog drains
@@ -482,7 +481,7 @@ export async function tickAllQueues(
       }
       // A write whose response was lost is nobody's job until it is this one's.
       // `settleReconciliation` above needs a surviving attempt; these rows
-      // outlive every attempt, which is why four merges sat unrecorded.
+      // outlive every attempt, so no attempt can be trusted to finish them.
       //
       // The terminal-entry page goes first because an old orphan that exhausts
       // the subrequest budget must not starve the simpler missed-webhook repair.
@@ -507,9 +506,8 @@ export async function tickAllQueues(
       // The queue reads its own chain here, once per queue per tick, the same
       // way `/v1/queue/:repositoryId/chain` reads it for an outside verifier
       // and the way `thwip verify-chain` checks it from off the network. This
-      // is the check that would have caught the four merges that sat unrecorded
-      // for a day: `verifyChain` has reported `BASE_DISCONTINUITY` for exactly
-      // that shape since the day the gap was understood, and nothing ran it.
+      // catches merges that remain unrecorded: `verifyChain` reports
+      // `BASE_DISCONTINUITY` for exactly that shape.
       //
       // Last, after everything that can add or repair a link this tick. A
       // finding is read and reported, never acted on: the sweep above is what
@@ -701,10 +699,9 @@ async function sweepOrphanedWrites(
   }), { expectedProjectId: lifecycleLease.projectId, lease: lifecycleLease });
 
   // A write is finished when the chain has a record for it, not when the row
-  // says MERGED. The two came apart on 4 August 2026 and nothing owned the
-  // difference: the merge landed, the record was skipped on a read that had
-  // not caught up, the row was resolved, and the unresolved sweep could not
-  // see it. Asked of the record store rather than of the queue document,
+  // says MERGED. A delayed ancestry read can skip the record after the merge
+  // lands, then the resolved row disappears from the unresolved sweep. Asked
+  // of the record store rather than of the queue document,
   // because the document keeps only the most recent transitions and an
   // absence there is not an absence.
   const unrecorded: typeof open = [];

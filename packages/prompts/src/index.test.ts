@@ -4,7 +4,7 @@ import { projectSetupPrompt } from "./index.js";
 describe("project setup prompt policy lifecycle", () => {
   it("offers the shared warning only after approval and names the full shipping path", () => {
     const prompt = projectSetupPrompt({
-      githubName: "recallnet/playhouse",
+      githubName: "example/project",
       defaultBranch: "main",
       enabled: true,
       hasActivePolicy: true,
@@ -20,7 +20,7 @@ describe("project setup prompt policy lifecycle", () => {
 
   it("explains the non-approving bootstrap result before first activation", () => {
     const prompt = projectSetupPrompt({
-      githubName: "recallnet/playhouse",
+      githubName: "example/project",
       defaultBranch: "main",
       enabled: true,
       hasActivePolicy: false,
@@ -34,7 +34,7 @@ describe("project setup prompt policy lifecycle", () => {
 
   it("explains that later policy changes remain under the active policy until merge", () => {
     const prompt = projectSetupPrompt({
-      githubName: "recallnet/playhouse",
+      githubName: "example/project",
       defaultBranch: "main",
       enabled: true,
       hasActivePolicy: true,
@@ -48,7 +48,7 @@ describe("project setup prompt policy lifecycle", () => {
 
   it("does not promise a passing check while the project is disabled", () => {
     const prompt = projectSetupPrompt({
-      githubName: "recallnet/playhouse",
+      githubName: "example/project",
       defaultBranch: "main",
       enabled: false,
       hasActivePolicy: false,

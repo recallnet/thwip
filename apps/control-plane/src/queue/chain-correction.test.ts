@@ -9,9 +9,9 @@ import { mergeCommitText } from "./merge-commit.js";
 /**
  * Correcting a record that says something untrue, without rewriting history.
  *
- * Record 54 says pull request 107's merge left the base at
- * `ff6ea882feefd64c4e9f4dff909209e7adb281e3`, which is the test merge GitHub
- * computed while the pull request was still open. Main became
+ * The fixture says a merge left the base at
+ * `ff6ea882feefd64c4e9f4dff909209e7adb281e3`, which is the temporary merge GitHub
+ * computed while the pull request was still open. The base branch became
  * `0b2076107aa20f8b365d3b510de4838b05d12622`: same tree, same parents, same
  * order. The record cannot be edited, because six records chain from its digest,
  * so the correction is appended and the walk follows it in place of the original.
@@ -205,7 +205,7 @@ async function writeRecordFiftyFour(e: QueueRouteEnv): Promise<string> {
   return ((await response.json()) as { transitionDigest: string }).transitionDigest;
 }
 
-const REASON = "record 54 names the test merge GitHub computed while pull request 107 was open";
+const REASON = "the record names a temporary merge GitHub computed while the pull request was open";
 
 describe("POST /v1/queue/:repositoryId/correct", () => {
   it("appends a correction naming the record it corrects and the sha that record should have named", async () => {

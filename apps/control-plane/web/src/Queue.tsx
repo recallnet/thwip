@@ -173,8 +173,7 @@ interface HealPlanView {
  *
  * Nothing here sends a tree, a parent list or a commit sha. The administrator
  * names the finding and says why. An operator who could name a commit could
- * name the throwaway merge GitHub computes for an open pull request, which is
- * how record 54 reached the chain.
+ * name the temporary merge GitHub computes for an open pull request.
  *
  * Findings the queue cannot answer from evidence it holds get no button. A
  * control that produces a refusal teaches a reader to distrust the next thing

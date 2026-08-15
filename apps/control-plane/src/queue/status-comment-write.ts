@@ -50,9 +50,9 @@ export type CommentWriteOutcome =
  * How many comments one pass over a queue may write.
  *
  * A Worker invocation gets fifty subrequests and each comment costs up to two,
- * against a queue document that keeps every entry it has ever held. On 4 August
- * the sweep tried fourteen and lost the whole tick to the ceiling, taking the
- * lane driving and the chain check with it.
+ * against a queue document that keeps every entry it has ever held. An
+ * unbounded sweep can therefore consume the whole tick before lane driving and
+ * chain verification run.
  *
  * Counted in writes, never in entries. A comment that already says the right
  * thing costs nothing and is not counted, so this only ever bounds a genuine
@@ -227,15 +227,11 @@ export async function writeStatusCommentsForSnapshot(
 /**
  * The states that may open a conversation, as opposed to continue one.
  *
- * Found live on 4 August, on the first tick after this shipped. The queue
- * document keeps every entry it has ever held, so the sweep walked fourteen
- * pull requests that had merged weeks earlier and tried to comment on each of
- * them. It spent the Worker's whole subrequest budget and took the tick down
- * with it, and had GitHub let it through it would have mailed fourteen closed
- * pull requests instead.
- *
- * So an ending is only worth saying to somebody thwip was already talking to. A
- * merged entry with no comment behind it gets nothing, which is also what keeps
+ * The queue document keeps historical entries, so terminal rows could otherwise
+ * spend the Worker's subrequest budget and notify pull requests that closed
+ * before Thwip started tracking them. An ending is therefore only worth saying
+ * to somebody Thwip was already talking to. A merged entry with no comment
+ * behind it gets nothing, which is also what keeps
  * the sweep's cost proportional to the live queue rather than to its history.
  */
 const MAY_SPEAK_FIRST = new Set<CommentView["state"]>([

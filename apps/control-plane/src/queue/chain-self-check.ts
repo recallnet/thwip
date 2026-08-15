@@ -7,11 +7,8 @@ import type { D1Like } from "./projection.js";
 /**
  * Reading the queue's own chain the way an outsider would.
  *
- * `verifyChain` has reported `BASE_DISCONTINUITY` since the day a missing merge
- * was first understood, and nothing ran it. Four merges were missing from this
- * repository's chain for a day before anybody looked, and they were found by a
- * script written for a blog post. A check nobody runs is a check that does not
- * exist.
+ * A verifier that is never run cannot protect the chain. The control plane runs
+ * the same check an outside reader would use and publishes the result.
  *
  * `NOTHING_CHECKED` is this module's own finding rather than the verifier's. An
  * `epochStartsAt` past the end of the chain makes every link skip its signature

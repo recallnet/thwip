@@ -724,11 +724,10 @@ export function applyEvent(previous: BranchQueueState, event: QueueEvent): Branc
       // And onto the base the attempt pinned.
       //
       // A signed intent names the parents as well as the tree, and a record is
-      // built by finding the intent that pins both. On 2 August 2026 the base
-      // moved between the pin and the merge, GitHub merged the head onto the
-      // tip the branch actually had, and four commits landed hanging off a
-      // parent no intent named. The tree check above lets that through whenever
-      // the commits the base gained touch nothing this candidate touches. The
+      // built by finding the intent that pins both. If the base moves between
+      // the pin and the merge, the resulting commit can hang from a parent no
+      // intent names. The tree check above lets that through whenever the
+      // commits the base gained touch nothing this candidate touches. The
       // first parent is the base, under a merge and under a squash alike, so
       // this is the same rule the tree check makes, applied to the other half
       // of what the intent binds.

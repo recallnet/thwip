@@ -10,8 +10,8 @@ import { mergeCommitText } from "./merge-commit.js";
  * Putting a merge back into the chain after the attempt that authorized it is
  * gone.
  *
- * Four merges landed and were never recorded. The queue read GitHub before
- * GitHub's read caught up with its own write, concluded the merge had not
+ * A merge can land without being recorded when the queue reads GitHub before
+ * GitHub's read catches up with its own write, concludes the merge has not
  * happened, and terminated the attempt. `reconcile` is the repair tool and it
  * refuses unless an attempt still holds the lane, so by the time anyone looked
  * it answered 409: the one tool for the job could not be used for the one job
@@ -320,8 +320,7 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
    * A commit that exists is not a commit that landed. The test merge GitHub
    * computes for an open pull request has the real merge's parents and the real
    * merge's tree, so it satisfies the authorization check exactly, and it is on
-   * no branch. Chain record 54 is what that produces. An operator repairing by
-   * hand must not be able to reach the same end by a shorter road.
+   * no branch. An operator repairing by hand must not be able to record it.
    */
   it("refuses a commit the base branch does not contain", async () => {
     const e = env();
@@ -425,8 +424,7 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
   /**
    * One attempt can sign its intent more than once. The authorize route is
    * called again when a merge run restarts, and each call stamps a fresh
-   * `createdAt`, so two rows end up authorizing the same commit for the same
-   * attempt. Pull requests 103 and 105 on staging are both shaped like that.
+   * `createdAt`, so two rows can authorize the same commit for the same attempt.
    *
    * Nothing is ambiguous about that: the two intents pin the same tree on the
    * same parents for the same pull request under the same policy and the same

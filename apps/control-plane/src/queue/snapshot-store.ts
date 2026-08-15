@@ -86,12 +86,9 @@ const EVENT_TAIL = 200;
  * How many outbox items the document keeps.
  *
  * Nothing in the Worker acknowledges one. `acknowledgeOutbox` had no caller
- * outside the tests, so every item any command ever appended was still here,
- * unacknowledged, and the array is re-serialised on every command and every
- * tick. On 5 August 2026 it held 1053 items and 281KB of a 613KB document, the
- * oldest dating from 31 July. The tick stopped fitting in a Worker invocation,
- * Cloudflare stopped dispatching the five minute trigger, and the queue sat for
- * eleven hours.
+ * outside the tests, so every item any command appends would otherwise remain
+ * unacknowledged and be re-serialised on every command and tick until the
+ * document no longer fits in a Worker invocation.
  *
  * The side effects these items describe are performed directly by the routes
  * that record them, so what is kept is a diagnostic tail, the same as the
@@ -114,9 +111,8 @@ const MERGE_OPERATION_TAIL = 200;
  *
  * Every cap above counts rows, and rows are not the resource. A Worker on the
  * free plan gets 10ms of CPU per invocation, and it spends that parsing this
- * document, folding it and serialising it again. Six caps, each chosen after a
- * different incident and each modest alone, summed to 398KB on 9 August 2026
- * with none of them exceeded, and the tick stopped fitting anyway.
+ * document, folding it and serialising it again. Several modest row caps can
+ * still exceed the combined byte budget.
  *
  * Counting rows also leaves the budget to be re-divided by hand whenever a field
  * is added, by someone who has no reason to know the other five exist. Bounding
@@ -289,9 +285,7 @@ export class SnapshotQueueStore {
     //
     // A queue that has grown too large has usually stopped applying events:
     // the tick no longer fits in an invocation, so nothing applies, so a bound
-    // that only ran on an applied event never ran. That is what shipped on
-    // 5 August, and it left 1057 outbox items in place on the queue it was
-    // written for, because the queue had gone quiet by the time it landed.
+    // that only ran on an applied event never ran.
     //
     // A document already within its bounds writes nothing, so opening stays
     // free for the reads it was kept free for. One that is over pays once and
@@ -325,8 +319,7 @@ export class SnapshotQueueStore {
    * The bounds are applied here rather than where an event is accepted, because
    * a queue that is already too large has usually stopped accepting events. The
    * tick stops fitting in an invocation, so nothing applies, so a bound that
-   * only ran on an applied event never runs. Shipped that way on 5 August, it
-   * left 1057 outbox items in place on the queue it was written for.
+   * only ran on an applied event never runs.
    *
    * Opening pays an existing backlog down, and every later persistence path
    * keeps it down: an applied event, a no-op command, or a merge write starting

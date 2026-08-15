@@ -300,8 +300,8 @@ describe("the pull request holding the lane goes away", () => {
 /**
  * A pull request that has left must not keep taking turns.
  *
- * Twice in production a merged pull request was still an entry, was offered the
- * turn, and starved the queue behind it until an operator ejected it by hand.
+ * A merged pull request can remain as an entry, take the turn and starve the
+ * queue behind it unless departure is checked explicitly.
  * The `closed` webhook does cancel an entry, so what matters is the case it was
  * missing: the entry holding a live attempt when its pull request goes away.
  */

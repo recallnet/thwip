@@ -79,9 +79,9 @@ export async function confirmMergeAbsence(
         // caught up with its own merge, and while a pull request is open
         // `merge_commit_sha` holds the test merge GitHub computes for it: same
         // parents and same tree as the real merge, different commit, on no
-        // branch. Pull request 107's losing run carried that value out of here
-        // and chain record 54 says main became a commit main never was. What
-        // landed is read from the branch by the caller, or not read at all.
+        // branch. Carrying that value out would let a chain claim that the base
+        // became a commit it never contained. What landed is read from the
+        // branch by the caller, or not read at all.
         mergeSha: null,
         reason: "the base branch already contains the head commit",
       };

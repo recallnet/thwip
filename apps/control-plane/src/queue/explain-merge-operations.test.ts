@@ -11,12 +11,9 @@ import { retryAfter } from "./orphaned-writes.js";
 /**
  * Merge writes, in the call that explains the queue.
  *
- * Four merges landed on this repository with no record. Finding them took a
- * remote SQL statement against the live database, digging the merge operations
- * out of `queue_state.document` with `json_each`, because no route reports
- * them. That statement is written down in two plan documents, which is how a
- * credential that can also run `DELETE` became the documented way to diagnose
- * production.
+ * Diagnosing an unrecorded merge should not require remote SQL access to the
+ * queue document. A read route can expose the required state without giving an
+ * operator a credential that can also mutate production.
  *
  * `/explain` already reports attempts and their outcomes. A write outlives its
  * attempt on purpose — the attempt is exactly what a stranded write cannot rely
