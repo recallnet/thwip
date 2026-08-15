@@ -13,8 +13,7 @@ import {
  *
  * `thwip / turn` renders the same for a draft that is correctly blocked, an
  * entry a few seconds from the end of a cooldown, and an entry that is stuck.
- * All three were live on this repository at once on 4 August and the second was
- * read as the third. The queue holds the difference and published none of it.
+ * The queue holds the difference and must publish it.
  */
 
 function entry(over: Partial<QueueSnapshot["entries"][number]> = {}): QueueSnapshot["entries"][number] {
@@ -177,9 +176,8 @@ describe("which of the six a reader is looking at", () => {
     expect(view.state).toBe("merged");
     const body = statusCommentBody(view, NOW);
     expect(body).toContain("42");
-    // Sixteen characters of the digest, not sixteen characters of the word
-    // "sha256". Live on pull request 180 this read `sha256:39966989f`, which
-    // names the algorithm and four bytes of the record.
+    // Sixteen characters of the digest, not sixteen characters beginning with
+    // the word "sha256", which would show only four bytes of the record.
     expect(body).toContain("cccccccccccccccc");
     expect(body).not.toContain("sha256");
     // One line and the marker. A merged pull request has nowhere left to go and
@@ -188,10 +186,8 @@ describe("which of the six a reader is looking at", () => {
   });
 
   /**
-   * Live on 4 August: pull requests 194, 197 and 198 all merged, and all three
-   * comments named record 142. The chain head is the head of the whole chain,
-   * so every merged entry claimed whichever merge happened last. Three
-   * different merges, one digest, and it looks right.
+   * The chain head is the head of the whole chain, so using it for an entry would
+   * make every merged pull request claim whichever merge happened last.
    */
   it("names the record this entry merged as, not whatever merged last", () => {
     const views = commentViews(

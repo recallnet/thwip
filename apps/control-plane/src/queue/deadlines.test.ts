@@ -361,8 +361,8 @@ describe("a merge outcome nobody could settle, past its deadline", () => {
 
   /**
    * The hard case. Every read failed, so the queue still cannot say what became
-   * of the merge, and it must not guess, because guessing "not merged" is how
-   * four merges left the chain.
+   * of the merge, and it must not guess because a false negative can leave the
+   * chain without a merge record.
    *
    * It frees the lane anyway and blocks the one entry it cannot speak for. The
    * write that may still be in flight belongs to this attempt and this pull

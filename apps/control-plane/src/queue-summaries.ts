@@ -41,10 +41,8 @@ export async function queueSummaries(db: D1Like, organizationId: string): Promis
   // Settling is not the only way to leave, either. The authority compacts
   // settled entries out of its document, so an entry that leaves the live set
   // stops appearing in every later message and its row keeps whatever state it
-  // was last seen in. Pull request 184 merged on 5 August 2026 while the queue
-  // was down, was compacted away before it recorded the outcome, and was still
-  // being reported here as the head four days later — `Merging` is not terminal,
-  // and it held the lowest ordinal.
+  // was last seen in. Such a stale non-terminal row must not remain the reported
+  // head after a newer projection no longer contains it.
   //
   // So a row also has to belong to the newest generation projected for its
   // queue. Nothing guesses at what became of a row that does not: a row at an

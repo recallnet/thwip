@@ -186,15 +186,10 @@ describe("one line of queue per repository", () => {
  * appearing in every later message and its row keeps whatever state it was last
  * seen in, for good.
  *
- * `entry_1315419165_184` sat in `Merging` from 5 August 2026. Pull request 184
- * had merged that afternoon; the queue stopped before it recorded the outcome,
- * and by the time it came back the entry had been compacted away. Four days
- * later this function still reported it as the head of the queue, because it is
- * not a state in `TERMINAL_ENTRY_STATES` and it holds the lowest ordinal. The
- * dashboard told everybody that a pull request merged the previous week was
- * integrating now.
+ * A compacted non-terminal row can otherwise remain the reported head forever
+ * because it is not in `TERMINAL_ENTRY_STATES` and keeps the lowest ordinal.
  *
- * A row cannot be settled on a guess. Nothing knows whether 184 merged or was
+ * A row cannot be settled on a guess. Nothing knows whether it merged or was
  * abandoned, and writing `Merged` to make the page tidy is the invention this
  * whole product exists to refuse. What is knowable is that the entry is not in
  * the authority's live set, because the projection has since written a later

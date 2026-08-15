@@ -65,8 +65,8 @@ export const TRANSITION_KINDS = [
    * A record that names the record it corrects and states the sha that record
    * should have named.
    *
-   * Record 54 said pull request 107's merge left the base at the throwaway test
-   * merge GitHub computes for an open pull request. That commit is on no branch.
+   * An incorrect record can name the temporary merge GitHub computes for an
+   * open pull request. That commit is on no branch.
    * Its bytes cannot change: its digest is the next record's predecessor and six
    * records chain from it, so editing it means re-signing seven records under
    * new digests, which replaces the chain rather than repairing it.

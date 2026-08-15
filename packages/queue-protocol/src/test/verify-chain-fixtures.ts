@@ -107,8 +107,8 @@ export function intactLinks(): ChainLink[] {
 }
 
 /**
- * The failure the sequence check cannot see, taken from the live chain: PR
- * 105 merged as `a1fe3e7` and wrote no record. Record 52 left the base at
+ * A failure the sequence check cannot see: a merge landed as `a1fe3e7` and
+ * wrote no record. Record 52 left the base at
  * `7059839`; record 53 says it began at `a1fe3e7`. Sequence numbers are
  * handed out per recorded transition, so the unrecorded merge leaves no hole
  * there. Only the base moves, and that is what `BASE_DISCONTINUITY` catches.

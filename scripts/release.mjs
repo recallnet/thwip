@@ -15,9 +15,9 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE = "@recallnet/thwip";
 const RELEASE_REPOSITORY = "recallnet/thwip";
-const RELEASE_REPOSITORY_ID = "1315419165";
 const MAIN_REF = "refs/heads/main";
 const RELEASE_WORKFLOW_REF = `${RELEASE_REPOSITORY}/.github/workflows/thwip-release.yml@${MAIN_REF}`;
+export const CLI_EXTERNAL_PACKAGES = Object.freeze(["yaml"]);
 
 /**
  * Every workspace package bundled into either the CLI or the GitHub Action.
@@ -25,6 +25,8 @@ const RELEASE_WORKFLOW_REF = `${RELEASE_REPOSITORY}/.github/workflows/thwip-rele
  * cannot quietly fall out of the release trigger again.
  */
 export const RELEASE_PATHS = Object.freeze([
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
   "action.yml",
   "packages/action",
   "packages/cli",
@@ -120,8 +122,14 @@ function git(args, options = {}) {
 export function releaseCheckout(facts, env) {
   if (env.GITHUB_ACTIONS !== "true") return null;
   if (env.CI !== "true") return "CI is not true";
-  if (env.GITHUB_REPOSITORY !== RELEASE_REPOSITORY || env.GITHUB_REPOSITORY_ID !== RELEASE_REPOSITORY_ID) {
-    return `expected ${RELEASE_REPOSITORY} (${RELEASE_REPOSITORY_ID})`;
+  if (!/^\d+$/.test(env.THWIP_RELEASE_REPOSITORY_ID ?? "")) {
+    return "THWIP_RELEASE_REPOSITORY_ID is not configured";
+  }
+  if (
+    env.GITHUB_REPOSITORY !== RELEASE_REPOSITORY ||
+    env.GITHUB_REPOSITORY_ID !== env.THWIP_RELEASE_REPOSITORY_ID
+  ) {
+    return `expected ${RELEASE_REPOSITORY} (${env.THWIP_RELEASE_REPOSITORY_ID})`;
   }
   if (!["push", "workflow_dispatch"].includes(env.GITHUB_EVENT_NAME ?? "")) return "only push and workflow_dispatch may release";
   if (env.GITHUB_REF !== MAIN_REF) return `expected ${MAIN_REF}`;
@@ -248,7 +256,7 @@ export async function buildPackage() {
     format: "esm",
     target: "node22",
     packages: "bundle",
-    external: ["yaml"],
+    external: CLI_EXTERNAL_PACKAGES,
   });
   chmodSync(join(out, "thwip.mjs"), 0o755);
   stampBuild(out);
@@ -267,7 +275,7 @@ export async function buildPackage() {
       license: "Apache-2.0",
       type: "module",
       bin: { thwip: "thwip.mjs" },
-      files: ["thwip.mjs", "build-stamp.json", "README.md"],
+      files: ["thwip.mjs", "build-stamp.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
       engines: { node: ">=22" },
       dependencies: { yaml: "^2.9.0" },
       publishConfig: { access: "public" },
@@ -276,6 +284,8 @@ export async function buildPackage() {
   const readme = join(root, "packages/cli/README.md");
   if (!existsSync(readme)) throw new Error("packages/cli/README.md is required for the npm package");
   copyFileSync(readme, join(out, "README.md"));
+  copyFileSync(join(root, "LICENSE"), join(out, "LICENSE"));
+  copyFileSync(join(root, "THIRD_PARTY_NOTICES.md"), join(out, "THIRD_PARTY_NOTICES.md"));
   process.stdout.write(`built ${out} (thwip@${version})\n`);
 }
 

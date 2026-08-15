@@ -8,15 +8,9 @@ import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 /**
  * The base the queue pins, read at the moment it pins one.
  *
- * On 2 August 2026 four pull requests merged into recallnet/thwip and no chain
- * record could be written for any of them. The queue signed an intent pinning a
- * tree and a pair of parents, the base branch moved while that was happening,
- * and GitHub merged the head onto the tip the branch actually had. Pull request
- * 117's intent was signed sixteen seconds after its base had already been
- * superseded, and none of the seventy stored intents pins any of the four trees
- * that landed. `authorizationFor` compares the exact tree and the exact
- * parents, so every one of those merges could only be filed as an external
- * transition.
+ * If the base moves while the queue signs an intent, GitHub can merge the head
+ * onto a tip that the intent did not pin. `authorizationFor` compares the exact
+ * tree and parents, so such a merge can only be filed as an external transition.
  *
  * The base came from the caller. A workflow read the pull request, sent what it
  * saw, and the queue signed against that reading however old it was by the time

@@ -220,11 +220,9 @@ describe("the queue heartbeat", () => {
   /**
    * The condition under which the clock stopped and nobody could say why.
    *
-   * Every lane was paused for the App-native cutover on 5 August, so no queue
-   * had eligible work and none was driven. A pass that only recorded itself when
-   * it moved something would have reported an idle fleet as a stopped clock,
-   * which is exactly the reading that cost eleven hours: the health clock said
-   * "stale" and the cause was a paused fleet doing nothing wrong.
+   * A paused fleet has no eligible work and drives nothing. A pass that records
+   * itself only when it moves something would misreport an idle fleet as a
+   * stopped clock.
    */
   it("ticks a paused queue, so a quiet fleet is not read as a stopped clock", async () => {
     const e = env();
@@ -1013,8 +1011,8 @@ describe("the tick offers a turn, not just advances the clock", () => {
   }
 
   /**
-   * A Deferred entry with no cooldown at all, which is where PR 118 sat: it
-   * forfeited a turn, the termination that ended the turn carried no cooldown,
+   * A Deferred entry with no cooldown at all: it forfeited a turn, the
+   * termination that ended the turn carried no cooldown,
    * and the entry kept `schedulerEligible` true with `primaryReason` and
    * `cooldownUntil` null beside an idle lane. Nothing but a `pull_request`
    * webhook moved it, and the App was not subscribed to those, so nothing did.
@@ -1152,8 +1150,8 @@ describe("the tick offers a turn, not just advances the clock", () => {
 });
 
 /**
- * The shape of the four merges that landed on 2 August 2026 with no chain
- * link: a signed merge intent survives, the attempt that authorized it does
+ * The shape of a merge that lands with no chain link: a signed merge intent
+ * survives, the attempt that authorized it does
  * not, and nothing but the `merge_operations` row says a write was ever sent.
  *
  * Module scope, not local to one describe block: the chain-integration tests
@@ -1268,8 +1266,8 @@ async function seedIntent(shape: OrphanShape = ORPHAN): Promise<void> {
 
 /**
  * The write started twenty minutes ago and nothing ever resolved it. No
- * attempt is ever created, the same state the queue was in when it stranded
- * four merges: `state.attempts` held none of them.
+ * attempt is ever created, matching the state after an attempt has been
+ * compacted away.
  */
 async function beginWrite(
   db: D1Like,
@@ -1362,9 +1360,8 @@ describe("settling a merge write whose response was lost", () => {
   });
 
   /**
-   * What the four stranded rows actually look like in production D1: no
-   * `pullRequestNumber` key at all, because they were written before the row
-   * carried one. A sweep that reads that absence as a number asks GitHub about
+   * A row written before the field existed has no `pullRequestNumber` key at
+   * all. A sweep that reads that absence as a number asks GitHub about
    * pull request `undefined`, is refused, and leaves the row exactly where it
    * found it on every tick forever.
    */
@@ -1404,12 +1401,10 @@ describe("settling a merge write whose response was lost", () => {
   /**
    * A write that landed, was resolved, and never got a record.
    *
-   * The obligation to finish a merge write used to end at "resolved", and
-   * resolved is not finished: the record is. On 4 August 2026 pull request 183
-   * merged under the App's own write, the queue confirmed it, the ancestry read
-   * that gates the record had not caught up, and the operation was resolved
-   * MERGED with no link in the chain. The sweep looked only at unresolved rows,
-   * so nothing owned it and nothing ever came back for it.
+   * The obligation to finish a merge write cannot end at "resolved", because
+   * the record is the durable completion. If the ancestry read has not caught
+   * up, the operation can resolve MERGED with no link while an unresolved-only
+   * sweep has nothing left to find.
    */
   it("records a merge that was resolved and never written down", async () => {
     const e = env();
@@ -1500,9 +1495,7 @@ describe("settling a merge write whose response was lost", () => {
   });
 
   /**
-   * What re-epoching this repository did on 5 August, before this was fixed.
-   *
-   * The attested range moved past every existing record, and the two lookups
+   * Re-epoching can move the attested range past every existing record, and the two lookups
    * that answer "does the chain hold this merge" were scoped to the current
    * range. Fifty-nine merges recorded below it read back as unrecorded, and the
    * sweep began writing a second record for each at the head, so the new range
@@ -1622,9 +1615,8 @@ describe("settling a merge write whose response was lost", () => {
    *
    * Each was examined every five minutes, refused every time for the same
    * reason, and each refusal ran the full three-round absence backoff. The
-   * sweep spent its GitHub budget on them before it reached a write nobody had
-   * looked at, and on 4 August that spent the invocation's subrequests and
-   * failed both queues. Nothing about a row changes between two ticks five
+   * sweep can spend its GitHub budget on them before it reaches a write nobody
+   * has looked at. Nothing about a row changes between two ticks five
    * minutes apart, so the second read could never have learned anything the
    * first did not.
    */
@@ -1970,10 +1962,8 @@ describe("the status comments the heartbeat keeps in step", () => {
 /**
  * A comment must never cost a queue its tick.
  *
- * On 4 August the first sweep after the comments shipped ran the Worker out of
- * subrequests. The throw came back through the per-queue block and failed both
- * repositories: no lane driven, no write settled, no chain read, over a
- * sentence on a web page.
+ * A comment backlog must not exhaust the Worker's subrequests and prevent lane
+ * driving, write settlement, or chain reads over a sentence on a web page.
  */
 describe("what a failing comment publisher costs the heartbeat", () => {
   it("ticks the queue anyway and says what went wrong", async () => {
@@ -2004,9 +1994,8 @@ describe("what a failing comment publisher costs the heartbeat", () => {
  *
  * A Worker invocation gets fifty subrequests and the sweep shares them across
  * every queue in the fleet, the merge writes it settles and the lanes it
- * drives. A budget handed out per queue multiplies by the fleet: on 4 August
- * eight writes each across two queues, on top of four settled writes, ran the
- * invocation out and failed both queues.
+ * drives. A budget handed out per queue multiplies by the fleet and can exhaust
+ * the invocation before any queue finishes.
  */
 describe("the comment budget the whole sweep works to", () => {
   it("hands every queue the same budget object, so the fleet shares one", async () => {

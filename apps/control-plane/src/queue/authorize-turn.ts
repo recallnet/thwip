@@ -539,12 +539,9 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
     //
     // The caller used to send all four objects. A workflow read the pull
     // request, sent what it saw, and the queue signed against that reading
-    // however old it had become on the way. On 2 August 2026 four pull
-    // requests merged into this repository and no chain record could be
-    // written for any of them: pull request 117's intent was signed sixteen
-    // seconds after its base had already been superseded, the merge landed on
-    // the tip the branch really had, and none of the seventy stored intents
-    // pins any of the four trees that landed. `authorizationFor` compares the
+    // however old it had become on the way. If the base changes in transit, the
+    // merge can land on the real tip while no stored intent pins its tree and
+    // parents. `authorizationFor` compares the
     // exact tree and the exact parents, so a merge nothing pinned can only be
     // filed as an external transition, which claims far less than a merge.
     //
@@ -911,7 +908,7 @@ async function walkTurn<TEnv extends QueueRouteEnv>(
       // The queue used to find that out from the 405: by then it had signed an
       // intent, minted an operation and started the confirmation clock, and the
       // attempt held the lane until a person cleared it. Everything behind it
-      // waited. That happened to four pull requests on one day.
+      // waited.
       //
       // Both facts are readable here. Refusing now costs a turn; discovering it
       // from GitHub's answer cost the queue.

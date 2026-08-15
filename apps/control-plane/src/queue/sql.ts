@@ -222,8 +222,8 @@ const SCHEMA_PATCHES: readonly string[] = [
   // What the sweep concluded last time it looked at this row, how many times it
   // has concluded the same thing, and when it will look again. A row it cannot
   // settle used to cost its full GitHub read budget every five minutes forever,
-  // and on 4 August that spent the invocation's subrequests before the sweep
-  // reached anything new.
+  // which could spend the invocation's subrequests before the sweep reached
+  // anything new.
   `ALTER TABLE merge_operations ADD COLUMN refusal_reason TEXT`,
   `ALTER TABLE merge_operations ADD COLUMN refusal_count INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE merge_operations ADD COLUMN refused_at TEXT`,

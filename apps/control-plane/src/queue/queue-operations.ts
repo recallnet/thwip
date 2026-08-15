@@ -158,9 +158,8 @@ export interface QueueDiagnosis {
    * Every merge write the queue has started, oldest first, settled or not.
    *
    * A write outlives the attempt that started it, because the attempt is what a
-   * stranded write cannot rely on. Reporting attempts alone left the four
-   * unrecorded merges of 2 August visible only to a SQL statement run against
-   * the live database.
+   * stranded write cannot rely on. Reporting attempts alone can leave an
+   * unrecorded merge visible only through direct storage inspection.
    */
   mergeOperations: Array<{
     operationId: string;
@@ -360,7 +359,7 @@ export async function admit(
     // an honest account of the wrong tree. The queue accepts it and then refuses
     // every merge for that attempt with `INTEGRATION_RECEIPT_TREE_MISMATCH`,
     // which no push and no operator can clear, until the execution deadline
-    // reaps it. Pull request 2 on `recallnet/thwip-test` sat there.
+    // reaps it.
     //
     // `HEAD_MOVED` defers, so the place in line is kept and the next turn is
     // taken against what is there now. An offer nobody has claimed pins nothing

@@ -27,12 +27,10 @@ import { databaseSchemaCapabilities } from "../schema-state.js";
 /**
  * Enrolling a repository, through the product.
  *
- * `BOOTSTRAP_STEPS` and `mayActivate` were written, tested, and never called.
- * Bringing `recallnet/thwip-test` into the queue therefore took a `queue_projects`
- * row typed into D1, workflows copied in by hand, and a branch ruleset created
- * with `gh api` because no product path existed. Everything here exists so the
- * next repository takes a request. New enrolments use the App as their merge
- * writer, so setup does not ask an adopter to mint a branch-write token.
+ * The product must own the complete setup sequence rather than rely on manual
+ * database rows, copied workflows, or command-line ruleset writes. New
+ * enrolments use the App as their merge writer, so setup does not ask an adopter
+ * to mint a branch-write token.
  *
  * The order is the order in `rulesets.ts`, which is not arbitrary: GitHub will
  * not source-pin a context that does not already exist as a requirement, and it
