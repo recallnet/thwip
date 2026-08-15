@@ -67,11 +67,11 @@ Run \`thwip <command> --help\` for command-specific help.
 const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
   login: `Usage: thwip login [--endpoint URL]\n\nSign in through the thwip device authorization flow.\n`,
   ship:
-    `Usage: thwip ship [--wait] [--no-queue] [--json-events]\n\n` +
+    `Usage: thwip ship [--wait | --no-queue | --draft] [--json-events]\n\n` +
     `Run approved suites, attach a proof, push, and open or update the pull request.\n` +
     `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n` +
-    `For an existing draft, \`--no-queue\` refreshes its proof and pushes without queueing it.\n` +
-    `To create a new draft, run \`thwip run\`, push the proved head, then use \`gh pr create --draft\`.\n`,
+    `Use \`thwip ship --draft\` to create or refresh a draft with proof, without queueing or merging it.\n` +
+    `Use \`--no-queue\` for a proved pull request that must stay outside Thwip Queue.\n`,
   init:
     `Usage: thwip init [--required "lint,typecheck,test"] [--profile PROFILE]\n\n` +
     `Set up or refresh this machine and the bounded Thwip guidance in root AGENTS.md.\n` +
@@ -301,8 +301,11 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
   switch (name) {
     case "login":
       return simpleCommand("login", rest, { value: ["--endpoint"] });
-    case "ship":
-      return simpleCommand("ship", rest, { boolean: ["--wait", "--no-queue", "--json-events"] });
+    case "ship": {
+      const modes = ["--wait", "--no-queue", "--draft"].filter((option) => rest.includes(option));
+      if (modes.length > 1) return error(`${modes.join(" and ")} cannot be used together`);
+      return simpleCommand("ship", rest, { boolean: ["--wait", "--no-queue", "--draft", "--json-events"] });
+    }
     case "queue":
       return queueCommand(rest);
     case "init":

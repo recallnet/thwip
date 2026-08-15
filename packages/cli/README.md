@@ -42,10 +42,9 @@ request, joins the queue, and waits for the outcome. Use `thwip run` when you
 only need to create or refresh a proof without shipping it.
 
 A draft pull request still needs proof, but it must not enter the merge queue.
-For a new draft, run `thwip run`, push the proved `HEAD`, then create it with
-`gh pr create --draft`. For an existing draft, `thwip ship --no-queue` refreshes
-and pushes its proof without joining the queue or marking the pull request
-ready. Do not mark it ready or merge it until the user asks.
+Run `thwip ship --draft` to prove and push the exact `HEAD`, create or refresh
+the draft pull request, and stop without queueing or merging it. Do not mark it
+ready until the user asks.
 
 The CLI connects to `https://thwip.ai` by default. Set `THWIP_ENDPOINT` only
 when an operator has given you a different control-plane origin.

@@ -53,11 +53,8 @@ ${thwip} doctor --allow-unread
 If the user asks for a draft or review-only pull request, it still needs proof,
 but it must not join the queue or merge.
 
-- For a new draft, run \`${thwip} run\`, push the proved HEAD, then create it
-  with \`gh pr create --draft\`. Do not run \`ship\` for this path.
-- For an existing draft, run \`${thwip} ship --no-queue\`. It refreshes the
-  proof and safely pushes the amended head without joining the queue; it leaves
-  the existing pull request as a draft.
+- Run \`${thwip} ship --draft\`. It proves and pushes the exact HEAD, creates or
+  refreshes the draft pull request, and stops without joining the queue.
 - Do not mark the draft ready, join the queue, or merge unless the user asks.
 
 ### Normal completion
