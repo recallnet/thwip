@@ -1,11 +1,8 @@
 /**
  * What the worker says about how it was deployed.
  *
- * `scripts/control-plane-core.mjs` writes this stamp at deploy time and this reads it
- * back at runtime. The two live on opposite sides of a bundle boundary — the
- * deploy scripts are plain modules run by node, this is Worker source — so the
- * format is held together by `deploy-exception.test.ts`, which writes with one
- * and reads with the other.
+ * Managed deployment tooling may write this stamp at deploy time; the Worker
+ * reads it back at runtime. Self-hosted deployments normally leave it unset.
  */
 
 export interface DeployException {
