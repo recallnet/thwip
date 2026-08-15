@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { developerSetupPrompt, projectSetupPrompt } from "@thwip/prompts";
+import { initPrompt, NPX_COMMAND } from "@thwip/prompts";
 import faqSource from "../public/faq.md?raw";
 import { parseFaq, renderBlocks } from "./faq.js";
 import { Home } from "./Home.js";
@@ -26,6 +26,8 @@ import {
   proofCheckModeText,
   whenText,
 } from "./vocabulary.js";
+
+export const QUEUE_SETUP_COMMAND = `${NPX_COMMAND} queue setup`;
 
 async function signInWithGitHub(callbackURL: string): Promise<void> {
   const res = await api<{ url?: string }>("/api/auth/sign-in/social", {
@@ -160,7 +162,7 @@ function FaqPage({ me }: { me: Me | null | undefined }) {
   );
 }
 
-const INSTALL_PROMPT = developerSetupPrompt();
+const INSTALL_PROMPT = initPrompt();
 
 function InstallPage({ me }: { me: Me | null | undefined }) {
   const [copied, setCopied] = useState(false);
@@ -173,24 +175,23 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
             Install<b>Developer setup</b>
           </div>
           <div className="nt-body">
-            <h2>Machine setup is a prompt, not a checklist.</h2>
+            <h2>Set up Thwip in a checkout.</h2>
             <p>
-              Paste this prompt into your coding agent. The prompt installs the CLI. It signs you in with a device
-              code that works over SSH. It stops at each step that changes a file or your GitHub account, and waits
-              for your approval. Raw copy at <a href="/install.md">/install.md</a>.
+              Paste this prompt into your coding agent. It runs one safe, repeatable init command for a new checkout
+              or another machine. Raw copy at <a href="/install.md">/install.md</a>.
             </p>
             <p>What the prompt does:</p>
             <ol className="nt-steps">
               <li>
-                <b>Install the CLI.</b> One global install of <code>@recallnet/thwip</code>. The command is{" "}
-                <code>thwip</code>. Node 22 or newer is required.
+                <b>Run init.</b> <code>npx @recallnet/thwip@latest init</code> works without a global install and is
+                safe to rerun. Node 22 or newer is required.
               </li>
               <li>
-                <b>Sign in.</b> <code>thwip login</code> prints a URL and a short code. You open the URL in your
+                <b>Sign in.</b> Init prints the exact npx login command when needed. It gives you a URL and short code. You open the URL in your
                 own browser and approve. The session belongs to you, not to the agent.
               </li>
               <li>
-                <b>Register a signing key.</b> <code>thwip keys status</code> says which key would sign. It also
+                <b>Register a signing key.</b> Init checks which key would sign. It also
                 says whether GitHub lists the key as a <b>signing</b> key. The most common mistake is to register
                 the key as an authentication key. Thwip reads signing keys only.{" "}
                 <a href="/faq#where-do-signing-keys-come-from">Keys come from your GitHub account</a>.
@@ -200,10 +201,7 @@ function InstallPage({ me }: { me: Me | null | undefined }) {
                 account the proof names, and the key file it came from.
               </li>
             </ol>
-            <p>
-              That is the whole machine. Setting up a <em>repository</em> is a separate prompt on the project's
-              page in the <a href="/dashboard">dashboard</a>.
-            </p>
+            <p>The same init checks the repository and refreshes its bounded agent guidance.</p>
             <figure className="nt-record">
               <div className="nt-record__head">
                 <span>Agent prompt</span>
@@ -248,7 +246,7 @@ export const PROJECT_TABS = [
   ["settings", "Settings"],
 ] as const;
 
-type ProjectPanel = "setup" | "queue" | "access" | "verification";
+type ProjectPanel = "init" | "setup" | "queue" | "access" | "verification";
 
 /** Keep old project links useful while putting each job in its current tab. */
 export function projectSection(segment: string): string {
@@ -261,13 +259,13 @@ export function projectSection(segment: string): string {
 export function projectPagePanels(segment: string, setupComplete = true): readonly ProjectPanel[] {
   switch (projectSection(segment)) {
     case "queue":
-      // Required work must be encountered before queue data. Once complete it
-      // becomes a collapsed reference below the data people came here to read.
-      return setupComplete ? ["queue", "setup"] : ["setup", "queue"];
+      // A checkout action stays first even after repository setup is complete.
+      // Required enrolment controls remain before queue data until completed.
+      return setupComplete ? ["init", "queue", "setup"] : ["init", "setup", "queue"];
     case "access":
-      return ["access"];
+      return ["init", "access"];
     case "settings":
-      return ["verification"];
+      return ["init", "verification"];
     default:
       return [];
   }
@@ -439,7 +437,7 @@ function isOrgAdmin(me: Me): boolean {
   return me.viewer.githubOrgRole === "admin" || me.viewer.githubOrgRole === "owner";
 }
 
-interface ProjectRow {
+export interface ProjectRow {
   id: string;
   github_repository_id: string;
   github_name: string;
@@ -972,12 +970,11 @@ function buildSetupPrompt(p: {
   default_branch: string;
   enabled: number;
   policy_version: number | null;
+  queue_setup_complete: boolean;
 }): string {
-  return projectSetupPrompt({
+  return initPrompt({
     githubName: p.github_name,
     defaultBranch: p.default_branch,
-    enabled: p.enabled === 1,
-    hasActivePolicy: p.policy_version !== null,
   });
 }
 /**
@@ -1030,6 +1027,8 @@ function ProjectPage({ githubName, section, me }: { githubName: string; section:
       </dl>
       {panels.map((panel) => {
         switch (panel) {
+          case "init":
+            return <ProjectInitPanel key={panel} project={project} />;
           case "queue":
             return (
               <QueuePanel
@@ -1571,7 +1570,7 @@ function QueueEnrolment({ project, canAdminister }: { project: ProjectRow; canAd
         </div>
       )}
       <p className="gp-panel__meta">
-        To drive this from a coding agent instead, run <code>thwip queue setup</code> for the prompt.
+        To drive this from a coding agent instead, run <code>{QUEUE_SETUP_COMMAND}</code> for the prompt.
       </p>
     </Panel>
   );
@@ -1598,28 +1597,32 @@ export function ProjectSetupDisclosure({
   );
 }
 
-function ProjectSetup({ project: p, me }: { project: ProjectRow; me: Me }) {
+export function ProjectInitPanel({ project: p }: { project: ProjectRow }) {
   const [copied, setCopied] = useState(false);
   const prompt = buildSetupPrompt(p);
   return (
-    <ProjectSetupDisclosure complete={p.queue_setup_complete}>
-      <Panel
-        title={`Set up ${p.github_name}`}
-        meta="paste into your coding agent, in a checkout of this repository"
+    <Panel
+      title={`Use Thwip in ${p.github_name}`}
+      meta="paste into your coding agent, in a checkout of this repository"
+    >
+      <p>
+        Run the same init on a first checkout or another machine. It checks this repository, refreshes the bounded
+        AGENTS.md guidance, and tells you any human action still needed. Re-running it is safe.
+      </p>
+      <button
+        className="gp-btn gp-btn--sm"
+        onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
       >
-        <p>
-          The agent installs the CLI and signs you in. It resolves organization defaults, then proposes only the
-          repository overrides this project needs. It proves the App-owned check in observe mode and guides the
-          staged ruleset activation. Re-running it is safe.
-        </p>
-        <button
-          className="gp-btn gp-btn--sm"
-          onClick={() => void navigator.clipboard.writeText(prompt).then(() => setCopied(true))}
-        >
-          {copied ? "Copied" : "Copy prompt"}
-        </button>
-        <pre className="thwip-code-block">{prompt}</pre>
-      </Panel>
+        {copied ? "Copied" : "Copy prompt"}
+      </button>
+      <pre className="thwip-code-block">{prompt}</pre>
+    </Panel>
+  );
+}
+
+function ProjectSetup({ project: p, me }: { project: ProjectRow; me: Me }) {
+  return (
+    <ProjectSetupDisclosure complete={p.queue_setup_complete}>
       <QueueEnrolment project={p} canAdminister={isOrgAdmin(me)} />
     </ProjectSetupDisclosure>
   );
@@ -1716,7 +1719,7 @@ function Profile({ me }: { me: Me }) {
   }>("/v1/dashboard/profile");
   const [copied, setCopied] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
-  const prompt = developerSetupPrompt();
+  const prompt = initPrompt();
 
   const [denying, setDenying] = useState<string | null>(null);
   const [denyError, setDenyError] = useState<string | null>(null);
@@ -1829,9 +1832,8 @@ function Profile({ me }: { me: Me }) {
 
       <Panel title="Add a device" meta="paste into the coding agent on that machine">
         <p>
-          Setting up another machine means installing the CLI there, signing in, and registering that machine&apos;s
-          key with GitHub as a <b>signing</b> key. The prompt below walks an agent through it and hands you the
-          browser and terminal steps; your private key is never read. Existing devices keep working.
+          Run the same init in a checkout on another machine. It checks that machine&apos;s session and signing key,
+          refreshes repository guidance, and hands you any browser or terminal step. Existing devices keep working.
         </p>
         <div className="thwip-actions">
           <button

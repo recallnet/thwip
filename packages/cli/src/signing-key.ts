@@ -79,6 +79,7 @@ export async function discoverSigningKey(cwd: string, override?: string): Promis
 /** Public signing keys GitHub currently lists for this user. */
 export async function githubSigningKeys(login: string): Promise<Array<{ id: number; key: string; title: string }>> {
   const res = await fetch(`https://api.github.com/users/${encodeURIComponent(login)}/ssh_signing_keys?per_page=100`, {
+    signal: AbortSignal.timeout(15_000),
     headers: {
       accept: "application/vnd.github+json",
       "user-agent": "thwip-cli",
