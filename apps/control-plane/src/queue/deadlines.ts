@@ -16,12 +16,10 @@ import type { QueueRouteEnv } from "./routes.js";
  *
  * `Reconciling` is where an attempt goes when the queue cannot tell whether its
  * merge landed. It reads and never writes again, and that patience is correct:
- * four merges left the chain because a single stale read was turned into a
- * durable negative. What was missing is an end to it. Attempt `att_2dc5e37e`
- * held the lane for more than twenty minutes past its execution deadline, the
- * five-minute cron resolved nothing on every pass, `POST /tick` was a no-op
- * because the wedged attempt held the lane, and pull request 115 waited behind
- * it until an operator ran `POST /reconcile` by hand.
+ * a single stale read must not become a durable negative. What was missing is
+ * an end to reconciliation. A wedged attempt can otherwise hold the lane while
+ * scheduled and manual ticks resolve nothing and later pull requests wait
+ * behind it until an operator intervenes.
  *
  * The alarm cannot end it. Its answer for an overrun turn is
  * `EXPIRED_EXECUTION`, and the reducer refuses that outcome while a merge

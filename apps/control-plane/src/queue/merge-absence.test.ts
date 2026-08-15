@@ -11,7 +11,7 @@ import { confirmMergeAbsence, type AbsenceReads } from "./merge-absence.js";
  */
 
 const MERGE = "a1fe3e7e32aed7eaeefe799174d5c4962331ac40";
-/** The test merge GitHub computed for pull request 107 while it was still open. */
+/** A temporary merge GitHub computed while the pull request was still open. */
 const CANDIDATE = "ff6ea882feefd64c4e9f4dff909209e7adb281e3";
 
 function reads(over: Partial<AbsenceReads> = {}): AbsenceReads & { pulls: number; compares: number } {
@@ -65,11 +65,9 @@ describe("confirmMergeAbsence", () => {
 
   /**
    * The sha the pull request offers while it is open is the test merge GitHub
-   * computes for it, not the commit that landed. Pull request 107 answered
-   * `merged: false` with `merge_commit_sha` of ff6ea882, a commit whose parents
-   * and tree match the real merge 0b207610 and which is an ancestor of nothing.
-   * Carrying that out of this arm is how chain record 54 came to say main became
-   * a commit main never was.
+   * computes for it, not the commit that landed. The temporary commit can have
+   * the same parents and tree as the real merge while remaining on no branch.
+   * This arm must not carry that value into the chain.
    */
   it("names no merge commit when only git says the merge landed", async () => {
     const verdict = await confirmMergeAbsence(

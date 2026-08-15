@@ -115,9 +115,7 @@ function key(parts: readonly (string | number)[]): string {
  * later run of the same command look like a retry of the first one. Resuming a
  * queue is the case that bit: `key(["resume", repo, ref])` never changed, so the
  * second time anybody resumed that lane the control plane answered
- * `{"status":"duplicate"}` and left it paused. On 5 August a resume during the
- * App-native cutover did exactly that, and the lane only moved when the same
- * route was called by hand with a fresh key.
+ * `{"status":"duplicate"}` and left it paused until a fresh key was used.
  *
  * A key has to identify the intent, and two runs of `thwip queue resume` are two
  * intents: the operator meant it the second time as much as the first. So the

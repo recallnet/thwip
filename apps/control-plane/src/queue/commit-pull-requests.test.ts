@@ -6,8 +6,8 @@ import type { QueueRouteEnv } from "./routes.js";
 /**
  * Naming the pull request a stranded merge write belonged to.
  *
- * The four writes that stranded on 2 August 2026 carry no pull request number:
- * they were written before the row had one. Nothing else on the row can name the
+ * Older stranded writes carry no pull request number because they were written
+ * before the row had one. Nothing else on the row can name the
  * pull request, so the sweep asks git, through
  * `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, which answers with the pull
  * requests associated with a commit. The head commit the write pinned is the sha

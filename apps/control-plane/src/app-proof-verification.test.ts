@@ -417,12 +417,7 @@ describe("App-native check publication", () => {
     });
   });
 
-  /**
-   * PR #219 merged at 22:46:12 with a successful App proof. Work from an
-   * earlier delivery began at 22:46:15, compared its old head with the new
-   * base, and published SUBJECT_BASE_MISMATCH after the merge. Queue time is
-   * the race: the webhook payload was valid when received and stale when used.
-   */
+  /** A queued webhook can become stale after the pull request merges. */
   it("does not publish a check when a queued verification starts after the pull request merged", async () => {
     const state = processDependencies({ mode: "enforced" });
     const evaluator = vi.fn(() => evaluationDependencies(target()));

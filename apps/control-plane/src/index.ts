@@ -372,9 +372,8 @@ const app = new Hono<{ Bindings: Env }>();
  * the invocation alive past the response, which is what lets a queue receiving
  * twenty webhooks an hour keep moving with no scheduled trigger at all.
  *
- * Cloudflare stopped dispatching thwip's five minute trigger at 03:55Z on
- * 5 August with the schedule still listed by its own API, and the eleven hours
- * that followed had traffic the whole way through.
+ * A registered schedule can stop dispatching while ordinary traffic continues,
+ * so requests also keep the maintenance clock moving.
  */
 app.use("*", async (c, next) => {
   await next();
@@ -434,9 +433,8 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => createAuth(c.env).handler(c.req.ra
 app.get("/health", async (c) => {
   // The age of the last finished tick, signed with everything else here.
   //
-  // A stopped clock is what this endpoint now makes external. The trigger that
-  // died on 5 August left the schedule registered, the Worker answering, and
-  // nothing on any page that said the queue had stopped.
+  // A stopped clock is what this endpoint makes external. A trigger can stop
+  // while its schedule remains registered and the Worker keeps answering.
   const clock = await readClock(c.env.DB as unknown as D1Like);
   const now = nowIso();
   const ageSeconds = tickAgeSeconds(clock, now);
@@ -455,8 +453,8 @@ app.get("/health", async (c) => {
       source: clock.source,
       ageSeconds,
       stale: ageSeconds > TICK_STALE_SECONDS,
-      // Null once a tick has finished cleanly. A stopped clock that says only
-      // how long it has been stopped is what cost eleven hours on 5 August.
+      // Null once a tick has finished cleanly. Age alone does not explain why a
+      // clock stopped.
       lastError: clock.lastError,
       lastErrorAt: clock.lastErrorAt,
     },
@@ -1550,12 +1548,10 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
     ([scope, level]) => granted[scope] !== level,
   );
 
-  // What the App is subscribed to, against what the router handles. This
-  // installation delivered `check_suite` and nothing else for months, so every
-  // other handler was dead code in production while the manifest, the tests and
-  // the review all said otherwise. The doctor is where an operator already
-  // looks when the queue is not moving, and it is the only surface that can see
-  // the live subscription at all.
+  // What the App is subscribed to, against what the router handles. A manifest
+  // does not prove an existing installation received later event changes. The
+  // doctor is where an operator already looks when the queue is not moving, and
+  // it is the only surface that can see the live subscription at all.
   const events = webhookEventDrift(installation.events);
 
   return Response.json({
@@ -1573,8 +1569,8 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
     ),
     // Reported on its own, because losing this costs the status comment as well
     // as the merge and an operator reading a bare scope name has to guess that.
-    // Read off `pull_requests` rather than `issues`: the App wrote a comment on
-    // pull request 180 holding no `issues` scope, so that is what carries it.
+    // Read off `pull_requests` rather than `issues`: pull-request comments use
+    // the former permission for this App.
     canComment: missing.every(([scope]) => scope !== "pull_requests"),
     canInspectRulesets: true,
     canConfigureRulesets: false,
@@ -1628,10 +1624,9 @@ app.get("/v1/queue/:repositoryId/doctor", async (c) => {
 /**
  * Setup, as a request.
  *
- * Enrolling `recallnet/thwip-test` took a hand-written D1 row, workflows copied
- * in, a secret set by hand, and a ruleset built with `gh api`. This route owns
- * the repeatable sequence now, while returning ruleset writes to the repository
- * administrator instead of granting the runtime App repository Administration.
+ * This route owns the repeatable setup sequence while returning ruleset writes
+ * to the repository administrator instead of granting the runtime App
+ * repository Administration.
  */
 app.post("/v1/queue/:repositoryId/bootstrap", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);

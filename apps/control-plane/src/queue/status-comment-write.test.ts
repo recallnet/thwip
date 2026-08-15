@@ -512,9 +512,9 @@ describe("comments for entries compacted out of authority", () => {
         terminalCommentPriority: true,
       },
     ];
-    // This ordinary ending is newer than every repair. It reproduces the live
-    // interleaving where PR #376 compacted during the repair pass and displaced
-    // #219 when recency, rather than authority, supplied the priority.
+    // This ordinary ending is newer than every repair. It proves that a newly
+    // compacted entry cannot displace an authoritative repair when recency and
+    // repair priority disagree.
     const ordinaryNewCompaction = {
       entryId: "ordinary-376",
       pullRequestNumber: 376,
@@ -976,13 +976,9 @@ describe("comments for entries compacted out of authority", () => {
 /**
  * What the App may open a conversation about.
  *
- * Found live on 4 August. The queue document keeps every entry it has ever
- * held, so the first tick after this shipped walked fourteen pull requests that
- * merged weeks ago and tried to write a comment on each. It spent the Worker's
- * whole subrequest budget and took the tick down with it, and had it succeeded
- * it would have mailed fourteen closed pull requests.
- *
- * A merged pull request is worth a line only where thwip was already talking.
+ * The queue document keeps historical entries. A merged pull request is worth
+ * a line only where Thwip was already talking, which keeps old terminal rows
+ * from consuming the subrequest budget or creating unwanted notifications.
  */
 describe("which states may say the first word", () => {
   it("says nothing on a pull request that merged before thwip ever commented", async () => {
@@ -1033,8 +1029,7 @@ describe("which states may say the first word", () => {
  *
  * A Worker invocation gets fifty subrequests, and each comment costs up to two.
  * The queue document keeps every entry it has ever held, so a repository with
- * any history has more entries than one invocation can pay for. On 4 August the
- * sweep hit that ceiling and lost the whole tick to it.
+ * enough history can have more entries than one invocation can pay for.
  *
  * Unchanged comments are free and are not counted. The cap is on writes, so a
  * backlog drains over a few ticks instead of failing on every one.

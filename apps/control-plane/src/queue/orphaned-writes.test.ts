@@ -53,9 +53,9 @@ describe("settleOrphanedWrite", () => {
 
   /**
    * A negative is a conclusion of last resort, and this row is the only surviving
-   * evidence that a write was ever sent. One pull request read that has not
-   * caught up with its own merge is exactly how four merges lost their chain
-   * links, so the negative goes through `confirmMergeAbsence`: every read, from
+   * evidence that a write was ever sent. One pull request read may not have
+   * caught up with its own merge, so the negative goes through
+   * `confirmMergeAbsence`: every read, from
    * both sources, across the backoff, or nothing.
    */
   it("takes the negative through the confirmation rule rather than one read pair", async () => {
@@ -157,9 +157,8 @@ describe("settleOrphanedWrite", () => {
    * The base containing the head says the merge landed. It does not say what
    * landed, and the head commit is not it: on a squash queue the squash tree
    * equals the head tree while the branch sits on base, so a head commit
-   * parented on base clears every gate and the chain would say main became the
-   * pull request's own commit. Chain record 54 already says main became a commit
-   * main never was, from exactly this shortcut. The write stays open until the
+   * parented on base clears every gate and the chain would say the base became
+   * the pull request's own commit. The write stays open until the
    * pull request catches up with itself and names the merge.
    */
   it("names no commit from ancestry alone, and leaves the write for the next tick", async () => {

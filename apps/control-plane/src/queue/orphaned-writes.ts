@@ -9,8 +9,8 @@ import { confirmMergeAbsence, type PullMergeState } from "./merge-absence.js";
  * mergeability, and the workflow exits saying it leaves the outcome to
  * reconciliation. There was no reconciliation for this: the only sweep keyed off
  * a surviving attempt, and the attempt is terminated and compacted long before
- * anybody looks. Four merges reached `main` that way on 2 August 2026 and the
- * chain has no link for any of them.
+ * anybody looks. A merge can therefore reach the base branch without a chain
+ * link.
  *
  * So the write settles itself, from git, and the workflow's report becomes the
  * fast path rather than the only path.
@@ -132,8 +132,8 @@ export async function settleOrphanedWrite(
   }
 
   // `confirmMergeAbsence` is the rule this codebase already settled on, and it
-  // is reused rather than restated. One pull request read that has not caught up
-  // with its own merge is how four merges lost their links; a negative needs
+  // is reused rather than restated. One pull request read may not have caught up
+  // with its own merge, so a negative needs
   // every read, from both sources, across the backoff.
   const verdict = await confirmMergeAbsence(
     {

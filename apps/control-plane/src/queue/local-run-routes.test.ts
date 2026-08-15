@@ -559,8 +559,7 @@ describe("the receipt the machine signs", () => {
    * the stale assignment, ran the stale tree, signed a receipt for it, and the
    * queue accepted it — and then refused every merge for that attempt with
    * `INTEGRATION_RECEIPT_TREE_MISMATCH`, forever, because the receipt really was
-   * about a different tree. Pull request 2 on `recallnet/thwip-test` sat in
-   * `RECEIPT_SUBMITTED` for exactly this reason.
+   * about a different tree.
    *
    * `HEAD_MOVED` is the reducer's own answer and nothing was reaching it. It
    * defers, so the place in line is kept and the next turn is taken against
@@ -609,8 +608,8 @@ describe("the receipt the machine signs", () => {
    * only knows `sha256:` digests, so the claim came back
    * `ASSIGNMENT_INVALID` 500 and the branch could never take another turn.
    *
-   * `recallnet/thwip-test` sat exactly there: one hand-pushed commit on `main`
-   * and no device could claim the lane again, rebaselined or not.
+   * A hand-pushed commit can otherwise leave the lane impossible to claim again,
+   * rebaselined or not.
    */
   it("hands a device its turn after the branch moved outside the queue", async () => {
     const e = env();

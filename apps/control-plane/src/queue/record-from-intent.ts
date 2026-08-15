@@ -41,8 +41,7 @@ import type { TurnCheckUpdate } from "./turn-check.js";
  *
  * The attempt does not survive the failure this exists for. A merge write is
  * authorized, GitHub returns an ambiguous refusal, the merge lands, and the
- * attempt is terminated and compacted. Four merges reached `main` that way in
- * one morning.
+ * attempt is terminated and compacted.
  *
  * What survives is the signed merge intent. It is stored by digest and it names
  * the base, the head, the tree the queue authorized, the pull request, the

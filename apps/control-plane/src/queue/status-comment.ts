@@ -9,9 +9,7 @@ import { blockedTitle, haltReasonOf, nextAction, type HaltReason } from "./turn-
  * enough to gate a merge and not enough to tell a person what is happening to
  * their work. A draft that is correctly blocked, an entry fifteen seconds from
  * the end of a cooldown, and an entry that is wedged all render as the same
- * yellow circle. All three were live on this repository at once on 4 August and
- * the middle one was read as the last one, by somebody who could also read the
- * queue's own diagnostics.
+ * yellow circle even though they require different action.
  *
  * The queue has known the difference the whole time. `/explain` answers with the
  * entry state, `schedulerEligible`, `primaryReason`, `cooldownUntil` and the
@@ -84,11 +82,9 @@ export interface CommentView {
   /**
    * The chain record this pull request merged as, for a reader who wants it.
    *
-   * This entry's own link, found by the attempt that merged it. It was the
-   * chain head for an afternoon, and on 4 August pull requests 194, 197 and 198
-   * all named record 142: the head is the head of the whole chain, so every
-   * merged entry claimed whichever merge happened last. Three merges, one
-   * digest, and nothing about it looked wrong.
+   * This entry's own link, found by the attempt that merged it. The head belongs
+   * to the whole chain, so using it would make every merged entry claim whichever
+   * merge happened last.
    *
    * Null when the chain no longer carries the link. Naming the head in its
    * place is how that bug worked.
@@ -175,8 +171,8 @@ export function commentViews(
  * The chain link one entry merged as, found by the attempt that merged it.
  *
  * The attempt id is what joins an entry to its record, and it is the only thing
- * that does. Reaching for the chain head instead gave three pull requests the
- * same digest on 4 August.
+ * that does. Reaching for the chain head instead gives unrelated pull requests
+ * the same digest.
  */
 function recordFor(
   snapshot: QueueSnapshot,

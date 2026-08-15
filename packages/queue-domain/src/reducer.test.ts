@@ -501,8 +501,7 @@ describe("reducer", () => {
     });
 
     it("refuses to confirm a merge whose first parent is not the base the attempt pinned", () => {
-      // What happened to four pull requests on 2 August 2026. The base moved
-      // between the pin and the merge, GitHub merged the head onto the tip the
+      // The base moved between the pin and the merge. GitHub merged the head onto the tip the
       // branch actually had, and the commit that landed hangs off a parent no
       // intent names. A record cites the exact parents, so confirming that
       // commit as this attempt's merge writes a state no chain can follow.

@@ -631,10 +631,9 @@ export class BranchQueueStore {
     return [...state.entries.values()]
       // Deferred is not out of the running. An entry that forfeited a turn keeps
       // its place, and the only thing that ever put it back to Ready was a
-      // readiness evaluation off a GitHub webhook. PR 118 sat Deferred with no
-      // cooldown beside an idle lane for forty minutes, and every tick, nudge
-      // and cron answered "no eligible entry"; it moved when its author force
-      // pushed, and nothing else would have moved it.
+      // readiness evaluation off a GitHub webhook. Without a cooldown, every
+      // tick can answer "no eligible entry" beside an idle lane until another
+      // webhook happens to move it.
       //
       // A cooldown is not a condition of competing. selectNext takes `now` and
       // reads cooldownUntil, so an entry still serving one cannot win the round;
@@ -860,11 +859,9 @@ export class BranchQueueStore {
    * Merge writes this queue resolved as MERGED since a moment, oldest first.
    *
    * Resolved is not finished. A write is finished when the chain has a record
-   * for it, and the two came apart on 4 August 2026: pull request 183 merged
-   * under the App's own write, the record was skipped on a read that had not
-   * caught up, and the row was resolved MERGED all the same. `unresolvedMergeOperations`
-   * cannot see it, so nothing owned it. The caller asks the record store which
-   * of these have a link and finishes the ones that do not.
+   * for it. A delayed ancestry read can skip the record while still resolving
+   * the row as MERGED; `unresolvedMergeOperations` then cannot see it. The caller
+   * asks the record store which resolved writes lack a link and finishes them.
    *
    * Bounded by time rather than by all history, because every row the caller
    * examines costs a lookup and the ones from last week are either recorded or

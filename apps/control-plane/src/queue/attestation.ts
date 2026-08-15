@@ -1149,14 +1149,9 @@ export async function recoverExactMergeRecord(
  * epoch-scoped answer here cannot lead to a repair, only to a repair attempted
  * on every tick and refused on every tick.
  *
- * Worse than the cost, it re-records. On 5 August the attested range on this
- * repository moved to 152 and fifty-nine merges recorded below it read back as
- * unrecorded. The sweep began writing second records for merges the chain
- * already held, at the head, so the new range said the base had moved to a
- * commit the branch left days ago and the walk broke at the first one. An epoch
- * boundary says which records a verifier is asked to check. It does not
- * un-record a merge, and reading a filtered-out record as an absent one is how
- * this repository keeps producing the same defect.
+ * Worse than the cost, an epoch-scoped lookup can re-record merges that the
+ * chain already holds and corrupt the apparent base sequence. An epoch boundary
+ * says which records a verifier checks. It does not un-record a merge.
  */
 export async function transitionRecordFor(
   db: D1Like,
@@ -1190,17 +1185,12 @@ export async function transitionRecordFor(
  * Asked of every range this branch has ever had. A merge record used to be
  * scoped to the current one, on the reasoning that a record from behind an
  * epoch boundary cites a policy and an intent a verifier no longer checks, so
- * answering from it would call a merge recorded while the live chain never
+ * answering from it would call a merge recorded while the active chain never
  * mentions it.
  *
- * What that produced instead is worse. The record does not stop existing when
- * the range moves, and the branch does not go back to the commit before it.
- * When the range on this repository moved to 152 on 5 August, fifty-nine merges
- * recorded below it read back as absent and the sweep wrote a second record for
- * each, at the head, saying the base had moved to a commit the branch left days
- * ago. The walk broke at the first one. A record for a commit is a fact about
- * git, and it reads as true from any range behind it, exactly the way a
- * movement record always did.
+ * The record does not stop existing when the range moves, and the branch does
+ * not go back to the commit before it. A record for a commit is a fact about
+ * Git and reads as true from any later range, exactly as a movement record does.
  *
  * Naming the record is not settling a write against it. What a caller does with
  * the answer is the caller's, and every caller here wants the same thing: stop,
