@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildMismatchFailure, findCliCheckout, parseBuildStamp, versionReport } from "./build-identity.js";
+import {
+  buildMismatchFailure,
+  findCliCheckout,
+  parseBuildStamp,
+  setupCommandMayUseForeignBuild,
+  versionReport,
+} from "./build-identity.js";
 
 /**
  * Which build is running, and does it belong to the checkout it is standing in.
@@ -92,21 +98,41 @@ describe("findCliCheckout", () => {
     "/elsewhere/repo/.git",
   ]);
   const exists = (path: string) => present.has(path);
+  const read = (path: string) =>
+    path === "/wt/thwip/branch/packages/cli/package.json" ? '{"name":"@thwip/cli"}' : null;
 
   it("walks up to the checkout that builds its own thwip", () => {
-    expect(findCliCheckout("/wt/thwip/branch/packages/cli/src", exists)).toBe("/wt/thwip/branch");
+    expect(findCliCheckout("/wt/thwip/branch/packages/cli/src", exists, read)).toBe("/wt/thwip/branch");
   });
 
   it("finds it from the root itself", () => {
-    expect(findCliCheckout("/wt/thwip/branch", exists)).toBe("/wt/thwip/branch");
+    expect(findCliCheckout("/wt/thwip/branch", exists, read)).toBe("/wt/thwip/branch");
   });
 
   it("reports nothing for a git repository with no thwip CLI in it", () => {
-    expect(findCliCheckout("/elsewhere/repo/src", exists)).toBeNull();
+    expect(findCliCheckout("/elsewhere/repo/src", exists, read)).toBeNull();
   });
 
   it("reports nothing outside a git repository", () => {
-    expect(findCliCheckout("/tmp/scratch", exists)).toBeNull();
+    expect(findCliCheckout("/tmp/scratch", exists, read)).toBeNull();
+  });
+
+  it("does not mistake an unrelated monorepo CLI package for Thwip", () => {
+    const paths = new Set(["/other/.git", "/other/packages/cli/package.json"]);
+    expect(
+      findCliCheckout("/other", (path) => paths.has(path), () => '{"name":"@other/cli"}'),
+    ).toBeNull();
+  });
+});
+
+describe("the narrow npx setup exception", () => {
+  it.each([["init"], ["login"], ["login", "--endpoint", "https://thwip.ai"], ["keys"], ["keys", "status"], ["queue", "setup"], ["queue", "setup", "--help"]])(
+    "allows %s",
+    (command, ...rest) => expect(setupCommandMayUseForeignBuild([command, ...rest])).toBe(true),
+  );
+
+  it.each([["ship"], ["run"], ["doctor"], ["queue", "status"], ["queue", "join"], ["verify"]])("keeps %s strict", (command, ...rest) => {
+    expect(setupCommandMayUseForeignBuild([command, ...rest])).toBe(false);
   });
 });
 

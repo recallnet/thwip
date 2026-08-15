@@ -17,6 +17,7 @@ const QUEUE_SUBCOMMANDS = [
   "repair",
   "doctor",
   "work",
+  "setup",
 ] as const;
 
 const HELP_TARGETS: readonly (readonly string[])[] = [
@@ -27,7 +28,6 @@ const HELP_TARGETS: readonly (readonly string[])[] = [
   ["init"],
   ["keys"],
   ["keys", "status"],
-  ["setup"],
   ["run"],
   ["verify"],
   ["policy"],
@@ -127,7 +127,6 @@ describe("fail-closed arguments", () => {
     ["queue", "work", "--repo", "recallnet/thwip"],
     ["init", "--unknown"],
     ["keys", "status", "--unknown"],
-    ["setup", "--unknown"],
     ["run", "--unknown"],
     ["run", "unexpected"],
     ["verify", "--unknown"],
@@ -160,8 +159,6 @@ describe("dispatch", () => {
     [["init", "--required", "lint"], "init"],
     [["keys"], "keys-status"],
     [["keys", "status"], "keys-status"],
-    [["setup"], "setup"],
-    [["setup", "--install-push-warning"], "setup"],
     [["run"], "run"],
     [["verify", "--json"], "verify"],
     [["verify", "--commit", "a".repeat(40)], "verify"],

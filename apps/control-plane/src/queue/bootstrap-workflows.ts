@@ -447,7 +447,7 @@ export function setupPullRequestBody(input: SetupPullRequestInput): string {
     "- `.github/workflows/thwip-queue-verify.yml` runs the required suites against the integrated candidate when the queue asks for it. The `remote` and `audited` profiles need it; `fast` and `fresh` never dispatch to it.",
     ...(input.includeRepositoryConfig === true
       ? ["- `thwip.yaml` is the repository-specific policy override selected for this setup. Edit it before merging if these are not the right suites."]
-      : ["- No `thwip.yaml` is added. This repository inherits organization defaults; use `thwip init` separately only if it needs an explicit repository override."]),
+      : ["- No `thwip.yaml` is added. This repository inherits organization defaults; use explicit `thwip init --required ...` flags only if it needs a repository override."]),
     "",
     "The queue writes merge commits. It composes the merge on the base it verified and lands it with a ref update that does not force, so a base that moved refuses the merge rather than producing a tree nothing ran. Setup has no merge-method selector.",
     "",

@@ -1,246 +1,154 @@
 import { describe, expect, it } from "vitest";
 import {
+  ManagedInstructionsError,
+  claudePointer,
   queueInstructions,
-  queuePointer,
   queueSetupPrompt,
-  withQueuePointer,
-  type QueueInstructionFacts,
+  withAgentInstructions,
+  withClaudePointer,
 } from "./queue.js";
 
-function facts(over: Partial<QueueInstructionFacts> = {}): QueueInstructionFacts {
-  return {
-    repositoryName: "recallnet/thwip",
-    baseRef: "refs/heads/main",
-    activationState: "enforced",
-    hasDaggerModule: true,
-    ...over,
-  };
-}
+const instructions = () => queueInstructions({ cliCommand: "npx @recallnet/thwip@latest" });
 
-describe("queueInstructions", () => {
-  it("names the branch it governs, without the ref prefix", () => {
-    const text = queueInstructions(facts());
-    expect(text).toContain("merging of\n`main`");
-    expect(text).not.toContain("refs/heads/main");
+describe("canonical AGENTS instructions", () => {
+  it("uses an invocation that works without a global install", () => {
+    const text = instructions();
+    expect(text).toContain("npx @recallnet/thwip@latest doctor --allow-unread");
+    expect(text).toContain("npx @recallnet/thwip@latest ship --wait --json-events");
+    expect(text).not.toMatch(/^thwip /m);
   });
 
-  it("states every prohibition an agent could otherwise violate", () => {
-    const text = queueInstructions(facts());
+  it("gates ship and queue prohibitions on live readiness", () => {
+    const text = instructions();
+    expect(text).toMatch(/First run:[\s\S]*doctor --allow-unread/);
+    expect(text).toMatch(/If doctor confirms[\s\S]*ship --wait/);
+    expect(text).toMatch(/If doctor does not confirm[\s\S]*do not run `ship`/);
+    expect(text).toContain("existing reviewed pull-request flow");
+    expect(text).toContain("Rules when doctor confirms the Queue is ready");
+  });
+
+  it("does not persist transient state or branch names", () => {
+    const text = instructions();
+    for (const stale of ["configured", "observe", "canary", "enforced", "refs/heads"]) {
+      expect(text).not.toContain(stale);
+    }
+    expect(text).toContain("default branch");
+  });
+
+  it("keeps the queue safety rules and precise completion", () => {
+    const text = instructions();
     for (const rule of [
       "Do not call `gh pr merge`",
       "Do not merge through the GitHub UI",
-      "Do not push directly to `main`",
+      "Do not push directly to the default branch",
       "Do not manually rebase",
       "Do not amend or force-push a queued head",
+      "complete only after `queue.merge_confirmed`",
     ]) {
-      expect(text, `missing rule: ${rule}`).toContain(rule);
+      expect(text, rule).toContain(rule);
     }
   });
 
-  it("says why force-pushing a queued head matters, not just that it is banned", () => {
-    // A rule an agent understands is one it will not rationalize around.
-    expect(queueInstructions(facts())).toMatch(/candidate someone is testing is the head you replaced/);
-  });
-
-  it("tells an agent that Ctrl-C is safe, so it does not avoid interrupting", () => {
-    expect(queueInstructions(facts())).toMatch(/does not erase the queue request or lose your place/);
-  });
-
-  it("defines completion precisely", () => {
-    const prompt = queueInstructions(facts());
-    expect(prompt).toMatch(/complete only after `queue\.merge_confirmed`/);
-    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
-  });
-
-  it("forbids retrying around a signature or permission failure", () => {
-    expect(queueInstructions(facts())).toMatch(/not conditions to retry around/);
-  });
-
-  it("explains that a pull request cannot approve its own policy change", () => {
-    expect(queueInstructions(facts())).toMatch(/cannot approve its\n *own policy change/);
-  });
-
-  it("says the queue is only observing when it is, and still asks for the rules", () => {
-    for (const activationState of ["observe", "configured"] as const) {
-      const text = queueInstructions(facts({ activationState }));
-      expect(text).toContain(`currently in \`${activationState}\``);
-      expect(text).toMatch(/Follow these rules anyway/);
-    }
-  });
-
-  it("says nothing about observing when the queue is enforcing", () => {
-    for (const activationState of ["canary", "enforced"] as const) {
-      expect(queueInstructions(facts({ activationState }))).not.toMatch(/would do without blocking/);
-    }
-  });
-
-  it("adapts to a repository with no Dagger module", () => {
-    const withModule = queueInstructions(facts({ hasDaggerModule: true }));
-    const without = queueInstructions(facts({ hasDaggerModule: false }));
-    expect(withModule).toContain("approved Dagger pipeline");
-    expect(without).toContain("approved required suites");
-    expect(without).not.toContain("Dagger material");
-  });
-
-  it("refuses to promise a permanent queue position", () => {
-    expect(queueInstructions(facts())).toMatch(/no permanent\nposition/);
+  it("does not require a repository override file", () => {
+    expect(instructions()).toContain("Read `thwip.yaml` if it exists");
   });
 });
 
-describe("queuePointer", () => {
-  it("is delimited so a later version can find and replace it", () => {
-    const pointer = queuePointer();
-    expect(pointer.startsWith("<!-- thwip:start -->")).toBe(true);
-    expect(pointer.trimEnd().endsWith("<!-- thwip:end -->")).toBe(true);
+describe("bounded managed regions", () => {
+  it("creates a canonical AGENTS region without leading blank lines", () => {
+    const updated = withAgentInstructions("", "Current instructions.");
+    expect(updated).toBe("<!-- thwip:start -->\nCurrent instructions.\n<!-- thwip:end -->\n");
   });
 
-  it("stays small: it points at THWIP.md rather than restating it", () => {
-    expect(queuePointer().split("\n")).toHaveLength(5);
-  });
-});
-
-describe("withQueuePointer", () => {
-  it("appends to an existing file without disturbing it", () => {
-    const existing = "# Agents\n\nRun the tests before you finish.\n";
-    const updated = withQueuePointer(existing);
-    expect(updated.startsWith(existing)).toBe(true);
-    expect(updated).toContain(queuePointer());
+  it("is idempotent and preserves authored bytes outside its markers", () => {
+    const prefix = "# Agents\r\n\r\nCafé authored text.\r\n";
+    const suffix = "\r\nAuthored suffix with no final newline";
+    const stale = `${prefix}<!-- thwip:start -->\nold\n<!-- thwip:end -->${suffix}`;
+    const updated = withAgentInstructions(stale, "new");
+    expect(updated.startsWith(prefix)).toBe(true);
+    expect(updated.endsWith(suffix)).toBe(true);
+    expect(withAgentInstructions(updated, "new")).toBe(updated);
   });
 
-  it("is idempotent, so re-running setup produces no diff", () => {
-    const once = withQueuePointer("# Agents\n\nSomething.\n");
-    expect(withQueuePointer(once)).toBe(once);
-    expect(withQueuePointer(withQueuePointer(once))).toBe(once);
+  it.each([
+    "<!-- thwip:start -->\none-sided",
+    "<!-- thwip:end -->\nreversed\n<!-- thwip:start -->",
+    "<!-- thwip:start -->\na\n<!-- thwip:start -->\nb\n<!-- thwip:end -->",
+    "<!-- thwip:start -->\na\n<!-- thwip:end -->\n<!-- thwip:end -->",
+  ])("refuses malformed or duplicate AGENTS markers", (text) => {
+    expect(() => withAgentInstructions(text, "new")).toThrow(ManagedInstructionsError);
   });
 
-  it("replaces an outdated pointer in place, keeping surrounding text", () => {
-    const stale = [
-      "# Agents",
+  it.each(["```md", "~~~md"])("refuses an unclosed %s fence instead of appending inside it", (opening) => {
+    const authored = `# Authored\n\n${opening}\nThis fence intentionally reaches EOF.\n`;
+    expect(() => withAgentInstructions(authored, "generated")).toThrow(ManagedInstructionsError);
+    expect(() => withClaudePointer(authored)).toThrow(ManagedInstructionsError);
+  });
+
+  it("does not claim inline or fenced marker examples as managed content", () => {
+    const authored = [
+      "# Marker docs",
       "",
-      "Before you start, read the README.",
+      "Inline `<!-- thwip:start -->` and `<!-- thwip:end -->` examples.",
       "",
+      "```md",
       "<!-- thwip:start -->",
-      "Something we used to say.",
+      "sample",
       "<!-- thwip:end -->",
-      "",
-      "Afterwards, update the changelog.",
+      "```",
       "",
     ].join("\n");
-    const updated = withQueuePointer(stale);
-    expect(updated).toContain("Before you start, read the README.");
-    expect(updated).toContain("Afterwards, update the changelog.");
-    expect(updated).not.toContain("Something we used to say.");
-    expect(updated).toContain("read `THWIP.md`");
+    const updated = withAgentInstructions(authored, "real managed content");
+    expect(updated.startsWith(authored)).toBe(true);
+    expect(updated.match(/<!-- thwip:start -->/g)).toHaveLength(3);
+    expect(updated).toContain("real managed content");
   });
 
-  it("leaves a malformed remnant alone rather than guessing", () => {
-    // One delimiter without the other could mean anything; editing it could
-    // destroy authored text.
-    const malformed = "# Agents\n\n<!-- thwip:start -->\nhalf a pointer\n";
-    const updated = withQueuePointer(malformed);
-    expect(updated).toContain("half a pointer");
-    expect(updated.match(/<!-- thwip:start -->/g)).toHaveLength(2);
+  it.each([
+    ["````md", "```", "````"],
+    ["~~~~md", "~~~", "~~~~"],
+  ])("preserves markers inside a %s fence with a shorter fence-like line", (open, shorter, close) => {
+    const authored = [
+      "# Authored example",
+      "",
+      open,
+      shorter,
+      "<!-- thwip:start -->",
+      "do not touch this example",
+      "<!-- thwip:end -->",
+      close,
+      "",
+    ].join("\n");
+    const updated = withAgentInstructions(authored, "generated");
+    expect(updated.startsWith(authored)).toBe(true);
+    expect(updated).toContain("do not touch this example");
   });
 
-  it("does not double a blank line when appending", () => {
-    expect(withQueuePointer("# Agents\n\n")).toBe("# Agents\n\n" + queuePointer() + "\n");
-    expect(withQueuePointer("# Agents\n")).toBe("# Agents\n\n" + queuePointer() + "\n");
-  });
-
-  it("handles a file with no trailing newline", () => {
-    const updated = withQueuePointer("# Agents");
-    expect(updated.startsWith("# Agents\n\n")).toBe(true);
-    expect(updated).toContain(queuePointer());
+  it("keeps Claude compatibility small and canonical", () => {
+    const existing = "# Claude\n\nAuthored.\n";
+    const updated = withClaudePointer(existing);
+    expect(updated.startsWith(existing)).toBe(true);
+    expect(updated).toContain(claudePointer());
+    expect(updated).toContain("AGENTS.md is the canonical agent contract");
+    expect(updated).not.toContain("ship --wait");
+    expect(withClaudePointer(updated)).toBe(updated);
   });
 });
 
-describe("queueSetupPrompt", () => {
-  it("offers the shared warning after approval and uses the complete shipping command", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toContain("Only after I explicitly approve");
-    expect(prompt).toContain("thwip setup --install-push-warning");
-    expect(prompt).toContain('Run "thwip ship --wait"');
-    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
+describe("queue enrolment prompt", () => {
+  it("uses init for local guidance", () => {
+    const prompt = queueSetupPrompt("example/project");
+    expect(prompt).toContain('Run "npx @recallnet/thwip@latest init" first');
+    expect(prompt).not.toContain("queue setup --write");
+    expect(prompt).not.toContain("push warning");
+    expect(prompt.match(/npx @recallnet\/thwip@latest/g)).toHaveLength(1);
   });
 
-  it("tells the agent to find a conflicting auto-merge system first", () => {
-    expect(queueSetupPrompt("recallnet/thwip")).toMatch(/second auto-merge system\n *racing the queue/);
-  });
-
-  it("insists the proposed configuration cannot judge itself", () => {
-    expect(queueSetupPrompt("recallnet/thwip")).toMatch(/must not judge itself/);
-  });
-
-  it("is explicit about what only the owner can do", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/merge the setup pull request/);
+  it("keeps remote enrolment human-guided", () => {
+    const prompt = queueSetupPrompt("example/project");
+    expect(prompt).toContain("merge the setup pull request");
+    expect(prompt).toContain("apply only the disabled policy payloads");
+    expect(prompt).toContain("confirm every bypass-actor list");
     expect(prompt).not.toContain("THWIP_ENQUEUE_TOKEN");
-    expect(prompt).toMatch(/installed App performs authorized\s+merges/);
-    expect(prompt).toMatch(/apply only the disabled policy payloads/);
-    expect(prompt).toMatch(/confirm every bypass-actor list/);
-    expect(prompt).toMatch(/does not request the broad\s+"administration: write" permission/);
-  });
-
-  /**
-   * Enrolment generates each phase and the administrator applies exactly what
-   * it returns. That keeps ordering in one state machine without giving the App
-   * repository Administration permission.
-   */
-  it("sends ruleset work to enrolment rather than to the agent", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/apply only the disabled policy payloads enrolment returns/);
-    expect(prompt).toMatch(/Start enrolment again after each manual change/);
-    // GitHub can only pin a context to its source after that source has
-    // published the check, and the prompt says who handles that ordering.
-    expect(prompt).toMatch(/checks that each is pinned to the\s+source that publishes it/);
-  });
-
-  it("names the request that enrols the repository", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toContain("/v1/queue/<repository id>/bootstrap");
-    expect(prompt).toMatch(/"Queue" tab/);
-  });
-
-  it("inherits organization defaults unless a repository override is explicitly selected", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/Organization\n *defaults are inherited/);
-    expect(prompt).toMatch(/only when this\n *repository intentionally needs its own thwip.yaml/);
-  });
-
-  it("observes before explicit enforcement without inventing review policy", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/ownership and policy enforcement remain disabled/);
-    expect(prompt).toContain('confirm "Begin enforcement"');
-    expect(prompt).toMatch(/adds no review policy/);
-  });
-
-  /**
-   * The prompt may only name checks that something publishes. It used to name
-   * "Thwip / Merge", from a path that was never built, so an agent following it
-   * would have required a check nothing could ever satisfy.
-   */
-  it("names the checks that exist and no others", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toContain("thwip / turn");
-    expect(prompt).not.toContain("Thwip / Merge");
-  });
-
-  it("only tells the agent to run commands the CLI has", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    for (const missing of ["thwip queue repair", "--watch"]) {
-      expect(prompt, missing).not.toContain(missing);
-    }
-    expect(prompt).toContain("thwip queue doctor");
-    expect(prompt).toContain("thwip queue setup --write");
-  });
-
-  it("asks for proof before the checks are made required", () => {
-    expect(queueSetupPrompt("recallnet/thwip")).toMatch(/required\s+check that nothing publishes blocks every merge/);
-  });
-
-  it("tells the agent to preserve what someone else authored", () => {
-    const prompt = queueSetupPrompt("recallnet/thwip");
-    expect(prompt).toMatch(/drop a rule or\s+required check somebody else added/);
-    expect(prompt).toMatch(/Do not rewrite instructions\n *someone else authored/);
   });
 });

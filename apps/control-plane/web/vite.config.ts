@@ -1,19 +1,15 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { developerSetupPrompt } from "@thwip/prompts";
+import { initPrompt } from "@thwip/prompts";
 
 const installDoc = `# Set up your machine for thwip
 
-Paste the block below into your coding agent, or run \`thwip setup\` to print
-it. It installs the CLI, signs you in with a device code that works over SSH,
-and guides you through registering a signing key with GitHub. The agent never
-handles your private key.
-
-Setting up a *repository* is a separate prompt, on that project's page in the
-dashboard.
+Paste the block below into your coding agent. It runs one safe, repeatable init
+command for a first checkout or another machine, then reports any human action
+still needed. The agent never handles your private key.
 
 \`\`\`
-${developerSetupPrompt()}
+${initPrompt()}
 \`\`\`
 `;
 

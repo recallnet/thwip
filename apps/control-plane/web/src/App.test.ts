@@ -13,6 +13,8 @@ import {
   projectPagePanels,
   projectSection,
   ProjectQueueHead,
+  ProjectInitPanel,
+  QUEUE_SETUP_COMMAND,
   ProjectSetupDisclosure,
   SignedOutDashboard,
 } from "./App.js";
@@ -37,6 +39,9 @@ describe("the signed-out dashboard", () => {
 });
 
 describe("completed queue setup copy", () => {
+  it("uses a queue setup command that works without a global install", () => {
+    expect(QUEUE_SETUP_COMMAND).toBe("npx @recallnet/thwip@latest queue setup");
+  });
   it("describes ownership and required checks once enforcement is active", () => {
     expect(completedQueueActivationText("enforced")).toBe(
       "It owns normal branch updates and requires the App proof and turn checks.",
@@ -96,9 +101,39 @@ describe("the organization project table", () => {
 describe("project navigation", () => {
   it("puts the live queue before repository setup", () => {
     expect(PROJECT_TABS.map(([, label]) => label)).toEqual(["Queue", "Access", "Settings"]);
-    expect(projectPagePanels("queue", true)).toEqual(["queue", "setup"]);
-    expect(projectPagePanels("queue", false)).toEqual(["setup", "queue"]);
-    expect(projectPagePanels("settings")).toEqual(["verification"]);
+    expect(projectPagePanels("queue", true)).toEqual(["init", "queue", "setup"]);
+    expect(projectPagePanels("queue", false)).toEqual(["init", "setup", "queue"]);
+    expect(projectPagePanels("access")).toEqual(["init", "access"]);
+    expect(projectPagePanels("settings")).toEqual(["init", "verification"]);
+  });
+
+  it("keeps the init action visible for a completed project without guessing laptop state", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectInitPanel, {
+        project: {
+          id: "p1",
+          github_repository_id: "1",
+          github_name: "example/project",
+          default_branch: "release",
+          enabled: 1,
+          activation_state: "active",
+          active_policy_digest: "digest",
+          policy_version: 1,
+          policy_profile: "fast",
+          config_source: "global",
+          proof_check_mode: "enforced",
+          collaborators: 1,
+          last_outcome: null,
+          last_observed_at: null,
+          queue_setup_complete: true,
+        },
+      }),
+    );
+    expect(html).toContain("Use Thwip in example/project");
+    expect(html).toContain("npx @recallnet/thwip@latest init");
+    expect(html).toContain("Inspect the live project state");
+    expect(html).not.toContain("example/project is already enrolled");
+    expect(html).not.toContain("signing key on this machine is registered");
   });
 
   it("collapses completed setup and leaves incomplete setup open", () => {

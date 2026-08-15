@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { constants, existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,6 +17,7 @@ import {
   currentTree,
   freezeSubject,
   git,
+  gitInitRead,
   headMessage,
   readTips,
   requireCleanTree,
@@ -28,7 +29,7 @@ import { headProofState } from "./head-proof.js";
 import { runSuites } from "./pipeline.js";
 import { loadProjectConfigAtHead, loadProjectConfigForRun } from "./config.js";
 import { discoverSigningKey, fingerprintOfPublicKey, githubSigningKeys } from "./signing-key.js";
-import { developerSetupPrompt, queueInstructions, queueSetupPrompt, withQueuePointer } from "@thwip/prompts";
+import { initReport, NPX_COMMAND, queueInstructions, queueSetupPrompt, type InitPromptFacts } from "@thwip/prompts";
 import { planQueueCommand } from "./queue-commands.js";
 import { installInterruptHandler, readGitState, runShip, type ShipPorts } from "./ship-io.js";
 import { EXIT } from "./queue-exit.js";
@@ -42,6 +43,7 @@ import {
   buildMismatchFailure,
   findCliCheckout,
   parseBuildStamp,
+  setupCommandMayUseForeignBuild,
   versionReport,
   type BuildIdentity,
 } from "./build-identity.js";
@@ -53,8 +55,16 @@ import { signReceipt, type ReceiptSuiteOutcome } from "./receipt.js";
 import { runFreshTurn, type FreshTurnResult } from "./fresh-turn.js";
 import { flag } from "./cli-flags.js";
 import { realHeartbeat, runQueueWork } from "./queue-work.js";
-import { installPushWarning } from "./push-hook.js";
 import { DEFAULT_ENDPOINT } from "./endpoint.js";
+import { normalizeSessionEndpoint, readStoredSession, writeStoredSession } from "./session-store.js";
+import { writeAgentGuidance } from "./agent-guidance.js";
+import {
+  mayWriteGuidance,
+  githubNameFromOrigin,
+  observeInitState,
+  readInitRepositoryContext,
+  type InitLiveState,
+} from "./init-state.js";
 
 /** Optional overrides only. Identity and keys live in GitHub. */
 interface CliConfig {
@@ -81,7 +91,14 @@ async function resolveGithubIdentity(config: CliConfig): Promise<{ login: string
   const { promisify } = await import("node:util");
   const execFileP = promisify(execFile);
   try {
-    const { stdout } = await execFileP("gh", ["api", "user", "--jq", "{login: .login, id: .id}"]);
+    const { stdout } = await execFileP("gh", [
+      "api",
+      "--hostname",
+      "github.com",
+      "user",
+      "--jq",
+      "{login: .login, id: .id}",
+    ], { timeout: 15_000 });
     const u = JSON.parse(stdout) as { login: string; id: number };
     return { login: u.login, id: String(u.id) };
   } catch {
@@ -89,6 +106,7 @@ async function resolveGithubIdentity(config: CliConfig): Promise<{ login: string
   }
   if (config.githubLogin) {
     const res = await fetch(`https://api.github.com/users/${encodeURIComponent(config.githubLogin)}`, {
+      signal: AbortSignal.timeout(15_000),
       headers: { accept: "application/vnd.github+json", "user-agent": "thwip-cli" },
     });
     if (res.ok) {
@@ -179,7 +197,7 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   await requireCleanTree(cwd);
   const subject = await freezeSubject(cwd, baseRef);
-  const project = await loadProjectConfigForRun(cwd, endpoint, await apiAuthHeader());
+  const project = await loadProjectConfigForRun(cwd, endpoint, await apiAuthHeader(endpoint));
   const { policy, policyDigest } = project;
   const def = project.pipeline;
   const pDigest = project.pipelineDigest;
@@ -196,7 +214,7 @@ async function cmdRun(argv: string[]): Promise<number> {
       baseSha: subject.baseSha,
       deviceKeyId: key.fingerprint,
     },
-    httpLeasePorts(endpoint, await apiAuthHeader()),
+    httpLeasePorts(endpoint, await apiAuthHeader(endpoint)),
   );
 
   const startedAt = new Date().toISOString();
@@ -303,29 +321,14 @@ async function cmdVerifyLocal(argv: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdSetup(argv: string[]): Promise<number> {
-  if (!argv.includes("--install-push-warning")) {
-    process.stdout.write(developerSetupPrompt() + "\n");
-    return 0;
-  }
-
-  const result = await installPushWarning(process.cwd());
-  if (result.status === "refused") {
-    process.stderr.write(`[thwip] ${result.detail}: ${result.path}\n`);
-    return 1;
-  }
-  process.stderr.write(
-    `[thwip] ${result.status} non-blocking push warning at ${result.path}\n` +
-      "[thwip] it applies to every linked worktree; remove that marked hook to undo it\n",
-  );
-  return 0;
-}
-
-const TOKEN_PATH = join(homedir(), ".config", "thwip", "session-token");
+const SESSION_PATH = join(homedir(), ".config", "thwip", "session.json");
 
 /** RFC 8628 device authorization flow against the thwip control plane. */
 async function cmdLogin(argv: string[]): Promise<number> {
-  const endpoint = flag(argv, "--endpoint") ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
+  const config = await loadConfig();
+  const endpoint = normalizeSessionEndpoint(
+    flag(argv, "--endpoint") ?? config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT,
+  );
   const codeRes = await fetch(`${endpoint}/api/auth/device/code`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -361,10 +364,8 @@ async function cmdLogin(argv: string[]): Promise<number> {
     });
     const body = (await tokenRes.json().catch(() => ({}))) as { access_token?: string; error?: string };
     if (tokenRes.ok && body.access_token) {
-      const { writeFile, mkdir } = await import("node:fs/promises");
-      await mkdir(join(homedir(), ".config", "thwip"), { recursive: true });
-      await writeFile(TOKEN_PATH, body.access_token, { mode: 0o600 });
-      process.stderr.write(`[thwip] signed in; session token stored at ${TOKEN_PATH}\n`);
+      await writeStoredSession(SESSION_PATH, { endpoint, token: body.access_token });
+      process.stderr.write(`[thwip] signed in; session stored at ${SESSION_PATH}\n`);
       return 0;
     }
     if (body.error && body.error !== "authorization_pending" && body.error !== "slow_down") {
@@ -376,21 +377,35 @@ async function cmdLogin(argv: string[]): Promise<number> {
   return 1;
 }
 
-async function apiAuthHeader(): Promise<string | null> {
-  try {
-    const token = (await readFile(TOKEN_PATH, "utf8")).trim();
-    if (token) return `Bearer ${token}`;
-  } catch {
-    /* fall through */
+async function apiAuthHeader(endpoint: string): Promise<string | null> {
+  const session = await readStoredSession(SESSION_PATH);
+  if (session !== null) {
+    const normalized = normalizeSessionEndpoint(endpoint);
+    if (normalizeSessionEndpoint(session.endpoint) !== normalized) {
+      throw new Error(`the saved user session belongs to ${session.endpoint}, not ${normalized}; sign in to that endpoint first`);
+    }
+    return `Bearer ${session.token}`;
   }
   const adminToken = process.env["THWIP_ADMIN_TOKEN"];
   return adminToken ? `Bearer ${adminToken}` : null;
 }
 
+/** Init uses only a user session minted by the exact endpoint it will call. */
+async function initUserAuthHeader(endpoint: string): Promise<string | null> {
+  const normalized = normalizeSessionEndpoint(endpoint);
+  const session = await readStoredSession(SESSION_PATH);
+  if (session === null) return null;
+  if (normalizeSessionEndpoint(session.endpoint) !== normalized) {
+    throw new Error(`the saved user session belongs to ${session.endpoint}, not ${normalized}; run thwip login --endpoint ${normalized}`);
+  }
+  return `Bearer ${session.token}`;
+}
+
 async function cmdPolicyDigest(): Promise<number> {
   const cwd = process.cwd();
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader());
+  const config = await loadConfig();
+  const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
+  const project = await loadProjectConfigAtHead(cwd, endpoint, await apiAuthHeader(endpoint));
   process.stdout.write(
     JSON.stringify(
       {
@@ -408,58 +423,159 @@ async function cmdPolicyDigest(): Promise<number> {
   return 0;
 }
 
-/**
- * thwip init: scaffold thwip.yaml (non-interactive; agents pass flags) and
- * optionally point git's SSH commit signing at the same key thwip signs with.
- */
-async function cmdInit(argv: string[]): Promise<number> {
-  const cwd = process.cwd();
-  const { existsSync } = await import("node:fs");
-  const { writeFile } = await import("node:fs/promises");
-  const { git } = await import("./git.js");
+async function planInitConfig(root: string, requiredArg: string | null, profileArg: string | null) {
+  if (requiredArg === null) {
+    if (profileArg !== null) throw new Error("--profile requires --required");
+    return { result: "not-requested" as const, apply: async () => "not-requested" as const };
+  }
+  const required = requiredArg.split(",").map((value) => value.trim()).filter(Boolean);
+  const profile = profileArg ?? "fast";
+  if (required.length === 0 || required.some((id) => !/^[A-Za-z0-9_.:-]+$/.test(id))) {
+    throw new Error("--required must contain comma-separated suite ids");
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(profile)) throw new Error("--profile is invalid");
 
-  if (argv.includes("--sign-commits")) {
-    const config = await loadConfig();
-    const key = await discoverSigningKey(cwd, config.signingKey);
-    if (!key) {
-      process.stderr.write("no ed25519 signing key found; see: thwip keys status\n");
-      return 1;
+  const path = join(root, "thwip.yaml");
+  const { lstat, open } = await import("node:fs/promises");
+  try {
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`${path} is not a regular file; init will not replace it`);
     }
-    await git(["config", "gpg.format", "ssh"], cwd);
-    await git(["config", "user.signingkey", `${key.privateKeyPath}.pub`], cwd);
-    await git(["config", "commit.gpgsign", "true"], cwd);
-    process.stderr.write(`[thwip] git signs commits with ${key.fingerprint} (repo-local config)\n`);
-    if (!existsSync(`${cwd}/thwip.yaml`)) return 0;
+    return { result: "unchanged" as const, apply: async () => "unchanged" as const };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-
-  if (existsSync(`${cwd}/thwip.yaml`)) {
-    process.stderr.write("thwip.yaml already exists; edit it directly\n");
-    return 0;
-  }
-  const requiredArg = flag(argv, "--required");
-  if (!requiredArg) {
-    process.stderr.write('usage: thwip init --required "lint,typecheck,test" [--profile fast] [--sign-commits]\n');
-    return 1;
-  }
-  const profile = flag(argv, "--profile") ?? "fast";
-  const required = requiredArg
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
   const yaml = [
-    "# thwip.yaml — thwip settings for this repository",
+    "# thwip.yaml — repository-specific overrides",
     `# docs: ${DEFAULT_ENDPOINT}/faq`,
-    "# Repository identity comes from the git remote; suite commands come from",
-    "# package.json scripts (or an explicit `suites:` map for non-node repos).",
     "version: 1",
     `profile: ${profile}`,
     "required:",
     ...required.map((id) => `  - ${id}`),
     "",
   ].join("\n");
-  await writeFile(`${cwd}/thwip.yaml`, yaml);
-  process.stderr.write("[thwip] wrote thwip.yaml; review it, commit it, and activate the policy in the dashboard\n");
-  return 0;
+  return {
+    result: "created" as const,
+    apply: async () => {
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o644);
+      try {
+        await handle.writeFile(yaml);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return "created" as const;
+    },
+  };
+}
+
+function promptFactsFor(
+  context: { githubName: string; defaultBranch: string },
+  state: InitLiveState,
+  key: SigningKeyRead,
+): InitPromptFacts {
+  const repositoryState: InitPromptFacts["repositoryState"] =
+    state.kind === "signed-out"
+      ? "unreadable"
+      : state.kind === "not-visible"
+        ? "not-visible"
+        : state.kind;
+  const repositoryDetail =
+    state.kind === "unreadable" || state.kind === "signed-out"
+      ? state.detail
+      : state.kind === "not-ready"
+        ? state.reasons.join("; ")
+        : undefined;
+  return {
+    githubName: context.githubName,
+    defaultBranch: context.defaultBranch,
+    repositoryState,
+    signedIn: state.kind !== "signed-out",
+    keyState: key.kind === "unread" ? "unreadable" : key.kind,
+    ...(repositoryDetail === undefined ? {} : { repositoryDetail }),
+    ...(key.kind === "unread" ? { keyDetail: key.detail } : {}),
+  };
+}
+
+/**
+ * The one setup and refresh command. Remote calls are GET-only. Local writes
+ * happen only after the user session, GitHub origin, project incarnation, and
+ * default-branch readiness all agree.
+ */
+async function cmdInit(argv: string[]): Promise<number> {
+  let context;
+  try {
+    context = await readInitRepositoryContext(process.cwd(), gitInitRead);
+  } catch (error) {
+    process.stderr.write(`[thwip] init stopped: ${failureDetail(error)}\n`);
+    return EXIT.setupInvalid;
+  }
+  const config = await loadConfig();
+  const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
+  let auth: string | null;
+  try {
+    auth = await initUserAuthHeader(endpoint);
+  } catch (error) {
+    process.stderr.write(`[thwip] init stopped: ${failureDetail(error)}\n`);
+    return EXIT.authRequired;
+  }
+
+  let githubUserId = "";
+  if (auth !== null) {
+    try {
+      githubUserId = (await resolveGithubIdentity(config)).id;
+    } catch (error) {
+      process.stderr.write(`[thwip] init stopped: ${failureDetail(error)}\n`);
+      return EXIT.authRequired;
+    }
+  }
+  const live = await observeInitState({ endpoint, authHeader: auth, githubUserId, context, fetch });
+  let key: SigningKeyRead = { kind: "unread", detail: "sign in before checking the signing key" };
+  if (auth !== null) key = await readSigningKey(context.root);
+
+  let guidance:
+    | { state: "blocked" }
+    | {
+        state: "current" | "changed";
+        paths: readonly string[];
+        claudeCompatibility: "managed-file" | "agents-symlink";
+        cliCommand: string;
+      } = { state: "blocked" };
+  let configResult: "not-requested" | "unchanged" | "created" = "not-requested";
+
+  if (mayWriteGuidance(live)) {
+    const configPlan = await planInitConfig(
+      context.root,
+      flag(argv, "--required") ?? null,
+      flag(argv, "--profile") ?? null,
+    );
+    const sourceCheckout = findCliCheckout(context.root, existsSync, (path) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    });
+    const cliCommand = sourceCheckout === context.root ? "pnpm -w thwip" : NPX_COMMAND;
+    const result = await writeAgentGuidance(context.root, queueInstructions({ cliCommand }));
+    guidance = {
+      state: result.changed.length === 0 ? "current" : "changed",
+      paths: result.changed,
+      claudeCompatibility: result.claudeCompatibility,
+      cliCommand,
+    };
+    configResult = await configPlan.apply();
+
+  }
+
+  process.stdout.write(initReport(promptFactsFor(context, live, key), { guidance, config: configResult }) + "\n");
+  if (live.kind === "signed-out") return EXIT.authRequired;
+  if (live.kind === "not-visible") return EXIT.permission;
+  if (live.kind === "unreadable") return EXIT.unavailable;
+  if (key.kind === "missing" || key.kind === "unregistered") return EXIT.authRequired;
+  if (key.kind === "unread") return EXIT.unavailable;
+  return EXIT.ok;
 }
 
 /**
@@ -468,11 +584,12 @@ async function cmdInit(argv: string[]): Promise<number> {
  */
 async function cmdShip(argv: string[]): Promise<number> {
   const cwd = process.cwd();
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
+  const config = await loadConfig();
+  const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
   const jsonEvents = argv.includes("--json-events");
   const wait = argv.includes("--wait");
   const useQueue = !argv.includes("--no-queue");
-  const auth = await apiAuthHeader();
+  const auth = await apiAuthHeader(endpoint);
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
     return EXIT.authRequired;
@@ -482,7 +599,7 @@ async function cmdShip(argv: string[]): Promise<number> {
   const repositoryId = project.policy.repositoryId;
   // The queue is per base branch, and the branch a pull request targets is what
   // GitHub reports, not something the policy pins.
-  const baseRef = "refs/heads/" + (await defaultBranch(cwd));
+  const baseRef = "refs/heads/" + (await shipTargetBranch(cwd));
 
   let prNumber: number | null = await currentPrNumber(cwd);
   let headProof: "accepted" | "missing" | "stale" = "missing";
@@ -806,23 +923,23 @@ function turnFrom(
   }
 }
 
-/** The branch this pull request targets, as GitHub reports it. */
+/** The remote's current default branch, independent of the current pull request. */
 async function defaultBranch(cwd: string): Promise<string> {
+  const remote = await gitInitRead(["ls-remote", "--symref", "origin", "HEAD"], cwd);
+  const branch = /^ref:\s+refs\/heads\/([^\s]+)\s+HEAD$/m.exec(remote)?.[1] ?? null;
+  if (branch === null || branch.length === 0) throw new Error("could not read origin's current default branch");
+  return branch;
+}
+
+/** Preserve an existing pull request's target; use remote HEAD before one exists. */
+async function shipTargetBranch(cwd: string): Promise<string> {
   try {
-    const out = await run("gh", ["pr", "view", "--json", "baseRefName", "-q", ".baseRefName"], cwd);
-    const name = out.trim();
-    if (name.length > 0) return name;
+    const branch = (await run("gh", ["pr", "view", "--json", "baseRefName", "-q", ".baseRefName"], cwd)).trim();
+    if (branch.length > 0) return branch;
   } catch {
-    /* no pull request yet */
+    // A branch without a pull request targets the repository default.
   }
-  try {
-    const out = await run("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], cwd);
-    const name = out.trim();
-    if (name.length > 0) return name;
-  } catch {
-    /* fall through */
-  }
-  return "main";
+  return defaultBranch(cwd);
 }
 
 /** The open pull request for this branch, or nothing. See pull-request.ts. */
@@ -863,7 +980,7 @@ async function cmdQueue(argv: string[]): Promise<number> {
     return parsed.exitCode;
   }
   const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const auth = await apiAuthHeader();
+  const auth = await apiAuthHeader(endpoint);
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
     return EXIT.authRequired;
@@ -929,10 +1046,10 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
     return parsed.exitCode;
   }
   const repo = flag(argv, "--repo") ?? "";
-  const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
+  const ref = "refs/heads/" + (flag(argv, "--branch") ?? (await defaultBranch(process.cwd())));
   const allowUnread = argv.includes("--allow-unread");
   const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const auth = await apiAuthHeader();
+  const auth = await apiAuthHeader(endpoint);
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
     return EXIT.authRequired;
@@ -997,10 +1114,16 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
 async function cmdDoctor(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const allowUnread = argv.includes("--allow-unread");
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const repo = flag(argv, "--repo") ?? (await originName(cwd)) ?? "";
-  const ref = "refs/heads/" + (flag(argv, "--branch") ?? "main");
-  const auth = await apiAuthHeader();
+  const config = await loadConfig();
+  const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
+  const explicitRepo = flag(argv, "--repo");
+  const explicitBranch = flag(argv, "--branch");
+  const context = explicitRepo === null || explicitBranch === null
+    ? await readInitRepositoryContext(cwd, gitInitRead)
+    : null;
+  const repo = explicitRepo ?? context!.githubName;
+  const ref = "refs/heads/" + (explicitBranch ?? context!.defaultBranch);
+  const auth = await apiAuthHeader(endpoint);
 
   const local: LocalReads = {
     cli: await readCli(cwd),
@@ -1041,7 +1164,13 @@ async function cmdDoctor(argv: string[]): Promise<number> {
 /** The build identity and checkout relationship already enforced at startup. */
 async function readCli(cwd: string): Promise<CliRead> {
   const identity = await runningBuild();
-  const checkoutRoot = findCliCheckout(cwd, existsSync);
+  const checkoutRoot = findCliCheckout(cwd, existsSync, (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  });
   return {
     version: identity.version,
     commit: identity.commit,
@@ -1130,110 +1259,20 @@ async function probeRemote(
 async function originName(cwd: string): Promise<string | null> {
   try {
     const url = await git(["config", "--get", "remote.origin.url"], cwd);
-    return /github\.com[:/]([^/]+\/[^/.]+)/.exec(url)?.[1] ?? null;
+    return githubNameFromOrigin(url);
   } catch {
     return null;
   }
 }
 
 /**
- * How far repository activation has got. Enrolment owns it, so it is read from
- * the bootstrap route. A repository that has not been enrolled yet is
- * `configured`, which is what the file should say about it.
- */
-async function queueFacts(
-  endpoint: string,
-  repo: string,
-): Promise<{ activationState: "configured" | "observe" | "canary" | "enforced" }> {
-  const fallback = { activationState: "configured" } as const;
-  const auth = await apiAuthHeader();
-  if (auth === null) return fallback;
-  const repositoryId = await resolveRepositoryId(endpoint, auth, repo);
-  if (repositoryId === null) return fallback;
-  const res = await fetch(`${endpoint}/v1/queue/${repositoryId}/bootstrap`, {
-    headers: { authorization: auth },
-  });
-  if (!res.ok) return fallback;
-  const body = (await res.json()) as { activationState?: string };
-  return {
-    activationState:
-      body.activationState === "observe" ||
-      body.activationState === "canary" ||
-      body.activationState === "enforced"
-        ? body.activationState
-        : "configured",
-  };
-}
-
-/**
- * `thwip queue setup`. Printing the prompt is the default, the way `thwip setup`
- * prints the developer one, because the rest of enrolment is judgement and a
- * request only an organization administrator may make.
- *
- * `--write` performs the one step of that prompt with a single right answer:
- * THWIP.md, and the bounded pointer in whichever agent instruction files this
- * repository already has. It writes nothing it has not first shown, and the
- * pointer replaces only the text between its own delimiters, so instructions
- * somebody else authored survive.
+ * Queue enrolment remains a separate human-guided prompt. `thwip init` owns
+ * local agent guidance and this command never writes it.
  */
 async function cmdQueueSetup(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const repo = flag(argv, "--repo") ?? (await originName(cwd)) ?? "this repository";
-  if (!argv.includes("--write")) {
-    process.stdout.write(queueSetupPrompt(repo) + "\n");
-    return 0;
-  }
-
-  const { existsSync } = await import("node:fs");
-  const { writeFile } = await import("node:fs/promises");
-  const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const branch = flag(argv, "--branch") ?? (await defaultBranch(cwd));
-
-  let hasDaggerModule = false;
-  try {
-    const { parseThwipYaml } = await import("@thwip/policy");
-    hasDaggerModule = parseThwipYaml(await readFile(join(cwd, "thwip.yaml"), "utf8")).pipeline !== undefined;
-  } catch {
-    hasDaggerModule = false;
-  }
-
-  const { activationState } = await queueFacts(endpoint, repo);
-  const instructions = queueInstructions({
-    repositoryName: repo,
-    baseRef: `refs/heads/${branch}`,
-    activationState,
-    hasDaggerModule,
-  });
-
-  const written: string[] = [];
-  const thwipMd = join(cwd, "THWIP.md");
-  const existingMd = existsSync(thwipMd) ? await readFile(thwipMd, "utf8") : null;
-  if (existingMd === instructions) {
-    process.stderr.write("[thwip] THWIP.md is already current\n");
-  } else {
-    // Nine documentation commits went into this repository's own THWIP.md. An
-    // existing file is the author's, so the generated one goes beside it and
-    // they reconcile it, rather than losing that history to a setup command.
-    const target = existingMd === null ? thwipMd : `${thwipMd}.new`;
-    await writeFile(target, instructions);
-    written.push(target);
-  }
-
-  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-    const path = join(cwd, name);
-    if (!existsSync(path)) continue;
-    const existing = await readFile(path, "utf8");
-    const updated = withQueuePointer(existing);
-    if (updated === existing) continue;
-    await writeFile(path, updated);
-    written.push(path);
-  }
-
-  if (written.length === 0) {
-    process.stderr.write("[thwip] nothing to change\n");
-    return 0;
-  }
-  process.stderr.write(`[thwip] wrote ${written.join(", ")}; review the diff before committing\n`);
+  process.stdout.write(queueSetupPrompt(repo) + "\n");
   return 0;
 }
 
@@ -1254,7 +1293,7 @@ async function cmdQueueWork(argv: string[]): Promise<number> {
   const repo = flag(argv, "--repo") ?? "";
   const cwd = process.cwd();
   const endpoint = process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT;
-  const auth = await apiAuthHeader();
+  const auth = await apiAuthHeader(endpoint);
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
     return EXIT.authRequired;
@@ -1312,8 +1351,6 @@ async function dispatchCli(invocation: CommandInvocation): Promise<number> {
       return cmdVerifyChain([...invocation.argv]);
     case "keys-status":
       return cmdKeysStatus();
-    case "setup":
-      return cmdSetup([...invocation.argv]);
     case "policy-digest":
       return cmdPolicyDigest();
     case "version":
@@ -1342,11 +1379,16 @@ async function runningBuild(): Promise<BuildIdentity> {
  * command; deliberate low-level Git remains untouched.
  */
 async function rejectForeignBuild(): Promise<boolean> {
-  const { existsSync } = await import("node:fs");
   const identity = await runningBuild();
   const failure = buildMismatchFailure({
     runningMainPath: identity.mainPath,
-    checkoutRoot: findCliCheckout(process.cwd(), existsSync),
+    checkoutRoot: findCliCheckout(process.cwd(), existsSync, (path) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    }),
     identity,
   });
   if (failure === null) return false;
@@ -1355,7 +1397,10 @@ async function rejectForeignBuild(): Promise<boolean> {
 }
 
 async function main(): Promise<void> {
-  if (await rejectForeignBuild()) {
+  // Init is deliberately allowed through npx in a checkout that builds its own
+  // CLI. It only performs read-only remote probes and bounded local setup. All
+  // proof, signing, and shipping commands keep the strict build identity gate.
+  if (!setupCommandMayUseForeignBuild(process.argv.slice(2)) && (await rejectForeignBuild())) {
     process.exitCode = EXIT.setupInvalid;
     return;
   }
