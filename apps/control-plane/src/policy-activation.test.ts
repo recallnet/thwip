@@ -141,7 +141,7 @@ function fixture(): { database: Database.Database; env: Env } {
     INSERT INTO organizations (id, github_org_id, github_login, installation_id)
     VALUES ('org_1', '10', 'recallnet', 'installation_1');
     INSERT INTO projects (id, organization_id, github_repository_id, github_name, default_branch)
-    VALUES ('project_1', 'org_1', '20', 'recallnet/playhouse', 'main');
+    VALUES ('project_1', 'org_1', '20', 'example/project', 'main');
   `);
   const d1 = new TestD1(database);
   // Activation re-verifies every open head under the policy it just activated,
