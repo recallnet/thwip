@@ -372,8 +372,8 @@ const app = new Hono<{ Bindings: Env }>();
  * the invocation alive past the response, which is what lets a queue receiving
  * twenty webhooks an hour keep moving with no scheduled trigger at all.
  *
- * A registered schedule can stop dispatching while ordinary traffic continues,
- * so requests also keep the maintenance clock moving.
+ * Scheduled triggers can stop while ordinary requests continue, so request
+ * traffic is allowed to recover a stale queue clock.
  */
 app.use("*", async (c, next) => {
   await next();
@@ -433,8 +433,8 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => createAuth(c.env).handler(c.req.ra
 app.get("/health", async (c) => {
   // The age of the last finished tick, signed with everything else here.
   //
-  // A stopped clock is what this endpoint makes external. A trigger can stop
-  // while its schedule remains registered and the Worker keeps answering.
+  // A stopped clock is public even when the Worker still answers requests and
+  // the scheduler still lists its trigger.
   const clock = await readClock(c.env.DB as unknown as D1Like);
   const now = nowIso();
   const ageSeconds = tickAgeSeconds(clock, now);
@@ -453,8 +453,8 @@ app.get("/health", async (c) => {
       source: clock.source,
       ageSeconds,
       stale: ageSeconds > TICK_STALE_SECONDS,
-      // Null once a tick has finished cleanly. Age alone does not explain why a
-      // clock stopped.
+      // Null once a tick has finished cleanly. Age alone cannot explain why a
+      // queue stopped.
       lastError: clock.lastError,
       lastErrorAt: clock.lastErrorAt,
     },
@@ -477,14 +477,11 @@ app.get("/health", async (c) => {
 /**
  * Which migrations this deployment's database has.
  *
- * `scripts/control-plane.mjs deploy` refuses code that needs a migration the
- * database does not have by reading this endpoint. The older gate ran
- * `wrangler d1 migrations list --remote`, making shipping the Worker and
- * rewriting its tables one authority, so a second contributor could not be
- * given the first without the second.
+ * Deployment tooling can refuse code that needs a migration the database does
+ * not have by reading this endpoint. This keeps schema inspection read-only.
  *
  * Public, and unauthenticated, for the same reason `/health` publishes the
- * build it is running: a name in `migrations/` is the schema's version and says
+ * build it is running: a migration name is the schema's version and says
  * nothing about any row. Requiring a credential here would put the deploy gate
  * back to needing one.
  */

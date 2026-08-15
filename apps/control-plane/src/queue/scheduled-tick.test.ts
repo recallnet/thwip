@@ -220,9 +220,8 @@ describe("the queue heartbeat", () => {
   /**
    * The condition under which the clock stopped and nobody could say why.
    *
-   * A paused fleet has no eligible work and drives nothing. A pass that records
-   * itself only when it moves something would misreport an idle fleet as a
-   * stopped clock.
+   * A pass that records itself only when it moves work would report an idle or
+   * paused fleet as a stopped clock.
    */
   it("ticks a paused queue, so a quiet fleet is not read as a stopped clock", async () => {
     const e = env();
@@ -1494,16 +1493,7 @@ describe("settling a merge write whose response was lost", () => {
     ).toEqual({ sequence: 1 });
   });
 
-  /**
-   * Re-epoching can move the attested range past every existing record, and the two lookups
-   * that answer "does the chain hold this merge" were scoped to the current
-   * range. Fifty-nine merges recorded below it read back as unrecorded, and the
-   * sweep began writing a second record for each at the head, so the new range
-   * said the base had moved to a commit the branch had left days before.
-   *
-   * A range boundary says which records a verifier is asked to check. It does
-   * not un-record a merge.
-   */
+  /** A range boundary must not make an already-recorded merge look absent. */
   it("writes no second record for a merge the chain holds behind the attested range", async () => {
     const e = env();
     const db = e.DB as unknown as D1Like;

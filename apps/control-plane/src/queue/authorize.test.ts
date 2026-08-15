@@ -8,8 +8,8 @@ import { queueRoutes, type QueueRouteEnv } from "./routes.js";
  * The merge gate, end to end, over the storage it actually uses.
  *
  * This could not be written while the queue lived in a Durable Object, because a
- * route needed a namespace no test could provide, so the one property the product
- * exists to guarantee was only ever checked on staging. It needs D1 now, and D1 is
+ * route needed a namespace no test could provide, so the key property was not
+ * covered by a unit test. It needs D1 now, and D1 is
  * SQLite, so the question "can two pull requests be told they hold the lane at
  * once" can finally be asked in a unit test.
  */

@@ -14,10 +14,8 @@ import { SWEEP_INTERVAL_SECONDS } from "./runners.js";
  * invocation; if that drive does not reach a merge — a slow GitHub read, a
  * candidate not yet resolved, a rate limit — the next sweep arrives 300 seconds
  * later, finds the offer 210 seconds past its deadline, and expires it before
- * anything drives it again. One transient failure therefore cost the whole turn,
- * every time, and the queue spent 9 August cycling offer, expire, cool down,
- * offer, with a merge landing only when a webhook happened to drive it
- * synchronously.
+ * anything drives it again. One transient failure would therefore cost the
+ * whole turn and leave progress dependent on a webhook.
  *
  * So the rule is a relation rather than a number: any window the sweep ends is
  * written in sweeps, and at least two of them. One sweep to see the state, one
