@@ -97,14 +97,20 @@ describe("help", () => {
     expect(parseCliArgs(["help", "queue", "bypass"])).toMatchObject({ kind: "help" });
   });
 
-  it("separates proof-only drafts from queue completion", () => {
+  it("gives drafts one complete command that never joins the queue", () => {
     const action = parseCliArgs(["ship", "--help"]);
     expect(action.kind).toBe("help");
     const text = action.kind === "help" ? action.text : "";
-    expect(text).toContain("existing draft");
+    expect(text).toContain("thwip ship --draft");
+    expect(text).toContain("without queueing or merging");
     expect(text).toContain("--no-queue");
-    expect(text).toContain("thwip run");
-    expect(text).toContain("gh pr create --draft");
+  });
+
+  it("refuses contradictory ship modes before doing any work", () => {
+    expect(parseCliArgs(["ship", "--wait", "--draft"])).toEqual({
+      kind: "error",
+      message: "--wait and --draft cannot be used together",
+    });
   });
 });
 

@@ -30,10 +30,9 @@ describe("canonical AGENTS instructions", () => {
   it("keeps draft proof separate from queueing and merging", () => {
     const text = instructions();
     expect(text).toContain("Draft or review-only work");
-    expect(text).toContain("npx @recallnet/thwip@latest run");
-    expect(text).toContain("gh pr create --draft");
-    expect(text).toContain("npx @recallnet/thwip@latest ship --no-queue");
-    expect(text).toMatch(/leaves\s+the existing pull request as a draft/);
+    expect(text).toContain("npx @recallnet/thwip@latest ship --draft");
+    expect(text).toMatch(/creates or\s+refreshes the draft pull request/);
+    expect(text).toContain("stops without joining the queue");
     expect(text).toContain("Do not mark the draft ready, join the queue, or merge unless the user asks");
   });
 

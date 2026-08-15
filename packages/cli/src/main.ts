@@ -38,7 +38,7 @@ import { acquireRunLease, httpLeasePorts } from "./run-lease.js";
 import { type CommandInvocation } from "./cli-args.js";
 import { classifyFailure, failureDetail, runCliProcess } from "./cli-failure.js";
 import { forceArgs, planPush } from "./push-plan.js";
-import { openPullRequestNumber } from "./pull-request.js";
+import { openPullRequest, pullRequestCommand, type OpenPullRequest } from "./pull-request.js";
 import {
   buildMismatchFailure,
   findCliCheckout,
@@ -588,7 +588,8 @@ async function cmdShip(argv: string[]): Promise<number> {
   const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
   const jsonEvents = argv.includes("--json-events");
   const wait = argv.includes("--wait");
-  const useQueue = !argv.includes("--no-queue");
+  const draft = argv.includes("--draft");
+  const useQueue = !draft && !argv.includes("--no-queue");
   const auth = await apiAuthHeader(endpoint);
   if (auth === null) {
     process.stderr.write("not signed in: run `thwip login`\n");
@@ -601,7 +602,12 @@ async function cmdShip(argv: string[]): Promise<number> {
   // GitHub reports, not something the policy pins.
   const baseRef = "refs/heads/" + (await shipTargetBranch(cwd));
 
-  let prNumber: number | null = await currentPrNumber(cwd);
+  const initialPullRequest = await currentPullRequest(cwd);
+  // A ready pull request must pass through the PR step before draft shipping is
+  // complete. Reporting it as present here would let the planner stop without
+  // asking GitHub to convert it.
+  let prNumber: number | null =
+    pullRequestCommand(initialPullRequest, draft) === null ? (initialPullRequest?.number ?? null) : null;
   let headProof: "accepted" | "missing" | "stale" = "missing";
   // Which attempt the queue is running, read from the snapshot each time it is
   // observed. A claim names the attempt it answers, and claiming under a stale
@@ -686,13 +692,17 @@ async function cmdShip(argv: string[]): Promise<number> {
       // Its failure used to be discarded. gh writes what it refused on stderr,
       // and that sentence is the only thing that tells a developer whether they
       // are missing a token, a base branch, or a commit — so it is reported.
-      const created = await run("gh", ["pr", "create", "--fill"], cwd).then(
+      const current = await currentPullRequest(cwd);
+      const command = pullRequestCommand(current, draft);
+      const operation = command === null ? Promise.resolve("") : run("gh", [...command], cwd);
+      const failure = await operation.then(
         () => null,
         (error: unknown) => failureDetail(error),
       );
-      prNumber = await currentPrNumber(cwd);
-      if (prNumber === null) {
-        process.stderr.write(`[thwip] gh pr create opened nothing: ${created ?? "no error reported"}\n`);
+      const observed = await currentPullRequest(cwd);
+      prNumber = observed?.number ?? null;
+      if (observed === null || (draft && !observed.isDraft)) {
+        process.stderr.write(`[thwip] gh left no ${draft ? "draft " : ""}pull request: ${failure ?? "no error reported"}\n`);
         return { pullRequestNumber: null, reasonCode: "PR_NOT_OPENED" };
       }
       return { pullRequestNumber: prNumber };
@@ -942,10 +952,10 @@ async function shipTargetBranch(cwd: string): Promise<string> {
   return defaultBranch(cwd);
 }
 
-/** The open pull request for this branch, or nothing. See pull-request.ts. */
-async function currentPrNumber(cwd: string): Promise<number | null> {
+/** The open pull request for this branch, including GitHub's draft state. */
+async function currentPullRequest(cwd: string): Promise<OpenPullRequest | null> {
   try {
-    return openPullRequestNumber(await run("gh", ["pr", "view", "--json", "number,state"], cwd));
+    return openPullRequest(await run("gh", ["pr", "view", "--json", "number,state,isDraft"], cwd));
   } catch {
     return null;
   }
