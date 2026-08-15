@@ -2424,10 +2424,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * `reconcile` is the repair tool and it refuses unless an attempt still holds
    * the lane. The failure it exists for takes the lane away first: the queue read
    * GitHub before GitHub's read caught up with its own write, concluded
-   * CONFIRMED_NOT_MERGED, and terminated the attempt. Four merges landed that
-   * way and the chain has no link for any of them, and by the time anyone noticed
-   * `reconcile` answered 409 for every one. A repair tool that only works while
-   * the failure is still in progress is not a repair tool.
+   * CONFIRMED_NOT_MERGED, and terminated the attempt. A merge can land that way
+   * without a chain link, after which `reconcile` answers 409. A repair tool
+   * that only works while the failure is still in progress is not a repair tool.
    *
    * So this needs nothing from the attempt. The signed merge intent is what
    * survives it, and it holds everything a transition record cites. The operator
@@ -2549,9 +2548,9 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * tree, no parent vector, no commit sha: the finding names the two ends of
    * the gap, the commits in between come from GitHub, and which of them a merge
    * record may be written for is decided by whether a signed intent pins that
-   * tree on those parents. An operator who could name the commit could name the
-   * throwaway merge GitHub computes for an open pull request, which is how
-   * record 54 reached the chain.
+   * tree on those parents. An operator who could name the commit could name a
+   * temporary merge GitHub computes for an open pull request, so the commit is
+   * derived instead.
    *
    * The plan is recomputed here from a fresh verification rather than accepted
    * from the caller, so a heal cannot answer a gap that has closed, or a gap
@@ -2678,8 +2677,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
   /**
    * Correct a record that names a sha the branch does not have.
    *
-   * Record 54 says pull request 107's merge left the base at the throwaway test
-   * merge GitHub computes for an open pull request. Main took a different commit
+   * The incorrect record says a merge left the base at the temporary merge
+   * GitHub computes for an open pull request. The branch took a different commit
    * with the same tree and the same parents. The cause is fixed; the record is
    * not, and cannot be: its digest is the next record's predecessor and six
    * records chain from it, so editing the bytes means re-signing seven records
@@ -2698,8 +2697,8 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    *    is asked whether the branch contains the sha the record names, and a
    *    `true` is refused: a record whose sha is on the branch has nothing wrong
    *    with it, whatever an administrator believes. A branch that cannot be
-   *    asked is refused too, because signing an unchecked claim is exactly what
-   *    produced record 54.
+   *    asked is refused too, because signing an unchecked claim can create the
+   *    same defect.
    * 2. The sha it is corrected to must be on the branch, asked the same way.
    * 3. That commit must be the same commit under another name. Its tree and its
    *    parent vector come from GitHub and have to equal the ones the record

@@ -6,13 +6,13 @@ import { verifyChain, type ChainLink } from "./verify-chain.js";
 /**
  * Correcting a record without rewriting it.
  *
- * Chain record 54 on staging says pull request 107's merge left the base at
+ * This fixture says a merge left the base at
  * `ff6ea882feefd64c4e9f4dff909209e7adb281e3`. That commit is the throwaway test
  * merge GitHub computes for an open pull request. It is on no branch and never
  * was. Main became `0b2076107aa20f8b365d3b510de4838b05d12622`, which carries the
  * same tree and the same parents in the same order.
  *
- * The bytes cannot change. Record 54's digest is record 55's predecessor and
+ * The bytes cannot change. The record's digest is its successor's predecessor and
  * five more records chain from it, so editing it means re-signing seven records
  * under new digests, which replaces the chain rather than repairing it.
  *
@@ -114,7 +114,7 @@ function correctionRecord(over: {
       correctedBaseSha: over.correctedBaseSha ?? TEST_MERGE,
       attemptId: over.attemptId ?? ATTEMPT,
       actorPrincipalId: "prn_amelia",
-      reason: "record 54 names the test merge GitHub computed for pull request 107 while it was open",
+      reason: "the record names a temporary merge GitHub computed while the pull request was open",
     },
   };
 }
@@ -126,7 +126,7 @@ async function asLink(record: Record<string, unknown>): Promise<ChainLink> {
 
 const ports = { verifySignature: async () => true, epochStartsAt: 53 };
 
-/** Records 53 and 54 as the live chain holds them, and the record that follows. */
+/** Two signed records around the incorrect link, plus the record that follows. */
 async function staging(): Promise<{ fiftyThree: ChainLink; fiftyFour: ChainLink; fiftyNine: ChainLink }> {
   const fiftyThree = await asLink(
     mergeRecord({

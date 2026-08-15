@@ -92,7 +92,7 @@ describe("the verification summary", () => {
           to: "0b2076107aa20f8b365d3b510de4838b05d12622",
           observedAt: "2026-08-02T09:00:00.000Z",
           actorPrincipalId: "prn_amelia",
-          reason: "record 54 names the test merge for pull request 107",
+          reason: "the record names a temporary merge",
         },
       ],
     );

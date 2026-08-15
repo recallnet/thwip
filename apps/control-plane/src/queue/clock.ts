@@ -3,12 +3,9 @@ import type { D1Like } from "./projection.js";
 /**
  * When the queue last moved, and what moved it.
  *
- * The five minute trigger was the only thing that ran the sweep. On 5 August
- * Cloudflare stopped dispatching it at 03:55Z, after thirteen consecutive
- * firings that exceeded the Worker's budget, and its own API went on listing
- * the schedule for the eleven hours that followed. Three deploys landed in that
- * window and none of them re-armed it. Webhooks arrived the whole time and not
- * one of them was allowed to move the queue.
+ * A scheduled trigger can stop firing while the Worker still receives normal
+ * traffic. Traffic therefore acts as a second clock instead of leaving queue
+ * progress dependent on one scheduler.
  *
  * This row lets anything move it. The cron claims it, and a request that
  * arrives while the row is stale claims it too, so ordinary traffic carries the
@@ -45,11 +42,9 @@ export const TICK_STALE_SECONDS = 900;
  * answered in minutes; whether the queue has stopped is answered in quarter
  * hours, from `finished_at`.
  *
- * Asking both of `started_at` is what starved the traffic clock on 5 August.
- * The cron claimed every five minutes and died every time, so `started_at` was
- * never older than the fifteen minutes the traffic claim demanded, and for
- * thirty minutes every request through the door was refused the work it existed
- * to pick up. A healthy tick on this queue finishes in under a minute.
+ * Comparing both questions to `started_at` can starve traffic takeover when a
+ * scheduled tick starts repeatedly but never finishes. A healthy tick on this
+ * queue finishes in under a minute.
  */
 const TICK_RUN_TIMEOUT_SECONDS = 240;
 
@@ -90,11 +85,8 @@ export async function finishTick(db: D1Like, now: string): Promise<void> {
 /**
  * Record why a tick did not finish.
  *
- * `queue_clock` used to answer one question — has the queue stopped — and every
- * diagnostic anybody had gave the same answer: an age. Twelve firings an hour
- * died for an hour on 5 August and finding out why meant reading invocation
- * analytics against webhook rows by hand. The watchdog that already notices a
- * stopped clock can now say what stopped it.
+ * An age says that the queue stopped but not why. Recording the last failure
+ * lets the watchdog report the cause without a manual log reconstruction.
  */
 export async function failTick(db: D1Like, now: string, error: unknown): Promise<void> {
   const said = error instanceof Error ? error.message : String(error);

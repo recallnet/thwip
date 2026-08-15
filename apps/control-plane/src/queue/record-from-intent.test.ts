@@ -1158,20 +1158,7 @@ describe("recordMergeFromIntent", () => {
     expect(outcome).toMatchObject({ status: "refused", code: "MERGE_NOT_ON_BASE" });
   });
 
-  /**
-   * What re-epoching this repository did on 5 August, before this was fixed.
-   *
-   * The attested range moved to 152 and fifty-nine merges recorded below it
-   * read back as unrecorded, because both lookups here were scoped to the
-   * current range. The sweep wrote a second record for each, at the head, so
-   * the new range said the base had moved to a commit the branch had left days
-   * before. The walk broke at the first one.
-   *
-   * A range boundary says which records a verifier is asked to check. It does
-   * not un-record a merge, and it does not put the branch back on the commit
-   * before it. Reading a record filtered out of view as a record that is not
-   * there is the defect this repository keeps producing.
-   */
+  /** A range boundary must not make an already-recorded merge look absent. */
   it("does not record a second time for a merge the chain already holds behind the range", async () => {
     const e = env();
     seed();

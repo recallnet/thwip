@@ -7,7 +7,7 @@ describe("verification bundle resolution contract", () => {
       parseBundleResolutionBody({
         state: "bootstrap_pending",
         code: "POLICY_AWAITING_FIRST_MERGE",
-        repository: "recallnet/playhouse",
+        repository: "example/project",
         repositoryId: "123",
         projectId: "project-old",
         defaultBranch: "main",
@@ -15,7 +15,7 @@ describe("verification bundle resolution contract", () => {
     ).toEqual({
       kind: "bootstrap_pending",
       code: "POLICY_AWAITING_FIRST_MERGE",
-      repository: "recallnet/playhouse",
+      repository: "example/project",
       repositoryId: "123",
       projectId: "project-old",
       defaultBranch: "main",
@@ -36,7 +36,7 @@ describe("verification bundle resolution contract", () => {
       parseBundleResolutionBody({
         state: "bootstrap_pending",
         code: "PROJECT_DISABLED",
-        repository: "recallnet/playhouse",
+        repository: "example/project",
         repositoryId: "123",
         projectId: "project-old",
         defaultBranch: "main",

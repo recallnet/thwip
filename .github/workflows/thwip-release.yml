@@ -6,9 +6,8 @@ run-name: "thwip: release from ${{ github.sha }}"
 #
 # Nobody chooses the version. A breaking change is major and a feat is minor.
 # Every other change to a shipped input is a patch, including a plain-language
-# merge title. That default matters because the queue does not require
-# Conventional Commit titles and silently skipped three real releases when this
-# workflow did.
+# merge title. The queue does not require Conventional Commit titles, so a
+# plain-language change must still produce a release.
 #
 # Bumping, tagging and publishing live in one job on purpose. A tag pushed with
 # GITHUB_TOKEN does not trigger another workflow, so splitting them would leave
@@ -20,12 +19,12 @@ on:
     # Only what ends up inside the CLI or Action, plus the release machinery
     # that decides and produces them.
     #
-    # This ran on every push to main and cut a release from any commit that
-    # looked releasable, so a change to the Worker published a new CLI that was
-    # byte-identical to the last one. Two versions went out inside a minute that
-    # way. The release planner independently derives the complete workspace
-    # dependency closure, and its test keeps this trigger in step with it.
+    # A Worker-only change must not publish a byte-identical CLI. The release
+    # planner derives the complete workspace dependency closure, and its test
+    # keeps this trigger in step with it.
     paths:
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
       - "action.yml"
       - "packages/action/**"
       - "packages/cli/**"
@@ -53,6 +52,11 @@ permissions:
 concurrency:
   group: thwip-release
   cancel-in-progress: false
+
+env:
+  # Set this repository variable to the numeric ID of the canonical repository.
+  # A renamed or replaced repository must be approved explicitly.
+  THWIP_RELEASE_REPOSITORY_ID: ${{ vars.THWIP_RELEASE_REPOSITORY_ID }}
 
 jobs:
   release:
@@ -107,8 +111,7 @@ jobs:
 
       # The version travels in the environment. Writing it into
       # packages/cli/package.json first left the checkout dirty, and the build
-      # stamp says so, so every published release claimed `<sha>-dirty` and
-      # `thwip version` on a clean install from npm read like a local hack.
+      # stamp would then claim `<sha>-dirty` for a clean release.
       - name: Build the package at the new version
         if: steps.decide.outputs.release == 'true'
         env:
@@ -195,13 +198,9 @@ jobs:
       # a lie the next run has to work around.
       # Only a tag. Nothing is pushed to the branch.
       #
-      # This used to commit the version bump to main, which a protected branch
-      # cannot accept: a direct push carries no status checks, so GitHub rejects
-      # it for the checks it is missing. The publish had already happened by
-      # then, so npm moved and the tag did not — and because the next version was
-      # derived from the file that never got committed, the pipeline computed an
-      # already-published version and skipped, for good. It shipped nothing for a
-      # day while reporting success.
+      # A protected branch cannot accept a direct version-bump push without its
+      # required checks. Publishing first and failing that push would leave npm
+      # and the Git tag out of step.
       #
       # A tag is not covered by a branch rule, and the registry is the record of
       # what exists. The version in packages/cli/package.json is a floor the
@@ -212,9 +211,9 @@ jobs:
         env:
           V: ${{ steps.decide.outputs.version }}
           GIT_AUTHOR_NAME: thwip release
-          GIT_AUTHOR_EMAIL: noreply@recall.network
+          GIT_AUTHOR_EMAIL: noreply@thwip.ai
           GIT_COMMITTER_NAME: thwip release
-          GIT_COMMITTER_EMAIL: noreply@recall.network
+          GIT_COMMITTER_EMAIL: noreply@thwip.ai
         run: |
           set -euo pipefail
           git tag -a "v$V" -m "thwip $V"

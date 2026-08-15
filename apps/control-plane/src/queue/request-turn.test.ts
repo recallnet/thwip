@@ -15,10 +15,8 @@ import type { QueueStateStore } from "@thwip/queue-domain";
  * So any later `pull_request` delivery about a merged pull request, including a
  * redelivery of one from before the merge, resurrected its entry into
  * `Requested` with a fresh ordinal and no eligibility. Nothing ever offered it
- * a turn, so nothing ever cancelled it, and it sat in the line for good. On
- * 5 August pull requests 201 and 209 were still queued five hours after they
- * merged, and every status comment written in that window named them as ahead
- * of the pull request actually holding the lane.
+ * a turn, so nothing ever cancelled it, and it could remain in the line while
+ * status comments named it ahead of the pull request actually holding the lane.
  */
 
 function storeWith(entry: { state: string; fairnessOrdinal: bigint } | null): QueueStateStore {

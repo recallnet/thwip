@@ -106,9 +106,8 @@ describe("the queue clock", () => {
 /**
  * What a request does about a clock that has stopped.
  *
- * The queue kept answering webhooks for eleven hours on 5 August while its own
- * clock was dead, so the traffic needed to run a tick was arriving the whole
- * time and nothing was allowed to use it. This is what uses it.
+ * The Worker may keep answering webhooks while its scheduled clock is dead.
+ * This path lets that traffic run the overdue tick.
  */
 describe("tickOwedByTraffic", () => {
   const fresh = { startedAt: "2026-08-05T12:00:00.000Z", finishedAt: "2026-08-05T12:00:03.000Z", source: "cron" };
@@ -135,12 +134,9 @@ describe("tickOwedByTraffic", () => {
    * A cron that starts a tick every five minutes and never finishes one must
    * not lock traffic out of the queue.
    *
-   * The claim compared `started_at` against the same fifteen minutes that
-   * define staleness, so each failing firing refreshed `started_at` and put the
-   * next traffic claim fifteen minutes away again. Live on 5 August between
-   * 18:46Z and 19:16Z: the row read `started_at 19:10:47` with
-   * `finished_at 18:46:42`, thirty minutes of no finished tick, and every
-   * request through the door was refused the work it existed to pick up.
+   * The claim once compared `started_at` against the same interval that defines
+   * staleness. Each failing firing could then refresh `started_at` and postpone
+   * traffic takeover again.
    *
    * Two different questions were being asked of one column. Whether a tick is
    * already running is about `started_at` and is answered in minutes. Whether
@@ -225,9 +221,8 @@ describe("tickOwedByTraffic", () => {
 /**
  * A stopped clock that says only how long it has been stopped.
  *
- * Twelve firings an hour died for an hour on 5 August, and every diagnostic
- * anybody had reported an age. Finding the cause meant reading invocation
- * analytics against webhook rows minute by minute, by hand.
+ * An age alone does not explain why the clock stopped, so the failure is stored
+ * with the clock.
  */
 describe("why the last tick did not finish", () => {
   const held: Array<{ close(): void }> = [];

@@ -55,9 +55,7 @@ export interface QueueTimings {
  * not reach a merge — a slow GitHub read, a candidate not yet resolved, a rate
  * limit — the next sweep arrives 300 seconds later, finds the offer 210 seconds
  * overdue and expires it before anything drives it again. One transient failure
- * cost the entire turn, every time. On 9 August 2026 the queue spent the day
- * cycling offer, expire, cool down, offer, and merged only when a webhook
- * happened to drive it synchronously.
+ * would then cost the entire turn and leave progress dependent on a webhook.
  *
  * Two sweeps is the floor: one to see the state, one to act on it, so a single
  * missed firing does not lose a turn. `timings.test.ts` holds the relation and

@@ -89,9 +89,9 @@ describe("verifying a chain", () => {
   });
 
   /**
-   * The failure the sequence check cannot see, taken from the live chain.
+   * A failure the sequence check cannot see.
    *
-   * PR 105 merged as a1fe3e7 and wrote no record. Record 52 left the base at
+   * A merge landed as a1fe3e7 and wrote no record. Record 52 left the base at
    * 7059839; record 53 says it began at a1fe3e7, whose parent is 7059839.
    * Sequence numbers are handed out per recorded transition, so an unrecorded
    * merge leaves no hole: 53 follows 52 and every existing check agrees.
@@ -177,9 +177,9 @@ describe("verifying a chain", () => {
   });
 
   /**
-   * The repaired chain, taken from the live staging chain.
+   * A repaired chain with merges recorded after the fact.
    *
-   * Four merges landed with no record. They were recorded afterwards by a route
+   * Several merges landed with no record. They were recorded afterwards by a route
    * that appends, and the chain is hash-linked, so the four could only land at
    * the head as 55, 56, 57 and 58, never back where the merges happened. Log
    * order stopped being history order at that moment.
@@ -238,7 +238,7 @@ describe("verifying a chain", () => {
       expect(findings).toEqual([]);
     });
 
-    it("still reports the hole when the record for PR 105 is not there", async () => {
+    it("still reports the hole when the merge record is not there", async () => {
       const links = (await repaired()).filter((l) => l.sequence !== 58);
       const { findings } = await verifyChain(links, atEpoch);
       expect(findings.map((f) => f.code)).toEqual(["BASE_DISCONTINUITY"]);
@@ -361,8 +361,8 @@ describe("verifying a chain", () => {
   /**
    * A repository that has never been rebaselined sits at queue epoch 0, and its
    * chain opens at sequence 1. Every fixture here passed `epochStartsAt: 1`, so
-   * nothing exercised that pair, and `thwip verify-chain` on recallnet/thwip-test
-   * reported `MISSING_PREFIX` on a two-link chain that was whole. Sequence 1 is
+   * nothing exercised that pair and a complete two-link chain could report
+   * `MISSING_PREFIX`. Sequence 1 is
    * where a chain starts: the record schema binds it to a null predecessor, so
    * there is no earlier link a server could have withheld.
    */

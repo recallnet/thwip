@@ -869,9 +869,8 @@ describe("recordCoveringCommit across an epoch bump", () => {
 
     const covering = await recordCoveringCommit(db, "1315419165", "refs/heads/main", commitSha);
 
-    // Scoping this to the current range is what re-epoching this repository on
-    // 5 August turned into fifty-nine second records written at the head, each
-    // one saying the base had moved to a commit the branch left days before.
+    // Scoping this to the current range would let re-epoching create duplicate
+    // records at the head for commits the branch left earlier.
     expect(covering).toMatchObject({ digest: `sha256:${"n".repeat(64)}`, attemptId: "att_dead_epoch" });
   });
 });

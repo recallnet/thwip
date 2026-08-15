@@ -38,13 +38,7 @@ describe("what the App asks for against what it needs", () => {
     expect(source("queue/bootstrap-workflows.ts")).not.toMatch(/verify:[\s\S]{0,500}actions:\s*read/);
   });
 
-  /**
-   * Demonstrated on recallnet/thwip on 4 August. The App holds no `issues`
-   * scope of any kind, and it wrote a status comment on pull request 180. So
-   * `pull_requests: write` reaches a pull request's conversation, and demanding
-   * `issues: write` here would report every installation as broken while every
-   * installation was commenting fine.
-   */
+  /** `pull_requests: write` is sufficient for pull-request conversations. */
   it("does not demand a scope the App comments without", () => {
     expect(REQUIRED_APP_PERMISSIONS["issues"]).toBeUndefined();
     expect(APP_MANIFEST_PERMISSIONS["issues"]).toBeUndefined();

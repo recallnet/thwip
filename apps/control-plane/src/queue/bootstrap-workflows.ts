@@ -1,12 +1,9 @@
 /**
  * The files a repository needs before the queue can run on it.
  *
- * Enrolling `recallnet/thwip-test` took copying these workflows in by hand,
- * which is why nothing about them was reviewable and why the next repository
- * would have taken the same afternoon. They are offered as a pull request
- * instead: the repository's own reviewers approve them under the controls it
- * already has, before either Thwip ruleset is active, which is the whole point
- * of `merge-setup-pr` being the first bootstrap step.
+ * They are offered as a pull request so the repository's own reviewers approve
+ * them under the controls it already has, before either Thwip ruleset is active.
+ * That is why `merge-setup-pr` is the first bootstrap step.
  *
  * The workflows are this repository's own, with two changes. The action is a
  * published reference rather than the local checkout only this repository has,
