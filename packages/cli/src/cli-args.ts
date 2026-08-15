@@ -69,7 +69,9 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
   ship:
     `Usage: thwip ship [--wait] [--no-queue] [--json-events]\n\n` +
     `Run approved suites, attach a proof, push, and open or update the pull request.\n` +
-    `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n`,
+    `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n` +
+    `For an existing draft, \`--no-queue\` refreshes its proof and pushes without queueing it.\n` +
+    `To create a new draft, run \`thwip run\`, push the proved head, then use \`gh pr create --draft\`.\n`,
   init:
     `Usage: thwip init [--required "lint,typecheck,test"] [--profile PROFILE]\n\n` +
     `Set up or refresh this machine and the bounded Thwip guidance in root AGENTS.md.\n` +

@@ -27,6 +27,16 @@ describe("canonical AGENTS instructions", () => {
     expect(text).toContain("Rules when doctor confirms the Queue is ready");
   });
 
+  it("keeps draft proof separate from queueing and merging", () => {
+    const text = instructions();
+    expect(text).toContain("Draft or review-only work");
+    expect(text).toContain("npx @recallnet/thwip@latest run");
+    expect(text).toContain("gh pr create --draft");
+    expect(text).toContain("npx @recallnet/thwip@latest ship --no-queue");
+    expect(text).toMatch(/leaves\s+the existing pull request as a draft/);
+    expect(text).toContain("Do not mark the draft ready, join the queue, or merge unless the user asks");
+  });
+
   it("does not persist transient state or branch names", () => {
     const text = instructions();
     for (const stale of ["configured", "observe", "canary", "enforced", "refs/heads"]) {
