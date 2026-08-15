@@ -9,13 +9,16 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "lint": "pnpm exec knip --reporter symbols && pnpm exec knip --production --exclude dependencies,unlisted,binaries,unresolved --reporter symbols",
+    "lint:anti-slop": "pnpm exec oxlint .",
     "test:workers": "pnpm --filter @thwip/control-plane run test:workers"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.1",
+    "@oxlint/plugins": "1.78.0",
     "esbuild": "0.28.1",
     "fast-check": "^4.9.0",
     "knip": "^6.31.0",
+    "oxlint": "1.78.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0",
     "yaml": "^2.9.0"
