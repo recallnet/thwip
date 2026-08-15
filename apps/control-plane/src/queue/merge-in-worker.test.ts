@@ -396,9 +396,8 @@ describe("the Worker performing the merge", () => {
   /**
    * Two authorization deliveries can overlap while the first App write is in
    * flight. The durable operation row is a no-retry guard, not a lease another
-   * delivery may reuse. Playhouse #500 had two writers for one operation: one
-   * moved the branch, while the loser observed stale GitHub state and recorded
-   * that the same merge had not happened.
+   * delivery may reuse. Two writers for one operation could otherwise let one
+   * move the branch while the other records stale GitHub state.
    */
   it("sends exactly one App write when another wake arrives while it is in flight", async () => {
     const e = env();

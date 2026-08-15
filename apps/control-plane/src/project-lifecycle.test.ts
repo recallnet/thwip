@@ -26,7 +26,7 @@ const OTHER_ORG = "org_2";
 const REPO = "1319756073";
 const OTHER_REPO = "555";
 const PROJECT = "prj_old_incarnation";
-const NAME = "recallnet/playhouse";
+const NAME = "example/project";
 const open: TestD1[] = [];
 const afterReimportQuarantine = () => new Date(Date.now() + 60 * 60_000 + 1);
 
