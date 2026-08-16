@@ -35,7 +35,7 @@ export interface ShipState {
   readonly pullRequestNumber: number | null;
   readonly queueEntryExists: boolean;
   readonly turn: "none" | "offered" | "claimed" | "running" | "verified" | "merging" | "merged";
-  /** --wait, --no-queue and --json-events. */
+  /** Queue behavior after command modes such as --wait, --no-queue, or --draft are resolved. */
   readonly options: { readonly wait: boolean; readonly queue: boolean; readonly jsonEvents: boolean };
 }
 

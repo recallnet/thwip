@@ -36,14 +36,34 @@ const CLI_PACKAGE = join("packages", "cli");
  * about; a check for a directory would find nothing in every worktree, which is
  * precisely where this matters.
  */
-export function findCliCheckout(startDir: string, exists: (path: string) => boolean): string | null {
+export function findCliCheckout(
+  startDir: string,
+  exists: (path: string) => boolean,
+  read: (path: string) => string | null,
+): string | null {
   let dir = startDir;
   for (;;) {
-    if (exists(join(dir, ".git")) && exists(join(dir, CLI_PACKAGE, "package.json"))) return dir;
+    const manifest = join(dir, CLI_PACKAGE, "package.json");
+    if (exists(join(dir, ".git")) && exists(manifest)) {
+      try {
+        const parsed = JSON.parse(read(manifest) ?? "null") as { name?: unknown } | null;
+        if (parsed?.name === "@thwip/cli") return dir;
+      } catch {
+        // A different or malformed package is not the Thwip source checkout.
+      }
+    }
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+/** Setup-only commands may run through npx in a checkout that builds Thwip. */
+export function setupCommandMayUseForeignBuild(argv: readonly string[]): boolean {
+  const [command, next] = argv;
+  if (command === "init" || command === "login") return true;
+  if (command === "keys") return next === undefined || next === "status" || next === "--help" || next === "-h";
+  return command === "queue" && next === "setup";
 }
 
 /**

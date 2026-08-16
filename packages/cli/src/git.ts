@@ -5,7 +5,21 @@ import type { DivergedTips, PushAttempt } from "./push-plan.js";
 const execFileP = promisify(execFile);
 
 export async function git(args: string[], cwd: string): Promise<string> {
-  const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+  const { stdout } = await execFileP("git", args, {
+    cwd,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return stdout.trimEnd();
+}
+
+/** A bounded, non-interactive Git read for onboarding remote discovery only. */
+export async function gitInitRead(args: readonly string[], cwd: string): Promise<string> {
+  const { stdout } = await execFileP("git", [...args], {
+    cwd,
+    maxBuffer: 4 * 1024 * 1024,
+    timeout: 30_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
   return stdout.trimEnd();
 }
 

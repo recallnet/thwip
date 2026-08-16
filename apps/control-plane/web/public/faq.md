@@ -90,9 +90,8 @@ fingerprint in Thwip.
 
 ## Do commits have to be signed?
 
-No. A proof has its own signature. Run `thwip init --sign-commits` if you also
-want Git to sign commits with the same SSH key. A GitHub ruleset can require
-signed commits separately.
+No. A proof has its own signature. Git commit signing is a separate repository
+or account preference. A GitHub ruleset can require signed commits separately.
 
 ## What happens on a rebase or squash?
 

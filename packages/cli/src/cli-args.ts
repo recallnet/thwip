@@ -10,7 +10,6 @@ export type CliCommand =
   | "verify"
   | "verify-chain"
   | "keys-status"
-  | "setup"
   | "run"
   | "policy-digest"
   | "version"
@@ -53,9 +52,8 @@ COMMANDS
   login                     Sign in via device code.
   ship                      Run suites, sign, push, and manage the queue; use --wait to finish.
   queue <subcommand>        Inspect or operate the branch queue.
-  init                      Write thwip.yaml for this repository.
+  init                      Set up or refresh this machine and repository guidance.
   keys status               Show the signing key and GitHub registration.
-  setup                     Machine setup and managed local push warning.
   run                       Proof-only: run approved suites and attach a proof.
   doctor                    Check this project can produce and verify a proof.
   verify                    Parse and check a commit's proof.
@@ -69,12 +67,16 @@ Run \`thwip <command> --help\` for command-specific help.
 const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
   login: `Usage: thwip login [--endpoint URL]\n\nSign in through the thwip device authorization flow.\n`,
   ship:
-    `Usage: thwip ship [--wait] [--no-queue] [--json-events]\n\n` +
+    `Usage: thwip ship [--wait | --no-queue | --draft] [--json-events]\n\n` +
     `Run approved suites, attach a proof, push, and open or update the pull request.\n` +
-    `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n`,
+    `Use \`thwip ship --wait\` for the complete path through the queue outcome.\n` +
+    `Use \`thwip ship --draft\` to create or refresh a draft with proof, without queueing or merging it.\n` +
+    `Use \`--no-queue\` for a proved pull request that must stay outside Thwip Queue.\n`,
   init:
-    `Usage: thwip init --required "lint,typecheck,test" [--profile PROFILE] [--sign-commits]\n\n` +
-    `Create a repository-specific thwip.yaml override and optionally configure SSH commit signing.\n`,
+    `Usage: thwip init [--required "lint,typecheck,test"] [--profile PROFILE]\n\n` +
+    `Set up or refresh this machine and the bounded Thwip guidance in root AGENTS.md.\n` +
+    `Init reads live project state but never changes enrolment, policy, rulesets, or GitHub access.\n` +
+    `--required explicitly creates an optional repository thwip.yaml override.\n`,
   verify:
     `Usage: thwip verify [--commit OID] [--json]\n\n` +
     `Parse the proof on HEAD, or on one exact commit, and check it binds that tree.\n`,
@@ -90,10 +92,6 @@ const SIMPLE_HELP: Readonly<Record<Exclude<CliCommand, "queue">, string>> = {
     `value the server reports.\n`,
   "keys-status":
     `Usage: thwip keys status\n\nShow which SSH key would sign and whether GitHub registers it.\n`,
-  setup:
-    `Usage: thwip setup [--install-push-warning]\n\n` +
-    `Print the human-guided machine setup prompt. --install-push-warning adds a\n` +
-    `non-blocking pre-push warning shared by this repository's linked worktrees.\n`,
   run:
     `Usage: thwip run [--base REF]\n\n` +
     `Proof-only: run approved suites against the committed tree and attach a signed proof to HEAD.\n` +
@@ -191,11 +189,10 @@ const QUEUE_SUBCOMMAND_HELP: Readonly<Record<QueueSubcommand, string>> = {
     `interval so it stays scheduler-eligible, and report the moment it holds\n` +
     `an offer. Exits cleanly on interrupt; queued work keeps its place in line.\n`,
   setup:
-    `Usage: thwip queue setup [--repo OWNER/NAME] [--branch BRANCH] [--write]\n\n` +
+    `Usage: thwip queue setup [--repo OWNER/NAME] [--branch BRANCH]\n\n` +
     `Print the prompt for adding this repository to the queue. Enrolment itself\n` +
     `is a request an organization administrator makes from the dashboard.\n` +
-    `--write writes THWIP.md and refreshes the bounded pointer in the AGENTS.md\n` +
-    `and CLAUDE.md this repository already has, leaving the rest of them alone.\n`,
+    `Repository enrolment remains a separate, human-guided dashboard action.\n`,
 };
 
 function isQueueSubcommand(value: string | undefined): value is QueueSubcommand {
@@ -249,10 +246,9 @@ function queueCommand(argv: readonly string[]): CliAction {
   }
   if (!isQueueSubcommand(subcommand)) return error(`unknown subcommand \`queue ${subcommand}\``);
   if (wantsHelp(rest)) return { kind: "help", text: QUEUE_SUBCOMMAND_HELP[subcommand] };
-  // Setup prints a prompt and writes two files here. There is no request to
-  // plan, so its flags are checked the way a top-level command's are.
+  // Setup prints an enrolment prompt. It makes no request and writes no files.
   if (subcommand === "setup") {
-    const invalid = validateOptions(rest, { boolean: ["--write"], value: ["--repo", "--branch"] });
+    const invalid = validateOptions(rest, { value: ["--repo", "--branch"] });
     return invalid === null ? command("queue", argv) : error(invalid);
   }
   // Planned only to find out whether the arguments parse; the plan itself is
@@ -305,13 +301,15 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
   switch (name) {
     case "login":
       return simpleCommand("login", rest, { value: ["--endpoint"] });
-    case "ship":
-      return simpleCommand("ship", rest, { boolean: ["--wait", "--no-queue", "--json-events"] });
+    case "ship": {
+      const modes = ["--wait", "--no-queue", "--draft"].filter((option) => rest.includes(option));
+      if (modes.length > 1) return error(`${modes.join(" and ")} cannot be used together`);
+      return simpleCommand("ship", rest, { boolean: ["--wait", "--no-queue", "--draft", "--json-events"] });
+    }
     case "queue":
       return queueCommand(rest);
     case "init":
       return simpleCommand("init", rest, {
-        boolean: ["--sign-commits"],
         value: ["--required", "--profile"],
       });
     case "verify":
@@ -326,8 +324,6 @@ export function parseCliArgs(argv: readonly string[]): CliAction {
       if (rest[0] !== "status") return error(`unknown subcommand \`keys ${rest[0]}\``);
       return simpleCommand("keys-status", rest.slice(1));
     }
-    case "setup":
-      return simpleCommand("setup", rest, { boolean: ["--install-push-warning"] });
     case "version":
       return simpleCommand("version", rest);
     case "run":

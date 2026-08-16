@@ -14,7 +14,19 @@
  *
  * So the state is read, not assumed, and only OPEN counts.
  */
-export function openPullRequestNumber(ghOutput: string): number | null {
+export interface OpenPullRequest {
+  readonly number: number;
+  readonly isDraft: boolean;
+}
+
+/** The exact gh command needed before ship's requested PR mode is true. */
+export function pullRequestCommand(current: OpenPullRequest | null, draft: boolean): readonly string[] | null {
+  if (current === null) return ["pr", "create", "--fill", ...(draft ? ["--draft"] : [])];
+  if (draft && !current.isDraft) return ["pr", "ready", String(current.number), "--undo"];
+  return null;
+}
+
+function openPullRequestView(ghOutput: string): Record<string, unknown> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(ghOutput);
@@ -28,6 +40,16 @@ export function openPullRequestNumber(ghOutput: string): number | null {
   // answer is what caused the bug. Missing is refused rather than allowed.
   if (view["state"] !== "OPEN") return null;
 
+  return view;
+}
+
+/** The open pull request and whether GitHub still considers it a draft. */
+export function openPullRequest(ghOutput: string): OpenPullRequest | null {
+  const view = openPullRequestView(ghOutput);
+  if (view === null || typeof view["isDraft"] !== "boolean") return null;
+
   const number = view["number"];
-  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? number : null;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0
+    ? { number, isDraft: view["isDraft"] }
+    : null;
 }
