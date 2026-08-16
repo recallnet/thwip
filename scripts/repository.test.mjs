@@ -4,12 +4,25 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import ts from "typescript";
+import { claudePointer, queueInstructions } from "../packages/prompts/src/queue.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 const json = (path) => JSON.parse(read(path));
 const workflowFiles = readdirSync(join(root, ".github/workflows"))
   .filter((name) => name.endsWith(".yml"));
+
+function managed(text) {
+  const match = /<!-- thwip:start -->\n([\s\S]*?)<!-- thwip:end -->/.exec(text);
+  return match?.[1] ?? null;
+}
+
+describe("canonical repository agent contract", () => {
+  it("is already the exact output init would write", () => {
+    expect(managed(read("AGENTS.md"))).toBe(queueInstructions({ cliCommand: "pnpm -w thwip" }));
+    expect(managed(read("CLAUDE.md"))).toBe(claudePointer() + "\n");
+  });
+});
 
 const UNKNOWN_WRITE = Symbol("unknown write");
 
@@ -349,7 +362,7 @@ describe("workspace build order", () => {
     expect(config).toContain('for (const path of ["blog", "_astro", "rss.xml", "sitemap-index.xml", "sitemap-0.xml"])');
     const vite = read("apps/control-plane/web/vite.config.ts");
     expect(vite).toContain('fileName: "install.md"');
-    expect(vite).toContain("developerSetupPrompt()");
+    expect(vite).toContain("initPrompt()");
   });
 });
 

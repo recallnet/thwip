@@ -50,7 +50,7 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   RULESET_DRIFT: "The repository ruleset no longer matches what the queue expects. An admin needs to look.",
   APP_PERMISSION_DRIFT: "The Thwip App is missing a permission it needs. An admin needs to reinstall it.",
   APP_UNINSTALLED: "The Thwip App was removed from this repository. An admin needs to install it again.",
-  QUEUE_NOT_CONFIGURED: "This repository has no queue configured. Run thwip init, or ask an admin to enable it.",
+  QUEUE_NOT_CONFIGURED: "This repository has no queue configured. Ask an administrator to continue setup in the dashboard.",
   NO_PINNED_VERIFIER:
     "This project's security profile requires a run against the integrated candidate, and the policy pins no verifier workflow. An admin needs to pin one and name the required suites.",
   CANDIDATE_VERIFIER_NOT_PINNED:

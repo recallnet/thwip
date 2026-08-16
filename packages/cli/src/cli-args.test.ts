@@ -17,6 +17,7 @@ const QUEUE_SUBCOMMANDS = [
   "repair",
   "doctor",
   "work",
+  "setup",
 ] as const;
 
 const HELP_TARGETS: readonly (readonly string[])[] = [
@@ -27,7 +28,6 @@ const HELP_TARGETS: readonly (readonly string[])[] = [
   ["init"],
   ["keys"],
   ["keys", "status"],
-  ["setup"],
   ["run"],
   ["verify"],
   ["policy"],
@@ -96,6 +96,22 @@ describe("help", () => {
     expect(parseCliArgs(["help", "run"])).toMatchObject({ kind: "help" });
     expect(parseCliArgs(["help", "queue", "bypass"])).toMatchObject({ kind: "help" });
   });
+
+  it("gives drafts one complete command that never joins the queue", () => {
+    const action = parseCliArgs(["ship", "--help"]);
+    expect(action.kind).toBe("help");
+    const text = action.kind === "help" ? action.text : "";
+    expect(text).toContain("thwip ship --draft");
+    expect(text).toContain("without queueing or merging");
+    expect(text).toContain("--no-queue");
+  });
+
+  it("refuses contradictory ship modes before doing any work", () => {
+    expect(parseCliArgs(["ship", "--wait", "--draft"])).toEqual({
+      kind: "error",
+      message: "--wait and --draft cannot be used together",
+    });
+  });
 });
 
 describe("thwip doctor", () => {
@@ -127,7 +143,6 @@ describe("fail-closed arguments", () => {
     ["queue", "work", "--repo", "recallnet/thwip"],
     ["init", "--unknown"],
     ["keys", "status", "--unknown"],
-    ["setup", "--unknown"],
     ["run", "--unknown"],
     ["run", "unexpected"],
     ["verify", "--unknown"],
@@ -160,8 +175,6 @@ describe("dispatch", () => {
     [["init", "--required", "lint"], "init"],
     [["keys"], "keys-status"],
     [["keys", "status"], "keys-status"],
-    [["setup"], "setup"],
-    [["setup", "--install-push-warning"], "setup"],
     [["run"], "run"],
     [["verify", "--json"], "verify"],
     [["verify", "--commit", "a".repeat(40)], "verify"],

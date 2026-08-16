@@ -1,60 +1,84 @@
 import { describe, expect, it } from "vitest";
-import { projectSetupPrompt } from "./index.js";
+import { COLD_START_COMMAND, initPrompt, initReport } from "./index.js";
 
-describe("project setup prompt policy lifecycle", () => {
-  it("offers the shared warning only after approval and names the full shipping path", () => {
-    const prompt = projectSetupPrompt({
-      githubName: "example/project",
-      defaultBranch: "main",
-      enabled: true,
-      hasActivePolicy: true,
-    });
-    expect(prompt).toContain("Only after I explicitly approve");
-    expect(prompt).toContain("thwip setup --install-push-warning");
-    expect(prompt).toContain("never overwrites");
-    expect(prompt).toContain("always allows deliberate low-level Git");
-    expect(prompt).toContain('"thwip ship --wait"');
-    expect(prompt).toContain('"thwip run" remains the proof-only command');
-    expect(prompt).not.toMatch(/thwip ship(?! --wait)/);
+describe("shared init prompt", () => {
+  it("names one cold-start command and no update command", () => {
+    const prompt = initPrompt();
+    expect(COLD_START_COMMAND).toBe("npx @recallnet/thwip@latest init");
+    expect(prompt).toContain(COLD_START_COMMAND);
+    expect(prompt).toContain("Init is also the update command");
+    expect(prompt).not.toMatch(/thwip update/);
+    expect(prompt).toContain("exact\n   `doctor --allow-unread` invocation init wrote in AGENTS.md");
+    expect(prompt).not.toMatch(/^\s*thwip doctor/m);
   });
 
-  it("explains the non-approving bootstrap result before first activation", () => {
-    const prompt = projectSetupPrompt({
+  it("separates a returning machine from repository enrolment", () => {
+    const prompt = initPrompt({
       githubName: "example/project",
-      defaultBranch: "main",
-      enabled: true,
-      hasActivePolicy: false,
+      defaultBranch: "trunk",
+      repositoryState: "ready",
+      signedIn: true,
+      keyState: "registered",
     });
-    expect(prompt).toContain("BOOTSTRAP_PENDING");
-    expect(prompt).toContain("does not approve this pull request's candidate policy or proof");
-    expect(prompt).toContain("organization defaults");
-    expect(prompt).toContain("canonical main");
-    expect(prompt).toContain("candidate policy never approves itself");
+    expect(prompt).toContain("already enrolled on trunk");
+    expect(prompt).toContain("Prepare only this machine");
+    expect(prompt).toContain("Do not run queue setup");
   });
 
-  it("explains that later policy changes remain under the active policy until merge", () => {
-    const prompt = projectSetupPrompt({
+  it("does not misname a selected but disabled project as incomplete enrolment", () => {
+    const prompt = initPrompt({
       githubName: "example/project",
-      defaultBranch: "main",
-      enabled: true,
-      hasActivePolicy: true,
+      repositoryState: "not-ready",
+      repositoryDetail: "the project is disabled",
     });
-    expect(prompt).toContain("verified under that policy");
-    expect(prompt).toContain("takes effect only after its protected merge lands");
-    expect(prompt).toContain("thwip / proof (observe)");
-    expect(prompt).toContain("Do not leave an unprotected interval");
-    expect(prompt).not.toContain("BOOTSTRAP_PENDING");
+    expect(prompt).toContain("not currently ready");
+    expect(prompt).toContain("the project is disabled");
+    expect(prompt).not.toContain("resume the existing Queue setup");
+  });
+});
+
+describe("CLI terminal report", () => {
+  it("does not tell init to run itself again after success", () => {
+    const report = initReport(
+      {
+        githubName: "example/project",
+        defaultBranch: "main",
+        repositoryState: "ready",
+        signedIn: true,
+        keyState: "registered",
+      },
+      {
+        guidance: {
+          state: "current",
+          paths: [],
+          claudeCompatibility: "managed-file",
+          cliCommand: "pnpm -w thwip",
+        },
+        config: "not-requested",
+      },
+    );
+    expect(report).not.toContain(COLD_START_COMMAND);
+    expect(report).not.toContain("run init");
+    expect(report).toContain("already current");
+    expect(report).toContain("no remote GitHub");
+    expect(report).toContain("pnpm -w thwip doctor --allow-unread");
   });
 
-  it("does not promise a passing check while the project is disabled", () => {
-    const prompt = projectSetupPrompt({
-      githubName: "example/project",
-      defaultBranch: "main",
-      enabled: false,
-      hasActivePolicy: false,
-    });
-    expect(prompt).toContain("currently disabled");
-    expect(prompt).toContain("before expecting the thwip check to pass");
-    expect(prompt).toContain("Once enabled");
+  it("does not claim blocked guidance or Claude compatibility was checked", () => {
+    const report = initReport(
+      {
+        githubName: "example/project",
+        repositoryState: "unreadable",
+        repositoryDetail: "service unavailable",
+        signedIn: true,
+        keyState: "unreadable",
+        keyDetail: "GitHub unavailable",
+      },
+      { guidance: { state: "blocked" }, config: "not-requested" },
+    );
+    expect(report).toContain("Not checked or changed");
+    expect(report).toContain("Claude compatibility was not checked");
+    expect(report).not.toContain("already current");
+    expect(report).not.toContain("contains only a pointer");
   });
 });

@@ -13,7 +13,7 @@ heroAlt: Terminal-style checklist from npm install through thwip run
 ---
 
 This is the human-readable path from zero to a signed proof. For a paste-ready
-agent prompt, use [/install](/install) or run `thwip setup` after the CLI is on
+agent prompt, use [/install](/install) or run `npx @recallnet/thwip@latest init`
 your PATH.
 
 {% callout type="note" title="Requirements" %}
@@ -100,7 +100,7 @@ setup ends here; repo setup starts there.
 From a checkout of a project thwip already knows:
 
 ```bash
-thwip init --required "lint,typecheck,test"
+npx @recallnet/thwip@latest init --required "lint,typecheck,test"
 thwip run
 ```
 

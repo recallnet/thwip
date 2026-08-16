@@ -24,15 +24,27 @@ built CLI; a consuming repository never clones or builds this repository.
 ## Getting started
 
 ```
-thwip login                                    # sign in with GitHub
-thwip init --required "lint,typecheck,test"    # write thwip.yaml
-thwip ship --wait                              # run, sign, push, and wait for merge
+npx @recallnet/thwip@latest init
 ```
+
+Init is the safe setup and refresh command for a first checkout or another
+machine. It checks your session, key, GitHub origin, and live project state. It
+then refreshes only bounded guidance in root `AGENTS.md` and `CLAUDE.md`. It
+reports any human dashboard action still needed and never enrols a repository.
+
+Repositories normally inherit organization defaults. To create an intentional
+repository override, use `thwip init --required "lint,typecheck,test"` and
+optionally `--profile PROFILE`.
 
 `thwip ship --wait` is the full completion path. It runs the suites against the
 committed tree, attaches the proof to `HEAD`, pushes, opens or updates the pull
 request, joins the queue, and waits for the outcome. Use `thwip run` when you
 only need to create or refresh a proof without shipping it.
+
+A draft pull request still needs proof, but it must not enter the merge queue.
+Run `thwip ship --draft` to prove and push the exact `HEAD`, create or refresh
+the draft pull request, and stop without queueing or merging it. Do not mark it
+ready until the user asks.
 
 The CLI connects to `https://thwip.ai` by default. Set `THWIP_ENDPOINT` only
 when an operator has given you a different control-plane origin.
@@ -54,7 +66,7 @@ required:
 | Command | What it does |
 | --- | --- |
 | `thwip login` | Sign in through a device code that works over SSH |
-| `thwip init` | Write `thwip.yaml` from the suites you name |
+| `thwip init` | Safely set up or refresh this machine and repository guidance |
 | `thwip run` | Proof-only: run the required suites and sign a proof of the tree |
 | `thwip verify` | Run the same checks the protected check will run |
 | `thwip ship --wait` | Run, sign, push, open the pull request, and wait for the queue outcome |

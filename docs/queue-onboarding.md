@@ -66,9 +66,9 @@ for a coding agent. The product flow is:
 
 1. Select the organization defaults. Choose the repository override only when
    this repository intentionally needs a different policy.
-2. Run `thwip queue setup --write` in the repository. Review and commit the
-   generated `THWIP.md` plus the bounded pointers added to existing agent
-   instructions.
+2. Run `npx @recallnet/thwip@latest init` in the repository. Review and commit
+   the bounded Thwip guidance in root `AGENTS.md`. A bounded `CLAUDE.md` pointer
+   keeps Claude Code on the same canonical contract.
 3. In the dashboard's **Queue** tab, select **Set up the queue**. Thwip opens
    `Set up Thwip Queue` from `thwip/setup` containing the required proof and
    candidate-verifier workflows. It omits `thwip.yaml` by default.

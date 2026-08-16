@@ -86,6 +86,7 @@ import {
   type MergeWriteOutcome,
 } from "./queue/merge-write.js";
 import { queueRoutes, runOnQueue, type QueueRouteEnv } from "./queue/routes.js";
+import { sessionIdentity } from "./session-identity.js";
 import { authorizeTurn } from "./queue/authorize-turn.js";
 import { reconsiderHead } from "./queue/reconsider-head.js";
 import { driveQueue } from "./queue/drive-queue.js";
@@ -523,6 +524,18 @@ app.get("/.well-known/thwip-keys", async (c) => {
 });
 
 // --- Viewer/session bootstrap ---------------------------------------------
+
+/**
+ * The CLI needs to bind a local GitHub identity to its user session without
+ * activating a seat or changing the selected organization. Keep this endpoint
+ * read-only; `/v1/me` performs dashboard bootstrap work on first sign-in.
+ */
+app.get("/v1/session/identity", async (c) => {
+  const viewer = await resolveViewer(c.env, c.req.raw);
+  const identity = sessionIdentity(viewer);
+  if (identity === null) return c.json({ error: "unauthenticated" }, 401);
+  return c.json(identity);
+});
 
 app.get("/v1/me", async (c) => {
   const viewer = await resolveViewer(c.env, c.req.raw);
