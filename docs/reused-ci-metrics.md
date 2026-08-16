@@ -5,14 +5,18 @@ pull request head. It does not estimate developer time or money saved.
 
 ## Definitions
 
-- **Verified local CI reused** is the signed wall-clock run window from
+- **CI that ran on dev machines** is the signed wall-clock run window from
   `run.startedAt` to `run.finishedAt` in the accepted proof cited by the merge.
+  The suites ran on the contributor's machine, so this time never reached a
+  hosted runner. The `thwip / workflow` job still runs in GitHub Actions to
+  check the signature; its duration is not recorded here.
 - **Signed suite duration** is the sum of the signed `durationMs` values for all
   suites in that proof. The API exposes it separately because suites may run in
   parallel, so it is not interchangeable with wall-clock time.
-- **Proof verification overhead** is the control-plane time from creating the
-  verification row until the proof verdict is ready. It does not include the
-  signed local run.
+- **What verifying them cost** is the control-plane time from creating the
+  verification row until the proof verdict is ready. It runs on thwip's servers
+  and consumes no GitHub Actions minutes. It does not include the signed local
+  run.
 - **Merges that reused a proof** counts signed `reused-proof-merge` records with
   all three measurements. One signed merge record counts once.
 
