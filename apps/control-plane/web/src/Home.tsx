@@ -1,7 +1,7 @@
 import React from "react";
 import { SiteBar, SiteFoot } from "./Chrome.js";
 import { useFetch } from "./api.js";
-import { durationText, measuredRunsText, reusedMergesText, type PublicReusedCiMetrics } from "./metrics.js";
+import { durationText, perMergeTradeText, type PublicReusedCiMetrics } from "./metrics.js";
 import "./notary.css";
 
 /**
@@ -36,24 +36,27 @@ export function OperatingMeasures({
     );
   }
 
-  const measuredRuns = measuredRunsText(metrics.mergedProofs);
+  const scope = `Across ${metrics.mergedProofs} merges`;
+  const perMerge = perMergeTradeText(metrics);
   return (
     <div className="mq-measures" aria-label="Measured reused CI">
       <article className="mq-measure">
         <strong>{durationText(metrics.signedWallClockDurationMs)}</strong>
-        <span>Verified local CI reused</span>
-        <small>{measuredRuns}, total signed runtime</small>
+        <span>CI that ran on dev machines, not hosted runners</span>
+        <small>{scope}</small>
       </article>
       <article className="mq-measure">
         <strong>{durationText(metrics.verificationOverheadMs)}</strong>
-        <span>Proof verification overhead</span>
-        <small>{measuredRuns}, total verification time</small>
+        <span>What verifying them cost</span>
+        <small>On thwip&rsquo;s servers. In Actions, all that&rsquo;s left is a signature check.</small>
       </article>
-      <article className="mq-measure">
-        <strong>{metrics.knownReusedMerges}</strong>
-        <span>Merges that reused a proof</span>
-        <small>{reusedMergesText(metrics.knownReusedMerges)}, total count</small>
-      </article>
+      {perMerge !== null && (
+        <article className="mq-measure">
+          <strong>{perMerge}</strong>
+          <span>Per merge</span>
+          <small>Tests already green, then verified</small>
+        </article>
+      )}
     </div>
   );
 }

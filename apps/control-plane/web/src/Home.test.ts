@@ -73,15 +73,58 @@ describe("Home", () => {
     const html = renderToStaticMarkup(createElement(OperatingMeasures, { metrics, error: null }));
 
     expect(html).toContain("1h 1m");
-    expect(html).toContain("Verified local CI reused");
+    expect(html).toContain("CI that ran on dev machines, not hosted runners");
     expect(html).toContain("125ms");
-    expect(html).toContain("Proof verification overhead");
-    expect(html).toContain("Merges that reused a proof");
-    expect(html).toContain("12 measured runs, total signed runtime");
-    expect(html).toContain("12 measured runs, total verification time");
-    expect(html).toContain("14 signed merge records, total count");
+    expect(html).toContain("What verifying them cost");
+    expect(html).toContain("Across 12 merges");
+    expect(html).toContain("On thwip\u2019s servers. In Actions, all that\u2019s left is a signature check.");
     expect(html).not.toMatch(/older merge|partial history/i);
     expect(html).not.toMatch(/money saved|developer waiting time/i);
+  });
+
+  /**
+   * A count of our merges tells a first-time reader nothing about their repo.
+   * The per-merge trade does, because they can hold it against their own.
+   */
+  it("reports the per-merge trade instead of a raw merge count", () => {
+    const metrics: PublicReusedCiMetrics = {
+      status: "partial",
+      minimumMergedProofs: 10,
+      signedSuiteDurationMs: 3_000_000,
+      signedWallClockDurationMs: 3_660_000,
+      verificationOverheadMs: 24_000,
+      mergedProofs: 12,
+      knownReusedMerges: 14,
+      unmeasuredMergedProofs: 2,
+    };
+    const html = renderToStaticMarkup(createElement(OperatingMeasures, { metrics, error: null }));
+
+    expect(html).toContain("5m 5s");
+    expect(html).toContain("2s");
+    expect(html).toContain("Per merge");
+    expect(html).not.toContain("Merges that reused a proof");
+    expect(html).not.toContain("signed merge records");
+  });
+
+  /** Every merge predates the measurement, so there is no average to state. */
+  it("omits the per-merge trade when nothing is measured", () => {
+    const html = renderToStaticMarkup(
+      createElement(OperatingMeasures, {
+        metrics: {
+          status: "partial",
+          minimumMergedProofs: 10,
+          signedSuiteDurationMs: 0,
+          signedWallClockDurationMs: 0,
+          verificationOverheadMs: 0,
+          mergedProofs: 0,
+          knownReusedMerges: 4,
+          unmeasuredMergedProofs: 4,
+        },
+        error: null,
+      }),
+    );
+    expect(html).not.toContain("Per merge");
+    expect(html).not.toContain("NaN");
   });
 
   it("shows no estimate while the public sample is too small", () => {

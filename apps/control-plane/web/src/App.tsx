@@ -667,11 +667,11 @@ export function DashboardMetrics({ metrics, error }: { metrics: ReusedCiMetrics 
           <>
             <dl className="thwip-metrics">
               <div>
-                <dt>Verified local CI reused</dt>
+                <dt>CI that ran on dev machines, not hosted runners</dt>
                 <dd>{durationText(metrics.signedWallClockDurationMs)}</dd>
               </div>
               <div>
-                <dt>Proof verification overhead</dt>
+                <dt>What verifying them cost</dt>
                 <dd>{durationText(metrics.verificationOverheadMs)}</dd>
               </div>
               <div>
