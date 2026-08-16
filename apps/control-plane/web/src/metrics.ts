@@ -22,6 +22,21 @@ export function durationText(milliseconds: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
+/**
+ * What one merge traded: the CI that already ran locally, then the time to
+ * check it. A reader can hold this against their own repository, which a count
+ * of our merges never lets them do.
+ *
+ * Null when nothing in scope carries a duration, so no tile claims an average
+ * over zero merges.
+ */
+export function perMergeTradeText(metrics: ReusedCiMetrics): string | null {
+  if (metrics.mergedProofs === 0) return null;
+  const ran = durationText(metrics.signedWallClockDurationMs / metrics.mergedProofs);
+  const checked = durationText(metrics.verificationOverheadMs / metrics.mergedProofs);
+  return `${ran} \u2192 ${checked}`;
+}
+
 export function measuredRunsText(count: number): string {
   return count === 1 ? "1 measured run" : `${count} measured runs`;
 }

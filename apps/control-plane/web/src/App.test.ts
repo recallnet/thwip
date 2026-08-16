@@ -260,8 +260,9 @@ describe("the organization's reused-CI measurements", () => {
 
     expect(loading).toContain("Loading measured results");
     expect(empty).toContain("No merge has reused a measured proof yet");
-    expect(partial).toContain("Verified local CI reused");
+    expect(partial).toContain("CI that ran on dev machines, not hosted runners");
     expect(partial).toContain("6s");
+    expect(partial).toContain("What verifying them cost");
     expect(partial).toContain("2 measured runs, total signed runtime and verification time");
     expect(partial).toContain("3 signed merge records, total count");
     expect(partial).not.toMatch(/older merge|partial history/i);
