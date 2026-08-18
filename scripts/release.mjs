@@ -103,7 +103,10 @@ export function plannedVersion({
   if (
     npm.version !== "0.0.0" &&
     npm.version === github.version &&
-    npm.sourceCommit !== github.sourceCommit
+    ((npm.sourceCommit !== null &&
+      github.sourceCommit !== null &&
+      npm.sourceCommit !== github.sourceCommit) ||
+      (npm.integrity !== null && github.integrity !== null && npm.integrity !== github.integrity))
   ) {
     throw new Error(
       `${PACKAGE}@${npm.version} comes from different commits in npm and GitHub Packages; ` +
@@ -116,14 +119,24 @@ export function plannedVersion({
     ...registries.map(([, registry]) => registry.version),
   ]);
   const currentPublications = registries.filter(([, registry]) => registry.version === current);
+  const currentHeadIntegrities = new Set(
+    currentPublications
+      .filter(([, registry]) => registry.sourceCommit === head && registry.integrity !== null)
+      .map(([, registry]) => registry.integrity),
+  );
+  const matchesHead = (registry) =>
+    registry.sourceCommit === head ||
+    (registry.sourceCommit === null &&
+      registry.integrity !== null &&
+      currentHeadIntegrities.has(registry.integrity));
   const partialAtHead =
     currentPublications.length > 0 &&
-    currentPublications.every(([, registry]) => registry.sourceCommit === head);
+    currentPublications.every(([, registry]) => matchesHead(registry));
   const recovering = compareVersions(current, lastTagVersion) > 0 && partialAtHead;
   const version = recovering ? current : bumpVersion(current, bump);
 
   for (const [label, registry] of registries) {
-    if (registry.version === version && registry.sourceCommit !== head) {
+    if (registry.version === version && !matchesHead(registry)) {
       throw new Error(
         `${label} already contains ${PACKAGE}@${version} from ` +
           `${registry.sourceCommit ?? "an unknown commit"}; refusing to overwrite or tag it as ${head}`,
@@ -188,6 +201,7 @@ function registryInfo({ registry, userconfig }) {
     "version",
     "gitHead",
     "thwipSourceCommit",
+    "dist.integrity",
     "--json",
     `--registry=${registry}`,
   ];
@@ -200,7 +214,7 @@ function registryInfo({ registry, userconfig }) {
   if (result.status !== 0) {
     const failure = `${result.stdout}\n${result.stderr}`;
     if (/\bE404\b|\b404 Not Found\b/.test(failure)) {
-      return { version: "0.0.0", sourceCommit: null };
+      return { version: "0.0.0", sourceCommit: null, integrity: null };
     }
     throw new Error(`could not read ${PACKAGE} from ${registry}: ${failure.trim()}`);
   }
@@ -208,6 +222,7 @@ function registryInfo({ registry, userconfig }) {
   return {
     version: typeof value.version === "string" ? value.version : "0.0.0",
     sourceCommit: releaseSourceCommit(value),
+    integrity: typeof value["dist.integrity"] === "string" ? value["dist.integrity"] : null,
   };
 }
 

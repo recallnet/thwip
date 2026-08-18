@@ -13,7 +13,11 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const registry = (version = "0.0.0", sourceCommit = null) => ({ version, sourceCommit });
+const registry = (version = "0.0.0", sourceCommit = null, integrity = null) => ({
+  version,
+  sourceCommit,
+  integrity,
+});
 const SHA = "a".repeat(40);
 
 describe("CLI release planning", () => {
@@ -108,6 +112,33 @@ describe("CLI release planning", () => {
       npmExists: true,
       githubExists: true,
     });
+  });
+
+  it("uses matching package integrity when GitHub Packages omits source metadata", () => {
+    expect(plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.3", "abc", "sha512-same"),
+      github: registry("0.16.3", null, "sha512-same"),
+      head: "abc",
+    })).toEqual({
+      version: "0.16.3",
+      recovering: true,
+      npmExists: true,
+      githubExists: true,
+    });
+  });
+
+  it("refuses matching versions with different package bytes", () => {
+    expect(() => plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.3", "abc", "sha512-npm"),
+      github: registry("0.16.3", null, "sha512-github"),
+      head: "abc",
+    })).toThrow(/inconsistent mirror/);
   });
 
   it("never reuses a version published from another commit", () => {
