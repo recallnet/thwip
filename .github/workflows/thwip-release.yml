@@ -32,6 +32,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 concurrency:
   group: thwip-release
@@ -57,22 +58,31 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
 
-      - name: Configure npm reads
+      - name: Configure registry reads
         id: npm
         run: |
           set -euo pipefail
           npmjs_config="$RUNNER_TEMP/thwip-npmjs-read.npmrc"
+          github_config="$RUNNER_TEMP/thwip-github-read.npmrc"
           {
             echo "registry=https://registry.npmjs.org"
             echo "@recallnet:registry=https://registry.npmjs.org"
           } > "$npmjs_config"
-          chmod 0600 "$npmjs_config"
+          {
+            echo "registry=https://registry.npmjs.org"
+            echo "@recallnet:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=\${NODE_AUTH_TOKEN}"
+          } > "$github_config"
+          chmod 0600 "$npmjs_config" "$github_config"
           echo "npmjs_path=$npmjs_config" >> "$GITHUB_OUTPUT"
+          echo "github_path=$github_config" >> "$GITHUB_OUTPUT"
 
       - name: Work out whether this is a release, and what kind
         id: decide
         env:
           NPMJS_NPMRC: ${{ steps.npm.outputs.npmjs_path }}
+          GITHUB_NPMRC: ${{ steps.npm.outputs.github_path }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
         run: node scripts/release.mjs plan
 
       - name: Install
@@ -93,25 +103,43 @@ jobs:
           THWIP_RELEASE_VERSION: ${{ steps.decide.outputs.version }}
         run: node scripts/release.mjs package
 
-      - name: Confirm the bundle runs the way it is installed
+      - name: Pack and confirm the bundle
+        id: package
         if: steps.decide.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           set -euo pipefail
-          tarball=$(cd packages/cli/dist-npm && npm pack --silent)
+          filename=$(npm pack packages/cli/dist-npm --silent --pack-destination "$RUNNER_TEMP")
+          expected="recallnet-thwip-$VERSION.tgz"
+          if [ "$filename" != "$expected" ]; then
+            echo "::error::Expected $expected from npm pack, received $filename"
+            exit 1
+          fi
+          tarball="$RUNNER_TEMP/$filename"
+          test -f "$tarball"
+          integrity=$(node -e '
+            const { createHash } = require("node:crypto");
+            const { readFileSync } = require("node:fs");
+            process.stdout.write("sha512-" + createHash("sha512").update(readFileSync(process.argv[1])).digest("base64"));
+          ' "$tarball")
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "integrity=$integrity" >> "$GITHUB_OUTPUT"
+          sha256sum "$tarball"
           probe=$(mktemp -d)
-          cp "packages/cli/dist-npm/$tarball" "$probe/"
           cd "$probe"
           npm init -y > /dev/null
-          npm install --silent "./$tarball"
+          npm install --silent --ignore-scripts "$tarball"
           ./node_modules/.bin/thwip --help > /dev/null
           ./node_modules/.bin/thwip version
 
-      - name: Publish
+      - name: Publish to npm
         if: steps.decide.outputs.release == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VISIBILITY: ${{ github.event.repository.visibility }}
           DRY: ${{ inputs.dry_run }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
         run: |
           set -euo pipefail
           args=(--access public)
@@ -120,31 +148,87 @@ jobs:
             echo "npm already has this exact release; continuing the interrupted publication"
           elif [ "${DRY:-false}" = "true" ]; then
             echo "npm user: $(npm whoami 2>&1 || echo 'not authenticated')"
-            npm publish packages/cli/dist-npm "${args[@]}" --dry-run
+            npm publish "$TARBALL" "${args[@]}" --dry-run --registry=https://registry.npmjs.org
           else
-            npm publish packages/cli/dist-npm "${args[@]}"
+            npm publish "$TARBALL" "${args[@]}" --registry=https://registry.npmjs.org
           fi
 
-      - name: Confirm the installed release
+      - name: Publish to GitHub Packages
+        if: steps.decide.outputs.release == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          GITHUB_NPMRC: ${{ steps.npm.outputs.github_path }}
+          DRY: ${{ inputs.dry_run }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.decide.outputs.github_exists }}" = "true" ]; then
+            echo "GitHub Packages already has this exact release; continuing the interrupted publication"
+          elif [ "${DRY:-false}" = "true" ]; then
+            npm publish "$TARBALL" --access restricted --dry-run \
+              --registry=https://npm.pkg.github.com --userconfig="$GITHUB_NPMRC"
+          else
+            npm publish "$TARBALL" --access restricted \
+              --registry=https://npm.pkg.github.com --userconfig="$GITHUB_NPMRC"
+          fi
+
+      - name: Confirm both registries serve the same release
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:
           NPMJS_NPMRC: ${{ steps.npm.outputs.npmjs_path }}
+          GITHUB_NPMRC: ${{ steps.npm.outputs.github_path }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.decide.outputs.version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          EXPECTED_INTEGRITY: ${{ steps.package.outputs.integrity }}
         run: |
           set -euo pipefail
-          confirm_install() {
+          confirm_registry() {
             label=$1
             config=$2
             attempt=1
             max_attempts=18
             while [ "$attempt" -le "$max_attempts" ]; do
+              integrity=$(npm view "@recallnet/thwip@$VERSION" dist.integrity \
+                --userconfig="$config" --prefer-online 2>/dev/null || true)
+              if [ "$integrity" = "$EXPECTED_INTEGRITY" ]; then
+                echo "$label serves the packed release ($integrity)"
+                return 0
+              fi
+              if [ -n "$integrity" ]; then
+                echo "::error::$label serves different bytes for @recallnet/thwip@$VERSION"
+                return 1
+              fi
+              if [ "$attempt" -eq "$max_attempts" ]; then break; fi
+              echo "$label has not served the published release yet; retrying in 10 seconds"
+              sleep 10
+              attempt=$((attempt + 1))
+            done
+            echo "::error::$label did not serve @recallnet/thwip@$VERSION after $attempt attempts"
+            return 1
+          }
+
+          confirm_install() {
+            label=$1
+            config=$2
+            authenticated=$3
+            attempt=1
+            max_attempts=18
+            while [ "$attempt" -le "$max_attempts" ]; do
               probe=$(mktemp -d)
-              if (cd "$probe" && npm install --userconfig="$config" --prefer-online \
-                    --cache="$probe/.npm-cache" \
-                    "@recallnet/thwip@$VERSION") &&
-                 (cd "$probe" && ./node_modules/.bin/thwip version) | tee "$probe/version" &&
-                 grep -F "thwip $VERSION" "$probe/version"; then
-                echo "$label serves @recallnet/thwip@$VERSION"
+              if [ "$authenticated" = "true" ]; then
+                (cd "$probe" && npm install --ignore-scripts --userconfig="$config" --prefer-online \
+                  --cache="$probe/.npm-cache" "@recallnet/thwip@$VERSION") || true
+              else
+                (cd "$probe" && env -u NODE_AUTH_TOKEN npm install --ignore-scripts \
+                  --userconfig="$config" --prefer-online --cache="$probe/.npm-cache" \
+                  "@recallnet/thwip@$VERSION") || true
+              fi
+              if test -x "$probe/node_modules/.bin/thwip" &&
+                 (cd "$probe" && env -u NODE_AUTH_TOKEN ./node_modules/.bin/thwip version) | tee "$probe/version" &&
+                 grep -F "thwip $VERSION" "$probe/version" &&
+                 grep -F "$SOURCE_COMMIT" "$probe/version"; then
+                echo "$label installs @recallnet/thwip@$VERSION"
                 return 0
               fi
               if [ "$attempt" -eq "$max_attempts" ]; then break; fi
@@ -156,9 +240,12 @@ jobs:
             return 1
           }
 
-          confirm_install "npm" "$NPMJS_NPMRC"
+          confirm_registry "npm" "$NPMJS_NPMRC"
+          confirm_registry "GitHub Packages" "$GITHUB_NPMRC"
+          confirm_install "npm" "$NPMJS_NPMRC" false
+          confirm_install "GitHub Packages" "$GITHUB_NPMRC" true
 
-      # Record a tag only after the registry serves the release.
+      # Record a tag only after both registries serve the same release.
       - name: Record the release
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:
