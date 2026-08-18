@@ -30,8 +30,7 @@ jobs:
       record-sequence: ${{ steps.evidence.outputs.record_sequence }}
       verified-sha: ${{ steps.evidence.outputs.verified_sha }}
     steps:
-      # The read-only token stays available because this internal repository has
-      # to refetch main immediately before it calls a checkout canonical.
+      # Keep the credential because the canonical-check step refetches main.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.sha }}
@@ -65,8 +64,7 @@ jobs:
       - name: Build workspace packages for the chain verifier
         run: pnpm -r --filter './packages/**' run build
 
-      # The commit itself is created by the GitHub App and is not expected to
-      # carry a developer proof. The signed queue record is the merge evidence.
+      # A signed queue record is the deployment evidence for an App merge.
       - name: Verify the signed record for this landed SHA
         id: evidence
         env:
@@ -126,8 +124,7 @@ jobs:
       name: staging
       url: https://thwip.ai/health
     steps:
-      # Keep the read-only checkout credential so predeploy can refetch the
-      # internal canonical branch after any environment approval wait.
+      # Keep the credential so deployment can refetch main after approval.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.sha }}
@@ -161,8 +158,7 @@ jobs:
       - name: Build workspace packages for the chain verifier
         run: pnpm -r --filter './packages/**' run build
 
-      # Recheck after any environment approval wait. A deployment never relies
-      # only on evidence observed by an earlier job.
+      # Approval may take time, so recheck the evidence before deployment.
       - name: Recheck the signed record for this landed SHA
         id: evidence
         env:
