@@ -79,7 +79,7 @@ class FakeGitHub implements BootstrapGitHub {
     this.openedFiles = input.files.map((file) => file.path);
     this.verifierContent = input.files.find((file) => file.path === ".github/workflows/thwip-queue-verify.yml")?.content
       ?? this.verifierContent;
-    this.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    this.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
     return this.pull;
   }
 
@@ -97,7 +97,7 @@ class FakeGitHub implements BootstrapGitHub {
 
   async openVerifierUpgradePullRequest(input: { files: ReadonlyArray<{ path: string }> }): Promise<SetupPullRequestState> {
     this.openedFiles = input.files.map((file) => file.path);
-    this.upgradePull = { number: 8, merged: false, headSha: "d".repeat(40) };
+    this.upgradePull = { number: 8, state: "open", merged: false, headSha: "d".repeat(40) };
     return this.upgradePull;
   }
 
@@ -265,7 +265,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     enforceAppProofCheck();
     // Already reviewed and merged, which is the second call an administrator
     // makes. The first opens the pull request and stops.
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
     const response = await postThroughManualSetup();
 
     expect(response.status).toBe(200);
@@ -309,14 +309,14 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
   it("lets an owner run setup, not only an admin", async () => {
     seedInstalledRepository();
     enforceAppProofCheck();
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
     const response = await postThroughManualSetup("owner");
     expect(response.status).toBe(200);
   });
 
   it("enables the queue while the proof check is still an administrator's to enforce", async () => {
     seedInstalledRepository();
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
     const response = await postThroughManualSetup();
 
     expect(response.status).toBe(202);
@@ -325,7 +325,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("keeps ownership disabled until the administrator explicitly enforces after observing", async () => {
     seedInstalledRepository();
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
 
     const observing = await postThroughManualSetup("admin", false);
     expect(observing).toMatchObject({ status: 202, body: { activationState: "observe" } });
@@ -401,7 +401,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("returns an exact manual ruleset payload without writing it as the App", async () => {
     seedInstalledRepository();
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
 
     const response = await bootstrapRouteResponse(
       env(),
@@ -432,7 +432,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
 
   it("structures a GitHub failure while reading rulesets", async () => {
     seedInstalledRepository();
-    github.pull = { number: 7, merged: true, headSha: "c".repeat(40) };
+    github.pull = { number: 7, state: "closed", merged: true, headSha: "c".repeat(40) };
     github.rulesetNamed = async () => {
       throw new GithubApiError(
         "/repos/acme/widgets/rulesets",
@@ -466,7 +466,7 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
   it("waits rather than finishing while the setup pull request is unmerged", async () => {
     seedInstalledRepository();
     github.openSetupPullRequest = async () => {
-      github.pull = { number: 7, merged: false, headSha: "c".repeat(40) };
+      github.pull = { number: 7, state: "open", merged: false, headSha: "c".repeat(40) };
       return github.pull;
     };
     const response = await bootstrapRouteResponse(
@@ -478,6 +478,43 @@ describe("POST /v1/queue/:repositoryId/bootstrap", () => {
     );
     expect(response.status).toBe(202);
     expect(queueProjectRow()?.enabled).toBe(0);
+  });
+
+  it("returns the replacement pull request after the prior setup pull request was closed", async () => {
+    seedInstalledRepository();
+    github.pull = {
+      number: 446,
+      state: "closed",
+      merged: false,
+      headSha: "a".repeat(40),
+    };
+    github.openSetupPullRequest = async () => {
+      github.pull = { number: 447, state: "open", merged: false, headSha: "c".repeat(40) };
+      return github.pull;
+    };
+
+    const response = await bootstrapRouteResponse(
+      env(),
+      viewer("admin"),
+      REPOSITORY_ID,
+      {},
+      port,
+    );
+
+    expect(response).toMatchObject({
+      status: 202,
+      body: {
+        nextStep: "merge-setup-pr",
+        outcomes: [
+          {
+            kind: "waiting",
+            step: "merge-setup-pr",
+            pullRequestNumber: 447,
+            detail: "replaced closed setup pull request #446 with #447; merge it to continue",
+          },
+        ],
+      },
+    });
   });
 });
 
@@ -504,7 +541,7 @@ describe("GET /v1/queue/:repositoryId/bootstrap", () => {
   it("reports where setup got to without doing any of it again", async () => {
     seedInstalledRepository();
     github.openSetupPullRequest = async () => {
-      github.pull = { number: 7, merged: false, headSha: "c".repeat(40) };
+      github.pull = { number: 7, state: "open", merged: false, headSha: "c".repeat(40) };
       return github.pull;
     };
     await bootstrapRouteResponse(env(), viewer("admin"), REPOSITORY_ID, {}, port);

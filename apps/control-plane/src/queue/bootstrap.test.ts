@@ -28,6 +28,8 @@ const REPOSITORY_ID = "987654321";
 const BASE_REF = "refs/heads/main";
 const APP_INTEGRATION_ID = 4419870;
 const BASE_SHA = "b".repeat(40);
+const CLOSED_SETUP_SHA = "a".repeat(40);
+const MOVED_SETUP_SHA = "d".repeat(40);
 const PROJECT_BINDING = { expectedProjectId: "proj_1", expectedOrganizationId: "org_1" } as const;
 
 let d1: TestD1;
@@ -37,6 +39,46 @@ function enrollQueueProject(
   request: Omit<EnrollmentRequest, "expectedProjectId" | "expectedOrganizationId">,
 ) {
   return enrollBoundQueueProject(db, { ...request, ...PROJECT_BINDING });
+}
+
+interface RecordedGitHubWrite {
+  readonly path: string;
+  readonly method: string;
+  readonly body: unknown;
+}
+
+function setupBranchHarness(branchSha: string | null) {
+  const writes: RecordedGitHubWrite[] = [];
+  const github = bootstrapGitHub(
+    {
+      async json<T>(path: string, init?: RequestInit): Promise<T> {
+        if (init?.method !== undefined) {
+          writes.push({
+            path,
+            method: init.method,
+            body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+          });
+        }
+        if (path.endsWith("/git/blobs")) return { sha: "blob" } as T;
+        if (path.endsWith("/git/trees")) return { sha: "tree" } as T;
+        if (path.endsWith("/git/commits")) return { sha: "commit" } as T;
+        if (path.includes("/git/matching-refs/heads/thwip/setup")) {
+          return (branchSha === null
+            ? []
+            : [{ ref: "refs/heads/thwip/setup", object: { sha: branchSha } }]) as T;
+        }
+        if (path.endsWith("/git/refs") && branchSha !== null) {
+          throw new Error("reference already exists");
+        }
+        if (path.includes("/git/refs")) return {} as T;
+        if (path.endsWith("/pulls")) return { number: 447, head: { sha: "commit" } } as T;
+        throw new Error(`unexpected ${path}`);
+      },
+    },
+    { owner: "acme", repo: "widgets", baseRef: BASE_REF },
+    { branch: "thwip/setup", title: "Set up", body: "Set up" },
+  );
+  return { github, writes };
 }
 
 describe("production setup GitHub writes", () => {
@@ -101,6 +143,112 @@ describe("production setup GitHub writes", () => {
     expect(writes.some((path) => path.endsWith("/git/refs"))).toBe(false);
     expect(writes.some((path) => path.endsWith("/pulls"))).toBe(false);
   });
+
+  it("reports a closed unmerged setup pull request as terminal", async () => {
+    const github = bootstrapGitHub(
+      {
+        async json<T>(path: string): Promise<T> {
+          if (path.includes("/pulls?state=open")) return [] as T;
+          if (path.includes("/pulls?state=closed")) {
+            return [
+              {
+                number: 446,
+                state: "closed",
+                merged_at: null,
+                head: { sha: "c".repeat(40) },
+              },
+            ] as T;
+          }
+          throw new Error(`unexpected ${path}`);
+        },
+      },
+      { owner: "acme", repo: "widgets", baseRef: BASE_REF },
+      { branch: "thwip/setup", title: "Set up", body: "Set up" },
+    );
+
+    await expect(github.setupPullRequest()).resolves.toEqual({
+      number: 446,
+      state: "closed",
+      merged: false,
+      headSha: "c".repeat(40),
+    });
+  });
+
+  it("does not treat a malformed GitHub pull response as merged", async () => {
+    const github = bootstrapGitHub(
+      {
+        async json<T>(path: string): Promise<T> {
+          if (path.includes("/pulls?state=open")) return [] as T;
+          if (path.includes("/pulls?state=closed")) {
+            return [{ number: 446, state: "closed", head: { sha: "c".repeat(40) } }] as T;
+          }
+          throw new Error(`unexpected ${path}`);
+        },
+      },
+      { owner: "acme", repo: "widgets", baseRef: BASE_REF },
+      { branch: "thwip/setup", title: "Set up", body: "Set up" },
+    );
+
+    await expect(github.setupPullRequest()).rejects.toThrow("invalid setup pull request state");
+  });
+
+  it("creates the reserved branch on first-time setup", async () => {
+    const { github, writes } = setupBranchHarness(null);
+
+    await expect(
+      github.openSetupPullRequest({
+        baseSha: BASE_SHA,
+        files: [{ path: "setup.yml", content: "current" }],
+      }),
+    ).resolves.toMatchObject({ number: 447, state: "open", merged: false });
+    expect(writes).toContainEqual({
+      path: "/repos/acme/widgets/git/refs",
+      method: "POST",
+      body: { ref: "refs/heads/thwip/setup", sha: "commit" },
+    });
+    expect(writes.some((write) => write.method === "PATCH")).toBe(false);
+  });
+
+  it("refreshes the reserved setup branch before opening a replacement pull request", async () => {
+    const { github, writes } = setupBranchHarness(CLOSED_SETUP_SHA);
+
+    await expect(
+      github.openSetupPullRequest({
+        baseSha: BASE_SHA,
+        replaceHeadSha: CLOSED_SETUP_SHA,
+        files: [{ path: "setup.yml", content: "current" }],
+      }),
+    ).resolves.toMatchObject({ number: 447, state: "open", merged: false });
+    expect(writes).toContainEqual({
+      path: "/repos/acme/widgets/git/refs/heads/thwip/setup",
+      method: "PATCH",
+      body: { sha: "commit", force: false },
+    });
+    expect(writes).toContainEqual({
+      path: "/repos/acme/widgets/git/commits",
+      method: "POST",
+      body: {
+        message: "Set up",
+        tree: "tree",
+        parents: [BASE_SHA, CLOSED_SETUP_SHA],
+      },
+    });
+    expect(writes.some((write) => write.path.endsWith("/git/refs") && write.method === "POST")).toBe(false);
+  });
+
+  it("refuses to replace a setup branch that changed after the closed pull request was read", async () => {
+    const { github, writes } = setupBranchHarness(MOVED_SETUP_SHA);
+
+    await expect(
+      github.openSetupPullRequest({
+        baseSha: BASE_SHA,
+        replaceHeadSha: CLOSED_SETUP_SHA,
+        files: [{ path: "setup.yml", content: "current" }],
+      }),
+    ).rejects.toThrow("reference already exists");
+    expect(writes.some((write) => write.method === "PATCH")).toBe(false);
+    expect(writes.some((write) => write.path.endsWith("/pulls"))).toBe(false);
+  });
 });
 
 function seedInstalledRepository(): void {
@@ -154,7 +302,8 @@ class FakeGitHub implements BootstrapGitHub {
     this.verifierContent =
       input.files.find((file) => file.path === ".github/workflows/thwip-queue-verify.yml")?.content ?? "";
     this.pull = {
-      number: 7,
+      number: (this.pull?.number ?? 6) + 1,
+      state: this.options.mergesSetupPr === true ? "closed" : "open",
       merged: this.options.mergesSetupPr === true,
       headSha: "c".repeat(40),
     };
@@ -179,7 +328,12 @@ class FakeGitHub implements BootstrapGitHub {
   }): Promise<SetupPullRequestState> {
     this.openedFiles = input.files.map((f) => f.path);
     this.verifierContent = input.files[0]?.content ?? "";
-    this.upgradePull = { number: 8, merged: false, headSha: "d".repeat(40) };
+    this.upgradePull = {
+      number: (this.upgradePull?.number ?? 7) + 1,
+      state: "open",
+      merged: false,
+      headSha: "d".repeat(40),
+    };
     return this.upgradePull;
   }
 
@@ -432,6 +586,28 @@ describe("advanceBootstrap", () => {
     expect(github.openedFiles).toEqual([]);
   });
 
+  it("replaces a closed unmerged setup pull request without resetting the project", async () => {
+    const github = new FakeGitHub();
+    const enrolled = await project();
+    github.pull = {
+      number: 446,
+      state: "closed",
+      merged: false,
+      headSha: "a".repeat(40),
+    };
+
+    const outcome = await advanceBootstrap(deps(github), enrolled);
+
+    expect(outcome).toMatchObject({
+      kind: "waiting",
+      step: "merge-setup-pr",
+      pullRequestNumber: 447,
+      detail: "replaced closed setup pull request #446 with #447; merge it to continue",
+    });
+    expect(github.pull).toMatchObject({ number: 447, state: "open", merged: false });
+    expect((await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF))?.id).toBe(enrolled.id);
+  });
+
   it("records the step once the setup pull request has merged", async () => {
     const github = new FakeGitHub({ mergesSetupPr: true });
     await advanceBootstrap(deps(github), await project());
@@ -521,7 +697,7 @@ describe("runBootstrap", () => {
     expect(github.openedFiles).toEqual([".github/workflows/thwip-queue-verify.yml"]);
     expect(waiting.status).toMatchObject({ complete: false, enabled: true, nextStep: "merge-verifier-v3-pr" });
 
-    github.upgradePull = { ...github.upgradePull!, merged: true };
+    github.upgradePull = { ...github.upgradePull!, state: "closed", merged: true };
     const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
     const completed = await runBootstrap(deps(github), current!);
 
@@ -533,6 +709,40 @@ describe("runBootstrap", () => {
     expect(
       d1.raw.prepare("SELECT verifier_protocol AS protocol FROM queue_projects WHERE project_id = 'proj_1'").get(),
     ).toEqual({ protocol: 3 });
+  });
+
+  it("replaces a closed unmerged verifier upgrade without changing protocol v2", async () => {
+    const github = new FakeGitHub();
+    await enrolled();
+    const progress = Object.fromEntries(BOOTSTRAP_STEPS.map((step) => [step, true]));
+    d1.raw
+      .prepare(
+        `UPDATE queue_projects
+            SET enabled = 1, activation_state = 'enforced', bootstrap_progress_json = ?,
+                verifier_workflow_version = 1, verifier_protocol = 2
+          WHERE project_id = 'proj_1'`,
+      )
+      .run(JSON.stringify(progress));
+    github.upgradePull = {
+      number: 446,
+      state: "closed",
+      merged: false,
+      headSha: "a".repeat(40),
+    };
+    const project = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);
+
+    const waiting = await runBootstrap(deps(github), project!);
+
+    expect(waiting.outcomes.at(-1)).toMatchObject({
+      kind: "waiting",
+      step: "merge-verifier-v3-pr",
+      pullRequestNumber: 447,
+      detail: "replaced closed verifier protocol upgrade pull request #446 with #447; merge it to continue",
+    });
+    expect(github.upgradePull).toMatchObject({ number: 447, state: "open", merged: false });
+    expect(
+      d1.raw.prepare("SELECT verifier_protocol AS protocol FROM queue_projects WHERE project_id = 'proj_1'").get(),
+    ).toEqual({ protocol: 2 });
   });
 
   it("keeps protocol v2 active until the owner approves Actions: read", async () => {
@@ -578,7 +788,7 @@ describe("runBootstrap", () => {
 
     const waiting = await runBootstrap(deps(github), legacy);
     expect(waiting.outcomes.at(-1)).toMatchObject({ kind: "waiting", step: "merge-verifier-v3-pr" });
-    github.upgradePull = { ...github.upgradePull!, merged: true };
+    github.upgradePull = { ...github.upgradePull!, state: "closed", merged: true };
     d1.raw.prepare("UPDATE projects SET default_branch = 'trunk' WHERE id = 'proj_1'").run();
 
     const current = await readQueueProject(d1.db, REPOSITORY_ID, BASE_REF);

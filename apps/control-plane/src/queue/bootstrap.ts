@@ -62,6 +62,7 @@ export interface QueueProject {
 
 export interface SetupPullRequestState {
   readonly number: number;
+  readonly state: "open" | "closed";
   readonly merged: boolean;
   readonly headSha: string;
 }
@@ -85,11 +86,15 @@ export interface BootstrapGitHub {
   openSetupPullRequest(input: {
     files: readonly SetupFile[];
     baseSha: string;
+    /** Only replace the reserved branch when it still has this closed pull request's head. */
+    replaceHeadSha?: string;
   }): Promise<SetupPullRequestState>;
   verifierUpgradePullRequest(): Promise<SetupPullRequestState | null>;
   openVerifierUpgradePullRequest(input: {
     files: readonly SetupFile[];
     baseSha: string;
+    /** Only replace the reserved branch when it still has this closed pull request's head. */
+    replaceHeadSha?: string;
   }): Promise<SetupPullRequestState>;
   /** Exact default-branch verifier after a person merges the upgrade. */
   verifierWorkflowAtBase?(): Promise<{ commitSha: string; blobSha: string; content: string }>;
@@ -731,7 +736,7 @@ async function performStep(
       // it already has. Nothing Thwip creates is active yet, so this cannot be
       // the queue asking the queue for permission.
       const open = await deps.github.setupPullRequest();
-      if (open === null) {
+      if (open === null || (!open.merged && open.state === "closed")) {
         const baseSha = await deps.github.baseSha();
         const opened = await deps.github.openSetupPullRequest({
           files: setupPullRequestFiles({
@@ -740,11 +745,14 @@ async function performStep(
             ...(deps.includeRepositoryConfig === true ? { includeRepositoryConfig: true } : {}),
           }),
           baseSha,
+          ...(open === null ? {} : { replaceHeadSha: open.headSha }),
         });
         return {
           kind: "waiting",
           step,
-          detail: `opened the setup pull request #${opened.number}; merge it to continue`,
+          detail: open === null
+            ? `opened the setup pull request #${opened.number}; merge it to continue`
+            : `replaced closed setup pull request #${open.number} with #${opened.number}; merge it to continue`,
           pullRequestNumber: opened.number,
         };
       }
@@ -1065,16 +1073,19 @@ async function upgradeVerifierWorkflow(deps: BootstrapDeps, project: QueueProjec
   if (installed.content === expected.content) return activateInstalledV3();
 
   const open = await deps.github.verifierUpgradePullRequest();
-  if (open === null) {
+  if (open === null || (!open.merged && open.state === "closed")) {
     const baseSha = await deps.github.baseSha();
     const opened = await deps.github.openVerifierUpgradePullRequest({
       files: [verifierWorkflowFile({ endpoint: deps.endpoint, actionRef: deps.actionRef })],
       baseSha,
+      ...(open === null ? {} : { replaceHeadSha: open.headSha }),
     });
     return {
       kind: "waiting",
       step,
-      detail: `opened verifier protocol upgrade pull request #${opened.number}; merge it to continue`,
+      detail: open === null
+        ? `opened verifier protocol upgrade pull request #${opened.number}; merge it to continue`
+        : `replaced closed verifier protocol upgrade pull request #${open.number} with #${opened.number}; merge it to continue`,
       pullRequestNumber: opened.number,
     };
   }
@@ -1155,6 +1166,7 @@ export interface BootstrapResponse {
  *
  * Idempotent by construction: enrolment does nothing to an existing project, and
  * every step reads what the repository is before deciding what to do to it.
+ * An open setup pull request is reused. A closed, unmerged one is replaced.
  * 202 means the run stopped on something a person has to do; 409 means it
  * refused; 200 means the queue is on.
  */
@@ -1207,17 +1219,43 @@ export function bootstrapGitHub(
   const branch = repo.baseRef.replace(/^refs\/heads\//, "");
 
   const pullRequest = async (configuration: { branch: string }): Promise<SetupPullRequestState | null> => {
-    const found = await http.json<
-      Array<{ number: number; merged_at: string | null; head: { sha: string } }>
-    >(`${base}/pulls?state=all&head=${repo.owner}:${configuration.branch}&per_page=1`);
-    const pull = found[0];
-    if (pull === undefined) return null;
-    return { number: pull.number, merged: pull.merged_at !== null, headSha: pull.head.sha };
+    type Pull = {
+      number: number;
+      state: string;
+      merged_at: string | null;
+      head: { sha: string };
+    };
+    const head = `${repo.owner}:${configuration.branch}`;
+    const list = (state: "open" | "closed") => {
+      const query = new URLSearchParams({ state, head, base: branch, per_page: "1" });
+      return http.json<Pull[]>(`${base}/pulls?${query.toString()}`);
+    };
+    const open = await list("open");
+    const expectedState = open[0] === undefined ? "closed" : "open";
+    const found = open[0] ?? (await list("closed"))[0];
+    if (found === undefined) return null;
+    if (
+      found.state !== expectedState ||
+      !Number.isSafeInteger(found.number) ||
+      found.number < 1 ||
+      (found.merged_at !== null && typeof found.merged_at !== "string") ||
+      typeof found.head?.sha !== "string" ||
+      !/^[0-9a-f]{40,64}$/.test(found.head.sha) ||
+      (found.state === "open" && found.merged_at !== null)
+    ) {
+      throw new Error("GitHub returned an invalid setup pull request state");
+    }
+    return {
+      number: found.number,
+      state: found.state,
+      merged: found.merged_at !== null,
+      headSha: found.head.sha,
+    };
   };
 
   const openPullRequest = async (
     configuration: { branch: string; title: string; body: string },
-    input: { files: readonly SetupFile[]; baseSha: string },
+    input: { files: readonly SetupFile[]; baseSha: string; replaceHeadSha?: string },
   ): Promise<SetupPullRequestState> => {
     // A tree built from blobs rather than the contents API, so every file
     // lands in one commit and a reviewer sees one diff.
@@ -1240,13 +1278,25 @@ export function bootstrapGitHub(
     await beforeWrite();
     const commit = await http.json<{ sha: string }>(`${base}/git/commits`, {
       method: "POST",
-      body: JSON.stringify({ message: configuration.title, tree: tree.sha, parents: [input.baseSha] }),
+      body: JSON.stringify({
+        message: configuration.title,
+        tree: tree.sha,
+        parents: input.replaceHeadSha === undefined
+          ? [input.baseSha]
+          : [input.baseSha, input.replaceHeadSha],
+      }),
       headers: { "content-type": "application/json" },
     });
+    const refName = `refs/heads/${configuration.branch}`;
+    const matching = await http.json<Array<{ ref: string; object: { sha: string } }>>(
+      `${base}/git/matching-refs/heads/${configuration.branch}`,
+    );
     await beforeWrite();
-    await http.json(`${base}/git/refs`, {
-      method: "POST",
-      body: JSON.stringify({ ref: `refs/heads/${configuration.branch}`, sha: commit.sha }),
+    const existing = matching.find((candidate) => candidate.ref === refName);
+    const replaceExisting = input.replaceHeadSha !== undefined && existing?.object.sha === input.replaceHeadSha;
+    await http.json(replaceExisting ? `${base}/git/refs/heads/${configuration.branch}` : `${base}/git/refs`, {
+      method: replaceExisting ? "PATCH" : "POST",
+      body: JSON.stringify(replaceExisting ? { sha: commit.sha, force: false } : { ref: refName, sha: commit.sha }),
       headers: { "content-type": "application/json" },
     });
     await beforeWrite();
@@ -1260,7 +1310,7 @@ export function bootstrapGitHub(
       }),
       headers: { "content-type": "application/json" },
     });
-    return { number: pull.number, merged: false, headSha: pull.head.sha };
+    return { number: pull.number, state: "open", merged: false, headSha: pull.head.sha };
   };
 
   return {
