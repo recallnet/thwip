@@ -4,6 +4,7 @@ import {
   mayWriteGuidance,
   observeInitState,
   readInitRepositoryContext,
+  resolveDoctorTarget,
   type InitFetch,
   type InitRepositoryContext,
 } from "./init-state.js";
@@ -69,6 +70,28 @@ describe("repository context", () => {
     });
     await expect(readInitRepositoryContext("/repo/packages/app", run)).resolves.toEqual(context);
     expect(run.mock.calls.flatMap(([args]) => args)).not.toContain("pr");
+  });
+
+  it("fills an omitted doctor target from the repository context", async () => {
+    const run = vi.fn(async (args: readonly string[]) => {
+      if (args[0] === "rev-parse") return "/repo";
+      if (args[0] === "config") return "git@github.com:example/project.git";
+      if (args[0] === "ls-remote") return "ref: refs/heads/trunk\tHEAD\nabc\tHEAD";
+      throw new Error("unexpected git read");
+    });
+
+    await expect(resolveDoctorTarget("/repo", run, {})).resolves.toEqual({
+      repo: "example/project",
+      branch: "trunk",
+    });
+  });
+
+  it("does not inspect Git when doctor receives both target fields", async () => {
+    const run = vi.fn(async () => "");
+    await expect(
+      resolveDoctorTarget("/not-a-repository", run, { repo: "example/other", branch: "stable" }),
+    ).resolves.toEqual({ repo: "example/other", branch: "stable" });
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
