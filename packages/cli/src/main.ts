@@ -63,6 +63,7 @@ import {
   githubNameFromOrigin,
   observeInitState,
   readInitRepositoryContext,
+  resolveDoctorTarget,
   type InitLiveState,
 } from "./init-state.js";
 
@@ -1128,11 +1129,11 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   const endpoint = normalizeSessionEndpoint(config.endpoint ?? process.env["THWIP_ENDPOINT"] ?? DEFAULT_ENDPOINT);
   const explicitRepo = flag(argv, "--repo");
   const explicitBranch = flag(argv, "--branch");
-  const context = explicitRepo === null || explicitBranch === null
-    ? await readInitRepositoryContext(cwd, gitInitRead)
-    : null;
-  const repo = explicitRepo ?? context!.githubName;
-  const ref = "refs/heads/" + (explicitBranch ?? context!.defaultBranch);
+  const { repo, branch } = await resolveDoctorTarget(cwd, gitInitRead, {
+    ...(explicitRepo === undefined ? {} : { repo: explicitRepo }),
+    ...(explicitBranch === undefined ? {} : { branch: explicitBranch }),
+  });
+  const ref = "refs/heads/" + branch;
   const auth = await apiAuthHeader(endpoint);
 
   const local: LocalReads = {

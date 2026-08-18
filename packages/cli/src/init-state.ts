@@ -59,6 +59,22 @@ export async function readInitRepositoryContext(cwd: string, runGit: GitRead): P
   return { root, githubName, defaultBranch, baseRef: `refs/heads/${defaultBranch}` };
 }
 
+/** Fill only the missing doctor target fields from the repository's live origin. */
+export async function resolveDoctorTarget(
+  cwd: string,
+  runGit: GitRead,
+  explicit: { readonly repo?: string; readonly branch?: string },
+): Promise<{ repo: string; branch: string }> {
+  if (explicit.repo !== undefined && explicit.branch !== undefined) {
+    return { repo: explicit.repo, branch: explicit.branch };
+  }
+  const context = await readInitRepositoryContext(cwd, runGit);
+  return {
+    repo: explicit.repo ?? context.githubName,
+    branch: explicit.branch ?? context.defaultBranch,
+  };
+}
+
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 }
