@@ -18,8 +18,10 @@ npm install -g @recallnet/thwip
 Node 22 or newer. To skip the global install, use `npx @recallnet/thwip`
 wherever the commands below say `thwip`.
 
-The public npm registry is the release authority. The package contains the
-built CLI; a consuming repository never clones or builds this repository.
+The public npm registry is the release authority. The same release is mirrored
+to GitHub Packages for environments that map the `@recallnet` scope there. The
+package contains the built CLI; a consuming repository never clones or builds
+this repository.
 
 ## Getting started
 
