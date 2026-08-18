@@ -339,7 +339,7 @@ function workflowCommandValue(value: string): string {
   return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
 }
 
-export function warnQueueFailure(error: unknown): void {
+function warnQueueFailure(error: unknown): void {
   const detail = message(error);
   const warning =
     `Queue enrolment did not complete: ${detail}. ` +
