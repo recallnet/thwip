@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit && esbuild src/main.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/index.cjs",
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/entry.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

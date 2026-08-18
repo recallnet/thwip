@@ -1,5 +1,5 @@
-import { appendFileSync, readFileSync } from "node:fs";
-import { importJWK, compactVerify, type JWK } from "jose";
+import { appendFileSync } from "node:fs";
+import { compactVerify, createLocalJWKSet } from "jose";
 import { verifySshSignature } from "@thwip/sshsig";
 import { verifyProof, type GithubFacts } from "@thwip/verifier";
 import {
@@ -9,8 +9,10 @@ import {
   utf8Decode,
   type VerificationBundleV1,
 } from "@thwip/protocol";
-import servicePublicJwk from "../service-public.jwk.json" with { type: "json" };
 import { parseBundleResolutionBody } from "./bundle-resolution.js";
+import { ActionClient } from "./control-plane.js";
+import { readActionContext, readActionInputs, type PullRequestContext } from "./context.js";
+import { verifyAndAuthorize } from "./orchestration.js";
 
 interface CommitData {
   sha: string;
@@ -19,45 +21,12 @@ interface CommitData {
   message: string;
 }
 
-const API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
-const TOKEN = process.env["GITHUB_TOKEN"] ?? "";
-const ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.ai";
-
 function summary(line: string): void {
   const f = process.env["GITHUB_STEP_SUMMARY"];
   if (f) appendFileSync(f, line + "\n");
   console.log(line);
 }
 
-async function gh<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    headers: {
-      authorization: `Bearer ${TOKEN}`,
-      accept: "application/vnd.github+json",
-      "user-agent": "thwip-action",
-    },
-  });
-  if (!res.ok) throw new Error(`GitHub API ${path} -> ${res.status}`);
-  return res.json() as Promise<T>;
-}
-
-async function getOidcToken(audience: string): Promise<string> {
-  const url = process.env["ACTIONS_ID_TOKEN_REQUEST_URL"];
-  const reqToken = process.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
-  if (!url || !reqToken) throw new Error("OIDC not available; set permissions id-token: write");
-  const res = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, {
-    headers: { authorization: `Bearer ${reqToken}`, accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`OIDC token request failed: ${res.status}`);
-  const body = (await res.json()) as { value: string };
-  return body.value;
-}
-
-/**
- * Read the signer selectors out of the trailer without trusting them. They
- * only decide which facts the control plane returns; the verifier re-checks
- * every one of them against the signed payload afterwards.
- */
 function proofHints(commitMessage: string): { signerGithubUserId?: string; keyFingerprint?: string } {
   const carrier = extractCarrier(commitMessage);
   if (!carrier.ok) return {};
@@ -78,11 +47,8 @@ function proofHints(commitMessage: string): { signerGithubUserId?: string; keyFi
   };
 }
 
-/**
- * Selector hints come from the unverified proof; they only choose which facts
- * to fetch. Everything is re-checked against the signed payload afterwards.
- */
 async function fetchBundle(
+  client: ActionClient,
   repositoryId: string,
   headSha: string,
   hints: { signerGithubUserId?: string; keyFingerprint?: string },
@@ -97,32 +63,38 @@ async function fetchBundle(
       defaultBranch: string;
     }
 > {
-  const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
-  const res = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-    body: JSON.stringify({ repositoryId, headSha, ...hints }),
+  const response = await client.controlPlane<unknown>("/v1/verification-bundles:resolve", {
+    repositoryId,
+    headSha,
+    ...hints,
   });
-  if (!res.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res.status} ${await res.text()}`);
-  const resolution = parseBundleResolutionBody(await res.json());
+  if (response.status !== 200) {
+    throw new Error(`BUNDLE_UNAVAILABLE: ${response.status} ${response.text}`);
+  }
+  const resolution = parseBundleResolutionBody(response.body);
   if (resolution.kind === "bootstrap_pending") return resolution;
-  const key = await importJWK(servicePublicJwk as JWK, "ES256");
-  const { payload, protectedHeader } = await compactVerify(resolution.bundle, key);
-  if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
+  const { payload, protectedHeader } = await compactVerify(
+    resolution.bundle,
+    createLocalJWKSet(await client.publishedKeys()),
+  );
+  if (protectedHeader.alg !== "ES256" || protectedHeader.typ !== "thwip-bundle+jws") {
+    throw new Error("BUNDLE_SIGNATURE_INVALID: bad protected header");
+  }
   return {
     kind: "active",
     bundle: JSON.parse(new TextDecoder().decode(payload)) as VerificationBundleV1,
   };
 }
 
-async function mergeBase(repoFullName: string, base: string, head: string): Promise<string> {
-  const cmp = await gh<{ merge_base_commit: { sha: string } }>(
+async function mergeBase(client: ActionClient, repoFullName: string, base: string, head: string): Promise<string> {
+  const cmp = await client.github<{ merge_base_commit: { sha: string } }>(
     `/repos/${repoFullName}/compare/${encodeURIComponent(base)}...${head}`,
   );
   return cmp.merge_base_commit.sha;
 }
 
 async function requireBootstrapPrerequisites(
+  client: ActionClient,
   fullName: string,
   ownerId: string,
   repositoryId: string,
@@ -154,34 +126,23 @@ async function requireBootstrapPrerequisites(
     throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof is not bound to this repository tree`);
   }
   try {
-    await gh<unknown>(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
+    await client.github<unknown>(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
   } catch {
     throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no committed thwip.yaml`);
   }
 }
 
-async function main(): Promise<void> {
-  const eventName = process.env["GITHUB_EVENT_NAME"] ?? "";
-  const event = JSON.parse(readFileSync(process.env["GITHUB_EVENT_PATH"]!, "utf8")) as Record<string, any>;
-  const repo = event["repository"];
-  const repositoryId = String(repo["id"]);
-  const ownerId = String(repo["owner"]["id"]);
-  const fullName = repo["full_name"] as string;
-
-  if (eventName !== "pull_request" && eventName !== "pull_request_target") {
-    summary(`thwip: FAIL — unsupported event ${eventName}`);
-    process.exit(1);
-  }
-  const pr = event["pull_request"];
-  const baseRefName = pr["base"]["ref"] as string;
-  const prHeadSha = pr["head"]["sha"] as string;
-  const prAuthorId = String(pr["user"]["id"]);
-
-  // One bundle request per verification run.
-  const commit = await gh<CommitData>(`/repos/${fullName}/git/commits/${prHeadSha}`);
-  const resolution = await fetchBundle(repositoryId, prHeadSha, proofHints(commit.message));
+async function verifyPullRequest(context: PullRequestContext, client: ActionClient): Promise<number> {
+  const commit = await client.github<CommitData>(`/repos/${context.repository}/git/commits/${context.headSha}`);
+  const resolution = await fetchBundle(client, context.repositoryId, context.headSha, proofHints(commit.message));
   if (resolution.kind === "bootstrap_pending") {
-    await requireBootstrapPrerequisites(fullName, ownerId, repositoryId, commit);
+    await requireBootstrapPrerequisites(
+      client,
+      context.repository,
+      context.repositoryOwnerId,
+      context.repositoryId,
+      commit,
+    );
     summary("## 🟡 `BOOTSTRAP_PENDING` — waiting for the first canonical policy");
     summary("");
     summary(
@@ -191,22 +152,22 @@ async function main(): Promise<void> {
     summary(
       `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`,
     );
-    await recordObservation(repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING");
-    process.exit(0);
+    await recordObservation(client, context.repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING", context.runId);
+    return 0;
   }
   const bundle = resolution.bundle;
 
-  const baseSha = await mergeBase(fullName, baseRefName, prHeadSha);
+  const baseSha = await mergeBase(client, context.repository, context.baseRefName, context.headSha);
   const facts: GithubFacts = {
-    ownerId,
-    repositoryId,
+    ownerId: context.repositoryOwnerId,
+    repositoryId: context.repositoryId,
     headSha: commit.sha,
     treeOid: commit.tree.sha,
     parentOids: commit.parents.map((p) => p.sha),
-    baseRef: `refs/heads/${baseRefName}`,
+    baseRef: `refs/heads/${context.baseRefName}`,
     baseSha,
     objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
-    prAuthorGithubUserId: prAuthorId,
+    prAuthorGithubUserId: context.authorGithubUserId,
   };
   const result = await verifyProof(
     { commitMessage: commit.message, facts, bundle, now: new Date().toISOString() },
@@ -214,8 +175,8 @@ async function main(): Promise<void> {
       verifySshSignature,
       // Remote suites are proven by GitHub's own checks on this commit.
       remoteCheckConclusions: async (headSha) => {
-        const runs = await gh<{ check_runs: Array<{ name: string; conclusion: string | null }> }>(
-          `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`,
+        const runs = await client.github<{ check_runs: Array<{ name: string; conclusion: string | null }> }>(
+          `/repos/${context.repository}/commits/${headSha}/check-runs?per_page=100`,
         );
         const map = new Map<string, string>();
         for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
@@ -225,15 +186,6 @@ async function main(): Promise<void> {
   );
   renderRichSummary(result, commit, facts);
 
-  // This job publishes the `thwip` status check that the ruleset requires, so
-  // anything but a pass has to keep the gate closed. That includes
-  // VERIFICATION_PENDING: the evidence has not settled after the verifier's
-  // own retries, and a green check here would let the merge through on
-  // evidence nobody has read.
-  //
-  // The control plane publishes a separate in-progress check that explains
-  // the wait. Say the same thing here, so the red is not read as "your tests
-  // failed".
   if (result.code === "VERIFICATION_PENDING") {
     console.log(
       `[thwip] ${commit.sha.slice(0, 12)}: waiting for evidence. ${result.detail ?? ""} ` +
@@ -241,56 +193,39 @@ async function main(): Promise<void> {
     );
   }
 
-  // Per-suite check runs on the PR head, so the checks list reads like a
-  // CI matrix: each proven suite appears with its measured local duration.
   if (result.code === "PASS" && result.statement) {
-    await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
+    await publishSuiteChecks(client, context.repository, commit.sha, result.statement).catch(() => {
       /* display only; never affects the conclusion */
     });
   }
 
-  // Best-effort observation; never affects the conclusion.
-  //
-  // Pending is not a verdict, so it is not recorded as one. The dashboard
-  // reads the newest observation as the project's last verification, and
-  // "we have not decided yet" is not something to show there.
   if (result.code !== "VERIFICATION_PENDING") {
-    await recordObservation(repositoryId, bundle.projectId, commit.sha, result.code);
+    await recordObservation(client, context.repositoryId, bundle.projectId, commit.sha, result.code, context.runId);
   }
-
-  process.exit(result.code === "PASS" ? 0 : 1);
+  return result.code === "PASS" ? 0 : 1;
 }
 
 async function recordObservation(
+  client: ActionClient,
   repositoryId: string,
   projectId: string,
   headSha: string,
   outcome: string,
+  runId: string | null,
 ): Promise<void> {
   try {
-    const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
-    await fetch(`${ENDPOINT}/v1/verification-observations`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        repositoryId,
-        projectId,
-        headSha,
-        outcome,
-        runId: process.env["GITHUB_RUN_ID"] ?? null,
-      }),
+    await client.controlPlane("/v1/verification-observations", {
+      repositoryId,
+      projectId,
+      headSha,
+      outcome,
+      runId,
     });
   } catch {
     /* telemetry only */
   }
 }
 
-/**
- * The verifier runs its controls in a fixed order; the verdict code names the
- * first control that failed. This table maps each display row to the codes it
- * owns, so the summary can show what was established, what failed, and what
- * was never reached — in the same stable vocabulary as the product.
- */
 const CHECK_SEQUENCE: Array<[label: string, codes: string[]]> = [
   ["Proof present on the exact head commit", ["PROOF_MISSING", "PROOF_DUPLICATE", "PROOF_TOO_LARGE", "PROOF_MALFORMED", "PROOF_SCHEMA_UNSUPPORTED"]],
   ["Signature by an enrolled, unrevoked key", ["SIGNATURE_INVALID", "SIGNER_KEY_UNKNOWN", "SIGNER_KEY_REVOKED", "SIGNER_KEY_ALGORITHM_FORBIDDEN"]],
@@ -298,9 +233,6 @@ const CHECK_SEQUENCE: Array<[label: string, codes: string[]]> = [
   ["Exact Git tree matches", ["SUBJECT_TREE_MISMATCH"]],
   ["Ancestry (parents) matches", ["SUBJECT_ANCESTRY_MISMATCH"]],
   ["Base context matches", ["SUBJECT_BASE_MISMATCH"]],
-  // No row for the policy digest. The verifier stopped asking which policy a
-  // proof cites and asks whether it satisfies the policy in force, so the rows
-  // below are where a policy change shows up.
   ["Pipeline digest is policy-approved", ["PIPELINE_DIGEST_MISMATCH"]],
   ["Signer holds current repository permission", ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"]],
   ["Every required suite passed exactly once", ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"]],
@@ -322,7 +254,6 @@ function renderRichSummary(
   );
   summary("");
 
-  // Verification sequence in the product's stable outcome vocabulary.
   const failedIndex = pass ? -1 : CHECK_SEQUENCE.findIndex(([, codes]) => codes.includes(result.code));
   summary("| Verified | Outcome |");
   summary("| --- | --- |");
@@ -334,7 +265,6 @@ function renderRichSummary(
   });
   summary("");
 
-  // The CI sequence the proof covers, with the signer's measured durations.
   if (result.statement) {
     const run = result.statement.predicate.run;
     summary("### CI sequence proven");
@@ -366,20 +296,21 @@ function renderRichSummary(
   }
 }
 
-/** One completed check run per proven suite, timed from the signer's run. */
-async function publishSuiteChecks(fullName: string, headSha: string, statement: NonNullable<Awaited<ReturnType<typeof verifyProof>>["statement"]>): Promise<void> {
+async function publishSuiteChecks(
+  client: ActionClient,
+  fullName: string,
+  headSha: string,
+  statement: NonNullable<Awaited<ReturnType<typeof verifyProof>>["statement"]>,
+): Promise<void> {
   const run = statement.predicate.run;
   let startMs = Date.parse(run.startedAt);
   for (const s of run.suites) {
     const started = new Date(startMs);
     const completed = new Date(startMs + s.durationMs);
     startMs += s.durationMs;
-    await fetch(`${API}/repos/${fullName}/check-runs`, {
+    await client.github(`/repos/${fullName}/check-runs`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${TOKEN}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "thwip-action",
         "content-type": "application/json",
       },
       body: JSON.stringify({
@@ -400,7 +331,50 @@ async function publishSuiteChecks(fullName: string, headSha: string, statement: 
   }
 }
 
-main().catch((e: unknown) => {
-  summary(`thwip: FAIL — ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
-});
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function workflowCommandValue(value: string): string {
+  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+function warnQueueFailure(error: unknown): void {
+  const detail = message(error);
+  const warning =
+    `Queue enrolment did not complete: ${detail}. ` +
+    "The proof result is unchanged. Re-run this job to try enrolment again.";
+  console.warn(`::warning::${workflowCommandValue(warning)}`);
+  summary(`> ⚠️ ${warning}`);
+}
+
+export async function runAction(): Promise<number> {
+  const inputs = readActionInputs();
+  const context = readActionContext();
+  const client = new ActionClient({
+    endpoint: inputs.endpoint,
+    githubApiUrl: inputs.githubApiUrl,
+    githubToken: inputs.githubToken,
+  });
+  if (context.kind === "candidate_report") {
+    await client.reportCandidate(context);
+    console.log("Thwip Queue accepted the candidate report");
+    return 0;
+  }
+  return verifyAndAuthorize(
+    () => verifyPullRequest(context, client),
+    async () => {
+      const reason = await client.authorize({
+        repositoryId: context.repositoryId,
+        pullRequestNumber: context.pullRequestNumber,
+        headSha: context.headSha,
+        baseRef: `refs/heads/${context.baseRefName}`,
+        authorGithubUserId: context.authorGithubUserId,
+        draft: context.draft,
+      });
+      console.log(`Thwip Queue says: ${reason}`);
+    },
+    (error) => summary(`thwip: FAIL — ${message(error)}`),
+    warnQueueFailure,
+  );
+}

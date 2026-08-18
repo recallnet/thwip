@@ -1,13 +1,6 @@
 name: queue clock
 
-# Cloudflare stopped dispatching thwip's own five minute trigger at 03:55Z on
-# 5 August, with the schedule still listed by its own API and no error recorded
-# against it. Eleven hours passed before anybody noticed, and what noticed was a
-# person comparing invocation counts against webhook rows by hand.
-#
-# This reads the age of the last finished tick from a scheduler that is not
-# Cloudflare's, and the request it makes is itself traffic, which is the queue's
-# second clock. Two vendors now have to stop for the queue to stop quietly.
+# Independent watchdog for the queue's Cloudflare scheduler.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -32,8 +25,6 @@ jobs:
           fi
           if [ "$age" -gt 900 ]; then
             echo "::error::the queue has not finished a tick in ${age}s"
-            # What stopped it, when the Worker knows. An age alone says how long,
-            # not why, and otherwise requires a manual log reconstruction.
             cause=$(echo "$health" | jq -r '.tick.lastError // empty')
             if [ -n "$cause" ]; then
               echo "::error::the last tick threw at $(echo "$health" | jq -r '.tick.lastErrorAt'): ${cause}"
@@ -44,10 +35,7 @@ jobs:
           fi
           echo "last tick ${age}s ago, by $(echo "$health" | jq -r '.tick.source')"
 
-          # A break-glass deploy is unreviewed code in production, so it needs a
-          # durable reminder. An ordinary deploy
-          # from main clears the stamp, so this goes quiet by itself once the
-          # tree it excused has merged and shipped the usual way.
+          # Keep break-glass deployments visible until a normal deploy replaces them.
           exception=$(echo "$health" | jq -r '.exception // empty')
           if [ -n "$exception" ]; then
             echo "$exception" | jq .

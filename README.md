@@ -24,6 +24,26 @@ Most teams should use the managed service at [thwip.ai](https://thwip.ai).
 For teams that need independent operation, the source retains a manual
 [control-plane setup path](docs/self-hosting.md); it does not require Stripe.
 
+## GitHub Action
+
+Queue setup adds the required workflows. The normal pull-request job calls one
+Action step; the Action verifies the proof and joins the queue:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+  checks: write
+  pull-requests: read
+
+steps:
+  - uses: recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b
+```
+
+The hosted service needs no inputs. A self-hosted control plane can set the
+`endpoint` input to its HTTPS origin. The optional `github-token` input defaults
+to the job's GitHub token.
+
 ## Develop this repository
 
 Use Node.js 22 or newer and pnpm. Install the locked dependencies, then run the
