@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { ActionClient } from "./control-plane.js";
+import { ActionClient, parsePublishedKeys } from "./control-plane.js";
+
+const publicKey = {
+  kty: "EC",
+  crv: "P-256",
+  alg: "ES256",
+  use: "sig",
+  kid: "service-key",
+  x: "x-coordinate",
+  y: "y-coordinate",
+} as const;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -21,6 +31,20 @@ function client(fetch: typeof globalThis.fetch, sleep = vi.fn(async () => undefi
 }
 
 describe("control-plane calls", () => {
+  it("reads usable signing keys from the selected control plane without OIDC", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(json(200, { keys: [publicKey] }));
+    await expect(client(fetch).publishedKeys()).resolves.toEqual({ keys: [publicKey] });
+    expect(fetch).toHaveBeenCalledWith("https://thwip.example/.well-known/thwip-keys", {
+      headers: { accept: "application/json", "user-agent": "thwip-action" },
+    });
+  });
+
+  it("rejects empty or unusable signing key sets", async () => {
+    expect(parsePublishedKeys({ keys: [] })).toBeNull();
+    expect(parsePublishedKeys({ keys: [{ ...publicKey, alg: "RS256" }] })).toBeNull();
+    expect(parsePublishedKeys({ keys: [{ ...publicKey, use: "enc" }] })).toBeNull();
+  });
+
   it("uses one OIDC token for repeated calls", async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
