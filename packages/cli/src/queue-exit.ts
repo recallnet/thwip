@@ -83,6 +83,8 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   BASE_NOT_MANAGED: EXIT.setupInvalid,
   RULESET_DRIFT: EXIT.setupInvalid,
   APP_PERMISSION_DRIFT: EXIT.setupInvalid,
+  EVIDENCE_MISSING: EXIT.setupInvalid,
+  EVIDENCE_DRIFTED: EXIT.setupInvalid,
   QUEUE_NOT_CONFIGURED: EXIT.setupInvalid,
   NO_PINNED_VERIFIER: EXIT.setupInvalid,
   CANDIDATE_VERIFIER_NOT_PINNED: EXIT.setupInvalid,
@@ -232,6 +234,10 @@ const CLASS: Record<ReasonCode, ExitCode> = {
   NETWORK_UNAVAILABLE: EXIT.unavailable,
   BUNDLE_UNAVAILABLE: EXIT.unavailable,
   RATE_LIMITED: EXIT.rateLimited,
+  // Evidence that was not read is never waived by --allow-unread. That flag
+  // covers only the caller's lack of repository-admin standing.
+  EVIDENCE_UNAVAILABLE: EXIT.unavailable,
+  EVIDENCE_UNREADABLE: EXIT.unavailable,
 
   /* Something disagreed that should not have. A human must look. */
   INVARIANT_FAILURE: EXIT.invariant,
