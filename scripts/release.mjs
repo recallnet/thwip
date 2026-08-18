@@ -93,24 +93,49 @@ export function plannedVersion({
   declaredVersion,
   lastTagVersion,
   npm,
+  github,
   head,
 }) {
-  const current = highestVersion([declaredVersion, lastTagVersion, npm.version]);
-  const partialAtHead = npm.version === current && npm.sourceCommit === head;
+  const registries = [
+    ["npm", npm],
+    ["GitHub Packages", github],
+  ];
+  if (
+    npm.version !== "0.0.0" &&
+    npm.version === github.version &&
+    npm.sourceCommit !== github.sourceCommit
+  ) {
+    throw new Error(
+      `${PACKAGE}@${npm.version} comes from different commits in npm and GitHub Packages; ` +
+        "refusing to publish over an inconsistent mirror",
+    );
+  }
+  const current = highestVersion([
+    declaredVersion,
+    lastTagVersion,
+    ...registries.map(([, registry]) => registry.version),
+  ]);
+  const currentPublications = registries.filter(([, registry]) => registry.version === current);
+  const partialAtHead =
+    currentPublications.length > 0 &&
+    currentPublications.every(([, registry]) => registry.sourceCommit === head);
   const recovering = compareVersions(current, lastTagVersion) > 0 && partialAtHead;
   const version = recovering ? current : bumpVersion(current, bump);
 
-  if (npm.version === version && npm.sourceCommit !== head) {
-    throw new Error(
-      `npm already contains ${PACKAGE}@${version} from ${npm.sourceCommit ?? "an unknown commit"}; ` +
-        `refusing to overwrite or tag it as ${head}`,
-    );
+  for (const [label, registry] of registries) {
+    if (registry.version === version && registry.sourceCommit !== head) {
+      throw new Error(
+        `${label} already contains ${PACKAGE}@${version} from ` +
+          `${registry.sourceCommit ?? "an unknown commit"}; refusing to overwrite or tag it as ${head}`,
+      );
+    }
   }
 
   return {
     version,
     recovering,
     npmExists: npm.version === version,
+    githubExists: github.version === version,
   };
 }
 
@@ -193,6 +218,7 @@ function append(path, lines) {
 
 export function planRelease({
   npmjsUserconfig = process.env.NPMJS_NPMRC,
+  githubUserconfig = process.env.GITHUB_NPMRC,
   head = process.env.GITHUB_SHA || git(["rev-parse", "HEAD"]),
 } = {}) {
   requireCanonicalReleaseCheckout();
@@ -217,13 +243,18 @@ export function planRelease({
     registry: "https://registry.npmjs.org",
     userconfig: npmjsUserconfig,
   });
+  const github = registryInfo({
+    registry: "https://npm.pkg.github.com",
+    userconfig: githubUserconfig,
+  });
   return {
     release: true,
     lastTag,
     bump,
     head,
     npm,
-    ...plannedVersion({ bump, declaredVersion, lastTagVersion, npm, head }),
+    github,
+    ...plannedVersion({ bump, declaredVersion, lastTagVersion, npm, github, head }),
   };
 }
 
@@ -303,6 +334,7 @@ function plan() {
     "release=true",
     `version=${plan.version}`,
     `npm_exists=${plan.npmExists}`,
+    `github_exists=${plan.githubExists}`,
   ]);
   append(process.env.GITHUB_STEP_SUMMARY, [
     `${plan.bump}: ${plan.lastTag || "no tag"} to v${plan.version}`,
