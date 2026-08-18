@@ -1529,7 +1529,6 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
   }
   const workflowHealth = managedWorkflowHealth({
     endpoint: env.PUBLIC_ORIGIN,
-    installedRepository: repo,
     files: liveWorkflows,
     actionAccessible,
   });

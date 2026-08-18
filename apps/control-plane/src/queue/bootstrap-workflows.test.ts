@@ -8,7 +8,6 @@ import {
   setupPullRequestBody,
   setupPullRequestFiles,
   SETUP_BRANCH,
-  sourceRepositoryRequiredWorkflowFile,
 } from "./bootstrap-workflows.js";
 import { PROOF_CHECK, WORKFLOW_CHECK } from "./turn-check.js";
 
@@ -33,7 +32,7 @@ function file(path: string): string {
 
 describe("setupPullRequestFiles", () => {
   it("pins new repositories to the current immutable Action release", () => {
-    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@ca2a4d70946fe2b2aa364998dbae227ae81e8186");
+    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b");
   });
 
   it("offers only the workflows while inheriting organization defaults", () => {
@@ -190,11 +189,13 @@ describe("the generated workflows under the workflow lint", () => {
 describe("drift against this repository's own workflows", () => {
   it("keeps this repository on the exact managed proof workflow", () => {
     const live = readFileSync(join(repoRoot, ".github/workflows/thwip-required.yml"), "utf8");
-    const generated = sourceRepositoryRequiredWorkflowFile({
+    const generated = setupPullRequestFiles({
       endpoint: PRODUCTION_ENDPOINT,
       actionRef: QUEUE_ACTION_REF,
-    }).content;
-    expect(generated).toContain("uses: ./");
+    }).find((entry) => entry.path === ".github/workflows/thwip-required.yml")?.content;
+    expect(generated).toContain(`uses: ${QUEUE_ACTION_REF}`);
+    expect(generated).not.toContain("uses: ./");
+    expect(generated).not.toContain("actions/checkout");
     expect(live).toBe(generated);
   });
 

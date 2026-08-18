@@ -37,7 +37,7 @@ permissions:
   pull-requests: read
 
 steps:
-  - uses: recallnet/thwip@ca2a4d70946fe2b2aa364998dbae227ae81e8186
+  - uses: recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b
 ```
 
 The hosted service needs no inputs. A self-hosted control plane can set the

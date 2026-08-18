@@ -5,7 +5,7 @@ export interface SetupFile {
 
 export const SETUP_BRANCH = "thwip/setup";
 export const SETUP_PULL_REQUEST_TITLE = "Set up Thwip Queue" as const;
-export const QUEUE_ACTION_REF = "recallnet/thwip@ca2a4d70946fe2b2aa364998dbae227ae81e8186";
+export const QUEUE_ACTION_REF = "recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b";
 
 const HOSTED_ENDPOINT = "https://thwip.ai";
 
@@ -20,14 +20,6 @@ required:
 
 const PUBLISHED_ACTION_STEP = `      - name: Verify the proof and join Thwip Queue
         uses: __ACTION_REF____ACTION_INPUTS__`;
-
-const SOURCE_REPOSITORY_ACTION_STEPS = `      # Run the Action from the workflow revision, not pull-request code.
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: \${{ github.workflow_sha }}
-          persist-credentials: false
-      - name: Verify the proof and join Thwip Queue
-        uses: ./__ACTION_INPUTS__`;
 
 const REQUIRED_WORKFLOW = `name: thwip
 
@@ -120,7 +112,7 @@ jobs:
         env:
           EXPECTED_TREE: \${{ github.event.client_payload.candidateTreeOid }}
         run: |
-          actual=$(git rev-parse HEAD^{tree})
+          actual=$(git rev-parse "HEAD^{tree}")
           test "$actual" = "$EXPECTED_TREE"
 
       - name: Install
@@ -159,9 +151,9 @@ function actionInputs(endpoint: string): string {
   return `\n        with:\n          endpoint: ${JSON.stringify(endpoint)}`;
 }
 
-function render(template: string, input: SetupPullRequestInput, actionSteps = PUBLISHED_ACTION_STEP): string {
+function render(template: string, input: SetupPullRequestInput): string {
   return template
-    .replaceAll("__ACTION_STEPS__", actionSteps)
+    .replaceAll("__ACTION_STEPS__", PUBLISHED_ACTION_STEP)
     .replaceAll("__ACTION_INPUTS__", actionInputs(input.endpoint))
     .replaceAll("__ACTION_REF__", input.actionRef);
 }
@@ -176,13 +168,6 @@ export function setupPullRequestFiles(input: SetupPullRequestInput): readonly Se
 
 function requiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
   return { path: ".github/workflows/thwip-required.yml", content: render(REQUIRED_WORKFLOW, input) };
-}
-
-export function sourceRepositoryRequiredWorkflowFile(input: SetupPullRequestInput): SetupFile {
-  return {
-    path: ".github/workflows/thwip-required.yml",
-    content: render(REQUIRED_WORKFLOW, input, SOURCE_REPOSITORY_ACTION_STEPS),
-  };
 }
 
 export function verifierWorkflowFile(input: SetupPullRequestInput): SetupFile {
