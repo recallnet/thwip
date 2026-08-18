@@ -41,6 +41,7 @@ describe("managed ruleset doctor", () => {
       duplicate: [],
       drifted: [],
       bypassActorsKnown: true,
+      bypassActorsStatus: "verified",
     });
   });
 
@@ -106,6 +107,24 @@ describe("managed ruleset doctor", () => {
       const { bypass_actors: _hidden, ...visible } = ruleset;
       return { id, ruleset: visible as Ruleset };
     });
-    expect(health(rulesets)).toMatchObject({ healthy: false, bypassActorsKnown: false });
+    expect(health(rulesets)).toMatchObject({
+      healthy: false,
+      bypassActorsKnown: false,
+      bypassActorsStatus: "unreadable",
+    });
+  });
+
+  it("distinguishes visible incorrect bypass actors from hidden actors", () => {
+    const rulesets = healthyRulesets();
+    rulesets[0] = {
+      ...rulesets[0]!,
+      ruleset: { ...rulesets[0]!.ruleset, bypass_actors: [] },
+    };
+    expect(health(rulesets)).toMatchObject({
+      healthy: false,
+      bypassActorsKnown: true,
+      bypassActorsStatus: "incorrect",
+      drifted: ["Thwip Queue Ownership"],
+    });
   });
 });

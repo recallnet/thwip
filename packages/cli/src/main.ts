@@ -48,6 +48,7 @@ import {
   type BuildIdentity,
 } from "./build-identity.js";
 import { doctorProbes, reportDoctor, type DoctorObservation } from "./queue-doctor.js";
+import { readDoctorProbe } from "./doctor-remote.js";
 import { runDoctor, type CliRead, type LocalReads, type PolicyRead, type SigningKeyRead } from "./doctor.js";
 import { cmdVerifyChain, parseKeySet } from "./verify-chain.js";
 import { materializeCandidate, type CandidateWorkspace } from "./candidate.js";
@@ -1075,17 +1076,8 @@ async function cmdQueueDoctor(argv: string[]): Promise<number> {
     if (probe.requiresAdmin && observations[0]?.body?.["projectId"] !== undefined) {
       path += `?projectId=${encodeURIComponent(String(observations[0].body?.["projectId"]))}`;
     }
-    // A section that cannot be read is a fact to report, so a network failure
-    // is recorded as status 0 rather than ending the command.
-    const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
-      headers: { authorization: auth },
-    })
-      .then(async (res) => ({
-        status: res.status,
-        body: (await res.json().catch(() => null)) as Record<string, unknown> | null,
-      }))
-      .catch(() => ({ status: 0, body: null }));
-    observations.push({ section: probe.section, ...answer });
+    const answer = await readDoctorProbe({ endpoint, auth, path, probe });
+    observations.push(answer);
     if (probe.section === "repository" && answer.status === 200) {
       const id = answer.body?.["repositoryId"];
       repositoryId = typeof id === "string" ? id : null;
@@ -1247,15 +1239,8 @@ async function probeRemote(
     if (probe.path.includes("{repositoryId}") && repositoryId === null) break;
     let path = repositoryId === null ? probe.path : probe.path.replaceAll("{repositoryId}", repositoryId);
     if (probe.requiresAdmin && projectId !== null) path += `?projectId=${encodeURIComponent(projectId)}`;
-    const answer: Pick<DoctorObservation, "status" | "body"> = await fetch(endpoint + path, {
-      headers: { authorization: auth },
-    })
-      .then(async (res) => ({
-        status: res.status,
-        body: (await res.json().catch(() => null)) as Record<string, unknown> | null,
-      }))
-      .catch(() => ({ status: 0, body: null }));
-    observations.push({ section: probe.section, ...answer });
+    const answer = await readDoctorProbe({ endpoint, auth, path, probe });
+    observations.push(answer);
     if (probe.section === "repository" && answer.status === 200) {
       const id = answer.body?.["repositoryId"];
       repositoryId = typeof id === "string" ? id : null;
