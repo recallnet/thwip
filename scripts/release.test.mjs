@@ -68,11 +68,45 @@ describe("CLI release planning", () => {
       declaredVersion: "0.1.1",
       lastTagVersion: "0.16.2",
       npm: registry("0.16.3", "abc"),
+      github: registry("0.16.2", "older"),
       head: "abc",
     })).toEqual({
       version: "0.16.3",
       recovering: true,
       npmExists: true,
+      githubExists: false,
+    });
+  });
+
+  it("recovers the same version after GitHub Packages accepted this exact commit", () => {
+    expect(plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.2", "older"),
+      github: registry("0.16.3", "abc"),
+      head: "abc",
+    })).toEqual({
+      version: "0.16.3",
+      recovering: true,
+      npmExists: false,
+      githubExists: true,
+    });
+  });
+
+  it("recovers when both registries already accepted the exact commit", () => {
+    expect(plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.3", "abc"),
+      github: registry("0.16.3", "abc"),
+      head: "abc",
+    })).toEqual({
+      version: "0.16.3",
+      recovering: true,
+      npmExists: true,
+      githubExists: true,
     });
   });
 
@@ -82,8 +116,31 @@ describe("CLI release planning", () => {
       declaredVersion: "0.1.1",
       lastTagVersion: "0.16.2",
       npm: registry("0.16.3", "older"),
+      github: registry("0.16.2", "older"),
       head: "newer",
     }).version).toBe("0.16.4");
+  });
+
+  it("chooses a version above either registry", () => {
+    expect(plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.3", "older"),
+      github: registry("0.16.5", "older"),
+      head: "newer",
+    }).version).toBe("0.16.6");
+  });
+
+  it("refuses conflicting same-version publications", () => {
+    expect(() => plannedVersion({
+      bump: "patch",
+      declaredVersion: "0.1.1",
+      lastTagVersion: "0.16.2",
+      npm: registry("0.16.3", "abc"),
+      github: registry("0.16.3", "other"),
+      head: "abc",
+    })).toThrow(/different commits in npm and GitHub Packages/);
   });
 
   it("covers the complete workspace dependency closure for the CLI and Action", () => {
@@ -141,11 +198,24 @@ describe("CLI release planning", () => {
     }
     expect(workflow).toContain("run: git diff --exit-code");
     expect(workflow).toContain('confirm_install "npm"');
+    expect(workflow).toContain('confirm_install "GitHub Packages"');
     expect(workflow).toContain('echo "@recallnet:registry=https://registry.npmjs.org"');
+    expect(workflow).toContain('echo "@recallnet:registry=https://npm.pkg.github.com"');
+    expect(workflow).toContain('packages: write');
+    expect(workflow).toContain('npm publish "$TARBALL"');
+    expect(workflow.match(/npm publish "\$TARBALL"/g)).toHaveLength(4);
+    expect(workflow).toContain('steps.decide.outputs.github_exists');
+    expect(workflow).toContain('EXPECTED_INTEGRITY');
+    expect(workflow).toContain('confirm_registry "npm"');
+    expect(workflow).toContain('confirm_registry "GitHub Packages"');
+    expect(workflow).toContain('env -u NODE_AUTH_TOKEN ./node_modules/.bin/thwip version');
+    expect(workflow.match(/npm install --ignore-scripts/g)).toHaveLength(2);
     expect(workflow).toContain('(cd "$probe" && npm install');
     expect(workflow).toContain('--cache="$probe/.npm-cache"');
     expect(workflow).toContain('--prefer-online');
-    expect(workflow).toContain('(cd "$probe" && ./node_modules/.bin/thwip version)');
+    expect(workflow).toContain(
+      '(cd "$probe" && env -u NODE_AUTH_TOKEN ./node_modules/.bin/thwip version)',
+    );
     expect(workflow).toContain('max_attempts=18');
   });
 

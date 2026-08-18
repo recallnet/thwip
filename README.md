@@ -8,9 +8,9 @@ The CLI runs approved checks, signs evidence for the exact Git tree, and
 attaches that evidence to the commit. The ruleset-protected GitHub App verifies
 it and moves eligible pull requests through the queue.
 
-The CLI ships on npm as `@recallnet/thwip`. Users install that package; this
-repository contains the service, CLI, GitHub Action, and shared packages behind
-it.
+The CLI ships on npm as `@recallnet/thwip` and is mirrored to GitHub Packages.
+Users install that package; this repository contains the service, CLI, GitHub
+Action, and shared packages behind it.
 
 - Product: https://thwip.ai
 - CLI guide: [packages/cli/README.md](packages/cli/README.md)
