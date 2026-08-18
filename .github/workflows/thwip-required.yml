@@ -18,10 +18,5 @@ jobs:
     name: thwip / workflow
     runs-on: ubuntu-latest
     steps:
-      # Run the Action from the workflow revision, not pull-request code.
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
       - name: Verify the proof and join Thwip Queue
-        uses: ./
+        uses: recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b

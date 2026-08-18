@@ -66,7 +66,7 @@ jobs:
         env:
           EXPECTED_TREE: ${{ github.event.client_payload.candidateTreeOid }}
         run: |
-          actual=$(git rev-parse HEAD^{tree})
+          actual=$(git rev-parse "HEAD^{tree}")
           test "$actual" = "$EXPECTED_TREE"
 
       - name: Install
@@ -91,4 +91,4 @@ jobs:
       id-token: write
     steps:
       - name: Register the candidate report with Thwip Queue
-        uses: recallnet/thwip@ca2a4d70946fe2b2aa364998dbae227ae81e8186
+        uses: recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b
