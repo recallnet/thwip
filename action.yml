@@ -1,5 +1,15 @@
-name: thwip
-description: Verify a signed thwip local-CI proof for the exact pull-request head.
+name: Thwip
+description: Verify a signed local-CI proof and enrol the pull request in Thwip Queue.
+
+inputs:
+  endpoint:
+    description: Thwip control-plane origin. Leave unchanged when using the hosted service.
+    required: false
+    default: https://thwip.ai
+  github-token:
+    description: GitHub token used to read the commit and publish suite checks.
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: node24
