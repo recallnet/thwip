@@ -1,3 +1,5 @@
+import type { JWK, JSONWebKeySet } from "jose";
+
 export interface HttpResponse<T = unknown> {
   readonly status: number;
   readonly body: T;
@@ -29,6 +31,31 @@ function delay(milliseconds: number): Promise<void> {
 
 function bodyText(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function verificationKey(value: unknown): value is JWK {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const key = value as Record<string, unknown>;
+  return (
+    key["kty"] === "EC" &&
+    key["crv"] === "P-256" &&
+    key["alg"] === "ES256" &&
+    key["use"] === "sig" &&
+    typeof key["kid"] === "string" &&
+    key["kid"].length > 0 &&
+    typeof key["x"] === "string" &&
+    key["x"].length > 0 &&
+    typeof key["y"] === "string" &&
+    key["y"].length > 0
+  );
+}
+
+export function parsePublishedKeys(value: unknown): JSONWebKeySet | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const keys = (value as Record<string, unknown>)["keys"];
+  if (!Array.isArray(keys)) return null;
+  const usable = keys.filter(verificationKey);
+  return usable.length === 0 ? null : { keys: usable };
 }
 
 export class ActionClient {
@@ -85,6 +112,16 @@ export class ActionClient {
       }
     }
     return { status: response.status, body: parsed as T, text };
+  }
+
+  async publishedKeys(): Promise<JSONWebKeySet> {
+    const response = await this.#fetch(`${this.#endpoint}/.well-known/thwip-keys`, {
+      headers: { accept: "application/json", "user-agent": "thwip-action" },
+    });
+    if (!response.ok) throw new Error(`SIGNING_KEYS_UNAVAILABLE: ${response.status}`);
+    const keys = parsePublishedKeys(await response.json().catch(() => null));
+    if (keys === null) throw new Error("SIGNING_KEYS_UNAVAILABLE: no usable ES256 signing key was published");
+    return keys;
   }
 
   async authorize(input: QueueAuthorization): Promise<string> {

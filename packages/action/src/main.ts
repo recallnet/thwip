@@ -1,5 +1,5 @@
 import { appendFileSync } from "node:fs";
-import { importJWK, compactVerify, type JWK } from "jose";
+import { compactVerify, createLocalJWKSet } from "jose";
 import { verifySshSignature } from "@thwip/sshsig";
 import { verifyProof, type GithubFacts } from "@thwip/verifier";
 import {
@@ -9,7 +9,6 @@ import {
   utf8Decode,
   type VerificationBundleV1,
 } from "@thwip/protocol";
-import servicePublicJwk from "../service-public.jwk.json" with { type: "json" };
 import { parseBundleResolutionBody } from "./bundle-resolution.js";
 import { ActionClient } from "./control-plane.js";
 import { readActionContext, readActionInputs, type PullRequestContext } from "./context.js";
@@ -74,9 +73,13 @@ async function fetchBundle(
   }
   const resolution = parseBundleResolutionBody(response.body);
   if (resolution.kind === "bootstrap_pending") return resolution;
-  const key = await importJWK(servicePublicJwk as JWK, "ES256");
-  const { payload, protectedHeader } = await compactVerify(resolution.bundle, key);
-  if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
+  const { payload, protectedHeader } = await compactVerify(
+    resolution.bundle,
+    createLocalJWKSet(await client.publishedKeys()),
+  );
+  if (protectedHeader.alg !== "ES256" || protectedHeader.typ !== "thwip-bundle+jws") {
+    throw new Error("BUNDLE_SIGNATURE_INVALID: bad protected header");
+  }
   return {
     kind: "active",
     bundle: JSON.parse(new TextDecoder().decode(payload)) as VerificationBundleV1,
@@ -332,6 +335,19 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function workflowCommandValue(value: string): string {
+  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+export function warnQueueFailure(error: unknown): void {
+  const detail = message(error);
+  const warning =
+    `Queue enrolment did not complete: ${detail}. ` +
+    "The proof result is unchanged. Re-run this job to try enrolment again.";
+  console.warn(`::warning::${workflowCommandValue(warning)}`);
+  summary(`> ⚠️ ${warning}`);
+}
+
 export async function runAction(): Promise<number> {
   const inputs = readActionInputs();
   const context = readActionContext();
@@ -359,6 +375,6 @@ export async function runAction(): Promise<number> {
       console.log(`Thwip Queue says: ${reason}`);
     },
     (error) => summary(`thwip: FAIL — ${message(error)}`),
-    (error) => console.warn(`thwip: queue enrolment could not complete — ${message(error)}`),
+    warnQueueFailure,
   );
 }

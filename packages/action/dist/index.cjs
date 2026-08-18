@@ -254,6 +254,25 @@ var JWSInvalid = class extends JOSEError {
   static code = "ERR_JWS_INVALID";
   code = "ERR_JWS_INVALID";
 };
+var JWKSInvalid = class extends JOSEError {
+  static code = "ERR_JWKS_INVALID";
+  code = "ERR_JWKS_INVALID";
+};
+var JWKSNoMatchingKey = class extends JOSEError {
+  static code = "ERR_JWKS_NO_MATCHING_KEY";
+  code = "ERR_JWKS_NO_MATCHING_KEY";
+  constructor(message3 = "no applicable key found in the JSON Web Key Set", options) {
+    super(message3, options);
+  }
+};
+var JWKSMultipleMatchingKeys = class extends JOSEError {
+  [Symbol.asyncIterator];
+  static code = "ERR_JWKS_MULTIPLE_MATCHING_KEYS";
+  code = "ERR_JWKS_MULTIPLE_MATCHING_KEYS";
+  constructor(message3 = "multiple matching keys found in the JSON Web Key Set", options) {
+    super(message3, options);
+  }
+};
 var JWSSignatureVerificationFailed = class extends JOSEError {
   static code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
   code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
@@ -964,6 +983,121 @@ async function compactVerify(jws, key, options) {
     return { ...result, key: verified.key };
   }
   return result;
+}
+
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/jwks/local.js
+function getKtyFromAlg(alg) {
+  switch (typeof alg === "string" && alg.slice(0, 2)) {
+    case "RS":
+    case "PS":
+      return "RSA";
+    case "ES":
+      return "EC";
+    case "Ed":
+      return "OKP";
+    case "ML":
+      return "AKP";
+    default:
+      throw new JOSENotSupported('Unsupported "alg" value for a JSON Web Key Set');
+  }
+}
+function isJWKSLike(jwks) {
+  return jwks && typeof jwks === "object" && Array.isArray(jwks.keys) && jwks.keys.every(isJWKLike);
+}
+function isJWKLike(key) {
+  return isObject(key);
+}
+var LocalJWKSet = class {
+  #jwks;
+  #cached = /* @__PURE__ */ new WeakMap();
+  constructor(jwks) {
+    if (!isJWKSLike(jwks)) {
+      throw new JWKSInvalid("JSON Web Key Set malformed");
+    }
+    this.#jwks = structuredClone(jwks);
+  }
+  jwks() {
+    return this.#jwks;
+  }
+  async getKey(protectedHeader, token) {
+    const { alg, kid } = { ...protectedHeader, ...token?.header };
+    const kty = getKtyFromAlg(alg);
+    const candidates = this.#jwks.keys.filter((jwk2) => {
+      let candidate = kty === jwk2.kty;
+      if (candidate && typeof kid === "string") {
+        candidate = kid === jwk2.kid;
+      }
+      if (candidate && (typeof jwk2.alg === "string" || kty === "AKP")) {
+        candidate = alg === jwk2.alg;
+      }
+      if (candidate && typeof jwk2.use === "string") {
+        candidate = jwk2.use === "sig";
+      }
+      if (candidate && Array.isArray(jwk2.key_ops)) {
+        candidate = jwk2.key_ops.includes("verify");
+      }
+      if (candidate) {
+        switch (alg) {
+          case "ES256":
+            candidate = jwk2.crv === "P-256";
+            break;
+          case "ES384":
+            candidate = jwk2.crv === "P-384";
+            break;
+          case "ES512":
+            candidate = jwk2.crv === "P-521";
+            break;
+          case "Ed25519":
+          case "EdDSA":
+            candidate = jwk2.crv === "Ed25519";
+            break;
+        }
+      }
+      return candidate;
+    });
+    const { 0: jwk, length } = candidates;
+    if (length === 0) {
+      throw new JWKSNoMatchingKey();
+    }
+    if (length !== 1) {
+      const error = new JWKSMultipleMatchingKeys();
+      const _cached = this.#cached;
+      error[Symbol.asyncIterator] = async function* () {
+        for (const jwk2 of candidates) {
+          try {
+            yield await importWithAlgCache(_cached, jwk2, alg);
+          } catch {
+          }
+        }
+      };
+      throw error;
+    }
+    return importWithAlgCache(this.#cached, jwk, alg);
+  }
+};
+async function importWithAlgCache(cache2, jwk, alg) {
+  const cached = cache2.get(jwk) || cache2.set(jwk, {}).get(jwk);
+  if (cached[alg] === void 0) {
+    const key = await importJWK({ ...jwk, ext: true }, alg);
+    if (key instanceof Uint8Array || key.type !== "public") {
+      throw new JWKSInvalid("JSON Web Key Set members must be public keys");
+    }
+    cached[alg] = key;
+  }
+  return cached[alg];
+}
+function createLocalJWKSet(jwks) {
+  const set = new LocalJWKSet(jwks);
+  const localJWKSet = async (protectedHeader, token) => set.getKey(protectedHeader, token);
+  Object.defineProperties(localJWKSet, {
+    jwks: {
+      value: () => structuredClone(set.jwks()),
+      enumerable: false,
+      configurable: false,
+      writable: false
+    }
+  });
+  return localJWKSet;
 }
 
 // ../sshsig/dist/index.js
@@ -1814,16 +1948,6 @@ async function checkLease(input) {
   return void 0;
 }
 
-// service-public.jwk.json
-var service_public_jwk_default = {
-  kty: "EC",
-  x: "um1lpxU3JthsE-C8wiYSaon_h_hsaZAp9x8MZ6cUWjo",
-  y: "YmW9EvHEHrChYQMwKEGdkFsXl8-HulgQRCzEKyb7q5o",
-  crv: "P-256",
-  kid: "thwip-svc-1",
-  alg: "ES256"
-};
-
 // src/bundle-resolution.ts
 function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1855,6 +1979,18 @@ function delay(milliseconds) {
 }
 function bodyText(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+function verificationKey(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const key = value;
+  return key["kty"] === "EC" && key["crv"] === "P-256" && key["alg"] === "ES256" && key["use"] === "sig" && typeof key["kid"] === "string" && key["kid"].length > 0 && typeof key["x"] === "string" && key["x"].length > 0 && typeof key["y"] === "string" && key["y"].length > 0;
+}
+function parsePublishedKeys(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const keys = value["keys"];
+  if (!Array.isArray(keys)) return null;
+  const usable = keys.filter(verificationKey);
+  return usable.length === 0 ? null : { keys: usable };
 }
 var ActionClient = class {
   #endpoint;
@@ -1907,6 +2043,15 @@ var ActionClient = class {
       }
     }
     return { status: response.status, body: parsed, text };
+  }
+  async publishedKeys() {
+    const response = await this.#fetch(`${this.#endpoint}/.well-known/thwip-keys`, {
+      headers: { accept: "application/json", "user-agent": "thwip-action" }
+    });
+    if (!response.ok) throw new Error(`SIGNING_KEYS_UNAVAILABLE: ${response.status}`);
+    const keys = parsePublishedKeys(await response.json().catch(() => null));
+    if (keys === null) throw new Error("SIGNING_KEYS_UNAVAILABLE: no usable ES256 signing key was published");
+    return keys;
   }
   async authorize(input) {
     const body = {
@@ -2098,9 +2243,13 @@ async function fetchBundle(client, repositoryId, headSha, hints) {
   }
   const resolution = parseBundleResolutionBody(response.body);
   if (resolution.kind === "bootstrap_pending") return resolution;
-  const key = await importJWK(service_public_jwk_default, "ES256");
-  const { payload, protectedHeader } = await compactVerify(resolution.bundle, key);
-  if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
+  const { payload, protectedHeader } = await compactVerify(
+    resolution.bundle,
+    createLocalJWKSet(await client.publishedKeys())
+  );
+  if (protectedHeader.alg !== "ES256" || protectedHeader.typ !== "thwip-bundle+jws") {
+    throw new Error("BUNDLE_SIGNATURE_INVALID: bad protected header");
+  }
   return {
     kind: "active",
     bundle: JSON.parse(new TextDecoder().decode(payload))
@@ -2306,6 +2455,15 @@ async function publishSuiteChecks(client, fullName, headSha, statement) {
 function message2(error) {
   return error instanceof Error ? error.message : String(error);
 }
+function workflowCommandValue(value) {
+  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+function warnQueueFailure(error) {
+  const detail = message2(error);
+  const warning = `Queue enrolment did not complete: ${detail}. The proof result is unchanged. Re-run this job to try enrolment again.`;
+  console.warn(`::warning::${workflowCommandValue(warning)}`);
+  summary(`> \u26A0\uFE0F ${warning}`);
+}
 async function runAction() {
   const inputs = readActionInputs();
   const context = readActionContext();
@@ -2333,7 +2491,7 @@ async function runAction() {
       console.log(`Thwip Queue says: ${reason}`);
     },
     (error) => summary(`thwip: FAIL \u2014 ${message2(error)}`),
-    (error) => console.warn(`thwip: queue enrolment could not complete \u2014 ${message2(error)}`)
+    warnQueueFailure
   );
 }
 
