@@ -33,7 +33,7 @@ function file(path: string): string {
 
 describe("setupPullRequestFiles", () => {
   it("pins new repositories to the current immutable Action release", () => {
-    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@e8e060530f938e415e8f651a081ce1707adb2ff0");
+    expect(QUEUE_ACTION_REF).toBe("recallnet/thwip@ca2a4d70946fe2b2aa364998dbae227ae81e8186");
   });
 
   it("offers only the workflows while inheriting organization defaults", () => {
@@ -43,13 +43,6 @@ describe("setupPullRequestFiles", () => {
     ]);
   });
 
-  /**
-   * `remote` and `audited` claim the integrated candidate was run, and the run
-   * happens in a workflow the control plane dispatches by
-   * `repository_dispatch: thwip-queue-verify`. The template emitted no such
-   * file, so every repository enrolled through the product got a dispatch
-   * nothing listened to.
-   */
   it("answers the candidate dispatch the control plane sends", () => {
     const verify = parse(file(".github/workflows/thwip-queue-verify.yml")) as {
       name: string;
@@ -59,11 +52,6 @@ describe("setupPullRequestFiles", () => {
     expect(verify.on.repository_dispatch.types).toEqual(["thwip-queue-verify"]);
   });
 
-  /**
-   * Which suites the verdict has to cover comes from the activated policy, which
-   * only the control plane holds. Reading it out of the candidate checkout would
-   * let a pull request shrink its own suite list.
-   */
   it("runs the suites the dispatch named, not a list baked into the file", () => {
     const verify = file(".github/workflows/thwip-queue-verify.yml");
     expect(verify).toContain("github.event.client_payload.requiredSuites");
@@ -94,12 +82,17 @@ describe("setupPullRequestFiles", () => {
 
   it("gives the clean reporter only a pending-report identity", () => {
     const verify = parse(file(".github/workflows/thwip-queue-verify.yml")) as {
-      jobs: Record<string, { permissions?: Record<string, string>; steps?: Array<{ uses?: string; run?: string }> }>;
+      jobs: Record<string, {
+        permissions?: Record<string, string>;
+        steps?: Array<{ uses?: string; run?: string; env?: Record<string, string> }>;
+      }>;
     };
     const report = verify.jobs["report"];
     expect(report?.permissions).toEqual({ "id-token": "write" });
     expect(report?.steps).toHaveLength(1);
-    expect(report?.steps?.[0]?.uses).toBeUndefined();
+    expect(report?.steps?.[0]?.uses).toBe("recallnet/thwip@v1.2.3");
+    expect(report?.steps?.[0]?.run).toBeUndefined();
+    expect(report?.steps?.[0]?.env).toBeUndefined();
     const serialized = JSON.stringify(report);
     expect(serialized).not.toContain("actions:read");
     expect(serialized).not.toContain("checkout");
@@ -109,7 +102,7 @@ describe("setupPullRequestFiles", () => {
     expect(serialized).not.toContain("accepted");
     expect(serialized).not.toContain("reasonCodes");
     expect(serialized).not.toContain("candidateSha");
-    expect(serialized).toContain("dispatchNonce");
+    expect(serialized).not.toContain("dispatchNonce");
   });
 
   it("publishes the proof check GitHub Actions is the source of", () => {
@@ -119,6 +112,17 @@ describe("setupPullRequestFiles", () => {
     };
     expect(workflow.name).toBe(PROOF_CHECK);
     expect(workflow.jobs["thwip"]?.name).toBe(WORKFLOW_CHECK);
+  });
+
+  it("keeps the public proof workflow to one Action step", () => {
+    const workflow = parse(file(".github/workflows/thwip-required.yml")) as {
+      jobs: Record<string, { steps: Array<{ uses?: string; run?: string; env?: Record<string, string> }> }>;
+    };
+    const steps = workflow.jobs["thwip"]?.steps ?? [];
+    expect(steps).toHaveLength(1);
+    expect(steps[0]?.uses).toBe("recallnet/thwip@v1.2.3");
+    expect(steps[0]?.run).toBeUndefined();
+    expect(steps[0]?.env).toBeUndefined();
   });
 
   it("produces workflows GitHub can parse and will run", () => {
@@ -147,9 +151,7 @@ describe("setupPullRequestFiles", () => {
       endpoint: "https://thwip.example.test",
       actionRef: "recallnet/thwip@v1.2.3",
     });
-    expect(body).toMatch(/does not request `administration: write`/);
-    expect(body).toMatch(/`workflows: write` when a reviewed merge changes CI definitions/);
-    expect(body).toMatch(/No repository merge token is needed/);
+    expect(body).toMatch(/does not need repository administration access or a merge token/);
   });
 
   it("commits a thwip.yaml only when the team explicitly chooses a repository override", () => {
@@ -166,11 +168,6 @@ describe("setupPullRequestFiles", () => {
   });
 });
 
-/**
- * The template is a workflow, so the rules workflows are held to apply to it.
- *
- * The template is TypeScript that emits YAML, so parse the generated result.
- */
 const PRODUCTION_ENDPOINT = "https://thwip.ai";
 function validateWorkflow(filename: string, source: string): void {
   const workflow = parse(source) as { on?: { schedule?: unknown } } | null;
@@ -191,7 +188,6 @@ describe("the generated workflows under the workflow lint", () => {
 });
 
 describe("drift against this repository's own workflows", () => {
-  /** Keep the source-repository variant exact without exposing it to adopters. */
   it("keeps this repository on the exact managed proof workflow", () => {
     const live = readFileSync(join(repoRoot, ".github/workflows/thwip-required.yml"), "utf8");
     const generated = sourceRepositoryRequiredWorkflowFile({
@@ -206,7 +202,7 @@ describe("drift against this repository's own workflows", () => {
     const live = readFileSync(join(repoRoot, ".github/workflows/thwip-queue-verify.yml"), "utf8");
     const upgrade = setupPullRequestFiles({
       endpoint: PRODUCTION_ENDPOINT,
-      actionRef: "recallnet/thwip@v1",
+      actionRef: QUEUE_ACTION_REF,
     }).find((f) => f.path === ".github/workflows/thwip-queue-verify.yml")?.content;
     expect(live).toContain("Thwip verifier callback protocol: 3");
     expect(live).toBe(upgrade);
