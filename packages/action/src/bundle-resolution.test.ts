@@ -22,12 +22,11 @@ describe("verification bundle resolution contract", () => {
     });
   });
 
-  it("accepts active bundles from current and older control planes", () => {
+  it("accepts an active signed bundle", () => {
     expect(parseBundleResolutionBody({ state: "active", bundle: "signed" })).toEqual({
       kind: "active",
       bundle: "signed",
     });
-    expect(parseBundleResolutionBody({ bundle: "signed" })).toEqual({ kind: "active", bundle: "signed" });
   });
 
   it("does not turn malformed or disabled resolver responses into bootstrap success", () => {

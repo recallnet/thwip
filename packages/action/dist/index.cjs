@@ -63,7 +63,7 @@ var require_canonicalize = __commonJS({
 });
 
 // src/main.ts
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 
 // ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/lib/buffer_utils.js
 var encoder = new TextEncoder();
@@ -79,10 +79,10 @@ function concat(...buffers) {
   }
   return buf;
 }
-function encode(string) {
-  const bytes = new Uint8Array(string.length);
-  for (let i = 0; i < string.length; i++) {
-    const code = string.charCodeAt(i);
+function encode(string2) {
+  const bytes = new Uint8Array(string2.length);
+  for (let i = 0; i < string2.length; i++) {
+    const code = string2.charCodeAt(i);
     if (code > 127) {
       throw new TypeError("non-ASCII string encountered in encode()");
     }
@@ -236,8 +236,8 @@ var withAlg = (alg, actual, ...types) => message(`Key for the ${alg} algorithm m
 var JOSEError = class extends Error {
   static code = "ERR_JOSE_GENERIC";
   code = "ERR_JOSE_GENERIC";
-  constructor(message2, options) {
-    super(message2, options);
+  constructor(message3, options) {
+    super(message3, options);
     this.name = this.constructor.name;
     Error.captureStackTrace?.(this, this.constructor);
   }
@@ -254,11 +254,30 @@ var JWSInvalid = class extends JOSEError {
   static code = "ERR_JWS_INVALID";
   code = "ERR_JWS_INVALID";
 };
+var JWKSInvalid = class extends JOSEError {
+  static code = "ERR_JWKS_INVALID";
+  code = "ERR_JWKS_INVALID";
+};
+var JWKSNoMatchingKey = class extends JOSEError {
+  static code = "ERR_JWKS_NO_MATCHING_KEY";
+  code = "ERR_JWKS_NO_MATCHING_KEY";
+  constructor(message3 = "no applicable key found in the JSON Web Key Set", options) {
+    super(message3, options);
+  }
+};
+var JWKSMultipleMatchingKeys = class extends JOSEError {
+  [Symbol.asyncIterator];
+  static code = "ERR_JWKS_MULTIPLE_MATCHING_KEYS";
+  code = "ERR_JWKS_MULTIPLE_MATCHING_KEYS";
+  constructor(message3 = "multiple matching keys found in the JSON Web Key Set", options) {
+    super(message3, options);
+  }
+};
 var JWSSignatureVerificationFailed = class extends JOSEError {
   static code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
   code = "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
-  constructor(message2 = "signature verification failed", options) {
-    super(message2, options);
+  constructor(message3 = "signature verification failed", options) {
+    super(message3, options);
   }
 };
 
@@ -966,6 +985,121 @@ async function compactVerify(jws, key, options) {
   return result;
 }
 
+// ../../node_modules/.pnpm/jose@6.2.4/node_modules/jose/dist/webapi/jwks/local.js
+function getKtyFromAlg(alg) {
+  switch (typeof alg === "string" && alg.slice(0, 2)) {
+    case "RS":
+    case "PS":
+      return "RSA";
+    case "ES":
+      return "EC";
+    case "Ed":
+      return "OKP";
+    case "ML":
+      return "AKP";
+    default:
+      throw new JOSENotSupported('Unsupported "alg" value for a JSON Web Key Set');
+  }
+}
+function isJWKSLike(jwks) {
+  return jwks && typeof jwks === "object" && Array.isArray(jwks.keys) && jwks.keys.every(isJWKLike);
+}
+function isJWKLike(key) {
+  return isObject(key);
+}
+var LocalJWKSet = class {
+  #jwks;
+  #cached = /* @__PURE__ */ new WeakMap();
+  constructor(jwks) {
+    if (!isJWKSLike(jwks)) {
+      throw new JWKSInvalid("JSON Web Key Set malformed");
+    }
+    this.#jwks = structuredClone(jwks);
+  }
+  jwks() {
+    return this.#jwks;
+  }
+  async getKey(protectedHeader, token) {
+    const { alg, kid } = { ...protectedHeader, ...token?.header };
+    const kty = getKtyFromAlg(alg);
+    const candidates = this.#jwks.keys.filter((jwk2) => {
+      let candidate = kty === jwk2.kty;
+      if (candidate && typeof kid === "string") {
+        candidate = kid === jwk2.kid;
+      }
+      if (candidate && (typeof jwk2.alg === "string" || kty === "AKP")) {
+        candidate = alg === jwk2.alg;
+      }
+      if (candidate && typeof jwk2.use === "string") {
+        candidate = jwk2.use === "sig";
+      }
+      if (candidate && Array.isArray(jwk2.key_ops)) {
+        candidate = jwk2.key_ops.includes("verify");
+      }
+      if (candidate) {
+        switch (alg) {
+          case "ES256":
+            candidate = jwk2.crv === "P-256";
+            break;
+          case "ES384":
+            candidate = jwk2.crv === "P-384";
+            break;
+          case "ES512":
+            candidate = jwk2.crv === "P-521";
+            break;
+          case "Ed25519":
+          case "EdDSA":
+            candidate = jwk2.crv === "Ed25519";
+            break;
+        }
+      }
+      return candidate;
+    });
+    const { 0: jwk, length } = candidates;
+    if (length === 0) {
+      throw new JWKSNoMatchingKey();
+    }
+    if (length !== 1) {
+      const error = new JWKSMultipleMatchingKeys();
+      const _cached = this.#cached;
+      error[Symbol.asyncIterator] = async function* () {
+        for (const jwk2 of candidates) {
+          try {
+            yield await importWithAlgCache(_cached, jwk2, alg);
+          } catch {
+          }
+        }
+      };
+      throw error;
+    }
+    return importWithAlgCache(this.#cached, jwk, alg);
+  }
+};
+async function importWithAlgCache(cache2, jwk, alg) {
+  const cached = cache2.get(jwk) || cache2.set(jwk, {}).get(jwk);
+  if (cached[alg] === void 0) {
+    const key = await importJWK({ ...jwk, ext: true }, alg);
+    if (key instanceof Uint8Array || key.type !== "public") {
+      throw new JWKSInvalid("JSON Web Key Set members must be public keys");
+    }
+    cached[alg] = key;
+  }
+  return cached[alg];
+}
+function createLocalJWKSet(jwks) {
+  const set = new LocalJWKSet(jwks);
+  const localJWKSet = async (protectedHeader, token) => set.getKey(protectedHeader, token);
+  Object.defineProperties(localJWKSet, {
+    jwks: {
+      value: () => structuredClone(set.jwks()),
+      enumerable: false,
+      configurable: false,
+      writable: false
+    }
+  });
+  return localJWKSet;
+}
+
 // ../sshsig/dist/index.js
 var import_node_child_process = require("node:child_process");
 var import_promises = require("node:fs/promises");
@@ -1107,8 +1241,8 @@ function parseEnvelope(v) {
 function parseSuite(v, i) {
   if (!isRecord(v))
     return fail(`suite[${i}] not an object`);
-  const id = v["id"];
-  if (typeof id !== "string" || !SUITE_ID_RE.test(id))
+  const id2 = v["id"];
+  if (typeof id2 !== "string" || !SUITE_ID_RE.test(id2))
     return fail(`suite[${i}].id invalid`);
   const status = v["status"];
   if (status !== "passed" && status !== "failed" && status !== "skipped")
@@ -1117,7 +1251,7 @@ function parseSuite(v, i) {
   if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
     return fail(`suite[${i}].durationMs invalid`);
   }
-  const out = { id, status, durationMs };
+  const out = { id: id2, status, durationMs };
   if (v["reportDigest"] !== void 0) {
     if (typeof v["reportDigest"] !== "string" || !SHA256_RE.test(v["reportDigest"])) {
       return fail(`suite[${i}].reportDigest invalid`);
@@ -1745,8 +1879,8 @@ async function checkLease(input) {
   const candidates = jwks.filter((jwk) => {
     if (kid === void 0)
       return true;
-    const id = jwk?.kid;
-    return typeof id !== "string" || id === kid;
+    const id2 = jwk?.kid;
+    return typeof id2 !== "string" || id2 === kid;
   });
   let signatureOk = false;
   for (const jwk of candidates) {
@@ -1814,16 +1948,6 @@ async function checkLease(input) {
   return void 0;
 }
 
-// service-public.jwk.json
-var service_public_jwk_default = {
-  kty: "EC",
-  x: "um1lpxU3JthsE-C8wiYSaon_h_hsaZAp9x8MZ6cUWjo",
-  y: "YmW9EvHEHrChYQMwKEGdkFsXl8-HulgQRCzEKyb7q5o",
-  crv: "P-256",
-  kid: "thwip-svc-1",
-  alg: "ES256"
-};
-
 // src/bundle-resolution.ts
 function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1843,42 +1967,254 @@ function parseBundleResolutionBody(value) {
       defaultBranch: value["defaultBranch"]
     };
   }
-  if ((value["state"] === void 0 || value["state"] === "active") && typeof value["bundle"] === "string") {
+  if (value["state"] === "active" && typeof value["bundle"] === "string") {
     return { kind: "active", bundle: value["bundle"] };
   }
   throw new Error("BUNDLE_UNAVAILABLE: resolver returned neither an active bundle nor bootstrap state");
 }
 
+// src/control-plane.ts
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+function bodyText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+function verificationKey(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const key = value;
+  return key["kty"] === "EC" && key["crv"] === "P-256" && key["alg"] === "ES256" && key["use"] === "sig" && typeof key["kid"] === "string" && key["kid"].length > 0 && typeof key["x"] === "string" && key["x"].length > 0 && typeof key["y"] === "string" && key["y"].length > 0;
+}
+function parsePublishedKeys(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const keys = value["keys"];
+  if (!Array.isArray(keys)) return null;
+  const usable = keys.filter(verificationKey);
+  return usable.length === 0 ? null : { keys: usable };
+}
+var ActionClient = class {
+  #endpoint;
+  #githubApiUrl;
+  #githubToken;
+  #env;
+  #fetch;
+  #sleep;
+  #log;
+  #oidcToken;
+  constructor(options) {
+    this.#endpoint = options.endpoint;
+    this.#githubApiUrl = options.githubApiUrl;
+    this.#githubToken = options.githubToken;
+    this.#env = options.env ?? process.env;
+    this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#sleep = options.sleep ?? delay;
+    this.#log = options.log ?? console.log;
+  }
+  async github(path, init = {}) {
+    if (this.#githubToken === "") throw new Error("github-token is required for pull-request verification");
+    const response = await this.#fetch(`${this.#githubApiUrl}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${this.#githubToken}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-action",
+        ...init.headers
+      }
+    });
+    if (!response.ok) throw new Error(`GitHub API ${path} returned ${response.status}`);
+    return response.json();
+  }
+  async controlPlane(path, body) {
+    const response = await this.#fetch(`${this.#endpoint}${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await this.#getOidcToken()}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const text = await response.text();
+    let parsed = text;
+    if (text !== "") {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+    return { status: response.status, body: parsed, text };
+  }
+  async publishedKeys() {
+    const response = await this.#fetch(`${this.#endpoint}/.well-known/thwip-keys`, {
+      headers: { accept: "application/json", "user-agent": "thwip-action" }
+    });
+    if (!response.ok) throw new Error(`SIGNING_KEYS_UNAVAILABLE: ${response.status}`);
+    const keys = parsePublishedKeys(await response.json().catch(() => null));
+    if (keys === null) throw new Error("SIGNING_KEYS_UNAVAILABLE: no usable ES256 signing key was published");
+    return keys;
+  }
+  async authorize(input) {
+    const body = {
+      pullRequestNumber: input.pullRequestNumber,
+      headSha: input.headSha,
+      baseRef: input.baseRef,
+      authorGithubUserId: input.authorGithubUserId,
+      draft: input.draft
+    };
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const response = await this.controlPlane(
+        `/v1/queue/${input.repositoryId}/authorize`,
+        body
+      );
+      if (response.status === 200) {
+        const reason = response.body["reason"];
+        return typeof reason === "string" ? reason : "UNKNOWN";
+      }
+      if (![429, 500, 502, 503, 504].includes(response.status) || attempt === 6) {
+        throw new Error(`queue authorization returned ${response.status}: ${bodyText(response.body)}`);
+      }
+      const wait2 = attempt * 15e3;
+      this.#log(`Thwip Queue returned ${response.status}; retrying in ${wait2 / 1e3}s`);
+      await this.#sleep(wait2);
+    }
+    throw new Error("queue authorization did not complete");
+  }
+  async reportCandidate(input) {
+    if (input.actualWorkflowSha !== input.expectedWorkflowSha) {
+      throw new Error("the verifier did not start from the dispatched workflow commit");
+    }
+    const response = await this.controlPlane(`/v1/queue/${input.repositoryId}/candidate-result`, {
+      dispatchNonce: input.dispatchNonce
+    });
+    if (response.status !== 202) {
+      throw new Error(`candidate report returned ${response.status}: ${bodyText(response.body)}`);
+    }
+  }
+  async #getOidcToken() {
+    this.#oidcToken ??= this.#requestOidcToken();
+    return this.#oidcToken;
+  }
+  async #requestOidcToken() {
+    const requestUrl = this.#env["ACTIONS_ID_TOKEN_REQUEST_URL"];
+    const requestToken = this.#env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
+    if (!requestUrl || !requestToken) throw new Error("OIDC is unavailable; grant id-token: write");
+    const url = new URL(requestUrl);
+    url.searchParams.set("audience", `${this.#endpoint}/api/github-actions`);
+    const response = await this.#fetch(url, {
+      headers: { authorization: `Bearer ${requestToken}`, accept: "application/json" }
+    });
+    if (!response.ok) throw new Error(`OIDC token request returned ${response.status}`);
+    const body = await response.json();
+    if (typeof body.value !== "string" || body.value === "") {
+      throw new Error("OIDC token response contained no token");
+    }
+    return body.value;
+  }
+};
+
+// src/context.ts
+var import_node_fs = require("node:fs");
+var DEFAULT_ENDPOINT = "https://thwip.ai";
+function record2(value, name) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${name} is missing or malformed`);
+  }
+  return value;
+}
+function string(value, name) {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${name} is missing or malformed`);
+  return value;
+}
+function id(value, name) {
+  if (typeof value !== "string" && typeof value !== "number" || String(value).length === 0) {
+    throw new Error(`${name} is missing or malformed`);
+  }
+  return String(value);
+}
+function pullRequestContext(event, env) {
+  const repository = record2(event["repository"], "repository");
+  const owner = record2(repository["owner"], "repository.owner");
+  const pullRequest = record2(event["pull_request"], "pull_request");
+  const base = record2(pullRequest["base"], "pull_request.base");
+  const head = record2(pullRequest["head"], "pull_request.head");
+  const author = record2(pullRequest["user"], "pull_request.user");
+  const number = pullRequest["number"];
+  if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
+    throw new Error("pull_request.number is missing or malformed");
+  }
+  const draft = pullRequest["draft"];
+  if (typeof draft !== "boolean") throw new Error("pull_request.draft is missing or malformed");
+  return {
+    kind: "pull_request",
+    repositoryId: id(repository["id"], "repository.id"),
+    repositoryOwnerId: id(owner["id"], "repository.owner.id"),
+    repository: string(repository["full_name"], "repository.full_name"),
+    pullRequestNumber: number,
+    baseRefName: string(base["ref"], "pull_request.base.ref"),
+    headSha: string(head["sha"], "pull_request.head.sha"),
+    authorGithubUserId: id(author["id"], "pull_request.user.id"),
+    draft,
+    runId: env["GITHUB_RUN_ID"] ?? null
+  };
+}
+function candidateReportContext(event, env) {
+  if (event["action"] !== "thwip-queue-verify") {
+    throw new Error(`unsupported repository_dispatch action ${String(event["action"] ?? "")}`);
+  }
+  const repository = record2(event["repository"], "repository");
+  const payload = record2(event["client_payload"], "client_payload");
+  return {
+    kind: "candidate_report",
+    repositoryId: id(repository["id"], "repository.id"),
+    dispatchNonce: string(payload["dispatchNonce"], "client_payload.dispatchNonce"),
+    expectedWorkflowSha: string(payload["workflowCommitSha"], "client_payload.workflowCommitSha"),
+    actualWorkflowSha: string(env["GITHUB_WORKFLOW_SHA"], "GITHUB_WORKFLOW_SHA")
+  };
+}
+function readActionContext(env = process.env) {
+  const eventName = string(env["GITHUB_EVENT_NAME"], "GITHUB_EVENT_NAME");
+  const eventPath = string(env["GITHUB_EVENT_PATH"], "GITHUB_EVENT_PATH");
+  const event = record2(JSON.parse((0, import_node_fs.readFileSync)(eventPath, "utf8")), "event payload");
+  if (eventName === "pull_request" || eventName === "pull_request_target") {
+    return pullRequestContext(event, env);
+  }
+  if (eventName === "repository_dispatch") return candidateReportContext(event, env);
+  throw new Error(`unsupported event ${eventName}`);
+}
+function readActionInputs(env = process.env) {
+  const rawEndpoint = env["INPUT_ENDPOINT"]?.trim() || DEFAULT_ENDPOINT;
+  const endpoint = new URL(rawEndpoint);
+  if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "" || endpoint.search !== "" || endpoint.hash !== "" || endpoint.pathname !== "/") {
+    throw new Error("endpoint must be an HTTPS origin");
+  }
+  return {
+    endpoint: endpoint.origin,
+    githubToken: env["INPUT_GITHUB-TOKEN"]?.trim() ?? "",
+    githubApiUrl: env["GITHUB_API_URL"]?.trim() || "https://api.github.com"
+  };
+}
+
+// src/orchestration.ts
+async function verifyAndAuthorize(verify2, authorize, fail2, warn) {
+  let exitCode = 1;
+  try {
+    exitCode = await verify2();
+  } catch (error) {
+    fail2(error);
+  }
+  try {
+    await authorize();
+  } catch (error) {
+    warn(error);
+  }
+  return exitCode;
+}
+
 // src/main.ts
-var API = process.env["GITHUB_API_URL"] ?? "https://api.github.com";
-var TOKEN = process.env["GITHUB_TOKEN"] ?? "";
-var ENDPOINT = process.env["THWIP_ENDPOINT"] ?? "https://thwip.ai";
 function summary(line) {
   const f = process.env["GITHUB_STEP_SUMMARY"];
-  if (f) (0, import_node_fs.appendFileSync)(f, line + "\n");
+  if (f) (0, import_node_fs2.appendFileSync)(f, line + "\n");
   console.log(line);
-}
-async function gh(path) {
-  const res2 = await fetch(`${API}${path}`, {
-    headers: {
-      authorization: `Bearer ${TOKEN}`,
-      accept: "application/vnd.github+json",
-      "user-agent": "thwip-action"
-    }
-  });
-  if (!res2.ok) throw new Error(`GitHub API ${path} -> ${res2.status}`);
-  return res2.json();
-}
-async function getOidcToken(audience) {
-  const url = process.env["ACTIONS_ID_TOKEN_REQUEST_URL"];
-  const reqToken = process.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
-  if (!url || !reqToken) throw new Error("OIDC not available; set permissions id-token: write");
-  const res2 = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, {
-    headers: { authorization: `Bearer ${reqToken}`, accept: "application/json" }
-  });
-  if (!res2.ok) throw new Error(`OIDC token request failed: ${res2.status}`);
-  const body = await res2.json();
-  return body.value;
 }
 function proofHints(commitMessage) {
   const carrier = extractCarrier(commitMessage);
@@ -1896,31 +2232,36 @@ function proofHints(commitMessage) {
     ...keyFingerprint !== void 0 ? { keyFingerprint } : {}
   };
 }
-async function fetchBundle(repositoryId, headSha, hints) {
-  const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
-  const res2 = await fetch(`${ENDPOINT}/v1/verification-bundles:resolve`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-    body: JSON.stringify({ repositoryId, headSha, ...hints })
+async function fetchBundle(client, repositoryId, headSha, hints) {
+  const response = await client.controlPlane("/v1/verification-bundles:resolve", {
+    repositoryId,
+    headSha,
+    ...hints
   });
-  if (!res2.ok) throw new Error(`BUNDLE_UNAVAILABLE: ${res2.status} ${await res2.text()}`);
-  const resolution = parseBundleResolutionBody(await res2.json());
+  if (response.status !== 200) {
+    throw new Error(`BUNDLE_UNAVAILABLE: ${response.status} ${response.text}`);
+  }
+  const resolution = parseBundleResolutionBody(response.body);
   if (resolution.kind === "bootstrap_pending") return resolution;
-  const key = await importJWK(service_public_jwk_default, "ES256");
-  const { payload, protectedHeader } = await compactVerify(resolution.bundle, key);
-  if (protectedHeader.typ !== "thwip-bundle+jws") throw new Error("BUNDLE_SIGNATURE_INVALID: bad typ");
+  const { payload, protectedHeader } = await compactVerify(
+    resolution.bundle,
+    createLocalJWKSet(await client.publishedKeys())
+  );
+  if (protectedHeader.alg !== "ES256" || protectedHeader.typ !== "thwip-bundle+jws") {
+    throw new Error("BUNDLE_SIGNATURE_INVALID: bad protected header");
+  }
   return {
     kind: "active",
     bundle: JSON.parse(new TextDecoder().decode(payload))
   };
 }
-async function mergeBase(repoFullName, base, head) {
-  const cmp = await gh(
+async function mergeBase(client, repoFullName, base, head) {
+  const cmp = await client.github(
     `/repos/${repoFullName}/compare/${encodeURIComponent(base)}...${head}`
   );
   return cmp.merge_base_commit.sha;
 }
-async function requireBootstrapPrerequisites(fullName, ownerId, repositoryId, commit) {
+async function requireBootstrapPrerequisites(client, fullName, ownerId, repositoryId, commit) {
   const carrier = extractCarrier(commit.message);
   if (!carrier.ok) {
     throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no parseable proof (${carrier.error.code})`);
@@ -1940,30 +2281,22 @@ async function requireBootstrapPrerequisites(fullName, ownerId, repositoryId, co
     throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} proof is not bound to this repository tree`);
   }
   try {
-    await gh(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
+    await client.github(`/repos/${fullName}/contents/thwip.yaml?ref=${encodeURIComponent(commit.sha)}`);
   } catch {
     throw new Error(`BOOTSTRAP_PREREQUISITE_FAILED: ${commit.sha} has no committed thwip.yaml`);
   }
 }
-async function main() {
-  const eventName = process.env["GITHUB_EVENT_NAME"] ?? "";
-  const event = JSON.parse((0, import_node_fs.readFileSync)(process.env["GITHUB_EVENT_PATH"], "utf8"));
-  const repo = event["repository"];
-  const repositoryId = String(repo["id"]);
-  const ownerId = String(repo["owner"]["id"]);
-  const fullName = repo["full_name"];
-  if (eventName !== "pull_request" && eventName !== "pull_request_target") {
-    summary(`thwip: FAIL \u2014 unsupported event ${eventName}`);
-    process.exit(1);
-  }
-  const pr = event["pull_request"];
-  const baseRefName = pr["base"]["ref"];
-  const prHeadSha = pr["head"]["sha"];
-  const prAuthorId = String(pr["user"]["id"]);
-  const commit = await gh(`/repos/${fullName}/git/commits/${prHeadSha}`);
-  const resolution = await fetchBundle(repositoryId, prHeadSha, proofHints(commit.message));
+async function verifyPullRequest(context, client) {
+  const commit = await client.github(`/repos/${context.repository}/git/commits/${context.headSha}`);
+  const resolution = await fetchBundle(client, context.repositoryId, context.headSha, proofHints(commit.message));
   if (resolution.kind === "bootstrap_pending") {
-    await requireBootstrapPrerequisites(fullName, ownerId, repositoryId, commit);
+    await requireBootstrapPrerequisites(
+      client,
+      context.repository,
+      context.repositoryOwnerId,
+      context.repositoryId,
+      commit
+    );
     summary("## \u{1F7E1} `BOOTSTRAP_PENDING` \u2014 waiting for the first canonical policy");
     summary("");
     summary(
@@ -1973,21 +2306,21 @@ async function main() {
     summary(
       `A candidate \`thwip.yaml\` and structured proof bound to the exact repository tree are present on the head. This result does **not** approve that candidate policy or verify its signature. After merge, thwip derives and activates the exact policy from \`${resolution.defaultBranch}\`; later changes are verified under the policy that was already active.`
     );
-    await recordObservation(repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING");
-    process.exit(0);
+    await recordObservation(client, context.repositoryId, resolution.projectId, commit.sha, "BOOTSTRAP_PENDING", context.runId);
+    return 0;
   }
   const bundle = resolution.bundle;
-  const baseSha = await mergeBase(fullName, baseRefName, prHeadSha);
+  const baseSha = await mergeBase(client, context.repository, context.baseRefName, context.headSha);
   const facts = {
-    ownerId,
-    repositoryId,
+    ownerId: context.repositoryOwnerId,
+    repositoryId: context.repositoryId,
     headSha: commit.sha,
     treeOid: commit.tree.sha,
     parentOids: commit.parents.map((p) => p.sha),
-    baseRef: `refs/heads/${baseRefName}`,
+    baseRef: `refs/heads/${context.baseRefName}`,
     baseSha,
     objectFormat: commit.sha.length === 64 ? "sha256" : "sha1",
-    prAuthorGithubUserId: prAuthorId
+    prAuthorGithubUserId: context.authorGithubUserId
   };
   const result = await verifyProof(
     { commitMessage: commit.message, facts, bundle, now: (/* @__PURE__ */ new Date()).toISOString() },
@@ -1995,8 +2328,8 @@ async function main() {
       verifySshSignature,
       // Remote suites are proven by GitHub's own checks on this commit.
       remoteCheckConclusions: async (headSha) => {
-        const runs = await gh(
-          `/repos/${fullName}/commits/${headSha}/check-runs?per_page=100`
+        const runs = await client.github(
+          `/repos/${context.repository}/commits/${headSha}/check-runs?per_page=100`
         );
         const map = /* @__PURE__ */ new Map();
         for (const r of runs.check_runs) map.set(r.name, r.conclusion ?? "pending");
@@ -2011,27 +2344,22 @@ async function main() {
     );
   }
   if (result.code === "PASS" && result.statement) {
-    await publishSuiteChecks(fullName, commit.sha, result.statement).catch(() => {
+    await publishSuiteChecks(client, context.repository, commit.sha, result.statement).catch(() => {
     });
   }
   if (result.code !== "VERIFICATION_PENDING") {
-    await recordObservation(repositoryId, bundle.projectId, commit.sha, result.code);
+    await recordObservation(client, context.repositoryId, bundle.projectId, commit.sha, result.code, context.runId);
   }
-  process.exit(result.code === "PASS" ? 0 : 1);
+  return result.code === "PASS" ? 0 : 1;
 }
-async function recordObservation(repositoryId, projectId, headSha, outcome) {
+async function recordObservation(client, repositoryId, projectId, headSha, outcome, runId) {
   try {
-    const oidc = await getOidcToken(`${ENDPOINT}/api/github-actions`);
-    await fetch(`${ENDPOINT}/v1/verification-observations`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${oidc}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        repositoryId,
-        projectId,
-        headSha,
-        outcome,
-        runId: process.env["GITHUB_RUN_ID"] ?? null
-      })
+    await client.controlPlane("/v1/verification-observations", {
+      repositoryId,
+      projectId,
+      headSha,
+      outcome,
+      runId
     });
   } catch {
   }
@@ -2043,9 +2371,6 @@ var CHECK_SEQUENCE = [
   ["Exact Git tree matches", ["SUBJECT_TREE_MISMATCH"]],
   ["Ancestry (parents) matches", ["SUBJECT_ANCESTRY_MISMATCH"]],
   ["Base context matches", ["SUBJECT_BASE_MISMATCH"]],
-  // No row for the policy digest. The verifier stopped asking which policy a
-  // proof cites and asks whether it satisfies the policy in force, so the rows
-  // below are where a policy change shows up.
   ["Pipeline digest is policy-approved", ["PIPELINE_DIGEST_MISMATCH"]],
   ["Signer holds current repository permission", ["SIGNER_MISMATCH", "SIGNER_PERMISSION_INSUFFICIENT"]],
   ["Every required suite passed exactly once", ["SUITE_MISSING", "SUITE_DUPLICATE", "SUITE_NOT_PASSED"]],
@@ -2100,19 +2425,16 @@ function renderRichSummary(result, commit, facts) {
     );
   }
 }
-async function publishSuiteChecks(fullName, headSha, statement) {
+async function publishSuiteChecks(client, fullName, headSha, statement) {
   const run = statement.predicate.run;
   let startMs = Date.parse(run.startedAt);
   for (const s of run.suites) {
     const started = new Date(startMs);
     const completed = new Date(startMs + s.durationMs);
     startMs += s.durationMs;
-    await fetch(`${API}/repos/${fullName}/check-runs`, {
+    await client.github(`/repos/${fullName}/check-runs`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${TOKEN}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "thwip-action",
         "content-type": "application/json"
       },
       body: JSON.stringify({
@@ -2130,7 +2452,53 @@ async function publishSuiteChecks(fullName, headSha, statement) {
     });
   }
 }
-main().catch((e) => {
-  summary(`thwip: FAIL \u2014 ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
+function message2(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function workflowCommandValue(value) {
+  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+function warnQueueFailure(error) {
+  const detail = message2(error);
+  const warning = `Queue enrolment did not complete: ${detail}. The proof result is unchanged. Re-run this job to try enrolment again.`;
+  console.warn(`::warning::${workflowCommandValue(warning)}`);
+  summary(`> \u26A0\uFE0F ${warning}`);
+}
+async function runAction() {
+  const inputs = readActionInputs();
+  const context = readActionContext();
+  const client = new ActionClient({
+    endpoint: inputs.endpoint,
+    githubApiUrl: inputs.githubApiUrl,
+    githubToken: inputs.githubToken
+  });
+  if (context.kind === "candidate_report") {
+    await client.reportCandidate(context);
+    console.log("Thwip Queue accepted the candidate report");
+    return 0;
+  }
+  return verifyAndAuthorize(
+    () => verifyPullRequest(context, client),
+    async () => {
+      const reason = await client.authorize({
+        repositoryId: context.repositoryId,
+        pullRequestNumber: context.pullRequestNumber,
+        headSha: context.headSha,
+        baseRef: `refs/heads/${context.baseRefName}`,
+        authorGithubUserId: context.authorGithubUserId,
+        draft: context.draft
+      });
+      console.log(`Thwip Queue says: ${reason}`);
+    },
+    (error) => summary(`thwip: FAIL \u2014 ${message2(error)}`),
+    warnQueueFailure
+  );
+}
+
+// src/entry.ts
+runAction().then((exitCode) => {
+  process.exitCode = exitCode;
+}).catch((error) => {
+  console.error(`thwip: FAIL \u2014 ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 });

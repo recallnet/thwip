@@ -13,10 +13,6 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Parse the resolver contract explicitly. An active bundle remains backwards
- * compatible with older control planes that omitted `state`.
- */
 export function parseBundleResolutionBody(value: unknown): BundleResolutionBody {
   if (!record(value)) throw new Error("BUNDLE_UNAVAILABLE: resolver returned a non-object");
   if (value["state"] === "bootstrap_pending") {
@@ -38,7 +34,7 @@ export function parseBundleResolutionBody(value: unknown): BundleResolutionBody 
       defaultBranch: value["defaultBranch"],
     };
   }
-  if ((value["state"] === undefined || value["state"] === "active") && typeof value["bundle"] === "string") {
+  if (value["state"] === "active" && typeof value["bundle"] === "string") {
     return { kind: "active", bundle: value["bundle"] };
   }
   throw new Error("BUNDLE_UNAVAILABLE: resolver returned neither an active bundle nor bootstrap state");

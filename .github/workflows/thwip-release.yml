@@ -2,26 +2,10 @@ name: thwip-release
 
 run-name: "thwip: release from ${{ github.sha }}"
 
-# Publish @recallnet/thwip when main gains something worth releasing.
-#
-# Nobody chooses the version. A breaking change is major and a feat is minor.
-# Every other change to a shipped input is a patch, including a plain-language
-# merge title. The queue does not require Conventional Commit titles, so a
-# plain-language change must still produce a release.
-#
-# Bumping, tagging and publishing live in one job on purpose. A tag pushed with
-# GITHUB_TOKEN does not trigger another workflow, so splitting them would leave
-# the tag sitting there with nothing publishing from it. That same property is
-# what stops this re-triggering itself when it pushes the release commit.
+# Publish the CLI and Action when their release inputs change.
 on:
   push:
     branches: [main]
-    # Only what ends up inside the CLI or Action, plus the release machinery
-    # that decides and produces them.
-    #
-    # A Worker-only change must not publish a byte-identical CLI. The release
-    # planner derives the complete workspace dependency closure, and its test
-    # keeps this trigger in step with it.
     paths:
       - "LICENSE"
       - "THIRD_PARTY_NOTICES.md"
@@ -54,8 +38,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Set this repository variable to the numeric ID of the canonical repository.
-  # A renamed or replaced repository must be approved explicitly.
+  # Numeric ID of the canonical release repository.
   THWIP_RELEASE_REPOSITORY_ID: ${{ vars.THWIP_RELEASE_REPOSITORY_ID }}
 
 jobs:
@@ -96,11 +79,6 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         run: pnpm install --frozen-lockfile
 
-      # The CLI imports the workspace packages through their built entry points,
-      # so they have to exist before the bundle can resolve them. Only those:
-      # the bundler inlines packages and nothing else, and building the apps
-      # here put the Worker's SPA and the Astro blog between a CLI fix and the
-      # registry for no reason.
       - name: Build workspace packages
         if: steps.decide.outputs.release == 'true'
         run: pnpm -r --filter './packages/**' run build
@@ -109,23 +87,12 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         run: git diff --exit-code
 
-      # The version travels in the environment. Writing it into
-      # packages/cli/package.json first left the checkout dirty, and the build
-      # stamp would then claim `<sha>-dirty` for a clean release.
       - name: Build the package at the new version
         if: steps.decide.outputs.release == 'true'
         env:
           THWIP_RELEASE_VERSION: ${{ steps.decide.outputs.version }}
         run: node scripts/release.mjs package
 
-      # Runs the built artifact rather than the source, so a bundle that cannot
-      # start is caught here instead of by whoever installs it.
-      #
-      # From a packed tarball installed outside the repository, because that is
-      # what an installer gets. Run in place, the bundle resolves any import
-      # through the workspace's own node_modules, so a runtime dependency the
-      # published package.json never declares starts fine here and fails on
-      # every `npm install -g`.
       - name: Confirm the bundle runs the way it is installed
         if: steps.decide.outputs.release == 'true'
         run: |
@@ -143,9 +110,6 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          # Provenance needs a public source repository. npm refuses the
-          # attestation otherwise, with a 422 that arrives after the tarball is
-          # built and signed. This turns itself on the day the repository opens.
           VISIBILITY: ${{ github.event.repository.visibility }}
           DRY: ${{ inputs.dry_run }}
         run: |
@@ -194,18 +158,7 @@ jobs:
 
           confirm_install "npm" "$NPMJS_NPMRC"
 
-      # Only once npm has it. A tag naming a version that was never published is
-      # a lie the next run has to work around.
-      # Only a tag. Nothing is pushed to the branch.
-      #
-      # A protected branch cannot accept a direct version-bump push without its
-      # required checks. Publishing first and failing that push would leave npm
-      # and the Git tag out of step.
-      #
-      # A tag is not covered by a branch rule, and the registry is the record of
-      # what exists. The version in packages/cli/package.json is a floor the
-      # release counts from if it is ever ahead of the registry; the build sets
-      # the published version itself.
+      # Record a tag only after the registry serves the release.
       - name: Record the release
         if: steps.decide.outputs.release == 'true' && inputs.dry_run != true
         env:

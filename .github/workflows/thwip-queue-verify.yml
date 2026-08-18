@@ -6,21 +6,11 @@ run-name: >-
   thwip: verify candidate ${{ github.event.client_payload.candidateSha }}
   for PR #${{ github.event.client_payload.pullRequestNumber }}
 
-# Dispatched by the control plane when a pull request holds the turn and its
-# integrated candidate has not been tested yet.
-#
-# repository_dispatch always runs the default branch's copy of this file. That is
-# the point: a pull request can edit a workflow that runs on pull_request, and a
-# verifier a contributor can edit verifies nothing. Everything below — the suite
-# commands, the toolchain, the reporting — comes from main. Only the code under
-# test comes from the candidate.
 on:
   repository_dispatch:
     types: [thwip-queue-verify]
 
 jobs:
-  # Validate the control-plane-owned suite list before GitHub expands it into a
-  # matrix. This job checks out nothing and receives no token permission.
   prepare:
     name: prepare trusted suite matrix
     runs-on: ubuntu-latest
@@ -54,19 +44,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      # Candidate-controlled install, build and suite code runs in this job.
-      # It must never receive OIDC or a repository write capability. Each suite
-      # runs on its own hosted runner, and no output, cache or artifact crosses
-      # the trust boundary into the reporter.
+      # Candidate code must not receive OIDC or write permission.
       contents: read
     strategy:
       fail-fast: false
       matrix:
         suite: ${{ fromJSON(needs.prepare.outputs.suites) }}
     steps:
-      # The candidate commit itself: the merge GitHub simulated for this pull
-      # request. This is the integration that will land, which is the thing no
-      # earlier check has ever run.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.event.client_payload.candidateSha }}
@@ -78,50 +62,24 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
 
-      # Confirm the checkout is the tree the control plane pinned before running
-      # anything. If it is not, the run would report on code the queue did not ask
-      # about, and reporting it would be worse than not running.
       - name: Confirm the candidate tree
         env:
           EXPECTED_TREE: ${{ github.event.client_payload.candidateTreeOid }}
         run: |
-          set -euo pipefail
-          actual=$(git rev-parse HEAD^{tree})
-          echo "candidate tree: $actual (expected $EXPECTED_TREE)"
-          if [ "$actual" != "$EXPECTED_TREE" ]; then
-            echo "::error::checked out tree does not match the pinned candidate"
-            exit 1
-          fi
+          actual=$(git rev-parse "HEAD^{tree}")
+          test "$actual" = "$EXPECTED_TREE"
 
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # Workspace packages resolve to their built types, so typecheck cannot run
-      # from a clean checkout until they exist. A developer's tree already has
-      # them, which is why only a clean-room run of the candidate ever noticed.
-      - name: Build workspace packages
+      - name: Build
         run: pnpm build
 
-      # The suite id came through the validated matrix and enters the shell only
-      # as a quoted environment value. The command remains the repository's
-      # reviewed package-script mapping; the reporter never consumes its output.
       - name: Run required suite
         env:
           NODE_OPTIONS: --max-old-space-size=4096
           SUITE: ${{ matrix.suite }}
-        run: |
-          set -euo pipefail
-          case "$SUITE" in
-            ""|[!a-z0-9]*|*[!a-z0-9_.-]*)
-              echo "::error::the matrix supplied an invalid suite id"
-              exit 1
-              ;;
-          esac
-          if [ "${#SUITE}" -gt 64 ]; then
-            echo "::error::the matrix supplied an invalid suite id"
-            exit 1
-          fi
-          pnpm run "$SUITE"
+        run: pnpm run "$SUITE"
 
   report:
     name: register trusted candidate report
@@ -129,44 +87,8 @@ jobs:
     if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
-      # This clean job is the only place that can mint the report identity. It
-      # has no repository or Actions read capability and consumes no candidate
-      # output, artifact, cache, environment or workspace.
+      # This job receives no candidate files or outputs.
       id-token: write
     steps:
-      # Register only a dispatch nonce. The App waits for this job to finish,
-      # reads GitHub's exact run-attempt jobs, and derives the verdict itself.
       - name: Register the candidate report with Thwip Queue
-        env:
-          THWIP_ENDPOINT: https://thwip.ai
-          REPO_ID: ${{ github.event.repository.id }}
-          DISPATCH_NONCE: ${{ github.event.client_payload.dispatchNonce }}
-          EXPECTED_WORKFLOW_SHA: ${{ github.event.client_payload.workflowCommitSha }}
-          ACTUAL_WORKFLOW_SHA: ${{ github.workflow_sha }}
-        run: |
-          set -euo pipefail
-          if [ "$ACTUAL_WORKFLOW_SHA" != "$EXPECTED_WORKFLOW_SHA" ]; then
-            echo "::error::the verifier did not start from the dispatched workflow commit"
-            exit 1
-          fi
-          raw=$(curl -sS -w '\n%{http_code}'             -H "authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${THWIP_ENDPOINT}/api/github-actions" || true)
-          code=$(printf '%s' "$raw" | tail -n1)
-          payload=$(printf '%s' "$raw" | sed '$d')
-          if [ "$code" != "200" ]; then
-            echo "::error::could not obtain an OIDC token (http $code)"
-            exit 1
-          fi
-          oidc=$(printf '%s' "$payload" | jq -r '.value // empty')
-          if [ -z "$oidc" ]; then
-            echo "::error::OIDC response carried no token"
-            exit 1
-          fi
-          body=$(jq -nc --arg nonce "$DISPATCH_NONCE" '{dispatchNonce:$nonce}')
-          out=$(curl -sS -w '\n%{http_code}' -X POST             -H "authorization: Bearer $oidc" -H "content-type: application/json"             -d "$body" "$THWIP_ENDPOINT/v1/queue/$REPO_ID/candidate-result" || true)
-          rcode=$(printf '%s' "$out" | tail -n1)
-          echo "candidate-report: http $rcode"
-          printf '%s\n' "$out" | sed '$d'
-          if [ "$rcode" != "202" ]; then
-            echo "::error::Thwip Queue did not register the candidate report (http $rcode)"
-            exit 1
-          fi
+        uses: recallnet/thwip@c9e23c740ffe7d7f30123e829787647443007f7b
