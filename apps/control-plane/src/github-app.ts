@@ -198,18 +198,131 @@ export async function installationToken(
   return res.token;
 }
 
+export interface GithubInstallation {
+  readonly id: number;
+  readonly account: { readonly id: number; readonly login: string; readonly type: string };
+  readonly repository_selection: string;
+  readonly permissions?: Record<string, string>;
+  readonly events?: string[];
+}
+
+function validGithubInstallation(value: unknown): value is GithubInstallation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const installation = value as Record<string, unknown>;
+  const account = installation["account"];
+  const permissions = installation["permissions"];
+  const events = installation["events"];
+  return (
+    typeof installation["id"] === "number" &&
+    typeof installation["repository_selection"] === "string" &&
+    account !== null &&
+    typeof account === "object" &&
+    !Array.isArray(account) &&
+    typeof (account as Record<string, unknown>)["id"] === "number" &&
+    typeof (account as Record<string, unknown>)["login"] === "string" &&
+    typeof (account as Record<string, unknown>)["type"] === "string" &&
+    (permissions === undefined ||
+      (permissions !== null &&
+        typeof permissions === "object" &&
+        !Array.isArray(permissions) &&
+        Object.values(permissions as Record<string, unknown>).every((permission) => typeof permission === "string"))) &&
+    (events === undefined || (Array.isArray(events) && events.every((event) => typeof event === "string")))
+  );
+}
+
+function validInstallationToken(value: unknown): value is { readonly token: string } {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    typeof (value as Record<string, unknown>)["token"] === "string" &&
+    (value as Record<string, unknown>)["token"] !== "";
+}
+
+/** Read one known installation and mint its repository-scoped token with one App signature. */
+export async function installationAccess(
+  env: Env,
+  installationId: string,
+  repositoryId: string,
+  additionalRepositoryName?: string,
+): Promise<{
+  readonly installation: GithubInstallation;
+  readonly token: string;
+  readonly additionalToken:
+    { readonly ok: true; readonly token: string } |
+    { readonly ok: false; readonly status: number; readonly problem: "transport" | "payload" } |
+    null;
+}> {
+  const numericRepositoryId = Number(repositoryId);
+  if (!Number.isSafeInteger(numericRepositoryId)) {
+    throw new Error(`GitHub repository id ${repositoryId} cannot be scoped safely`);
+  }
+  const jwt = await appJwt(env);
+  const installationPath = `/app/installations/${installationId}`;
+  let installation: GithubInstallation | null = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const response = await fetch(`${API}${installationPath}`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "thwip-control-plane",
+      },
+    }).catch(() => null);
+    const retryable = response === null || [429, 500, 502, 503, 504].includes(response.status);
+    if (retryable && attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+      continue;
+    }
+    if (response === null) throw new Error(`GitHub ${installationPath} network request failed`);
+    if (!response.ok) throw new GithubApiError(installationPath, response.status, await response.text());
+    const value = await response.json().catch(() => null);
+    if (!validGithubInstallation(value)) {
+      throw new GithubApiError(installationPath, 200, "invalid installation response");
+    }
+    installation = value;
+    break;
+  }
+  if (installation === null) throw new Error(`GitHub ${installationPath} returned no installation`);
+  const accessPath = `/app/installations/${installationId}/access_tokens`;
+  const scopedToken = async (body: Record<string, unknown>): Promise<unknown> => {
+    try {
+      return await gh<unknown>(jwt, accessPath, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new GithubApiError(accessPath, 200, "invalid access token JSON");
+      }
+      throw error;
+    }
+  };
+  const access = await scopedToken({ repository_ids: [numericRepositoryId] });
+  if (!validInstallationToken(access)) {
+    throw new GithubApiError(accessPath, 200, "invalid access token response");
+  }
+  let additionalToken:
+    { readonly ok: true; readonly token: string } |
+    { readonly ok: false; readonly status: number; readonly problem: "transport" | "payload" } |
+    null = null;
+  if (additionalRepositoryName !== undefined) {
+    try {
+      const additional = await scopedToken({ repositories: [additionalRepositoryName] });
+      if (!validInstallationToken(additional)) {
+        throw new GithubApiError(accessPath, 200, "invalid access token response");
+      }
+      additionalToken = { ok: true, token: additional.token };
+    } catch (error) {
+      additionalToken = {
+        ok: false,
+        status: error instanceof GithubApiError ? error.status : 0,
+        problem: error instanceof GithubApiError && error.status === 200 ? "payload" : "transport",
+      };
+    }
+  }
+  return { installation, token: access.token, additionalToken };
+}
+
 export async function listInstallations(env: Env): Promise<
-  Array<{
-    id: number;
-    account: { id: number; login: string; type: string };
-    repository_selection: string;
-    permissions?: Record<string, string>;
-    /**
-     * What this installation actually delivers. Absent on older responses, and
-     * a caller must not read that absence as "subscribed to nothing".
-     */
-    events?: string[];
-  }>
+  GithubInstallation[]
 > {
   const jwt = await appJwt(env);
   return listInstallationsWithToken(jwt);

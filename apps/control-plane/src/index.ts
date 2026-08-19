@@ -17,13 +17,14 @@ import {
   enqueueDueProjectReimportReconciliation,
   GithubInstallationSyncBusyError,
   githubSigningKeys,
+  installationAccess,
   installationToken,
   listInstallations,
   enqueueAppInstallationReconciliation,
   syncOrDeleteInstallation,
   syncInstallation,
 } from "./github-app.js";
-import { GithubRateLimitError } from "./github-error.js";
+import { GithubApiError, GithubRateLimitError } from "./github-error.js";
 import {
   activateProjectLifecycleWorker,
   acquireProjectWriteLease,
@@ -1292,13 +1293,28 @@ function validRuleset(value: unknown): value is Ruleset {
   ) {
     return false;
   }
-  if (ruleset["bypass_actors"] !== undefined && !Array.isArray(ruleset["bypass_actors"])) return false;
+  if (
+    ruleset["bypass_actors"] !== undefined &&
+    (!Array.isArray(ruleset["bypass_actors"]) ||
+      !(ruleset["bypass_actors"] as unknown[]).every((actor) => {
+        if (actor === null || typeof actor !== "object" || Array.isArray(actor)) return false;
+        const candidate = actor as Record<string, unknown>;
+        return typeof candidate["actor_id"] === "number" &&
+          typeof candidate["actor_type"] === "string" &&
+          typeof candidate["bypass_mode"] === "string";
+      }))
+  ) return false;
   const conditions = ruleset["conditions"];
   if (conditions === null || typeof conditions !== "object" || Array.isArray(conditions)) return false;
   const refName = (conditions as Record<string, unknown>)["ref_name"];
   if (refName === null || typeof refName !== "object" || Array.isArray(refName)) return false;
   const refs = refName as Record<string, unknown>;
-  if (!Array.isArray(refs["include"]) || !Array.isArray(refs["exclude"])) return false;
+  if (
+    !Array.isArray(refs["include"]) ||
+    !refs["include"].every((ref) => typeof ref === "string") ||
+    !Array.isArray(refs["exclude"]) ||
+    !refs["exclude"].every((ref) => typeof ref === "string")
+  ) return false;
   return (ruleset["rules"] as unknown[]).every((rule) => {
     if (rule === null || typeof rule !== "object" || Array.isArray(rule)) return false;
     const candidate = rule as Record<string, unknown>;
@@ -1338,7 +1354,7 @@ function decodeGithubFile(value: unknown): string | null {
  */
 async function queueDoctor(env: Env, repo: string, expectedProjectId: string | null = null): Promise<Response> {
   const project = await env.DB.prepare(
-    `SELECT p.id, p.github_repository_id, p.default_branch, p.proof_check_mode
+    `SELECT p.id, p.github_repository_id, p.default_branch, p.proof_check_mode, o.installation_id
        FROM projects p
        JOIN organizations o ON o.id = p.organization_id
       WHERE p.github_name = ? AND o.status = 'active'
@@ -1360,49 +1376,110 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
       github_repository_id: string;
       default_branch: string | null;
       proof_check_mode: string;
+      installation_id: string;
     }>();
   if (project === null) return Response.json({ error: "repository not installed for thwip" }, { status: 404 });
 
-  const installations = await listInstallations(env).catch(() => null);
-  if (installations === null) {
+  const action = /^([^/]+\/[^@]+)@([0-9a-f]{40})$/.exec(QUEUE_ACTION_REF);
+  if (action === null) {
+    return Response.json({ error: "the configured queue action is not commit-pinned", code: "INVARIANT_FAILURE" }, { status: 500 });
+  }
+  const actionRepository = action[1]!;
+  const actionSha = action[2]!;
+  const owner = repo.split("/")[0]!;
+  const actionParts = actionRepository.split("/");
+  const additionalActionRepository = actionParts[0]?.toLowerCase() === owner.toLowerCase() ? actionParts[1] : undefined;
+  const access = await installationAccess(
+    env,
+    project.installation_id,
+    project.github_repository_id,
+    additionalActionRepository,
+  ).catch((error: unknown) => ({ error } as const));
+  if ("error" in access) {
+    const githubStatus = access.error instanceof GithubApiError ? access.error.status : 0;
+    if (
+      access.error instanceof GithubApiError &&
+      access.error.status === 404 &&
+      access.error.path === `/app/installations/${project.installation_id}`
+    ) {
+      return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
+    }
     return Response.json(
-      { error: "GitHub App installation state could not be read", code: "GITHUB_UNAVAILABLE" },
+      {
+        error: "GitHub App installation access could not be read",
+        code: "GITHUB_UNAVAILABLE",
+        evidence: {
+          operation: access.error instanceof GithubApiError && access.error.path.endsWith("/access_tokens")
+            ? "github.installation-token.create"
+            : "github.installation.read",
+          status: githubStatus === 200 || (githubStatus >= 400 && githubStatus < 500 && githubStatus !== 429)
+            ? "unreadable"
+            : "unavailable",
+          httpStatus: githubStatus,
+        },
+      },
       { status: 502 },
     );
   }
-  const owner = repo.split("/")[0];
-  const installation = installations.find((i) => i.account.login.toLowerCase() === owner?.toLowerCase());
-  if (installation === undefined) return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
-
-  const token = await installationToken(
-    env,
-    String(installation.id),
-    undefined,
-    project.github_repository_id,
-  ).catch(() => null);
-  if (token === null) {
-    return Response.json(
-      { error: "GitHub App access could not be granted", code: "GITHUB_UNAVAILABLE" },
-      { status: 502 },
-    );
+  const { installation, token } = access;
+  if (installation.account.login.toLowerCase() !== owner.toLowerCase()) {
+    return Response.json({ error: `no installation for ${owner}` }, { status: 404 });
   }
   const gh = async <T>(
     path: string,
-    authenticated = true,
-  ): Promise<{ ok: true; value: T } | { ok: false; status: number; detail: string }> => {
-    const res = await fetch(`https://api.github.com${path}`, {
-      headers: {
-        ...(authenticated ? { authorization: `Bearer ${token}` } : {}),
-        accept: "application/vnd.github+json",
-        "user-agent": "thwip-control-plane",
-      },
-    }).catch(() => null);
-    if (res === null) return { ok: false, status: 0, detail: "network request failed" };
-    if (!res.ok) return { ok: false, status: res.status, detail: (await res.text()).slice(0, 500) };
-    const value = await res.json().catch(() => null);
-    if (value === null) return { ok: false, status: res.status, detail: "GitHub returned invalid JSON" };
-    return { ok: true, value: value as T };
+    githubToken: string | null = token,
+  ): Promise<
+    { ok: true; value: T; attempts: number } |
+    { ok: false; status: number; attempts: number; problem: "transport" | "payload" }
+  > => {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const res = await fetch(`https://api.github.com${path}`, {
+        headers: {
+          ...(githubToken === null ? {} : { authorization: `Bearer ${githubToken}` }),
+          accept: "application/vnd.github+json",
+          "user-agent": "thwip-control-plane",
+        },
+      }).catch(() => null);
+      const retryable = res === null || [429, 500, 502, 503, 504].includes(res.status);
+      if (retryable && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+        continue;
+      }
+      if (res === null) return { ok: false, status: 0, attempts: attempt, problem: "transport" };
+      if (!res.ok) return { ok: false, status: res.status, attempts: attempt, problem: "transport" };
+      const parsed = await res.json()
+        .then((value: unknown) => ({ ok: true as const, value }))
+        .catch(() => ({ ok: false as const }));
+      if (!parsed.ok) return { ok: false, status: res.status, attempts: attempt, problem: "payload" };
+      const value = parsed.value;
+      return { ok: true, value: value as T, attempts: attempt };
+    }
+    throw new Error("GitHub doctor retry bound was not reached");
   };
+
+  const evidenceFailure = (
+    error: string,
+    code: string,
+    operation: string,
+    failure: { readonly status: number; readonly attempts: number; readonly problem?: "transport" | "payload" },
+    resource?: string,
+  ) => Response.json(
+    {
+      error,
+      code,
+      evidence: {
+        operation,
+        status: failure.problem === "payload" ||
+            (failure.status >= 400 && failure.status < 500 && failure.status !== 429)
+          ? "unreadable"
+          : "unavailable",
+        httpStatus: failure.status,
+        attempts: failure.attempts,
+        ...(resource === undefined ? {} : { resource }),
+      },
+    },
+    { status: 502 },
+  );
 
   type RulesetSummary = { id: number; name: string; enforcement: string };
   const rulesets: RulesetSummary[] = [];
@@ -1410,13 +1487,12 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
   for (let page = 1; page <= 10; page += 1) {
     const listed = await gh<RulesetSummary[]>(`/repos/${repo}/rulesets?per_page=100&page=${page}`);
     if (!listed.ok || !Array.isArray(listed.value)) {
-      return Response.json(
-        {
-          error: "GitHub rulesets could not be read",
-          code: "GITHUB_RULESETS_UNAVAILABLE",
-          githubStatus: listed.ok ? 200 : listed.status,
-        },
-        { status: 502 },
+      return evidenceFailure(
+        "GitHub rulesets could not be read",
+        "GITHUB_RULESETS_UNAVAILABLE",
+        "github.rulesets.list",
+        listed.ok ? { status: 200, attempts: listed.attempts, problem: "payload" } : listed,
+        repo,
       );
     }
     const before = seenRulesets.size;
@@ -1426,9 +1502,12 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
         typeof summary.name !== "string" ||
         typeof summary.enforcement !== "string"
       ) {
-        return Response.json(
-          { error: "GitHub returned an invalid ruleset list", code: "GITHUB_RULESETS_UNAVAILABLE" },
-          { status: 502 },
+        return evidenceFailure(
+          "GitHub returned an invalid ruleset list",
+          "GITHUB_RULESETS_UNAVAILABLE",
+          "github.rulesets.list",
+          { status: 200, attempts: listed.attempts, problem: "payload" },
+          repo,
         );
       }
       if (!seenRulesets.has(summary.id)) {
@@ -1438,9 +1517,12 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
     }
     if (listed.value.length < 100) break;
     if (seenRulesets.size === before || page === 10) {
-      return Response.json(
-        { error: "GitHub ruleset listing did not complete", code: "GITHUB_RULESETS_UNAVAILABLE" },
-        { status: 502 },
+      return evidenceFailure(
+        "GitHub ruleset listing did not complete",
+        "GITHUB_RULESETS_UNAVAILABLE",
+        "github.rulesets.list",
+        { status: 200, attempts: listed.attempts, problem: "payload" },
+        repo,
       );
     }
   }
@@ -1450,13 +1532,12 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
   for (const summary of managedSummaries) {
     const full = await gh<Ruleset>(`/repos/${repo}/rulesets/${summary.id}`);
     if (!full.ok || !validRuleset(full.value)) {
-      return Response.json(
-        {
-          error: `GitHub ruleset ${summary.id} could not be read`,
-          code: "GITHUB_RULESETS_UNAVAILABLE",
-          githubStatus: full.ok ? 200 : full.status,
-        },
-        { status: 502 },
+      return evidenceFailure(
+        `GitHub ruleset ${summary.id} could not be read`,
+        "GITHUB_RULESETS_UNAVAILABLE",
+        "github.ruleset.read",
+        full.ok ? { status: 200, attempts: full.attempts, problem: "payload" } : full,
+        String(summary.id),
       );
     }
     fullRulesets.push({ id: summary.id, ruleset: full.value });
@@ -1483,54 +1564,78 @@ async function queueDoctor(env: Env, repo: string, expectedProjectId: string | n
         {
           error: `GitHub workflow ${expected.path} could not be read`,
           code: "GITHUB_WORKFLOWS_UNAVAILABLE",
-          githubStatus: live.status,
+          evidence: {
+            operation: "github.workflow.read",
+            status: live.status === 401 || live.status === 403 ? "unreadable" : "unavailable",
+            httpStatus: live.status,
+            attempts: live.attempts,
+            resource: expected.path,
+          },
         },
         { status: 502 },
       );
     }
     const content = decodeGithubFile(live.value);
     if (content === null) {
-      return Response.json(
-        { error: `GitHub returned an invalid workflow file for ${expected.path}`, code: "GITHUB_WORKFLOWS_UNAVAILABLE" },
-        { status: 502 },
+      return evidenceFailure(
+        `GitHub returned an invalid workflow file for ${expected.path}`,
+        "GITHUB_WORKFLOWS_UNAVAILABLE",
+        "github.workflow.read",
+        { status: 200, attempts: live.attempts, problem: "payload" },
+        expected.path,
       );
     }
     liveWorkflows[expected.path] = content;
   }
-  const action = /^([^/]+\/[^@]+)@([0-9a-f]{40})$/.exec(QUEUE_ACTION_REF);
-  if (action === null) {
-    return Response.json({ error: "the configured queue action is not commit-pinned", code: "INVARIANT_FAILURE" }, { status: 500 });
-  }
-  const actionRepository = action[1]!;
-  const actionSha = action[2]!;
-  // The installation token is scoped to the target repository. It can read a
-  // pinned Action hosted in that same repository; a foreign Action must remain
-  // readable without borrowing credentials the target repository does not have.
+  const actionToken = actionCommitUsesInstallationToken(actionRepository, repo)
+    ? token
+    : access.additionalToken?.ok === true
+      ? access.additionalToken.token
+      : null;
   const actionCommit = await gh<unknown>(
     `/repos/${actionRepository}/git/commits/${actionSha}`,
-    actionCommitUsesInstallationToken(actionRepository, repo),
+    actionToken,
   );
-  let actionAccessible = true;
-  if (!actionCommit.ok) {
-    if (actionCommit.status === 404) actionAccessible = false;
-    else {
-      return Response.json(
-        { error: "the pinned queue action could not be read", code: "GITHUB_WORKFLOWS_UNAVAILABLE", githubStatus: actionCommit.status },
-        { status: 502 },
-      );
-    }
-  } else if (
+  const actionTokenFailure = !actionCommitUsesInstallationToken(actionRepository, repo) &&
+      access.additionalToken?.ok === false
+    ? access.additionalToken
+    : null;
+  const invalidActionCommit = actionCommit.ok && (
     actionCommit.value === null ||
     typeof actionCommit.value !== "object" ||
     Array.isArray(actionCommit.value) ||
     (actionCommit.value as Record<string, unknown>)["sha"] !== actionSha
-  ) {
-    return Response.json({ error: "GitHub returned an invalid queue action commit", code: "GITHUB_WORKFLOWS_UNAVAILABLE" }, { status: 502 });
+  );
+  if ((!actionCommit.ok || invalidActionCommit) && actionTokenFailure !== null) {
+    return evidenceFailure(
+      "GitHub App access to the pinned action repository could not be granted",
+      "GITHUB_WORKFLOWS_UNAVAILABLE",
+      "github.action-repository-token.create",
+      { status: actionTokenFailure.status, attempts: 1, problem: actionTokenFailure.problem },
+      actionRepository,
+    );
+  }
+  if (!actionCommit.ok) {
+    return evidenceFailure(
+      "the pinned queue action could not be read",
+      "GITHUB_WORKFLOWS_UNAVAILABLE",
+      "github.action-commit.read",
+      actionCommit,
+      QUEUE_ACTION_REF,
+    );
+  } else if (invalidActionCommit) {
+    return evidenceFailure(
+      "GitHub returned an invalid queue action commit",
+      "GITHUB_WORKFLOWS_UNAVAILABLE",
+      "github.action-commit.read",
+      { status: 200, attempts: actionCommit.attempts, problem: "payload" },
+      QUEUE_ACTION_REF,
+    );
   }
   const workflowHealth = managedWorkflowHealth({
     endpoint: env.PUBLIC_ORIGIN,
     files: liveWorkflows,
-    actionAccessible,
+    actionAccessible: true,
   });
   const stillCurrent = await env.DB.prepare(
     `SELECT p.id

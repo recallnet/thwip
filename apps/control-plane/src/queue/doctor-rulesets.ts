@@ -23,6 +23,7 @@ export interface ManagedRulesetHealth {
   readonly duplicate: readonly string[];
   readonly drifted: readonly string[];
   readonly bypassActorsKnown: boolean;
+  readonly bypassActorsStatus: "verified" | "unreadable" | "incorrect";
 }
 
 function requiredChecksOf(ruleset: Ruleset): Array<{ context: string; integration_id?: number }> {
@@ -81,6 +82,26 @@ export function managedRulesetHealth(input: {
   const bypassActorsKnown = input.rulesets
     .filter((stored) => expectedNames.includes(stored.ruleset.name))
     .every((stored) => bypassActorsVisible(stored.ruleset));
+  const complete = expectedNames.every((name) => named(name).length === 1);
+  const bypassActorsStatus = !complete || !bypassActorsKnown
+    ? "unreadable"
+    : expectedNames.every((name) => {
+        const actual = named(name)[0]!.ruleset;
+        const expected = name === OWNERSHIP_RULESET_NAME
+          ? appOwnershipRuleset({ baseRef: input.baseRef, integrationId: input.integrationId })
+          : policyRuleset({
+              baseRef: input.baseRef,
+              integrationId: input.integrationId,
+              actionsIntegrationId: GITHUB_ACTIONS_INTEGRATION_ID,
+              proofCheckMode: input.proofCheckMode,
+              existingRequiredChecks: requiredChecksOf(actual),
+              enforcement: "active",
+              pinCheckSource: true,
+            });
+        return bypassActorsMatch(actual, expected);
+      })
+      ? "verified"
+      : "incorrect";
   return {
     healthy: missing.length === 0 && duplicate.length === 0 && drifted.length === 0 && bypassActorsKnown,
     expectedNames,
@@ -88,5 +109,6 @@ export function managedRulesetHealth(input: {
     duplicate,
     drifted,
     bypassActorsKnown,
+    bypassActorsStatus,
   };
 }

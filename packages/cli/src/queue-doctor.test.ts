@@ -170,7 +170,7 @@ describe("App and ruleset readiness", () => {
       },
     });
     const result = report([installed, ready, app]);
-    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("RULESET_DRIFT");
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("EVIDENCE_MISSING");
     expect(result.lines.join("\n")).toContain("missing Thwip Queue Ownership");
   });
 
@@ -187,7 +187,7 @@ describe("App and ruleset readiness", () => {
       },
     });
     const result = report([installed, ready, app]);
-    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("RULESET_DRIFT");
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("EVIDENCE_DRIFTED");
     expect(result.exitCode).toBe(EXIT.setupInvalid);
   });
 
@@ -213,10 +213,10 @@ describe("App and ruleset readiness", () => {
   });
 
   it.each([
-    [{ missing: [".github/workflows/thwip-required.yml"] }, "missing .github/workflows/thwip-required.yml"],
-    [{ drifted: [".github/workflows/thwip-queue-verify.yml"] }, "drifted .github/workflows/thwip-queue-verify.yml"],
-    [{ actionAccessible: false }, "pinned verifier action is inaccessible"],
-  ])("fails live workflow readiness: %s", (change, message) => {
+    [{ missing: [".github/workflows/thwip-required.yml"] }, "missing .github/workflows/thwip-required.yml", "EVIDENCE_MISSING"],
+    [{ drifted: [".github/workflows/thwip-queue-verify.yml"] }, "drifted .github/workflows/thwip-queue-verify.yml", "EVIDENCE_DRIFTED"],
+    [{ actionAccessible: false }, "pinned verifier action commit is unreadable", "EVIDENCE_UNREADABLE"],
+  ])("fails live workflow readiness: %s", (change, message, reason) => {
     const app = observation({
       section: "app",
       body: {
@@ -229,7 +229,7 @@ describe("App and ruleset readiness", () => {
       },
     });
     const result = report([installed, ready, app]);
-    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("NO_PINNED_VERIFIER");
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe(reason);
     expect(result.lines.join("\n")).toContain(message);
     expect(result.exitCode).not.toBe(EXIT.ok);
   });
@@ -269,7 +269,47 @@ describe("HTTP and unread branches", () => {
 
   it("classifies a GitHub API 502 as unavailable", () => {
     const result = report([installed, ready, observation({ section: "app", status: 502, body: { code: "GITHUB_RULESETS_UNAVAILABLE" } })]);
-    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("SERVICE_UNAVAILABLE");
+    expect(result.sections.find((section) => section.section === "app")?.reasonCode).toBe("EVIDENCE_UNAVAILABLE");
+    expect(result.exitCode).toBe(EXIT.unavailable);
+  });
+
+  it("reports the exact failed GitHub evidence operation without response details", () => {
+    const result = report([
+      installed,
+      ready,
+      observation({
+        section: "app",
+        operation: "control-plane.app-evidence.read",
+        attempts: 3,
+        status: 502,
+        body: {
+          error: "do not expose this response body",
+          evidence: {
+            operation: "github.action-commit.read",
+            status: "unreadable",
+            httpStatus: 404,
+            attempts: 1,
+            resource: `recallnet/thwip@${"a".repeat(40)}`,
+          },
+        },
+      }),
+    ]);
+    const app = result.sections.find((section) => section.section === "app");
+    expect(app).toMatchObject({
+      status: "unread",
+      reasonCode: "EVIDENCE_UNREADABLE",
+      facts: {
+        evidence: {
+          operation: "github.action-commit.read",
+          status: "unreadable",
+          httpStatus: 404,
+          attempts: 1,
+          controlPlaneAttempts: 3,
+        },
+      },
+    });
+    expect(result.lines.join("\n")).toContain("github.action-commit.read (recallnet/thwip@");
+    expect(JSON.stringify(result)).not.toContain("do not expose this response body");
     expect(result.exitCode).toBe(EXIT.unavailable);
   });
 

@@ -221,6 +221,10 @@ export const NEXT_ACTION: Record<ReasonCode, string> = {
   NETWORK_UNAVAILABLE: "This machine cannot reach the queue. Check your network and try again.",
   BUNDLE_UNAVAILABLE: "The trust bundle is unreachable, so no proof can be checked. Try again shortly.",
   RATE_LIMITED: "GitHub is rate limiting this repository. Wait for the limit to reset.",
+  EVIDENCE_UNAVAILABLE: "A required evidence read is temporarily unavailable. Try doctor again shortly.",
+  EVIDENCE_UNREADABLE: "Doctor could not verify required evidence with the access available to it. An admin needs to inspect that operation.",
+  EVIDENCE_MISSING: "Required repository evidence is missing. An admin needs to complete setup.",
+  EVIDENCE_DRIFTED: "Required repository evidence differs from the expected setup. An admin needs to inspect the reported drift.",
 
   /* Something disagreed that should not have. */
   INVARIANT_FAILURE: "The queue found a contradiction and stopped. Send this output to whoever runs the queue.",
