@@ -5,6 +5,9 @@ import { queueRoutes, type QueueRouteEnv } from "./routes.js";
 import { signReusedIntent } from "./attestation.js";
 import type { Sha256 } from "@thwip/queue-protocol";
 import { mergeCommitText } from "./merge-commit.js";
+import type { D1Like } from "./projection.js";
+import { commandsFor } from "./queue-operations.js";
+import { withQueueState } from "./queue-state.js";
 
 /**
  * Putting a merge back into the chain after the attempt that authorized it is
@@ -247,6 +250,82 @@ describe("POST /v1/queue/:repositoryId/repair", () => {
       sequence: 1,
       mergeIntentDigest: intentDigest,
     });
+  });
+
+  it("does not rebuild the full dashboard projection before an exact missing-link repair", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    const source = e.DB as unknown as D1Like;
+    let fullProjectionReads = 0;
+    const bounded = {
+      prepare(query: string) {
+        if (query.includes("SELECT MAX(generation) AS generation FROM queue_projection_marks")) {
+          fullProjectionReads += 1;
+          throw new Error("full projection is outside the repair request budget");
+        }
+        return source.prepare(query);
+      },
+      batch(statements: unknown[]) {
+        return source.batch(statements);
+      },
+    } as D1Like;
+    const boundedEnv = { ...e, DB: bounded } as unknown as QueueRouteEnv;
+
+    const response = await repair(routes(), boundedEnv, {
+      mergeSha: FIRST.mergeSha,
+      reason: REASON,
+      attemptId: FIRST.attemptId,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recorded: "applied", attemptId: FIRST.attemptId });
+    expect(fullProjectionReads).toBe(0);
+    expect(await chainLinks(routes(), e)).toHaveLength(1);
+  });
+
+  it("publishes the next turn when repair offers another waiting entry", async () => {
+    const e = env();
+    seed();
+    await seedIntent(FIRST);
+    const waitingHead = "ab".repeat(20);
+    await withQueueState(e.DB as unknown as D1Like, REPO, REF, (store) => {
+      const commands = commandsFor(store);
+      commands.requestQueue({
+        idempotencyKey: "request-waiting-after-repair",
+        entryId: `entry_${REPO}_98`,
+        pullRequestNumber: 98,
+        sponsorPrincipalId: "prn_acme",
+        sponsorGithubUserId: "11",
+        headSha: waitingHead,
+      });
+      commands.evaluateReadiness({
+        idempotencyKey: "ready-waiting-after-repair",
+        entryId: `entry_${REPO}_98`,
+        ready: true,
+        schedulerEligible: true,
+        primaryReason: null,
+      });
+    });
+    const published: Array<{ state: string; pullRequestNumber: number; headSha: string }> = [];
+    const app = routes(true, {
+      publishTurnCheck: async (_environment, _repositoryId, update) => {
+        published.push(update);
+      },
+    });
+
+    const response = await repair(app, e, {
+      mergeSha: FIRST.mergeSha,
+      reason: REASON,
+      attemptId: FIRST.attemptId,
+    });
+
+    expect(response.status).toBe(200);
+    expect(published).toContainEqual(expect.objectContaining({
+      state: "holds",
+      pullRequestNumber: 98,
+      headSha: waitingHead,
+    }));
   });
 
   it("writes a record the chain serves and that cites the intent that authorized it", async () => {

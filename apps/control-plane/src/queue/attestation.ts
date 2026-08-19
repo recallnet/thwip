@@ -1269,6 +1269,27 @@ export interface AuthorizationRefusal {
   readonly intentDigests: readonly string[];
 }
 
+/** Whether this pull request has ever received a durable Thwip merge intent. */
+export async function mergeIntentExistsForPullRequest(
+  db: D1Like,
+  input: {
+    readonly repositoryId: string;
+    readonly baseRef: string;
+    readonly pullRequestNumber: number;
+  },
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS present FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND kind = 'merge-intent'
+          AND json_extract(bytes, '$.pullRequestNumber') = ?
+        LIMIT 1`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.pullRequestNumber)
+    .first<{ present: number }>();
+  return row !== null;
+}
+
 export async function authorizationFor(
   db: D1Like,
   input: {

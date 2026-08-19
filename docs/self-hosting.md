@@ -16,6 +16,11 @@ needs these Cloudflare resources:
 - the `BranchQueue` Durable Object declared in the example configuration;
 - Worker static assets and the two scheduled triggers in that configuration.
 
+Use a Workers Paid account. Signed queue work needs the 30-second CPU budget
+declared in the example configuration. Wrangler should refuse the deployment if
+the account cannot provide that budget; the Workers Free 10 ms CPU limit is not
+enough.
+
 Copy `wrangler.self-host.example.jsonc` to the ignored local file
 `wrangler.self-host.jsonc`. Replace the
 example resource names, all-zero D1 ID, `example.com` origin, and `replace-me`

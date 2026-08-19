@@ -27,12 +27,13 @@ import {
   recoverExactMergeRecord,
   storeAttestation,
   transitionRecordFor,
+  type AuthorizationRefusal,
   type VerifiedEvidence,
 } from "./attestation.js";
 import { issuedAssignmentForAttempt } from "./assignment-store.js";
 import { acceptIntegrationReceipt, integrationReceiptDigest } from "./integration-receipt.js";
 import { withTransitionSigningLease } from "./transition-signing-lease.js";
-import { projectAuthoritativeQueue } from "./queue-projection.js";
+import { projectQueueTransitionTail, projectionMessageFrom } from "./projection.js";
 import type { ProjectWriteLease } from "../project-lifecycle.js";
 import type { TurnCheckUpdate } from "./turn-check.js";
 
@@ -91,7 +92,13 @@ export type RecordFromIntentResult =
       readonly transitionDigest: string;
       readonly repairAuditDigest: string | null;
     }
-  | { readonly status: "refused"; readonly code: RecordFromIntentRefusal; readonly detail: string };
+  | {
+      readonly status: "refused";
+      readonly code: RecordFromIntentRefusal;
+      readonly detail: string;
+      /** More precise cause when the broad refusal came from intent lookup. */
+      readonly authorizationCode?: AuthorizationRefusal["code"];
+    };
 
 /**
  * The subset of the route's dependencies this path uses.
@@ -440,17 +447,8 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     },
     async (claim) => {
 
-  // Recovery reads the transition projection, but queue_state is authority.
-  // Replay authority before deciding that no link exists; this repairs the
-  // commit-before-projection failure without creating new signed bytes.
-  await projectAuthoritativeQueue(db, repositoryId, baseRef, input.writeLease);
-  if (!(await claim.fence())) {
-    return {
-      status: "refused",
-      code: "CHAIN_MOVED",
-      detail: "a later signed transition writer replaced this repair while it restored queue authority",
-    };
-  }
+  const authoritative = await readQueue(env, repositoryId, baseRef);
+  const snapshot = authoritative.snapshot;
 
   // Asked before the authorization, because a chain that already carries this
   // exact, authentic merge has nothing left to put back. This also settles an
@@ -458,12 +456,47 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   // the pull request: the commit is the durable identity, not the callback that
   // happened to notice it. Storage or key-read failure propagates; treating it
   // as absence could sign a second record.
-  const durableCovered = await durableMergeRecordForCommit(db, {
+  let durableCovered = await durableMergeRecordForCommit(db, {
     repositoryId,
     baseRef,
     mergeSha,
     projectId: input.writeLease?.projectId,
   });
+  // Recovery reads the transition projection, but queue_state is authority.
+  // Only replay the bounded transition tail when authority says the exact
+  // commit is already linked. A genuinely missing merge should not rebuild
+  // entries and terminal-comment history before it signs.
+  const authoritativeLink = [...snapshot.transitions]
+    .reverse()
+    .find((transition) => transition.baseSha === mergeSha);
+  if (durableCovered === null && authoritativeLink !== undefined) {
+    if (authoritative.projectId === null) {
+      return {
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "the queue transition projection has no active project owner",
+      };
+    }
+    const projected = await projectQueueTransitionTail(
+      db,
+      projectionMessageFrom(repositoryId, baseRef, snapshot, authoritative.projectId),
+      input.writeLease,
+      authoritativeLink,
+    );
+    if (!projected || !(await claim.fence())) {
+      return {
+        status: "refused",
+        code: "CHAIN_MOVED",
+        detail: "a later signed transition writer replaced this repair while it restored queue authority",
+      };
+    }
+    durableCovered = await durableMergeRecordForCommit(db, {
+      repositoryId,
+      baseRef,
+      mergeSha,
+      projectId: input.writeLease?.projectId,
+    });
+  }
   if (durableCovered !== null) {
     const repairAuditDigest =
       durableCovered.queueAttemptId === null
@@ -533,7 +566,12 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
     ...(typeof input.attemptId === "string" ? { attemptId: input.attemptId } : {}),
   });
   if ("refused" in authorization) {
-    return { status: "refused", code: "MERGE_NOT_AUTHORIZED", detail: authorization.refused };
+    return {
+      status: "refused",
+      code: "MERGE_NOT_AUTHORIZED",
+      detail: authorization.refused,
+      authorizationCode: authorization.code,
+    };
   }
   const intent = authorization.intent;
   // An override binds a human authorization this path must not reissue.
@@ -546,7 +584,6 @@ export async function recordMergeFromIntent<TEnv extends QueueRouteEnv>(
   }
   const attemptId = intent.attemptId;
 
-  const { snapshot } = await readQueue(env, repositoryId, baseRef);
   const pull = await deps.pullRequestMergeState(env, repositoryId, intent.pullRequestNumber);
   if (pull?.merged !== true || pull.mergeCommitSha !== mergeSha) {
     return {

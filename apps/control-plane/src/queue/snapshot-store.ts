@@ -24,7 +24,10 @@ import type {
   TransitionRow,
   UnresolvedMergeOperation,
 } from "./store.js";
-import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
+import {
+  EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON,
+  TERMINAL_RECONCILIATION_CANCEL_REASON,
+} from "./terminal-comment-priority.js";
 
 /**
  * The same durable state, in one document instead of eleven SQL tables.
@@ -633,7 +636,8 @@ export class SnapshotQueueStore {
       full.type === "EntryMergeReconciled" ||
       (full.type === "EntryCancelled" &&
         full.actorPrincipalId === "github" &&
-        full.reason === TERMINAL_RECONCILIATION_CANCEL_REASON)
+        (full.reason === TERMINAL_RECONCILIATION_CANCEL_REASON ||
+          full.reason === EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON))
     ) {
       const entry = next.entries.get(full.entryId);
       if (entry !== undefined) {
@@ -1024,10 +1028,20 @@ export class SnapshotQueueStore {
 
   mergeOperation(
     operationId: string,
-  ): { attemptId: string; attemptRevision: number; outcome: string | null } | null {
+  ): (UnresolvedMergeOperation & { outcome: string | null }) | null {
     const row = this.doc.mergeOperations.find((o) => o.operationId === operationId);
     if (row === undefined) return null;
-    return { attemptId: row.attemptId, attemptRevision: row.attemptRevision, outcome: row.outcome };
+    return {
+      operationId: row.operationId,
+      attemptId: row.attemptId,
+      attemptRevision: row.attemptRevision,
+      expectedBaseSha: row.expectedBaseSha,
+      expectedHeadSha: row.expectedHeadSha,
+      expectedTreeOid: row.expectedTreeOid,
+      pullRequestNumber: row.pullRequestNumber ?? null,
+      writeStartedAt: row.writeStartedAt,
+      outcome: row.outcome,
+    };
   }
 
   /* ---------------- callback staleness ---------------- */
