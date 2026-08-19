@@ -8,6 +8,7 @@ import {
 } from "./verifier-identity.js";
 import {
   projectQueueState,
+  projectQueueTransitionTail,
   projectionMessageFrom,
   queuePageInfo,
   readProjectedQueue,
@@ -132,6 +133,7 @@ import {
   recordMergedTransition,
   storeEvidence,
 } from "./merge-lane.js";
+import type { MergeReconciliationTask } from "./merge-reconciliation.js";
 import { readQueueDoctorReadiness } from "./doctor-readiness.js";
 import { databaseSchemaCapabilities } from "../schema-state.js";
 
@@ -370,6 +372,7 @@ export async function runOnQueue<T>(
    */
   comment?: (snapshot: QueueSnapshot) => Promise<void>,
   existingLease?: ProjectWriteLease,
+  projection: "full" | "transition-tail" = "full",
 ): Promise<{ result: T; snapshot: QueueSnapshot }> {
   const db = env.DB as unknown as D1Like;
   const borrowed = existingLease !== undefined;
@@ -421,7 +424,16 @@ export async function runOnQueue<T>(
     return { result, snapshot: buildSnapshot(store) };
   }, { expectedProjectId: lease.projectId, lease });
   try {
-    await projectAuthoritativeQueue(db, repositoryId, baseRef, lease);
+    if (projection === "transition-tail") {
+      const applied = await projectQueueTransitionTail(
+        db,
+        projectionMessageFrom(repositoryId, baseRef, out.snapshot, lease.projectId),
+        lease,
+      );
+      if (!applied) throw new Error(`repository ${repositoryId} transition projection was not accepted`);
+    } else {
+      await projectAuthoritativeQueue(db, repositoryId, baseRef, lease);
+    }
   } catch (error) {
     // The projection may lag; the command already succeeded, so this is not
     // fatal. It still has to be seen: a write that fails every time looks, from
@@ -729,6 +741,10 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     intent: MergeIntent,
     lease?: ProjectWriteLease,
   ): Promise<MergeWriteOutcome>;
+  scheduleMergeReconciliation(
+    env: TEnv,
+    task: MergeReconciliationTask,
+  ): Promise<void>;
   /** The activated principal for a GitHub user id, or null. */
   principalFor(env: TEnv, repositoryId: string, githubUserId: string): Promise<string | null>;
   /**
@@ -809,7 +825,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * happen. A caller that saw one refusal saw one call's result, not the fate of
    * the pull request.
    */
-  pullRequestMergeState?(
+  pullRequestMergeState(
     env: TEnv,
     repositoryId: string,
     pullRequestNumber: number,
@@ -978,6 +994,15 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
    * publishing: the lane moving without the check following it is the failure
    * that made the queue rotate turns nobody could take.
    */
+  const turnCheckPublisher = (
+    env: TEnv,
+    repositoryId: string,
+    lease?: ProjectWriteLease,
+  ) => (update: TurnCheckUpdate) =>
+    deps.publishTurnCheck === undefined
+      ? Promise.resolve()
+      : deps.publishTurnCheck(env, repositoryId, update, lease);
+
   const onQueue = <T,>(
     env: TEnv,
     repositoryId: string,
@@ -990,10 +1015,7 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
       repositoryId,
       baseRef,
       decide,
-      (update) =>
-        deps.publishTurnCheck === undefined
-          ? Promise.resolve()
-          : deps.publishTurnCheck(env, repositoryId, update, lease),
+      turnCheckPublisher(env, repositoryId, lease),
       undefined,
       lease,
   );
@@ -1006,7 +1028,16 @@ export function queueRoutes<TEnv extends QueueRouteEnv>(deps: {
     _publish,
     _comment,
     lease,
-  ) => onQueue(env, repositoryId, baseRef, decide, lease);
+  ) => runOnQueue(
+    env,
+    repositoryId,
+    baseRef,
+    decide,
+    turnCheckPublisher(env, repositoryId, lease),
+    undefined,
+    lease,
+    "transition-tail",
+  );
 
   const { performMergeFromWorker } = mergeLaneFor(deps, onQueue);
 

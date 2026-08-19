@@ -34,6 +34,7 @@ import {
   repositoryAllowsExternalWrite,
   type ProjectWriteLease,
 } from "../project-lifecycle.js";
+import type { MergeReconciliationTask } from "./merge-reconciliation.js";
 
 /** How a caller runs commands against one queue document. */
 export type OnQueue<TEnv> = <T>(
@@ -96,6 +97,11 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
    * that does not get signed.
    */
   baseContainsSha(env: TEnv, repositoryId: string, baseRef: string, sha: string): Promise<boolean | null>;
+  pullRequestMergeState(
+    env: TEnv,
+    repositoryId: string,
+    pullRequestNumber: number,
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null } | null>;
   signRecordBytes(env: TEnv, bytes: Uint8Array, typ: string): Promise<string>;
   commitFacts(
     env: TEnv,
@@ -111,6 +117,11 @@ export interface MergeLaneDeps<TEnv extends QueueRouteEnv> {
     intent: MergeIntent,
     lease?: ProjectWriteLease,
   ): Promise<MergeWriteOutcome>;
+  /**
+   * Accept a fresh-invocation recovery task before the protected branch moves.
+   * If this cannot be made durable, the merge does not start.
+   */
+  scheduleMergeReconciliation(env: TEnv, task: MergeReconciliationTask): Promise<void>;
   /** Hold the project incarnation across the GitHub write and its signed record. */
   projectWriteLease?(
     env: TEnv,
@@ -759,6 +770,33 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
     ))) {
       return { merged: false, recorded: false, reason: "PROJECT_RELEASE_REQUESTED" };
     }
+    try {
+      await deps.scheduleMergeReconciliation(env, {
+        repositoryId: input.repositoryId,
+        baseRef: input.baseRef,
+        projectId: lease.projectId,
+        operationId: input.operationId,
+        attemptId: input.attemptId,
+        pullRequestNumber: input.pullRequestNumber,
+      });
+    } catch (error) {
+      const detail = `durable merge reconciliation could not be scheduled: ${
+        error instanceof Error ? error.message : String(error)
+      }`.slice(0, 1_000);
+      await onQueue(env, input.repositoryId, input.baseRef, async ({ commands }) => {
+        commands.mergeOutcomeUnknown({
+          idempotencyKey: `schedule-failed:unknown:${input.attemptId}`,
+          attemptId: input.attemptId,
+          detail,
+        });
+        return commands.confirmNotMerged({
+          idempotencyKey: `schedule-failed:not-merged:${input.attemptId}`,
+          attemptId: input.attemptId,
+          operationId: input.operationId,
+        });
+      }, lease);
+      return { merged: false, recorded: false, reason: "RECONCILIATION_NOT_SCHEDULED", detail };
+    }
     const outcome = await deps.mergeWrite(env, input.repositoryId, {
       baseRef: input.baseRef,
       pullRequestNumber: input.pullRequestNumber,
@@ -785,7 +823,16 @@ export function mergeLaneFor<TEnv extends QueueRouteEnv>(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const detail = `transition recording threw after the merge landed: ${message}`.slice(0, 1_000);
-        await markUnrecorded(detail);
+        // The recovery task was accepted before the ref write. Recording this
+        // refusal is useful, but it is no longer the only durable owner of the
+        // merge. A spent subrequest budget can therefore fail here without
+        // losing the fresh-invocation repair.
+        await markUnrecorded(detail).catch((markError) => {
+          console.error(
+            `[queue merge] ${input.operationId} could not retain its synchronous refusal; ` +
+              `durable reconciliation is already queued: ${String(markError)}`,
+          );
+        });
         return { merged: true, recorded: false, reason: "TRANSITION_RECORDING_FAILED", detail };
       }
       if (!recorded.ok) {

@@ -387,4 +387,9 @@ describe("independent control-plane configuration", () => {
     expect(config.queues.producers[0].binding).toBe("SYNC_QUEUE");
     expect(config.assets.binding).toBe("ASSETS");
   });
+
+  it("requires enough CPU for signed queue work in hosted and independent deployments", () => {
+    expect(config.limits.cpu_ms).toBe(30_000);
+    expect(read("wrangler.jsonc")).toContain('\"limits\": { \"cpu_ms\": 30000 }');
+  });
 });
