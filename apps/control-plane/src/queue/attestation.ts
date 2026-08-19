@@ -1424,6 +1424,71 @@ export async function readAttestation(
 }
 
 /**
+ * How many links a branch's attested range holds.
+ *
+ * The tick's chain self-check reads a bounded window of links rather than the
+ * whole range (issue #465), and choosing the window needs the count before the
+ * links are read. One statement, the same predicate `readChain` serves, so the
+ * count and the window can never disagree about what is in range.
+ */
+export async function countChain(
+  db: D1Like,
+  repositoryId: string,
+  baseRef: string,
+  fromSequence: number,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+          AND transition_sequence >= ?`,
+    )
+    .bind(repositoryId, baseRef, fromSequence)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}
+
+/**
+ * A bounded slice of a branch's attested range, oldest first.
+ *
+ * Same rows, same order, and the same "only records hold a position" rule as
+ * `readChain`; the slice is chosen by index into that ordering. A windowed
+ * reader transfers and parses only the links it will verify, which is the
+ * point: the full read grows with the chain, and the Worker's CPU budget does
+ * not.
+ */
+export async function readChainWindow(
+  db: D1Like,
+  input: {
+    readonly repositoryId: string;
+    readonly baseRef: string;
+    readonly fromSequence: number;
+    readonly offset: number;
+    readonly limit: number;
+  },
+): Promise<Array<{ digest: string; sequence: number; bytes: Uint8Array; jws: string }>> {
+  const rows = await db
+    .prepare(
+      `SELECT digest, transition_sequence AS sequence, bytes, jws
+         FROM queue_attestations
+        WHERE github_repository_id = ? AND base_ref = ? AND transition_sequence IS NOT NULL
+          AND transition_sequence >= ?
+        ORDER BY transition_sequence, created_at
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(input.repositoryId, input.baseRef, input.fromSequence, input.limit, input.offset)
+    .all<{ digest: string; sequence: number; bytes: string; jws: string }>();
+  const encoder = new TextEncoder();
+  return rows.results.map((r) => ({
+    digest: r.digest,
+    sequence: r.sequence,
+    bytes: encoder.encode(r.bytes),
+    jws: r.jws,
+  }));
+}
+
+/**
  * Every signed link in a branch's attested range, oldest first.
  *
  * Only records occupy a position in the chain, so intents are left out: they are

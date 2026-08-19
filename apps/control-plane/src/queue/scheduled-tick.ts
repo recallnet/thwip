@@ -26,7 +26,7 @@ import {
 } from "./orphaned-writes.js";
 import { durableMergeRecordForPullRequestNumber, durableTransitionForAttemptId } from "./attestation.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
-import { findingsForChain } from "./chain-self-check.js";
+import { findingsForChainWindow } from "./chain-self-check.js";
 import type { CommentBudget } from "./status-comment-write.js";
 import { reconcileTerminalEntries } from "./terminal-reconciliation.js";
 import { acquireProjectWriteLease, repositoryAllowsExternalWrite } from "../project-lifecycle.js";
@@ -509,24 +509,34 @@ export async function tickAllQueues(
       // catches merges that remain unrecorded: `verifyChain` reports
       // `BASE_DISCONTINUITY` for exactly that shape.
       //
+      // The heartbeat checks a bounded window of the chain, not the whole
+      // range: verifying every link on every tick grows with the chain and the
+      // Free plan's CPU budget does not, which is how ticks came to die at
+      // exactly 10 ms (issue #465). The newest links are verified every tick,
+      // and the rest rotates through on a stride, so coverage is a cycle old
+      // rather than instant. The heal route and the outside verifier still
+      // walk everything on demand.
+      //
       // Last, after everything that can add or repair a link this tick. A
       // finding is read and reported, never acted on: the sweep above is what
       // repairs a chain, and this is only the queue looking at what it wrote.
       //
-      // The key set `findingsForChain` reads is read after `sweepOrphanedWrites`
-      // rather than once for the whole tick, and that ordering is why this call
-      // sits here. `sweepOrphanedWrites` can call `recordMergeFromIntent`, which
-      // signs through `serviceKey()` and inserts a row into `service_keys` the
-      // first time this isolate uses that kid, inside the same per-queue pass.
-      // A key set taken before that insert would check the record the sweep just
-      // signed against a key published after the record was made and report it
-      // as `BAD_SIGNATURE`: a false alarm on the exact signal this feature
-      // exists to make trustworthy, and one that clears itself on the next tick,
-      // which makes it rarer and harder to diagnose rather than less bad.
-      const chainCheck = await findingsForChain(db, {
+      // The key set `findingsForChainWindow` reads is read after
+      // `sweepOrphanedWrites` rather than once for the whole tick, and that
+      // ordering is why this call sits here. `sweepOrphanedWrites` can call
+      // `recordMergeFromIntent`, which signs through `serviceKey()` and inserts
+      // a row into `service_keys` the first time this isolate uses that kid,
+      // inside the same per-queue pass. A key set taken before that insert would
+      // check the record the sweep just signed against a key published after
+      // the record was made and report it as `BAD_SIGNATURE`: a false alarm on
+      // the exact signal this feature exists to make trustworthy, and one that
+      // clears itself on the next tick, which makes it rarer and harder to
+      // diagnose rather than less bad.
+      const chainCheck = await findingsForChainWindow(db, {
         repositoryId: row.repositoryId,
         baseRef: row.baseRef,
         epochStartsAt: row.epochStartsAt,
+        slot,
       });
       chainFindings += chainCheck.length;
       for (const finding of chainCheck) {

@@ -16,6 +16,12 @@ needs these Cloudflare resources:
 - the `BranchQueue` Durable Object declared in the example configuration;
 - Worker static assets and the two scheduled triggers in that configuration.
 
+The scheduled tick's cost is bounded: it verifies the newest chain links every
+run and rotates through the rest a bounded window at a time, so its CPU use does
+not grow with the chain. The trade is detection latency — a tampered older
+record surfaces within one rotation cycle rather than on the next tick. The
+heal route and `thwip verify-chain` still check a whole chain on demand.
+
 Copy `wrangler.self-host.example.jsonc` to the ignored local file
 `wrangler.self-host.jsonc`. Replace the
 example resource names, all-zero D1 ID, `example.com` origin, and `replace-me`
