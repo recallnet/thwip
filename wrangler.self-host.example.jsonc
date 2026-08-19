@@ -6,7 +6,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": { "enabled": true },
-  "limits": { "cpu_ms": 30000 },
   "assets": {
     "directory": "apps/control-plane/dist/client",
     "binding": "ASSETS",

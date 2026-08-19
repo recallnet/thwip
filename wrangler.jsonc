@@ -6,7 +6,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "placement": { "mode": "smart" },
-  "limits": { "cpu_ms": 30000 },
   "env": {
     "staging": {
       "name": "thwip-staging",

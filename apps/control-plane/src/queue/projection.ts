@@ -737,7 +737,7 @@ function transitionProjectionStatement(
 }
 
 /**
- * Publish only the bounded authoritative transition tail.
+ * Publish one exact transition from the bounded authoritative tail.
  *
  * A merge repair needs its new chain link to be durable before it answers. It
  * does not need to rebuild every entry, terminal comment handoff, or dashboard
@@ -758,9 +758,15 @@ export async function projectQueueTransitionTail(
   }
   try {
     await lease.renew();
-    const tail = requiredTransition ?? message.transitions.at(-1);
-    if (tail === undefined) return true;
-    await db.batch(message.transitions.map((transition) => transitionProjectionStatement(db, message, transition)));
+    const tail = requiredTransition === undefined
+      ? message.transitions.at(-1)
+      : message.transitions.find(
+          (transition) =>
+            transition.transitionSequence === requiredTransition.transitionSequence &&
+            transition.digest === requiredTransition.digest,
+        );
+    if (tail === undefined) return requiredTransition === undefined;
+    await db.batch([transitionProjectionStatement(db, message, tail)]);
     const linked = await db
       .prepare(
         `SELECT 1 AS found FROM queue_transitions_index
