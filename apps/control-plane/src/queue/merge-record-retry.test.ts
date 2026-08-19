@@ -76,6 +76,8 @@ function laneDeps(): MergeLaneDeps<QueueRouteEnv> {
     activePolicy: async () => fixturePolicy(),
     proofCheckRunId: async () => "778899",
     baseContainsSha: async () => true,
+    pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+    scheduleMergeReconciliation: async () => {},
     signRecordBytes: sign,
     commitFacts: async (environment, repositoryId, sha) =>
       sha === LANDED

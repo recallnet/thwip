@@ -1,5 +1,5 @@
 import { TERMINAL_ENTRY_STATES } from "@thwip/queue-domain";
-import { recoverExactMergeRecord } from "./attestation.js";
+import { mergeIntentExistsForPullRequest, recoverExactMergeRecord } from "./attestation.js";
 import type { TerminalPullRequestReads } from "./deadlines.js";
 import type { QueueSnapshot } from "./queue-operations.js";
 import { loadQueueState, withQueueState } from "./queue-state.js";
@@ -7,7 +7,10 @@ import type { D1Like } from "./projection.js";
 import { recordMergeFromIntent, type RecordFromIntentDeps } from "./record-from-intent.js";
 import { runOnQueue, type QueueRouteEnv } from "./routes.js";
 import { projectAuthoritativeQueue } from "./queue-projection.js";
-import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
+import {
+  EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON,
+  TERMINAL_RECONCILIATION_CANCEL_REASON,
+} from "./terminal-comment-priority.js";
 import { acquireProjectWriteLease, type ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
@@ -40,6 +43,8 @@ interface Observation {
     readonly digest: string;
     readonly transitionSequence: number;
   } | null;
+  /** GitHub merged this PR, but Thwip never authorized that merge. */
+  readonly mergedOutsideQueue: boolean;
 }
 
 export interface TerminalReconciliationResult {
@@ -184,6 +189,7 @@ async function reconcileTerminalEntriesWithLease<TEnv extends QueueRouteEnv>(
       }
 
       let record: Observation["record"] = null;
+      let mergedOutsideQueue = false;
       if (pull?.merged === true && pull.mergeCommitSha !== null) {
         const existing = await recoverExactMergeRecord(db, {
           repositoryId: input.repositoryId,
@@ -214,6 +220,19 @@ async function reconcileTerminalEntriesWithLease<TEnv extends QueueRouteEnv>(
               `[queue heartbeat] pull request ${entry.pullRequestNumber} of repository ${input.repositoryId} ` +
                 `is merged but its signed record could not be recovered: ${repaired.detail}`,
             );
+            // Observe mode may admit and display a pull request without ever
+            // authorizing a merge. If another merge owner lands it during the
+            // cutover, there is deliberately no Thwip intent from which to
+            // build a signed record. Treat that exact absence as terminal
+            // queue membership, not as a Thwip-authored merge. Every other
+            // refusal remains fail-closed and is retried or surfaced.
+            mergedOutsideQueue =
+              repaired.authorizationCode === "NO_INTENT" &&
+              !(await mergeIntentExistsForPullRequest(db, {
+                repositoryId: input.repositoryId,
+                baseRef: input.baseRef,
+                pullRequestNumber: entry.pullRequestNumber,
+              }));
           }
           const recovered = await recoverExactMergeRecord(db, {
             repositoryId: input.repositoryId,
@@ -225,7 +244,7 @@ async function reconcileTerminalEntriesWithLease<TEnv extends QueueRouteEnv>(
           record = recovered?.status === "linked" ? recovered : null;
         }
       }
-      observations.push({ entry, pull, record });
+      observations.push({ entry, pull, record, mergedOutsideQueue });
     }
 
     const out = await runOnQueue(env, input.repositoryId, input.baseRef, ({ store, commands }) => {
@@ -242,7 +261,17 @@ async function reconcileTerminalEntriesWithLease<TEnv extends QueueRouteEnv>(
         }
 
         if (observation.pull?.merged === true && observation.pull.mergeCommitSha !== null) {
-          if (observation.record === null) continue;
+          if (observation.record === null) {
+            if (!observation.mergedOutsideQueue) continue;
+            const result = commands.cancel({
+              idempotencyKey: `reconcile:external-merge:${current.entryId}:${observation.pull.mergeCommitSha}`,
+              entryId: current.entryId,
+              actorPrincipalId: "github",
+              reason: EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON,
+            });
+            if (result.status === "applied") reconciled += 1;
+            continue;
+          }
           const result = commands.reconcileMerged({
             idempotencyKey: `reconcile:merged:${current.entryId}:${observation.record.digest}`,
             entryId: current.entryId,

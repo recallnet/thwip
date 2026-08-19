@@ -242,6 +242,78 @@ async function snapshot(e: QueueRouteEnv) {
 }
 
 describe("bounded terminal queue reconciliation", () => {
+  it("removes an observe-mode entry that merged outside Thwip without inventing a signed merge", async () => {
+    const e = env();
+    const pr = 246;
+    await runOnQueue(e, REPO, REF, ({ commands }) => {
+      commands.requestQueue({
+        idempotencyKey: `request-${pr}`,
+        entryId: `entry_${REPO}_${pr}`,
+        pullRequestNumber: pr,
+        sponsorPrincipalId: "alice",
+        sponsorGithubUserId: "1",
+        headSha: HEAD,
+      });
+    });
+
+    const first = await reconcileTerminalEntries(
+      e,
+      { repositoryId: REPO, baseRef: REF },
+      reads("closed", true),
+      deps(pr),
+    );
+    const repeated = await reconcileTerminalEntries(
+      e,
+      { repositoryId: REPO, baseRef: REF },
+      reads("closed", true),
+      deps(pr),
+    );
+
+    expect(first).toMatchObject({ examined: 1, reconciled: 1 });
+    expect(repeated).toMatchObject({ examined: 0, reconciled: 0 });
+    expect((await snapshot(e)).entries[0]).toMatchObject({ state: "Cancelled" });
+    expect(
+      raw
+        .prepare(
+          "SELECT state FROM queue_entries_index WHERE github_repository_id = ? AND base_ref = ? AND pull_request_number = ?",
+        )
+        .get(REPO, REF, pr),
+    ).toEqual({ state: "Cancelled" });
+    expect(
+      raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge', 'candidate-verified-merge')",
+        )
+        .get(),
+    ).toEqual({ n: 0 });
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 0 });
+  });
+
+  it("does not call a mismatched landed commit external when a Thwip intent exists for that pull request", async () => {
+    const e = env();
+    const pr = 247;
+    await seedIntent(pr);
+    await blocked(e, pr);
+    const mismatched: RecordFromIntentDeps<QueueRouteEnv> = {
+      ...deps(pr),
+      commitFacts: async (_environment, _repositoryId, sha) =>
+        sha === MERGE
+          ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "merged by somebody else" }
+          : { treeOid: BEFORE_TREE, parentShas: ["5".repeat(40)], message: "base" },
+    };
+
+    const result = await reconcileTerminalEntries(
+      e,
+      { repositoryId: REPO, baseRef: REF },
+      reads("closed", true),
+      mismatched,
+    );
+
+    expect(result).toMatchObject({ examined: 1, reconciled: 0 });
+    expect((await snapshot(e)).entries[0]?.state).toBe("Blocked");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 0 });
+  });
+
   it("settles an already-merged entry from its existing record without signing another", async () => {
     const e = env();
     const pr = 237;

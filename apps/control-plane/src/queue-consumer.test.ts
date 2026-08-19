@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { processQueueMessage } from "./queue-consumer.js";
+import {
+  processQueueMessage,
+  requeuePendingMergeReconciliation,
+} from "./queue-consumer.js";
+import {
+  MERGE_RECONCILIATION_RETRY_DELAY_SECONDS,
+  MergeReconciliationPendingError,
+} from "./queue/merge-reconciliation.js";
 
 /**
  * The production loop lives in `index.ts` because it owns ack and retry per
@@ -24,6 +31,76 @@ const REQUEST: AppProofRequest = {
 };
 
 describe("queue consumer", () => {
+  it("gives an exact merge-reconciliation task its own fresh invocation", async () => {
+    const work: string[] = [];
+    const task = {
+      repositoryId: "repo-1",
+      baseRef: "refs/heads/main",
+      projectId: "project-1",
+      operationId: "merge_attempt-1",
+      attemptId: "attempt-1",
+      pullRequestNumber: 53,
+    };
+
+    await runMessages(
+      [{ event: "pull_request", installationId: "42", syncInstallation: true, mergeReconciliation: task }],
+      {
+        reconcileMergeWrite: async (received) => {
+          work.push(`merge:${received.operationId}`);
+        },
+        syncInstallation: async () => {
+          work.push("unexpected installation sync");
+        },
+      },
+    );
+
+    expect(work).toEqual(["merge:merge_attempt-1"]);
+  });
+
+  it("re-enqueues repeated pending merge reads with delay before a later delivery settles", async () => {
+    const task = {
+      repositoryId: "repo-1",
+      baseRef: "refs/heads/main",
+      projectId: "project-1",
+      operationId: "merge_attempt-1",
+      attemptId: "attempt-1",
+      pullRequestNumber: 53,
+    };
+    const body = { mergeReconciliation: task };
+    const sent: Array<{ body: typeof body; delaySeconds: number }> = [];
+    const queue = {
+      async send(replacement: typeof body, options: { readonly delaySeconds: number }) {
+        sent.push({ body: replacement, delaySeconds: options.delaySeconds });
+      },
+    };
+
+    for (let read = 0; read < 6; read += 1) {
+      await expect(
+        requeuePendingMergeReconciliation(
+          new MergeReconciliationPendingError("GitHub has not exposed the merge yet"),
+          body,
+          queue,
+        ),
+      ).resolves.toBe(true);
+    }
+
+    let settled = 0;
+    await runMessages([body], {
+      reconcileMergeWrite: async () => {
+        settled += 1;
+      },
+    });
+
+    expect(sent).toHaveLength(6);
+    expect(sent).toEqual(
+      Array.from({ length: 6 }, () => ({
+        body,
+        delaySeconds: MERGE_RECONCILIATION_RETRY_DELAY_SECONDS,
+      })),
+    );
+    expect(settled).toBe(1);
+  });
+
   it("does not re-read the installation for a proof task that changed nothing about it", async () => {
     const synced: string[] = [];
     await runMessages(

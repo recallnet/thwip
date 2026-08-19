@@ -901,15 +901,37 @@ export class BranchQueueStore {
       }));
   }
 
-  mergeOperation(operationId: string): { attemptId: string; attemptRevision: number; outcome: string | null } | null {
+  mergeOperation(operationId: string): (UnresolvedMergeOperation & { outcome: string | null }) | null {
     const row = this.sql
-      .exec<{ attempt_id: string; attempt_revision: number; outcome: string | null }>(
-        "SELECT attempt_id, attempt_revision, outcome FROM merge_operations WHERE operation_id = ?",
+      .exec<{
+        operation_id: string;
+        attempt_id: string;
+        attempt_revision: number;
+        expected_base_sha: string;
+        expected_head_sha: string;
+        expected_tree_oid: string;
+        pull_request_number: number | null;
+        write_started_at: string;
+        outcome: string | null;
+      }>(
+        `SELECT operation_id, attempt_id, attempt_revision, expected_base_sha, expected_head_sha,
+                expected_tree_oid, pull_request_number, write_started_at, outcome
+           FROM merge_operations WHERE operation_id = ?`,
         operationId,
       )
       .toArray()[0];
     if (row === undefined) return null;
-    return { attemptId: row.attempt_id, attemptRevision: row.attempt_revision, outcome: row.outcome };
+    return {
+      operationId: row.operation_id,
+      attemptId: row.attempt_id,
+      attemptRevision: row.attempt_revision,
+      expectedBaseSha: row.expected_base_sha,
+      expectedHeadSha: row.expected_head_sha,
+      expectedTreeOid: row.expected_tree_oid,
+      pullRequestNumber: row.pull_request_number ?? null,
+      writeStartedAt: row.write_started_at,
+      outcome: row.outcome,
+    };
   }
 
   /* ---------------- callback staleness ---------------- */
