@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { migrationStatements } from "../../test/d1.js";
 import {
   projectQueueState,
+  projectQueueTransitionTail,
   projectTerminalEntryHistory,
   pruneTerminalEntryHistory,
   readProjectedQueue,
@@ -228,6 +229,30 @@ describe("projectQueueState", () => {
         message({ generation: 6, queueEpoch: 1, transitions: [transition] }),
       );
       expect((await rows(db, "queue_transitions_index")).results).toHaveLength(2);
+    });
+
+    it("projects only the exact transition needed by a narrow repair", async () => {
+      const db = d1();
+      const later = {
+        ...transition,
+        transitionSequence: 2,
+        digest: `sha256:${"b".repeat(64)}`,
+        priorDigest: transition.digest,
+      };
+      const current = message({ transitions: [transition, later] });
+
+      // The required transition is not necessarily the tail: restoring an
+      // older merge's missing link must project that link, not a later one.
+      expect(await projectQueueTransitionTail(
+        db,
+        current,
+        { projectId: "project", renew: async () => {}, release: async () => {} },
+        transition,
+      )).toBe(true);
+
+      expect((await rows(db, "queue_transitions_index")).results).toEqual([
+        expect.objectContaining({ transition_sequence: 1, digest: transition.digest }),
+      ]);
     });
   });
 

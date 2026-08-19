@@ -937,6 +937,30 @@ describe("recordMergeFromIntent", () => {
     ).toEqual({ sequence: 1 });
   });
 
+  it("restores a missing transition projection from the bounded authoritative tail", async () => {
+    const e = env();
+    seed();
+    await seedVerifiedIntent();
+    const input = {
+      repositoryId: REPO,
+      baseRef: REF,
+      mergeSha: FIRST.mergeSha,
+      witnessPrincipalId: "prn_acme",
+      reason: "restore the missing transition projection",
+      attemptId: FIRST.attemptId,
+    };
+    const first = await recordMergeFromIntent(e, stubDeps, input);
+    if (first.status !== "recorded") throw new Error("repair did not record");
+    raw.prepare("DELETE FROM queue_transitions_index").run();
+
+    const replay = await recordMergeFromIntent(e, stubDeps, input);
+
+    expect(replay).toMatchObject({ status: "already", transitionDigest: first.transitionDigest });
+    expect(raw.prepare("SELECT digest FROM queue_transitions_index").all()).toEqual([
+      { digest: first.transitionDigest },
+    ]);
+  });
+
   it("repairs a legacy positioned row that has no durable queue link", async () => {
     const e = env();
     seed();

@@ -94,6 +94,12 @@ import { driveQueue } from "./queue/drive-queue.js";
 import type { BranchQueueState, Entry } from "@thwip/queue-domain";
 import { GITHUB_READS } from "./queue/deadlines.js";
 import type { OnQueue } from "./queue/merge-lane.js";
+import {
+  MERGE_RECONCILIATION_DELAY_SECONDS,
+  MergeReconciliationPendingError,
+  reconcileQueuedMergeWrite,
+  type MergeReconciliationTask,
+} from "./queue/merge-reconciliation.js";
 import type { QueueSnapshot } from "./queue/queue-operations.js";
 import { CandidatePathCache, changedCandidatePaths, githubHttp } from "./queue/github-port.js";
 import { resolveOrDeriveCandidate } from "./queue/derive-candidate.js";
@@ -138,7 +144,12 @@ import {
   type AppProofTask,
 } from "./app-proof-verification.js";
 import { bindWebhookProject, webhookWork } from "./webhook-work.js";
-import { processQueueMessage, type QueueConsumerDeps, type QueueConsumerMessage } from "./queue-consumer.js";
+import {
+  processQueueMessage,
+  requeuePendingMergeReconciliation,
+  type QueueConsumerDeps,
+  type QueueConsumerMessage,
+} from "./queue-consumer.js";
 import type { Env } from "./env.js";
 
 export type { Env } from "./env.js";
@@ -3254,6 +3265,12 @@ const queueDeps = {
           },
     );
   },
+  async scheduleMergeReconciliation(env: Env, task: MergeReconciliationTask) {
+    await env.SYNC_QUEUE.send(
+      { mergeReconciliation: task },
+      { delaySeconds: MERGE_RECONCILIATION_DELAY_SECONDS },
+    );
+  },
   projectWriteLease(env: Env, repositoryId: string, projectId?: string) {
     return acquireProjectWriteLease(env.DB as unknown as D1Like, repositoryId, projectId);
   },
@@ -3885,13 +3902,43 @@ export default {
           headSha,
           ...(expectedProjectId === undefined ? {} : { expectedProjectId }),
         }),
+      reconcileMergeWrite: async (task) => {
+        const result = await reconcileQueuedMergeWrite(
+          env,
+          queueDeps,
+          queueOnQueue,
+          task,
+        );
+        if (result.status === "pending") throw new MergeReconciliationPendingError(result.detail);
+        if (result.status === "settled") {
+          console.log(
+            `[queue merge] recovered ${task.operationId} as ${result.mergeSha} from its durable queue task`,
+          );
+          await driveQueue(env, queueDeps as never, queueOnQueue, {
+            repositoryId: task.repositoryId,
+            baseRef: task.baseRef,
+          });
+        }
+      },
     };
     for (const msg of batch.messages) {
       try {
         await processQueueMessage(msg.body as QueueConsumerMessage, synced, deps);
         msg.ack();
       } catch (error) {
-        if (error instanceof GithubInstallationSyncBusyError) {
+        if (
+          error instanceof Error &&
+          await requeuePendingMergeReconciliation(
+            error,
+            msg.body as QueueConsumerMessage,
+            env.SYNC_QUEUE,
+          )
+        ) {
+          // GitHub can accept a merge before its pull-request and commit reads
+          // expose the result. A delayed new delivery preserves a fresh retry
+          // budget instead of spending all five retries in that short window.
+          msg.ack();
+        } else if (error instanceof GithubInstallationSyncBusyError) {
           // A concurrent webhook or daily sweep for the same installation is
           // redundant, but acknowledging it outright could lose authority
           // that changed after the active snapshot began. Re-enqueue it with a

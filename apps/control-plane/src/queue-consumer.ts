@@ -1,6 +1,10 @@
 import { MEMBERSHIP_EVENTS } from "./webhook-work.js";
 import type { AppProofRequest, AppProofTask } from "./app-proof-verification.js";
 import type { PolicyPush } from "./policy-activation.js";
+import {
+  MergeReconciliationPendingError,
+  type MergeReconciliationTask,
+} from "./queue/merge-reconciliation.js";
 
 /**
  * The shape of a `SYNC_QUEUE` message body, independent of the `Env` the real
@@ -20,11 +24,32 @@ export interface QueueConsumerMessage {
   /** Durable work restored by an installation-sync continuation. */
   readonly postSyncPolicyReconcile?: boolean;
   readonly postSyncProofReconcile?: boolean;
+  /** A fresh-invocation owner accepted before an App merge moves the branch. */
+  readonly mergeReconciliation?: MergeReconciliationTask | null;
 }
 
 export interface QueueConsumerPostSyncWork {
   readonly reconcilePolicies: boolean;
   readonly reconcileProofChecks: boolean;
+}
+
+export interface QueueMessageSender<TResult> {
+  send(body: QueueConsumerMessage, options: { readonly delaySeconds: number }): Promise<TResult>;
+}
+
+/**
+ * Give ordinary GitHub visibility lag a new queue delivery after a delay.
+ * `send` creates the fresh retry budget; the Worker acknowledges the current
+ * delivery only after this function confirms the replacement was accepted.
+ */
+export async function requeuePendingMergeReconciliation<TResult>(
+  error: Error,
+  body: QueueConsumerMessage,
+  queue: QueueMessageSender<TResult>,
+): Promise<boolean> {
+  if (!(error instanceof MergeReconciliationPendingError)) return false;
+  await queue.send(body, { delaySeconds: error.delaySeconds });
+  return true;
 }
 
 /** The consumer's side effects, each already bound to the `Env` it needs. */
@@ -49,6 +74,7 @@ export interface QueueConsumerDeps {
    * woke the lane. The App must reconsider it as soon as the verdict lands.
    */
   reconsiderHead?: (repositoryId: string, headSha: string, projectId?: string) => Promise<unknown>;
+  reconcileMergeWrite?: (task: MergeReconciliationTask) => Promise<unknown>;
 }
 
 const noop = async (): Promise<void> => {};
@@ -78,6 +104,7 @@ function resolveDeps(deps: QueueConsumerDeps): Required<QueueConsumerDeps> {
     processAppProof: deps.processAppProof ?? noop,
     requestForRerequest: deps.requestForRerequest ?? (async () => null),
     reconsiderHead: deps.reconsiderHead ?? noop,
+    reconcileMergeWrite: deps.reconcileMergeWrite ?? noop,
   };
 }
 
@@ -92,6 +119,10 @@ export async function processQueueMessage(
   deps: QueueConsumerDeps = {},
 ): Promise<void> {
   const resolved = resolveDeps(deps);
+  if (body.mergeReconciliation != null) {
+    await resolved.reconcileMergeWrite(body.mergeReconciliation);
+    return;
+  }
   const inst = body.installationId;
   const membershipWork = MEMBERSHIP_EVENTS.includes(body.event as (typeof MEMBERSHIP_EVENTS)[number]);
   const postSyncWork: QueueConsumerPostSyncWork = {

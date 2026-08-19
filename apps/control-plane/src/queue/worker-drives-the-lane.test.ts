@@ -129,6 +129,8 @@ function reads(over: Record<string, unknown> = {}) {
       candidateTreeOid: TREE,
     }),
     mergeWrite: async () => ({ kind: "unknown", detail: "test does not land the merge" }),
+    scheduleMergeReconciliation: async () => {},
+    pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
     publishTurnCheck: async () => {},
     commitFacts: async () => ({
       treeOid: TREE,

@@ -1,4 +1,4 @@
-import type { ProjectWriteLease } from "../project-lifecycle.js";
+import { acquireProjectWriteLease, type ProjectWriteLease } from "../project-lifecycle.js";
 
 /**
  * D1 projection of queue state.
@@ -15,7 +15,10 @@ import type { ProjectWriteLease } from "../project-lifecycle.js";
  * next change.
  */
 import type { QueueSnapshot } from "./queue-operations.js";
-import { TERMINAL_RECONCILIATION_CANCEL_REASON } from "./terminal-comment-priority.js";
+import {
+  EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON,
+  TERMINAL_RECONCILIATION_CANCEL_REASON,
+} from "./terminal-comment-priority.js";
 
 export interface ProjectionEntry {
   readonly entryId: string;
@@ -328,7 +331,8 @@ export async function terminalEntryHistoryFromRecentEvents(
     if (
       event.type === "EntryCancelled" &&
       (body.actorPrincipalId !== "github" ||
-        body.reason !== TERMINAL_RECONCILIATION_CANCEL_REASON)
+        (body.reason !== TERMINAL_RECONCILIATION_CANCEL_REASON &&
+          body.reason !== EXTERNAL_MERGE_RECONCILIATION_CANCEL_REASON))
     ) {
       continue;
     }
@@ -699,6 +703,91 @@ export type ProjectionResult =
   | { readonly applied: false; readonly reason: "STALE_GENERATION"; readonly seen: number }
   | { readonly applied: false; readonly reason: "PROJECT_UNAVAILABLE"; readonly seen: 0 };
 
+function transitionProjectionStatement(
+  db: D1Like,
+  message: ProjectionMessage,
+  transition: ProjectionTransition,
+): unknown {
+  return db
+    .prepare(
+      `INSERT INTO queue_transitions_index (
+         id, github_repository_id, project_id, base_ref, queue_epoch, transition_sequence,
+         kind, digest, prior_digest, base_sha, attempt_id, witness_count, observed_at
+       )
+       SELECT ?, ?, p.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         FROM projects p WHERE p.id = ? AND p.github_repository_id = ?
+       ON CONFLICT (github_repository_id, base_ref, queue_epoch, transition_sequence) DO NOTHING`,
+    )
+    .bind(
+      rowKey("qti", message.repositoryId, message.baseRef, `${message.queueEpoch}_${transition.transitionSequence}`),
+      message.repositoryId,
+      message.baseRef,
+      message.queueEpoch,
+      transition.transitionSequence,
+      transition.kind,
+      transition.digest,
+      transition.priorDigest,
+      transition.baseSha,
+      transition.attemptId,
+      transition.witnessCount,
+      transition.observedAt,
+      message.projectId,
+      message.repositoryId,
+    );
+}
+
+/**
+ * Publish one exact transition from the bounded authoritative tail.
+ *
+ * A merge repair needs its new chain link to be durable before it answers. It
+ * does not need to rebuild every entry, terminal comment handoff, or dashboard
+ * mark in the same request. Keeping this path narrow prevents emergency repair
+ * from spending its Worker budget on unrelated projection maintenance.
+ */
+export async function projectQueueTransitionTail(
+  db: D1Like,
+  message: ProjectionMessage,
+  writeLease?: ProjectWriteLease,
+  requiredTransition?: Pick<ProjectionTransition, "transitionSequence" | "digest">,
+): Promise<boolean> {
+  const borrowed = writeLease !== undefined;
+  const lease = writeLease ?? await acquireProjectWriteLease(db, message.repositoryId, message.projectId);
+  if (lease === null || lease.projectId !== message.projectId) {
+    if (!borrowed) await lease?.release();
+    return false;
+  }
+  try {
+    await lease.renew();
+    const tail = requiredTransition === undefined
+      ? message.transitions.at(-1)
+      : message.transitions.find(
+          (transition) =>
+            transition.transitionSequence === requiredTransition.transitionSequence &&
+            transition.digest === requiredTransition.digest,
+        );
+    if (tail === undefined) return requiredTransition === undefined;
+    await db.batch([transitionProjectionStatement(db, message, tail)]);
+    const linked = await db
+      .prepare(
+        `SELECT 1 AS found FROM queue_transitions_index
+          WHERE github_repository_id = ? AND base_ref = ? AND project_id = ?
+            AND queue_epoch = ? AND transition_sequence = ? AND digest = ?`,
+      )
+      .bind(
+        message.repositoryId,
+        message.baseRef,
+        message.projectId,
+        message.queueEpoch,
+        tail.transitionSequence,
+        tail.digest,
+      )
+      .first<{ found: number }>();
+    return linked !== null;
+  } finally {
+    if (!borrowed) await lease.release();
+  }
+}
+
 /**
  * Apply a projection message. Idempotent and order-independent: replaying an old
  * message is a no-op, and replaying the current one changes nothing.
@@ -750,34 +839,7 @@ export async function projectQueueState(
     // tail also repairs a missing row when the authoritative queue write landed
     // but its projection did not. A high-water mark cannot do that because one
     // missing row below a later row looks complete from MAX(sequence).
-    statements.push(
-      db
-        .prepare(
-          `INSERT INTO queue_transitions_index (
-             id, github_repository_id, project_id, base_ref, queue_epoch, transition_sequence,
-             kind, digest, prior_digest, base_sha, attempt_id, witness_count, observed_at
-           )
-           SELECT ?, ?, p.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-             FROM projects p WHERE p.id = ? AND p.github_repository_id = ?
-           ON CONFLICT (github_repository_id, base_ref, queue_epoch, transition_sequence) DO NOTHING`,
-        )
-        .bind(
-          rowKey("qti", message.repositoryId, message.baseRef, `${message.queueEpoch}_${transition.transitionSequence}`),
-          message.repositoryId,
-          message.baseRef,
-          message.queueEpoch,
-          transition.transitionSequence,
-          transition.kind,
-          transition.digest,
-          transition.priorDigest,
-          transition.baseSha,
-          transition.attemptId,
-          transition.witnessCount,
-          transition.observedAt,
-          message.projectId,
-          message.repositoryId,
-        ),
-    );
+    statements.push(transitionProjectionStatement(db, message, transition));
   }
 
   statements.push(

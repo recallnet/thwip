@@ -105,6 +105,8 @@ export function queueRouteDeps(
       headSha: headShaFor(pullRequestNumber),
     }),
     mergeWrite: async () => ({ kind: "unknown", detail: "the test did not provide a merge result" }),
+    scheduleMergeReconciliation: async () => {},
+    pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }),
     publishTurnCheck: async () => {},
     // A head that carries a readable proof, because the walk to a merge reads
     // the trailer to cite it and a head without one refuses with

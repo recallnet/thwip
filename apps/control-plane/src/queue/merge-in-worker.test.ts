@@ -14,6 +14,13 @@ import type { RecordFromIntentDeps } from "./record-from-intent.js";
 import { withTransitionSigningLease } from "./transition-signing-lease.js";
 import { tickAllQueues } from "./scheduled-tick.js";
 import type { ReconciliationReads } from "./deadlines.js";
+import {
+  reconcileQueuedMergeWrite,
+  type MergeReconciliationTask,
+} from "./merge-reconciliation.js";
+import type { OnQueue } from "./merge-lane.js";
+import { acquireProjectWriteLease } from "../project-lifecycle.js";
+import { mergeCommitText } from "./merge-commit.js";
 
 /**
  * The App performs the merge with the installation credential and keeps the
@@ -78,9 +85,10 @@ afterEach(() => {
   while (open.length > 0) open.pop()!.close();
 });
 
-function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
-  return queueRoutes(
-    queueRouteDeps({ repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD }, {
+function routeDeps(over: Partial<Parameters<typeof queueRoutes>[0]> = {}): Parameters<typeof queueRoutes>[0] {
+  return queueRouteDeps(
+    { repositoryId: REPO, baseRef: REF, baseSha: BASE, treeOid: TREE, candidateSha: CANDIDATE, headShaFor: () => HEAD },
+    {
       queueProject: async () => ({ activationState: "enforced", projectId: "proj_1" }),
       commitFacts: async (_e: unknown, _r: string, sha: string) =>
         sha === LANDED
@@ -90,8 +98,32 @@ function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
       pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
       signRecordBytes: async (_environment: unknown, bytes: Uint8Array, typ: string) => signFixture(bytes, typ),
       ...over,
-    }) as Parameters<typeof queueRoutes>[0],
-  );
+    },
+  ) as Parameters<typeof queueRoutes>[0];
+}
+
+function routes(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
+  return queueRoutes(routeDeps(over));
+}
+
+const recoveryOnQueue: OnQueue<QueueRouteEnv> = (
+  environment,
+  repositoryId,
+  baseRef,
+  decide,
+  lease,
+) => runOnQueue(environment, repositoryId, baseRef, decide, undefined, undefined, lease);
+
+function recoveryDeps(over: Partial<Parameters<typeof queueRoutes>[0]> = {}) {
+  const deps = routeDeps(over);
+  return {
+    ...deps,
+    projectWriteLease: (environment: QueueRouteEnv, repositoryId: string, projectId?: string) => {
+      // SAFETY: QueueRouteEnv's Cloudflare D1 binding implements the narrower D1Like methods.
+      const db = environment.DB as D1Like;
+      return acquireProjectWriteLease(db, repositoryId, projectId);
+    },
+  };
 }
 
 /** A write port that records the intent it was handed and answers as told. */
@@ -498,6 +530,226 @@ describe("the Worker performing the merge", () => {
         retryAfter: expect.any(String) as unknown as string,
       }),
     ]);
+  });
+
+  it("finishes an App merge from fresh queued work after the first invocation exhausts subrequests", async () => {
+    const e = env();
+    let exhausted = false;
+    let writes = 0;
+    let task: MergeReconciliationTask | null = null;
+    const liveDeps = routeDeps({
+      scheduleMergeReconciliation: async (_environment, scheduled) => {
+        task = scheduled;
+      },
+      projectWriteLease: async () => ({
+        projectId: "proj_1",
+        renew: async () => {
+          if (exhausted) throw new Error("Too many subrequests by single Worker invocation.");
+        },
+        release: async () => {},
+      }),
+      mergeWrite: async () => {
+        writes += 1;
+        exhausted = true;
+        return { kind: "merged", mergeSha: LANDED };
+      },
+    });
+
+    await authorize(queueRoutes(liveDeps), e);
+
+    expect(writes).toBe(1);
+    expect(task).not.toBeNull();
+    const before = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+    expect(before.store.mergeOperations()).toEqual([
+      expect.objectContaining({
+        operationId: task!.operationId,
+        outcome: null,
+      }),
+    ]);
+
+    const durableDeps = recoveryDeps({
+      commitFacts: async (_environment, _repositoryId, sha) =>
+        sha === LANDED
+          ? {
+              treeOid: TREE,
+              parentShas: [BASE, HEAD],
+              message: mergeCommitText(117, task!.operationId).replace(/\n$/, ""),
+            }
+          : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
+    });
+    const recovered = await reconcileQueuedMergeWrite(e, durableDeps, recoveryOnQueue, task!);
+    const repeated = await reconcileQueuedMergeWrite(e, durableDeps, recoveryOnQueue, task!);
+
+    expect(recovered).toMatchObject({ status: "settled", mergeSha: LANDED });
+    expect(repeated).toMatchObject({
+      status: "settled",
+      mergeSha: LANDED,
+      transitionDigest: recovered.status === "settled" ? recovered.transitionDigest : "",
+    });
+    expect(writes).toBe(1);
+    expect(await entryState(e)).toBe("Merged");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 1 });
+    expect(
+      raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM queue_attestations WHERE kind IN ('verified-merge', 'reused-proof-merge', 'candidate-verified-merge')",
+        )
+        .get(),
+    ).toEqual({ n: 1 });
+  });
+
+  it("does not start the App merge when fresh-invocation recovery cannot be scheduled", async () => {
+    const e = env();
+    let writes = 0;
+    await authorize(
+      routes({
+        scheduleMergeReconciliation: async () => {
+          throw new Error("queue unavailable");
+        },
+        mergeWrite: async () => {
+          writes += 1;
+          return { kind: "merged", mergeSha: LANDED };
+        },
+      }),
+      e,
+    );
+
+    expect(writes).toBe(0);
+    const { store } = await loadQueueState(e.DB as unknown as D1Like, REPO, REF);
+    expect(store.mergeOperations()).toEqual([
+      expect.objectContaining({ outcome: "CONFIRMED_NOT_MERGED" }),
+    ]);
+  });
+
+  it("treats a negative early reconciliation read as pending without another merge write", async () => {
+    const e = env();
+    let writes = 0;
+    let task: MergeReconciliationTask | null = null;
+    await authorize(
+      routes({
+        scheduleMergeReconciliation: async (_environment, scheduled) => {
+          task = scheduled;
+        },
+        mergeWrite: async () => {
+          writes += 1;
+          return { kind: "unknown", detail: "GitHub has not settled the write yet" };
+        },
+      }),
+      e,
+    );
+
+    const pending = await reconcileQueuedMergeWrite(
+      e,
+      recoveryDeps({ pullRequestMergeState: async () => ({ merged: false, mergeCommitSha: null }) }),
+      recoveryOnQueue,
+      task!,
+    );
+
+    expect(pending).toMatchObject({ status: "pending" });
+    expect(writes).toBe(1);
+    expect(await entryState(e)).toBe("Reconciling");
+
+    const external = await reconcileQueuedMergeWrite(
+      e,
+      recoveryDeps({
+        pullRequestMergeState: async () => ({ merged: true, mergeCommitSha: LANDED }),
+        commitFacts: async (_environment, _repositoryId, sha) =>
+          sha === LANDED
+            ? { treeOid: TREE, parentShas: [BASE, HEAD], message: "merged outside Thwip" }
+            : { treeOid: TREE, parentShas: [BASE], message: PROVEN },
+      }),
+      recoveryOnQueue,
+      task!,
+    );
+    expect(external).toMatchObject({ status: "stale", detail: expect.stringContaining("without") });
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 0 });
+  });
+
+  it("settles after repeated pending GitHub reads without another merge write", async () => {
+    const e = env();
+    let writes = 0;
+    let task: MergeReconciliationTask | null = null;
+    await authorize(
+      routes({
+        scheduleMergeReconciliation: async (_environment, scheduled) => {
+          task = scheduled;
+        },
+        mergeWrite: async () => {
+          writes += 1;
+          return { kind: "unknown", detail: "GitHub has not settled the write yet" };
+        },
+      }),
+      e,
+    );
+
+    let reads = 0;
+    const deps = recoveryDeps({
+      pullRequestMergeState: async () => {
+        reads += 1;
+        return reads <= 6
+          ? { merged: false, mergeCommitSha: null }
+          : { merged: true, mergeCommitSha: LANDED };
+      },
+      commitFacts: async (_environment, _repositoryId, sha) =>
+        sha === LANDED
+          ? {
+              treeOid: TREE,
+              parentShas: [BASE, HEAD],
+              message: mergeCommitText(117, task!.operationId).replace(/\n$/, ""),
+            }
+          : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await expect(reconcileQueuedMergeWrite(e, deps, recoveryOnQueue, task!)).resolves.toMatchObject({
+        status: "pending",
+      });
+    }
+    await expect(reconcileQueuedMergeWrite(e, deps, recoveryOnQueue, task!)).resolves.toMatchObject({
+      status: "settled",
+      mergeSha: LANDED,
+    });
+
+    expect(writes).toBe(1);
+    expect(await entryState(e)).toBe("Merged");
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 1 });
+  });
+
+  it("stops retrying when the landed result does not match the authorized candidate", async () => {
+    const e = env();
+    let task: MergeReconciliationTask | null = null;
+    await authorize(
+      routes({
+        scheduleMergeReconciliation: async (_environment, scheduled) => {
+          task = scheduled;
+        },
+        mergeWrite: async () => ({ kind: "unknown", detail: "GitHub accepted the request" }),
+      }),
+      e,
+    );
+    const unauthorizedTree = "9".repeat(40);
+
+    const result = await reconcileQueuedMergeWrite(
+      e,
+      recoveryDeps({
+        commitFacts: async (_environment, _repositoryId, sha) =>
+          sha === LANDED
+            ? {
+                treeOid: unauthorizedTree,
+                parentShas: [BASE, HEAD],
+                message: mergeCommitText(117, task!.operationId).replace(/\n$/, ""),
+              }
+            : { treeOid: TREE, parentShas: [BASE, "6".repeat(40)], message: PROVEN },
+      }),
+      recoveryOnQueue,
+      task!,
+    );
+
+    expect(result).toMatchObject({
+      status: "stale",
+      detail: expect.stringContaining("RESULT_NOT_AUTHORIZED"),
+    });
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM queue_transitions_index").get()).toEqual({ n: 0 });
   });
 
   it("does not link signed bytes at a different position when the chain moves before append", async () => {
