@@ -241,15 +241,17 @@ describe("projectQueueState", () => {
       };
       const current = message({ transitions: [transition, later] });
 
+      // The required transition is not necessarily the tail: restoring an
+      // older merge's missing link must project that link, not a later one.
       expect(await projectQueueTransitionTail(
         db,
         current,
         { projectId: "project", renew: async () => {}, release: async () => {} },
-        later,
+        transition,
       )).toBe(true);
 
       expect((await rows(db, "queue_transitions_index")).results).toEqual([
-        expect.objectContaining({ transition_sequence: 2, digest: later.digest }),
+        expect.objectContaining({ transition_sequence: 1, digest: transition.digest }),
       ]);
     });
   });
