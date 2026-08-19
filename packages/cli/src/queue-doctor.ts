@@ -37,6 +37,8 @@ export type CheckStatus = "pass" | "fail" | "unread";
 
 export interface DoctorProbe {
   readonly section: DoctorSection;
+  /** Stable name for the evidence read, safe to print in diagnostics. */
+  readonly operation: string;
   readonly method: "GET";
   /** `{repositoryId}` is substituted once the first probe has answered. */
   readonly path: string;
@@ -47,22 +49,32 @@ export function doctorProbes(input: { repo: string; ref: string; events: number 
   return [
     {
       section: "repository",
+      operation: "control-plane.repository.resolve",
       method: "GET",
       path: `/v1/resolve-repo?name=${encodeURIComponent(input.repo)}`,
       requiresAdmin: false,
     },
     {
       section: "queue",
+      operation: "control-plane.queue.readiness",
       method: "GET",
       path: `/v1/queue/{repositoryId}/readiness?ref=${encodeURIComponent(input.ref)}`,
       requiresAdmin: false,
     },
-    { section: "app", method: "GET", path: "/v1/queue/{repositoryId}/doctor", requiresAdmin: true },
+    {
+      section: "app",
+      operation: "control-plane.app-evidence.read",
+      method: "GET",
+      path: "/v1/queue/{repositoryId}/doctor",
+      requiresAdmin: true,
+    },
   ];
 }
 
 export interface DoctorObservation {
   readonly section: DoctorSection;
+  readonly operation?: string;
+  readonly attempts?: number;
   /** 0 when the request never completed. */
   readonly status: number;
   readonly body: Record<string, unknown> | null;
@@ -114,6 +126,59 @@ function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+type EvidenceStatus = "verified" | "unavailable" | "unreadable" | "missing" | "drifted" | "incorrect";
+
+function evidenceStatus(value: unknown): EvidenceStatus | null {
+  return value === "verified" || value === "unavailable" || value === "unreadable" || value === "missing" ||
+      value === "drifted" || value === "incorrect"
+    ? value
+    : null;
+}
+
+function failureEvidence(o: DoctorObservation, fallbackOperation: string): {
+  readonly operation: string;
+  readonly resource?: string;
+  readonly status: EvidenceStatus;
+  readonly httpStatus: number;
+  readonly attempts: number;
+  readonly controlPlaneAttempts: number;
+} {
+  const evidence = record(record(o.body)["evidence"]);
+  const operation = typeof evidence["operation"] === "string"
+    ? evidence["operation"]
+    : (o.operation ?? fallbackOperation);
+  const status = evidenceStatus(evidence["status"]) ?? "unavailable";
+  const httpStatus = typeof evidence["httpStatus"] === "number" ? evidence["httpStatus"] : o.status;
+  const attempts = typeof evidence["attempts"] === "number" ? evidence["attempts"] : (o.attempts ?? 1);
+  return {
+    operation,
+    ...(typeof evidence["resource"] === "string" ? { resource: evidence["resource"] } : {}),
+    status,
+    httpStatus,
+    attempts,
+    controlPlaneAttempts: o.attempts ?? 1,
+  };
+}
+
+function evidenceReason(status: EvidenceStatus): ReasonCode {
+  if (status === "unreadable") return "EVIDENCE_UNREADABLE";
+  if (status === "missing") return "EVIDENCE_MISSING";
+  if (status === "drifted" || status === "incorrect") return "EVIDENCE_DRIFTED";
+  return "EVIDENCE_UNAVAILABLE";
+}
+
+function failedRead(o: DoctorObservation, fallbackOperation: string): Part {
+  const evidence = failureEvidence(o, fallbackOperation);
+  const status = evidence.httpStatus === 0 ? "network failure" : `HTTP ${evidence.httpStatus}`;
+  const operation = evidence.resource === undefined ? evidence.operation : `${evidence.operation} (${evidence.resource})`;
+  return {
+    lines: [`Evidence ${operation} is ${evidence.status} (${status}, ${evidence.attempts} attempt${evidence.attempts === 1 ? "" : "s"}).`],
+    status: "unread",
+    reasonCode: evidenceReason(evidence.status),
+    facts: { evidence },
+  };
+}
+
 /**
  * One section's finding. The exit code is derived from `reasonCode` through the
  * table every other command uses, so a section cannot exit under one meaning
@@ -128,11 +193,7 @@ type Part = {
 
 function describeRepository(o: DoctorObservation, repo: string): Part {
   if (o.status === 0) {
-    return {
-      lines: [`Could not reach the control plane to look up ${repo}.`],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.repository.resolve");
   }
   if (o.status === 401) {
     return { lines: ["You are not signed in. Run thwip login."], status: "unread", reasonCode: "LOGIN_REQUIRED" };
@@ -152,11 +213,7 @@ function describeRepository(o: DoctorObservation, repo: string): Part {
     };
   }
   if (o.status >= 400) {
-    return {
-      lines: [`The control plane refused to look up ${repo} (${o.status}).`],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.repository.resolve");
   }
   const id = record(o.body)["repositoryId"];
   if (typeof id !== "string") {
@@ -181,11 +238,7 @@ function describeQueue(
   expected: { repositoryId: string; projectId: string },
 ): Part {
   if (o.status === 0) {
-    return {
-      lines: [`Could not reach the control plane to read the queue for ${ref}.`],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.queue.readiness");
   }
   if (o.status === 401) {
     return {
@@ -205,11 +258,7 @@ function describeQueue(
     return { lines: [`No queue is configured for ${ref}.`], status: "fail", reasonCode: "QUEUE_NOT_CONFIGURED" };
   }
   if (o.status >= 400) {
-    return {
-      lines: [`The control plane refused to read the queue for ${ref} (${o.status}).`],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.queue.readiness");
   }
 
   const body = record(o.body);
@@ -296,11 +345,7 @@ function describeQueue(
 
 function describeApp(o: DoctorObservation): Part {
   if (o.status === 0) {
-    return {
-      lines: ["Could not reach the control plane to read App permissions."],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.app-evidence.read");
   }
   if (o.status === 401) {
     return {
@@ -327,11 +372,7 @@ function describeApp(o: DoctorObservation): Part {
     };
   }
   if (o.status >= 400) {
-    return {
-      lines: [`The control plane refused to read App permissions (${o.status}).`],
-      status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
-    };
+    return failedRead(o, "control-plane.app-evidence.read");
   }
 
   const body = record(o.body);
@@ -393,6 +434,16 @@ function describeApp(o: DoctorObservation): Part {
   const driftedWorkflows = Array.isArray(workflowHealth["drifted"])
     ? (workflowHealth["drifted"] as unknown[]).filter((path): path is string => typeof path === "string")
     : [];
+  const rawBypassActorsStatus = evidenceStatus(rulesetHealth["bypassActorsStatus"]);
+  const bypassActorsStatus = rawBypassActorsStatus === "verified" || rawBypassActorsStatus === "unreadable" ||
+      rawBypassActorsStatus === "incorrect"
+    ? rawBypassActorsStatus
+    : (rulesetHealth["bypassActorsKnown"] === true ? "verified" : "unreadable");
+  const rawActionStatus = evidenceStatus(workflowHealth["actionStatus"]);
+  const actionStatus = rawActionStatus === "verified" || rawActionStatus === "unreadable" ||
+      rawActionStatus === "unavailable"
+    ? rawActionStatus
+    : (workflowHealth["actionAccessible"] === true ? "verified" : "unreadable");
   const lines: string[] = [];
   if (missing.length === 0) {
     lines.push("The Thwip App holds every permission the queue needs.");
@@ -410,7 +461,7 @@ function describeApp(o: DoctorObservation): Part {
   if (body["receivesEveryHandledEvent"] === false) {
     lines.push("The App is not subscribed to every GitHub event its handlers require.");
   }
-  if (rulesetHealth["healthy"] === true) {
+  if (missingRulesets.length === 0 && duplicateRulesets.length === 0 && driftedRulesets.length === 0) {
     lines.push(`GitHub is actively enforcing the exact ${expectedNames.join(" and ")} rulesets.`);
   } else {
     const findings = [
@@ -420,40 +471,51 @@ function describeApp(o: DoctorObservation): Part {
     ];
     lines.push(`The managed branch rulesets are not exact: ${findings.join(", ") || "unknown drift"}.`);
   }
-  if (rulesetHealth["bypassActorsKnown"] === false) {
-    lines.push("GitHub hid bypass actors from the App, so doctor cannot confirm the managed rulesets are exact.");
-  }
-  if (workflowHealth["healthy"] === true) {
-    lines.push("The default branch has the exact managed workflows and can read the pinned verifier action.");
-  } else {
-    const findings = [
-      ...missingWorkflows.map((path) => `missing ${path}`),
-      ...driftedWorkflows.map((path) => `drifted ${path}`),
-      ...(workflowHealth["actionAccessible"] === false ? ["pinned verifier action is inaccessible"] : []),
-    ];
-    lines.push(`The managed workflows are not ready: ${findings.join(", ") || "unknown drift"}.`);
-  }
+  lines.push(
+    bypassActorsStatus === "verified"
+      ? "Ruleset bypass actors are verified."
+      : bypassActorsStatus === "incorrect"
+        ? "Ruleset bypass actors are incorrect."
+        : "Ruleset bypass actors are unreadable to the App.",
+  );
+  const workflowFindings = [
+    ...missingWorkflows.map((path) => `missing ${path}`),
+    ...driftedWorkflows.map((path) => `drifted ${path}`),
+  ];
+  if (workflowFindings.length === 0) lines.push("The default branch has the exact managed workflows.");
+  else lines.push(`The managed workflows are not ready: ${workflowFindings.join(", ")}.`);
+  lines.push(
+    actionStatus === "verified"
+      ? "The pinned verifier action commit is verified."
+      : `The pinned verifier action commit is ${actionStatus}.`,
+  );
   const appBad =
     missing.length > 0 ||
     body["canPublishMergeCheck"] === false ||
     body["receivesEveryHandledEvent"] === false;
-  const rulesetBad =
-    missingRulesets.length > 0 || duplicateRulesets.length > 0 || driftedRulesets.length > 0;
-  const bypassActorsUnread = !rulesetBad && rulesetHealth["bypassActorsKnown"] === false;
-  const workflowBad = workflowHealth["healthy"] !== true;
-  const bad = appBad || rulesetBad || workflowBad;
+  const missingEvidence = missingRulesets.length > 0 || missingWorkflows.length > 0;
+  const driftedEvidence = duplicateRulesets.length > 0 || driftedRulesets.length > 0 ||
+    driftedWorkflows.length > 0 || bypassActorsStatus === "incorrect";
+  const bypassActorsUnread = bypassActorsStatus === "unreadable";
+  const actionUnreadable = actionStatus === "unreadable";
+  const unavailableEvidence = actionStatus === "unavailable";
+  const bad = appBad || missingEvidence || driftedEvidence;
   return {
     lines,
-    status: bad ? "fail" : bypassActorsUnread ? "unread" : "pass",
+    status: bad ? "fail" : bypassActorsUnread || actionUnreadable || unavailableEvidence ? "unread" : "pass",
     reasonCode: appBad
       ? "APP_PERMISSION_DRIFT"
-      : rulesetBad
-        ? "RULESET_DRIFT"
-        : workflowBad
-          ? "NO_PINNED_VERIFIER"
-          : bypassActorsUnread
-            ? "OWNER_UNAUTHORIZED"
-            : "PASS",
+      : missingEvidence
+        ? "EVIDENCE_MISSING"
+        : driftedEvidence
+          ? "EVIDENCE_DRIFTED"
+          : actionUnreadable
+            ? "EVIDENCE_UNREADABLE"
+            : unavailableEvidence
+              ? "EVIDENCE_UNAVAILABLE"
+              : bypassActorsUnread
+                ? "OWNER_UNAUTHORIZED"
+                : "PASS",
     facts: {
       missingPermissions: missing,
       canPublishMergeCheck: body["canPublishMergeCheck"] === true,
@@ -465,6 +527,7 @@ function describeApp(o: DoctorObservation): Part {
         duplicate: duplicateRulesets,
         drifted: driftedRulesets,
         bypassActorsKnown: rulesetHealth["bypassActorsKnown"] === true,
+        bypassActorsStatus,
       },
       workflowHealth: {
         healthy: workflowHealth["healthy"] === true,
@@ -473,6 +536,7 @@ function describeApp(o: DoctorObservation): Part {
         drifted: driftedWorkflows,
         actionRef: typeof workflowHealth["actionRef"] === "string" ? workflowHealth["actionRef"] : null,
         actionAccessible: workflowHealth["actionAccessible"] === true,
+        actionStatus,
       },
     },
   };
@@ -520,15 +584,22 @@ export function reportDoctor(
   }
   else if (repositoryPart.status === "pass") {
     add("queue", {
-      lines: [`Could not reach the control plane to read the queue for ${options.ref}.`],
+      lines: ["Evidence control-plane.queue.readiness is unavailable (request was not made)."],
       status: "unread",
-      reasonCode: "SERVICE_UNAVAILABLE",
+      reasonCode: "EVIDENCE_UNAVAILABLE",
+      facts: { evidence: { operation: "control-plane.queue.readiness", status: "unavailable", httpStatus: 0, attempts: 0 } },
     });
   }
 
   const app = seen("app");
   if (app !== undefined) add("app", describeApp(app));
-  else if (repositoryPart.status === "pass") add("app", describeApp({ section: "app", status: 0, body: null }));
+  else if (repositoryPart.status === "pass") add("app", describeApp({
+    section: "app",
+    operation: "control-plane.app-evidence.read",
+    attempts: 0,
+    status: 0,
+    body: null,
+  }));
 
   const codes = sections.map((section) => {
     // `--allow-unread` buys off a section this caller has no standing to read

@@ -7,6 +7,7 @@ export interface ManagedWorkflowHealth {
   readonly drifted: readonly string[];
   readonly actionRef: string;
   readonly actionAccessible: boolean;
+  readonly actionStatus: "verified" | "unreadable";
 }
 
 /** A repository-scoped App token may read an Action only from that repository. */
@@ -34,5 +35,6 @@ export function managedWorkflowHealth(input: {
     drifted,
     actionRef: QUEUE_ACTION_REF,
     actionAccessible: input.actionAccessible,
+    actionStatus: input.actionAccessible ? "verified" : "unreadable",
   };
 }

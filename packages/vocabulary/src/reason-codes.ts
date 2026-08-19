@@ -114,6 +114,13 @@ export const LOCAL_REASONS = [
   "SERVICE_UNAVAILABLE",
   "NETWORK_UNAVAILABLE",
   "RATE_LIMITED",
+  // Doctor evidence is classified separately from repository configuration.
+  // A read that failed, could not prove access, found nothing, or found drift
+  // must never be collapsed into one setup verdict.
+  "EVIDENCE_UNAVAILABLE",
+  "EVIDENCE_UNREADABLE",
+  "EVIDENCE_MISSING",
+  "EVIDENCE_DRIFTED",
 ] as const;
 
 export type ReasonCode =
