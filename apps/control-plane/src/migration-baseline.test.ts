@@ -144,7 +144,9 @@ describe("the public D1 baseline", () => {
       "insert into queue_clock",
       "insert into agent_report_retention_clock",
     ]);
-    expect(sql).not.toMatch(/recall|thwip\.ai|thwip-staging|1315419165|647114a5|00000000/i);
+    expect(sql).not.toMatch(/recall|thwip\.ai|thwip-staging|1315419165|647114a5/i);
+    // No Cloudflare account id: those are 32 hex characters.
+    expect(sql).not.toMatch(/\b[0-9a-f]{32}\b/i);
     expect(sql).not.toMatch(/INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+d1_migrations/i);
     expect(baseline.raw.prepare("SELECT * FROM project_lifecycle_backfills").all()).toEqual([]);
 
