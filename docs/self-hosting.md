@@ -108,9 +108,8 @@ ledger, run the foreign-key check, and run SQLite's integrity check against a
 local exported copy before returning the Worker to service. See
 [d1-baseline.md](d1-baseline.md) for the track rules.
 
-## Public repository boundary
+## Hosted-service files
 
-The hosted `wrangler.jsonc`, `.github/workflows/deploy-staging.yml`,
-`docs/production-access.md`, and `docs/blog-ops.md` describe Recall-operated
-infrastructure. They are not part of an independent deployment. A clean public
-root should use the example configuration and this document instead.
+`wrangler.jsonc` and `.github/workflows/deploy-staging.yml` configure the
+hosted service at thwip.ai. An independent deployment does not use them. Start
+from the example configuration and this document instead.

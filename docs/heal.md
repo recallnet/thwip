@@ -3,8 +3,7 @@
 The queue verifies its own chain on every tick and reports what it finds. This
 page says what each finding means, what thwip does about it, and what is left
 for a person. You should never need to read `mergeOperations` or open D1;
-`GET /v1/queue/:repositoryId/explain` reports the merge writes, and
-the private production runbook covers the rare direct-storage path.
+`GET /v1/queue/:repositoryId/explain` reports the merge writes.
 
 ## Where to click
 

@@ -158,7 +158,7 @@ export function d1CredentialFromEnv(env, kind) {
   const token = env[variable] ?? "";
   const accountId = env.THWIP_D1_ACCOUNT_ID ?? "";
   if (!token) return { credential: null, refusal: `Refusing: ${kind} access requires ${variable}. This command never uses CLOUDFLARE_API_TOKEN or the ambient Wrangler login.` };
-  if (!/^[0-9a-f]{32}$/i.test(accountId)) return { credential: null, refusal: "Refusing: THWIP_D1_ACCOUNT_ID must be the 32-character Recall Cloudflare account id." };
+  if (!/^[0-9a-f]{32}$/i.test(accountId)) return { credential: null, refusal: "Refusing: THWIP_D1_ACCOUNT_ID must be the 32-character Cloudflare account id." };
   return { credential: { kind, token, accountId, tokenVariable: variable }, refusal: null };
 }
 

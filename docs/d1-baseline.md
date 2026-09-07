@@ -9,7 +9,7 @@ Do not apply the baseline to an existing database. Do not add old migration name
 
 ## Fresh database
 
-The operational repository keeps the baseline in `migrations-baseline` so the hosted database can never see it as pending. The clean public release exposes `1000_current_schema.sql` through its configured D1 migration directory. Apply it once to an empty D1 database before deploying the Worker.
+The baseline lives in `migrations-baseline`, a separate directory from `migrations`, so the hosted database never sees it as pending. A self-hosted configuration points `migrations_dir` at `migrations-baseline`. Apply `1000_current_schema.sql` once to an empty D1 database before deploying the Worker.
 
 The baseline creates the current schema and only this generic bootstrap state:
 

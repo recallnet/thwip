@@ -64,8 +64,8 @@ Do not forge, copy, or reuse proof from another commit or repository.
 
 Public contributions from people without trusted write access need one
 independent human approval. The pull request author cannot provide it, and new
-commits require another look. Trusted contributors and maintainers may use the
-fast path described in [.github/HUMAN_REVIEW.md](.github/HUMAN_REVIEW.md).
+commits require another look. Maintainers may merge routine changes through
+Thwip without a second approval; required checks and the queue still apply.
 
 ## Conduct
 

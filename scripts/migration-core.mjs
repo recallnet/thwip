@@ -122,6 +122,6 @@ export function formatSchemaRefusal(blockers, env, liveHostname) {
     `  pnpm --filter @thwip/control-plane run migrate:${env} -- --confirm-live ${liveHostname}`,
     "",
     "That command is the one place a person administers this database, and it needs a",
-    "credential a deploy does not. See docs/production-access.md.",
+    "credential a deploy does not.",
   ].join("\n");
 }
