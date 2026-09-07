@@ -3,11 +3,10 @@
 Verified local CI.
 
 Your test suites already run on your machine. thwip signs a proof of the exact
-Git tree they ran against, attaches it to the commit, and a protected GitHub
-check verifies that proof instead of running everything again in the cloud.
-
-A check that takes seconds rather than minutes, and a signed record of what ran,
-against which code, by whom.
+Git tree they ran against and attaches it to the commit. A protected GitHub
+check verifies that proof instead of running everything again in the cloud, so
+the check finishes in seconds and leaves a signed record of what ran against
+which code.
 
 ## Install
 
@@ -15,7 +14,7 @@ against which code, by whom.
 npm install -g @recallnet/thwip
 ```
 
-Node 22 or newer. To skip the global install, use `npx @recallnet/thwip`
+You need Node 22 or newer. To skip the global install, use `npx @recallnet/thwip`
 wherever the commands below say `thwip`.
 
 The public npm registry is the release authority. The same release is mirrored
@@ -29,24 +28,24 @@ this repository.
 npx @recallnet/thwip@latest init
 ```
 
-Init is the safe setup and refresh command for a first checkout or another
-machine. It checks your session, key, GitHub origin, and live project state. It
-then refreshes only bounded guidance in root `AGENTS.md` and `CLAUDE.md`. It
-reports any human dashboard action still needed and never enrols a repository.
+Run `init` on a first checkout or a new machine. It checks your session, key,
+GitHub origin, and live project state, then refreshes the bounded guidance
+section in the root `AGENTS.md` and `CLAUDE.md`. It reports any dashboard action
+a person still has to take. It never enrols a repository.
 
-Repositories normally inherit organization defaults. To create an intentional
-repository override, use `thwip init --required "lint,typecheck,test"` and
-optionally `--profile PROFILE`.
+Repositories inherit organization defaults. To set a deliberate repository
+override, run `thwip init --required "lint,typecheck,test"`, with `--profile
+PROFILE` if you need one.
 
 `thwip ship --wait` is the full completion path. It runs the suites against the
 committed tree, attaches the proof to `HEAD`, pushes, opens or updates the pull
 request, joins the queue, and waits for the outcome. Use `thwip run` when you
-only need to create or refresh a proof without shipping it.
+only need to create or refresh a proof.
 
-A draft pull request still needs proof, but it must not enter the merge queue.
-Run `thwip ship --draft` to prove and push the exact `HEAD`, create or refresh
-the draft pull request, and stop without queueing or merging it. Do not mark it
-ready until the user asks.
+A draft pull request still needs proof but must stay out of the merge queue.
+`thwip ship --draft` proves and pushes the exact `HEAD`, creates or refreshes
+the draft pull request, and stops there. Leave it as a draft until the user
+asks otherwise.
 
 The CLI connects to `https://thwip.ai` by default. Set `THWIP_ENDPOINT` only
 when an operator has given you a different control-plane origin.
@@ -68,8 +67,8 @@ required:
 | Command | What it does |
 | --- | --- |
 | `thwip login` | Sign in through a device code that works over SSH |
-| `thwip init` | Safely set up or refresh this machine and repository guidance |
-| `thwip run` | Proof-only: run the required suites and sign a proof of the tree |
+| `thwip init` | Set up or refresh this machine and repository guidance |
+| `thwip run` | Run the required suites and sign a proof of the tree |
 | `thwip verify` | Run the same checks the protected check will run |
 | `thwip ship --wait` | Run, sign, push, open the pull request, and wait for the queue outcome |
 | `thwip keys status` | Report which key signs, and whether GitHub lists it |
@@ -77,9 +76,8 @@ required:
 | `thwip queue` | Inspect and administer the merge queue |
 
 `thwip doctor` changes nothing and exits zero only when every check passed. A
-check nobody could read fails on its own, so a report that says fine is a report
-that looked. Reading App permissions needs repository admin; pass
-`--allow-unread` when you are not one.
+check nobody could read counts as a failure. Reading App permissions needs
+repository admin; pass `--allow-unread` when you are not one.
 
 Run `thwip --help` for the full list.
 
@@ -87,10 +85,10 @@ Run `thwip --help` for the full list.
 
 Proofs are signed with an SSH key that GitHub lists as a **signing key** for your
 account. GitHub keeps signing keys and authentication keys in separate lists, and
-only the first is read. `thwip keys status` tells you which key would sign and
-whether GitHub knows about it.
+thwip reads only the first. `thwip keys status` tells you which key would sign
+and whether GitHub knows about it.
 
-Your private key is never read, moved, or transmitted.
+thwip never reads, moves, or transmits your private key.
 
 ## Learn more
 
