@@ -9,7 +9,6 @@
 
   "workspaces": {
     ".": {
-      "entry": ["scripts/control-plane.mjs"],
       "project": ["scripts/**/*.mjs"]
     },
     "apps/control-plane": {

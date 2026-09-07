@@ -310,43 +310,6 @@ describe("repository automation", () => {
   });
 });
 
-describe("the staging deploy workflow", () => {
-  const source = read(".github/workflows/deploy-staging.yml");
-  const workflow = parse(source);
-  const steps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
-
-  it("uses canonical main, read-only GitHub authority, and one deployment lane", () => {
-    expect(workflow.on.push.branches).toEqual(["main"]);
-    expect(workflow.on.workflow_dispatch.inputs.deploy).toMatchObject({ type: "boolean", default: false });
-    expect(workflow.permissions).toEqual({ contents: "read" });
-    expect(workflow.concurrency).toEqual({ group: "thwip-staging-deploy", "cancel-in-progress": false });
-    for (const checkout of steps.filter((step) => step.uses?.startsWith("actions/checkout@"))) {
-      expect(checkout.with).toMatchObject({ ref: "${{ github.sha }}", "fetch-depth": 0 });
-    }
-    expect(source).toContain('test "$canonical" = "$EXPECTED_SHA"');
-  });
-
-  it("verifies the exact SHA before both rehearsal and deploy", () => {
-    expect(source.match(/pnpm thwip verify-chain/g)).toHaveLength(2);
-    expect(source.match(/--expected-sha "\$\{\{ github\.sha \}\}"/g)).toHaveLength(2);
-    expect(workflow.jobs.deploy.if).toContain("vars.THWIP_STAGING_DEPLOY_ENABLED == 'true'");
-    expect(workflow.jobs.deploy.environment.name).toBe("staging");
-  });
-
-  it("hands build, gate, deploy, and confirmation to one command with no database write", () => {
-    const deploy = workflow.jobs.deploy.steps.find((step) => step.id === "deploy");
-    expect(deploy.run).toBe("pnpm --filter @thwip/control-plane run deploy:staging");
-    expect(json("apps/control-plane/package.json").scripts["deploy:staging"])
-      .toBe("node ../../scripts/control-plane.mjs deploy --env staging");
-    const core = read("scripts/control-plane-core.mjs");
-    expect(core).toContain('"--filter", "@thwip/control-plane", "exec", "wrangler"');
-    expect(core).toContain('"--var", `BUILD_SHA:${sha}`');
-    expect(core).toContain('"--var", `DEPLOYMENT_ID:${id}`');
-    expect(core.indexOf('execFileSync(\n    "pnpm"')).toBeLessThan(core.lastIndexOf("waitForBuildSha({"));
-    expect(source).not.toMatch(/wrangler\s+d1|migrations?\s+apply|migrate:staging/i);
-  });
-});
-
 describe("workspace build order", () => {
   it("builds the application once, then writes the blog directly into its client output", () => {
     const rootPackage = json("package.json");

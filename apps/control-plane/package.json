@@ -6,8 +6,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json && vite build --config web/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "deploy:staging": "node ../../scripts/control-plane.mjs deploy --env staging",
-    "migrate:staging": "node ../../scripts/control-plane.mjs migrate --env staging --database thwip-staging-wnam",
     "dev": "wrangler dev --env staging",
     "test:workers": "vitest run --config vitest.workers.config.ts"
   },

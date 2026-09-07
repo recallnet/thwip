@@ -108,8 +108,8 @@ ledger, run the foreign-key check, and run SQLite's integrity check against a
 local exported copy before returning the Worker to service. See
 [d1-baseline.md](d1-baseline.md) for the track rules.
 
-## Hosted-service files
+## Hosted-service configuration
 
-`wrangler.jsonc` and `.github/workflows/deploy-staging.yml` configure the
-hosted service at thwip.ai. An independent deployment does not use them. Start
-from the example configuration and this document instead.
+`wrangler.jsonc` configures the hosted service at thwip.ai. An independent
+deployment does not use it. Start from the example configuration and this
+document instead.
