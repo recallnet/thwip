@@ -11,10 +11,10 @@
     "@thwip/protocol": "workspace:*",
     "@thwip/sshsig": "workspace:*",
     "@thwip/verifier": "workspace:*",
-    "jose": "^6.0.0"
+    "jose": "^6.2.12"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "esbuild": "^0.25.0"
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.25.12"
   }
 }

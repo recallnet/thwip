@@ -16,11 +16,11 @@
     "@cloudflare/vitest-pool-workers": "0.21.1",
     "@oxlint/plugins": "1.78.0",
     "esbuild": "0.28.1",
-    "fast-check": "^4.9.0",
-    "knip": "^6.31.0",
+    "fast-check": "^4.10.2",
+    "knip": "^6.41.0",
     "oxlint": "1.78.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.0",
-    "yaml": "^2.9.0"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "yaml": "^2.9.1"
   }
 }

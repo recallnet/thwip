@@ -12,15 +12,15 @@
   },
   "dependencies": {
     "@thwip/policy": "workspace:*",
-    "@thwip/protocol": "workspace:*",
-    "@thwip/sshsig": "workspace:*",
     "@thwip/prompts": "workspace:*",
+    "@thwip/protocol": "workspace:*",
     "@thwip/queue-domain": "workspace:*",
-    "@thwip/vocabulary": "workspace:*",
     "@thwip/queue-protocol": "workspace:*",
-    "jose": "^6.0.0"
+    "@thwip/sshsig": "workspace:*",
+    "@thwip/vocabulary": "workspace:*",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.20.5"
   }
 }

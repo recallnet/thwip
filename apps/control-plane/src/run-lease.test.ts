@@ -30,6 +30,7 @@ async function envWithKey(): Promise<{ env: Env; rows: Array<[string, string]>; 
   const jwk = { ...(await exportJWK(pair.privateKey)), kid, alg: "ES256" };
   const rows: Array<[string, string]> = [];
   const env = {
+    PUBLIC_ORIGIN: "https://thwip.example",
     THWIP_SERVICE_SIGNING_PRIVATE_JWK: JSON.stringify(jwk),
     DB: {
       prepare() {
@@ -72,6 +73,7 @@ describe("minting a run lease", () => {
     const jwk = JSON.parse(env.THWIP_SERVICE_SIGNING_PRIVATE_JWK) as Record<string, unknown>;
     const { payload, protectedHeader } = await jwtVerify(lease, await keyOf(jwk), {
       audience: LEASE_AUDIENCE,
+      issuer: env.PUBLIC_ORIGIN,
     });
     expect(protectedHeader.kid).toBe(kid);
     expect(payload).toMatchObject({
