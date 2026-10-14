@@ -19,6 +19,29 @@ mirrored to GitHub Packages.
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security reports: [SECURITY.md](SECURITY.md)
 
+## Status and trust boundaries
+
+This is an experimental reference implementation with first-party operational
+use. Independent adoption, large-team reliability, saved developer time, and
+avoided compute cost have not been established. A signature authenticates a
+signer's claim; it does not prove that the machine executed the checks honestly
+or that the code is correct. Protect signing keys, restrict enrolled signers,
+and keep repository administration separate from merge authority.
+
+The queue depends on GitHub, Cloudflare, active policy, and an available
+verifier. Deployment operators must account for asynchronous merge recovery,
+stale queue entries, CPU limits when verifying long signed chains, and an
+exclusive handoff from any existing merge queue. See the
+[onboarding guide](docs/queue-onboarding.md) and
+[self-hosting guide](docs/self-hosting.md).
+
+Proofs, logs, queue records, and dashboard responses can disclose repository
+identifiers, commit metadata, signer identities, and check output. Review what
+your suites emit before uploading evidence, and choose storage access and
+retention rules for your deployment. Checked-in configuration names the
+original hosted installation; it does not grant access or promise hosted
+availability.
+
 ## GitHub Action
 
 Queue setup adds the required workflows. The pull-request job calls one Action
@@ -41,7 +64,8 @@ defaults to the job's GitHub token.
 
 ## Develop this repository
 
-You need Node.js 22 or newer and pnpm. Install the locked dependencies, then
+Use Node.js 24, as in the GitHub workflows, and pnpm 11.1.2, as declared in
+`package.json`. Install the locked dependencies, then
 run the checks your change can affect:
 
 ```sh
